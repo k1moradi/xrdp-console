@@ -4621,10 +4621,13 @@ server_paint_rect(struct xrdp_mod *mod, int x, int y, int cx, int cy,
     {
         LOG(LOG_LEVEL_INFO,
             "RDP VNC paint path: rect=%dx%d painter=%p screen=%dx%dx%d "
+            "output=%s "
             "cache=%d/%d/%d cache_version=0x%x bitmap_comp=%d "
             "no_orders=%d gfx=%d",
             width, height, (void *)p, wm->screen->width, wm->screen->height,
-            wm->screen->bpp, wm->cache->cache1_entries,
+            wm->screen->bpp,
+            p != 0 && p->painter != 0 ? "direct-bitmap" : "bitmap-cache-orders",
+            wm->cache->cache1_entries,
             wm->cache->cache2_entries, wm->cache->cache3_entries,
             wm->cache->bitmap_cache_version, wm->cache->use_bitmap_comp,
             wm->client_info->no_orders_supported, wm->client_info->gfx);
