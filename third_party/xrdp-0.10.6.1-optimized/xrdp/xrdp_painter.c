@@ -79,6 +79,7 @@ xrdp_painter_send_dirty(struct xrdp_painter *self)
     int index;
     int jndex;
     int error;
+    int send_error;
     char *ldata;
     char *src;
     char *dst;
@@ -124,12 +125,21 @@ xrdp_painter_send_dirty(struct xrdp_painter *self)
             LOG_DEVEL(LOG_LEVEL_DEBUG, "xrdp_painter_send_dirty:"
                       " x %d y %d cx %d cy %d",
                       rect.left, rect.top, cx, cy);
-            libxrdp_send_bitmap(self->session, cx, cy, bpp,
-                                ldata, rect.left, rect.top, cx, cy);
+            send_error = libxrdp_send_bitmap(self->session, cx, cy, bpp,
+                                             ldata, rect.left, rect.top,
+                                             cx, cy);
+            LOG(LOG_LEVEL_INFO,
+                "RDP direct bitmap output: rect=%dx%d+%d+%d bytes=%d result=%d",
+                cx, cy, rect.left, rect.top, cx * cy * Bpp, send_error);
             g_free(ldata);
 
             jndex++;
             error = xrdp_region_get_rect(self->dirty_region, jndex, &rect);
+        }
+        if (jndex == 0)
+        {
+            LOG(LOG_LEVEL_WARNING,
+                "RDP direct bitmap output: no dirty rectangles");
         }
     }
 

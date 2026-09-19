@@ -2135,10 +2135,44 @@ dynamic_monitor_data(intptr_t id, int chan_id, char *data, int bytes)
 }
 
 /******************************************************************************/
+static void
+restore_output_after_resize_error(struct xrdp_mm *mm)
+{
+    struct xrdp_wm *wm;
+
+    if (mm == NULL || mm->wm == NULL)
+    {
+        return;
+    }
+
+    wm = mm->wm;
+
+    /* WMRZ_ENCODER_DELETE removes the encoder before a resize can fail. */
+    if (mm->encoder == NULL && !mm->egfx_up)
+    {
+        mm->encoder = xrdp_encoder_create(mm);
+    }
+
+    if (wm->session != NULL && wm->session->rdp != NULL)
+    {
+        LOG(LOG_LEVEL_WARNING,
+            "Resize failed; restoring display output at current geometry %dx%d",
+            wm->screen != NULL ? wm->screen->width : 0,
+            wm->screen != NULL ? wm->screen->height : 0);
+        xrdp_rdp_suppress_output(wm->session->rdp,
+                                 0, XSO_REASON_DYNAMIC_RESIZE,
+                                 0, 0,
+                                 wm->screen != NULL ? wm->screen->width : 0,
+                                 wm->screen != NULL ? wm->screen->height : 0);
+    }
+}
+
+/******************************************************************************/
 static int
 advance_error(int error,
               struct xrdp_mm *mm)
 {
+    restore_output_after_resize_error(mm);
     advance_resize_state_machine(mm, WMRZ_ERROR);
     return error;
 }
