@@ -422,6 +422,7 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
     int bufsize = 0;
     int total_bufsize = 0;
     int num_updates = 0;
+    int rv = 0;
     int line_pad_bytes;
     int server_line_bytes;
     char *p_num_updates = (char *)NULL;
@@ -474,7 +475,14 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
 
             total_bufsize = 0;
             num_updates = 0;
-            xrdp_rdp_init_data((struct xrdp_rdp *)session->rdp, s);
+            rv = xrdp_rdp_init_data((struct xrdp_rdp *)session->rdp, s);
+            if (rv != 0)
+            {
+                LOG(LOG_LEVEL_ERROR,
+                    "libxrdp_send_bitmap: xrdp_rdp_init_data failed %d",
+                    rv);
+                goto done;
+            }
             out_uint16_le(s, RDP_UPDATE_BITMAP); /* updateType */
             p_num_updates = s->p;
             out_uint8s(s, 2); /* num_updates set later */
@@ -514,6 +522,20 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
 
                 if (lines_sending == 0)
                 {
+                    /*
+                     * No additional rectangle fitting after at least one
+                     * update is OK: send this PDU and continue. No progress
+                     * on an empty PDU would otherwise spin forever.
+                     */
+                    if (num_updates == 0)
+                    {
+                        LOG(LOG_LEVEL_ERROR,
+                            "libxrdp_send_bitmap: compressor made no progress "
+                            "at source line %d",
+                            i - 1);
+                        rv = 1;
+                        goto done;
+                    }
                     break;
                 }
 
@@ -583,8 +605,19 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
                       "rectangles <omitted from log>",
                       RDP_UPDATE_BITMAP, num_updates);
 
-            xrdp_rdp_send_data((struct xrdp_rdp *)session->rdp, s,
-                               RDP_DATA_PDU_UPDATE);
+            rv = xrdp_rdp_send_data((struct xrdp_rdp *)session->rdp, s,
+                                    RDP_DATA_PDU_UPDATE);
+            LOG(LOG_LEVEL_INFO,
+                "RDP bitmap compressed PDU: updates=%d bytes=%d "
+                "remaining_lines=%d result=%d",
+                num_updates, total_bufsize, i, rv);
+            if (rv != 0)
+            {
+                LOG(LOG_LEVEL_ERROR,
+                    "libxrdp_send_bitmap: xrdp_rdp_send_data failed %d",
+                    rv);
+                goto done;
+            }
 
             if (total_bufsize > MAX_BITMAP_BUF_SIZE)
             {
@@ -593,7 +626,6 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
             }
         }
 
-        free_stream(temp_s);
     }
     else
     {
@@ -616,12 +648,21 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
 
                 if (lines_sending == 0)
                 {
-                    LOG(LOG_LEVEL_WARNING, "libxrdp_send_bitmap: error, lines_sending == zero");
-                    break;
+                    LOG(LOG_LEVEL_ERROR,
+                        "libxrdp_send_bitmap: lines_sending == zero");
+                    rv = 1;
+                    goto done;
                 }
 
                 p += server_line_bytes * lines_sending;
-                xrdp_rdp_init_data((struct xrdp_rdp *)session->rdp, s);
+                rv = xrdp_rdp_init_data((struct xrdp_rdp *)session->rdp, s);
+                if (rv != 0)
+                {
+                    LOG(LOG_LEVEL_ERROR,
+                        "libxrdp_send_bitmap: xrdp_rdp_init_data failed %d",
+                        rv);
+                    goto done;
+                }
                 out_uint16_le(s, RDP_UPDATE_BITMAP);
                 out_uint16_le(s, 1); /* num updates */
                 out_uint16_le(s, x);
@@ -691,15 +732,31 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
                           "updateType %d (UPDATETYPE_BITMAP), numberRectangles 1, "
                           "rectangles <omitted from log>",
                           RDP_UPDATE_BITMAP);
-                xrdp_rdp_send_data((struct xrdp_rdp *)session->rdp, s,
-                                   RDP_DATA_PDU_UPDATE);
+                rv = xrdp_rdp_send_data((struct xrdp_rdp *)session->rdp, s,
+                                        RDP_DATA_PDU_UPDATE);
+                LOG(LOG_LEVEL_INFO,
+                    "RDP bitmap raw PDU: rect=%dx%d+%d+%d bytes=%d result=%d",
+                    cx, lines_sending, x, y + i,
+                    line_pad_bytes * lines_sending, rv);
+                if (rv != 0)
+                {
+                    LOG(LOG_LEVEL_ERROR,
+                        "libxrdp_send_bitmap: xrdp_rdp_send_data failed %d",
+                        rv);
+                    goto done;
+                }
                 i = i + lines_sending;
             }
         }
     }
 
+done:
+    if (temp_s != NULL)
+    {
+        free_stream(temp_s);
+    }
     free_stream(s);
-    return 0;
+    return rv;
 }
 
 /*****************************************************************************/

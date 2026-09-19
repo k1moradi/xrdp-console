@@ -51,6 +51,7 @@ export PKG_CONFIG_PATH=$pkg_config_path
 
 source_revision=$(sha256sum \
     "$source_root/configure.ac" \
+    "$source_root/libxrdp/libxrdp.c" \
     "$source_root/vnc/vnc.c" \
     "$source_root/xrdp/xrdp_cache.c" \
     "$source_root/xrdp/xrdp_mm.c" \

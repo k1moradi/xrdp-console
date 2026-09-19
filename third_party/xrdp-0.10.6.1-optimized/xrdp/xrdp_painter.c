@@ -128,10 +128,15 @@ xrdp_painter_send_dirty(struct xrdp_painter *self)
             send_error = libxrdp_send_bitmap(self->session, cx, cy, bpp,
                                              ldata, rect.left, rect.top,
                                              cx, cy);
-            LOG(LOG_LEVEL_INFO,
+            LOG(send_error == 0 ? LOG_LEVEL_INFO : LOG_LEVEL_ERROR,
                 "RDP direct bitmap output: rect=%dx%d+%d+%d bytes=%d result=%d",
                 cx, cy, rect.left, rect.top, cx * cy * Bpp, send_error);
             g_free(ldata);
+
+            if (send_error != 0)
+            {
+                return send_error;
+            }
 
             jndex++;
             error = xrdp_region_get_rect(self->dirty_region, jndex, &rect);
@@ -306,14 +311,12 @@ xrdp_painter_end_update(struct xrdp_painter *self)
 #if defined(XRDP_PAINTER)
         if (self->begin_end_level == 0)
         {
-            xrdp_painter_send_dirty(self);
-            return 0;
+            return xrdp_painter_send_dirty(self);
         }
 #endif
     }
 
-    libxrdp_orders_send(self->session);
-    return 0;
+    return libxrdp_orders_send(self->session);
 }
 
 /*****************************************************************************/

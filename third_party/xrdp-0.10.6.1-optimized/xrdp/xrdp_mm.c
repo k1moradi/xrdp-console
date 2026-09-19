@@ -4561,6 +4561,7 @@ int
 server_end_update(struct xrdp_mod *mod)
 {
     struct xrdp_painter *p;
+    int rv;
 
     p = (struct xrdp_painter *)(mod->painter);
 
@@ -4569,10 +4570,10 @@ server_end_update(struct xrdp_mod *mod)
         return 0;
     }
 
-    xrdp_painter_end_update(p);
+    rv = xrdp_painter_end_update(p);
     xrdp_painter_delete(p);
     mod->painter = 0;
-    return 0;
+    return rv;
 }
 
 /*****************************************************************************/
