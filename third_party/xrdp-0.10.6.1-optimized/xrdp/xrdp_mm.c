@@ -4614,14 +4614,27 @@ server_paint_rect(struct xrdp_mod *mod, int x, int y, int cx, int cy,
     struct xrdp_bitmap *b;
     struct xrdp_painter *p;
 
+    wm = (struct xrdp_wm *)(mod->wm);
     p = (struct xrdp_painter *)(mod->painter);
+
+    if (x == 0 && y == 0 && cx == width && cy == height)
+    {
+        LOG(LOG_LEVEL_INFO,
+            "RDP VNC paint path: rect=%dx%d painter=%p screen=%dx%dx%d "
+            "cache=%d/%d/%d cache_version=0x%x bitmap_comp=%d "
+            "no_orders=%d gfx=%d",
+            width, height, (void *)p, wm->screen->width, wm->screen->height,
+            wm->screen->bpp, wm->cache->cache1_entries,
+            wm->cache->cache2_entries, wm->cache->cache3_entries,
+            wm->cache->bitmap_cache_version, wm->cache->use_bitmap_comp,
+            wm->client_info->no_orders_supported, wm->client_info->gfx);
+    }
 
     if (p == 0)
     {
         return 0;
     }
 
-    wm = (struct xrdp_wm *)(mod->wm);
     b = xrdp_bitmap_create_with_data(width, height, wm->screen->bpp, data, wm);
     xrdp_painter_copy(p, b, wm->target_surface, x, y, cx, cy, srcx, srcy);
     xrdp_bitmap_delete(b);

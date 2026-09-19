@@ -52,6 +52,11 @@ and [PR #3755](https://github.com/neutrinolabs/xrdp/pull/3755). This workspace
 applies that state-machine fix on top of the VNC input/encoding optimizations
 in `third_party/xrdp-0.10.6.1-optimized`.
 
+The VNC module also honors `enable_dynamic_resizing=false` during its initial
+connection. It requests the physical framebuffer immediately instead of
+discarding that update while asking the RDP client to resize. This is required
+for a fixed X11 console when the Mac client opens at a different resolution.
+
 Build the candidate with `scripts/build-optimized-xrdp.sh`. It uses one worker,
 `-O3`, and `-march=native` because this binary is for the current laptop. Use
 `scripts/use-matched-xrdp-console-daemon.sh` to switch the service drop-in

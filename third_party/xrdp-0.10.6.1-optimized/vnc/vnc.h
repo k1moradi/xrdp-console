@@ -184,6 +184,8 @@ struct vnc
     int clip_chanid;
     struct vnc_clipboard_data *vc;
     int delay_ms;
+    /* Keep the RDP client geometry fixed when the module disables resizing. */
+    int dynamic_resizing;
     struct trans *trans;
     struct guid guid;
     int suppress_output;
@@ -205,6 +207,7 @@ struct vnc
     int framebuffer_cy;
     int framebuffer_raw_row_bytes;
     int framebuffer_raw_rows_done;
+    int first_frame_logged;
 };
 
 /*

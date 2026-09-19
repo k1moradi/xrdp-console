@@ -319,6 +319,16 @@ xrdp_cache_add_bitmap(struct xrdp_cache *self, struct xrdp_bitmap *bitmap,
     bmp_size = (bitmap->width + e) * bitmap->height * Bpp;
     self->bitmap_stamp++;
 
+    if (self->bitmap_stamp == 1)
+    {
+        LOG(LOG_LEVEL_INFO,
+            "RDP first bitmap-cache tile: size=%dx%d bpp=%d "
+            "cache=%d/%d/%d cache_version=0x%x bitmap_comp=%d",
+            bitmap->width, bitmap->height, bitmap->bpp,
+            self->cache1_entries, self->cache2_entries, self->cache3_entries,
+            self->bitmap_cache_version, self->use_bitmap_comp);
+    }
+
     if (bmp_size <= self->cache1_size)
     {
         cache_id = 0;

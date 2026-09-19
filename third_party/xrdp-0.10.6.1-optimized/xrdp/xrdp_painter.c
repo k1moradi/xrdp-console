@@ -146,6 +146,7 @@ struct xrdp_painter *
 xrdp_painter_create(struct xrdp_wm *wm, struct xrdp_session *session)
 {
     struct xrdp_painter *self;
+    int use_direct_bitmap_output;
 
     LOG_DEVEL(LOG_LEVEL_DEBUG, "xrdp_painter_create:");
     self = (struct xrdp_painter *)g_malloc(sizeof(struct xrdp_painter), 1);
@@ -154,8 +155,17 @@ xrdp_painter_create(struct xrdp_wm *wm, struct xrdp_session *session)
     self->rop = 0xcc; /* copy will use 0xcc */
     self->clip_children = 1;
 
+    /*
+     * VNC sessions receive complete pixels rather than drawing orders. Use
+     * the direct bitmap path for them so clients do not have to consume a
+     * cache upload followed by MemBlt orders for every captured tile.
+     * Normal Xorg sessions retain the negotiated order path.
+     */
+    use_direct_bitmap_output = wm->mm != 0 && wm->mm->mod != 0 &&
+                               XRDP_MM_IS_VNC(wm->mm);
+
     if (self->session->client_info->no_orders_supported ||
-            self->session->client_info->gfx)
+            self->session->client_info->gfx || use_direct_bitmap_output)
     {
 #if defined(XRDP_PAINTER)
         if (painter_create(&(self->painter)) != PT_ERROR_NONE)

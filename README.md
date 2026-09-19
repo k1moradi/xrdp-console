@@ -158,6 +158,20 @@ The script backs up the systemd drop-in and restores it automatically if the
 new daemon fails to stay active. It preserves the existing x11vnc profile,
 clipboard channel, and VNC scheduling/encoding optimizations.
 
+If this checkout should replace the distribution `xrdp` package for this
+machine, run the explicit privileged deployment from the same terminal after
+authenticating with `sudo -v`:
+
+```sh
+sudo scripts/install-console-xrdp.sh
+```
+
+That deployment keeps the existing `/etc/xrdp` Console configuration and
+x11vnc service, retains `xrdp-sesman` only for the physical-console clipboard
+socket, removes only the distribution `xrdp` package, and leaves `xorgxrdp`
+installed but unused. It stores recoverable backups under
+`/var/backups/xrdp-x11vnc/`.
+
 ## Source layout
 
 ```text

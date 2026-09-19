@@ -352,6 +352,16 @@ resize_client_to_server(struct vnc *v, int update_in_progress)
     const struct vnc_screen_layout *sl = &v->server_layout;
     struct monitor_info client_mons[CLIENT_MONITOR_DATA_MAXIMUM_MONITORS] = {0};
 
+    if (!v->dynamic_resizing)
+    {
+        LOG(LOG_LEVEL_INFO,
+            "VNC fixed geometry: keeping RDP client at %dx%d; "
+            "physical framebuffer is %dx%d",
+            v->client_layout.total_width, v->client_layout.total_height,
+            sl->total_width, sl->total_height);
+        return 0;
+    }
+
     if (sl->count <= 0 ||
             sl->count > CLIENT_MONITOR_DATA_MAXIMUM_MONITORS)
     {
@@ -404,6 +414,16 @@ static int
 resize_server_to_client_layout(struct vnc *v)
 {
     int error = 0;
+
+    if (!v->dynamic_resizing)
+    {
+        LOG(LOG_LEVEL_INFO,
+            "VNC fixed geometry: not resizing physical framebuffer to "
+            "RDP client layout %dx%d",
+            v->client_layout.total_width, v->client_layout.total_height);
+        v->resize_status = VRS_DONE;
+        return 0;
+    }
 
     /* Before checking the 'resize_supported' flag, see if this
      * is a null operation. We can get here if the server doesn't
@@ -1294,11 +1314,15 @@ lib_framebuffer_update(struct vnc *v)
     int b;
     int error;
     int need_size;
+    int raw_rects;
+    long long raw_bytes;
     struct stream *s;
     struct stream *pixel_s;
     struct vnc_screen_layout layout = { 0 };
 
     num_recs = 0;
+    raw_rects = 0;
+    raw_bytes = 0;
 
     make_stream(pixel_s);
 
@@ -1346,6 +1370,11 @@ lib_framebuffer_update(struct vnc *v)
                 if (error == 0)
                 {
                     error = v->server_paint_rect(v, x, y, cx, cy, pixel_s->data, cx, cy, 0, 0);
+                    if (error == 0)
+                    {
+                        ++raw_rects;
+                        raw_bytes += need_size;
+                    }
                 }
             }
             else if (encoding == RFB_ENC_COPY_RECT)
@@ -1440,6 +1469,16 @@ lib_framebuffer_update(struct vnc *v)
     if (error == 0)
     {
         error = v->server_end_update(v);
+    }
+
+    if (error == 0 && raw_rects > 0 && !v->first_frame_logged)
+    {
+        LOG(LOG_LEVEL_INFO,
+            "VNC first framebuffer delivered: rects=%d raw_bytes=%lld "
+            "geometry=%dx%d",
+            raw_rects, raw_bytes, v->server_layout.total_width,
+            v->server_layout.total_height);
+        v->first_frame_logged = 1;
     }
 
     if (error == 0)
@@ -2389,7 +2428,21 @@ lib_mod_connect(struct vnc *v)
     if (error == 0)
     {
         v->resize_supported = VRSS_UNKNOWN;
-        v->resize_status = VRS_WAITING_FOR_FIRST_UPDATE;
+        if (v->dynamic_resizing)
+        {
+            v->resize_status = VRS_WAITING_FOR_FIRST_UPDATE;
+        }
+        else
+        {
+            /* A fixed physical console has no resize handshake to perform.
+             * Request the real framebuffer immediately instead of consuming
+             * an initial update while asking the RDP client to resize. */
+            v->resize_supported = VRSS_NOT_SUPPORTED;
+            v->resize_status = VRS_DONE;
+            LOG(LOG_LEVEL_INFO,
+                "VNC fixed geometry enabled: requesting %dx%d framebuffer",
+                v->server_layout.total_width, v->server_layout.total_height);
+        }
         error = send_update_request_for_resize_status(v);
     }
 
@@ -2520,6 +2573,10 @@ lib_mod_set_param(struct vnc *v, const char *name, const char *value)
     else if (g_strcasecmp(name, "delay_ms") == 0)
     {
         v->delay_ms = g_atoi(value);
+    }
+    else if (g_strcasecmp(name, "enable_dynamic_resizing") == 0)
+    {
+        v->dynamic_resizing = g_text2bool(value);
     }
     else if (g_strcasecmp(name, "guid") == 0)
     {
@@ -2701,6 +2758,7 @@ mod_init(void)
 
     /* Member variables */
     v->enabled_encodings_mask = -1;
+    v->dynamic_resizing = 1;
     {
         const char *incremental_fb = g_getenv("XRDP_VNC_INCREMENTAL_FB");
         const char *read_quantum = g_getenv("XRDP_VNC_RAW_QUANTUM_BYTES");
