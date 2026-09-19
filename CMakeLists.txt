@@ -112,8 +112,6 @@ foreach(source IN LISTS PYTHON_SOURCES)
     list(APPEND PYTHON_SOURCE_PATHS "${CMAKE_CURRENT_SOURCE_DIR}/${source}")
 endforeach()
 
-configure_file(cmake/xrdp-vnc-bench.in
-    ${CMAKE_CURRENT_BINARY_DIR}/xrdp-vnc-bench @ONLY)
 configure_file(packaging/systemd/x11vnc-console.service.in
     ${CMAKE_CURRENT_BINARY_DIR}/x11vnc-console.service @ONLY)
 configure_file(packaging/systemd/x11vnc-console.in
@@ -142,8 +140,6 @@ install(TARGETS ${BENCHMARK_BINARIES}
     RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/xrdp-vnc-bench)
 install(PROGRAMS ${PYTHON_SOURCES}
     DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench)
-install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/xrdp-vnc-bench
-    DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(PROGRAMS scripts/run-network-latency-matrix.sh
     DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench)
 install(PROGRAMS scripts/fix-console-dynamic-resizing.sh

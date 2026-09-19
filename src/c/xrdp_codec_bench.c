@@ -2,6 +2,8 @@
 /* Compare the two codecs available to the local xrdp build.
  * This is an offline microbenchmark; it never starts xrdp or touches a
  * network socket. It includes BGRA->NV12 conversion for x264, as xrdp does. */
+#define _POSIX_C_SOURCE 200809L
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

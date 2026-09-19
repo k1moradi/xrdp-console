@@ -45,10 +45,11 @@ cmake --install build
 cpack --config build/CPackConfig.cmake
 ```
 
-The build installs the unified command as `xrdp-vnc-bench`, helper binaries
-under `libexec/xrdp-vnc-bench`, and read-only diagnostics under the data
-directory. CPack produces a relocatable `.tar.gz` and, on Debian systems, a
-`.deb`. The optional offline codec probe is built when both `rfxcodec` and
+The build installs helper binaries under `libexec/xrdp-vnc-bench` and
+read-only diagnostics under the data directory. Run the benchmark directly
+from `src/python/xrdp_vnc_bench.py` or its installed data path. CPack produces
+a relocatable `.tar.gz` and, on Debian systems, a `.deb`. The optional offline
+codec probe is built when both `rfxcodec` and
 `x264` development files are available; its absence does not affect the
 end-to-end benchmark. Vulkan development files are optional too; without them
 the Vulkan capability helper is omitted while the rest of the toolkit remains
@@ -137,6 +138,13 @@ The optimized daemon source is kept under
 
 ```sh
 scripts/build-optimized-xrdp.sh
+```
+
+When x264 is installed by the distribution under `/usr`, set the sysroot to
+`/` (the value must contain the `usr/` subtree):
+
+```sh
+XRDP_X264_SYSROOT=/ scripts/build-optimized-xrdp.sh
 ```
 
 After reviewing the candidate and closing the RDP connection, switch only the
