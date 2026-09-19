@@ -16,10 +16,10 @@ git config user.email "you@example.com"
 git remote -v
 git fetch origin --prune
 git status --short
-git switch -c xrdp-x11vnc-optimized-console
+git switch main
 git diff --cached --check -- . ':(exclude)third_party'
 git commit -m "Publish optimized xrdp and x11vnc benchmark toolkit"
-git push -u origin xrdp-x11vnc-optimized-console
+git push -u origin main
 ```
 
 If the older repository has existing history that is not present in this
