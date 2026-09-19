@@ -1,0 +1,18 @@
+[Unit]
+Description=Export the physical X11 console to local xrdp
+After=display-manager.service
+Requires=display-manager.service
+PartOf=display-manager.service
+ConditionPathExists=/etc/x11vnc.pass
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=-/etc/default/xrdp-vnc-bench
+ExecStart=/usr/@CMAKE_INSTALL_LIBEXECDIR@/xrdp-vnc-bench/x11vnc-console
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+
+[Install]
+WantedBy=graphical.target

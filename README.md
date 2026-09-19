@@ -1,0 +1,178 @@
+# xrdp-vnc-bench
+
+`xrdp-vnc-bench` is a GPLv3 benchmark and diagnostic toolkit for the
+console-sharing path:
+
+```text
+physical X11 display -> x11vnc -> xrdp libvnc.so -> RDP client
+```
+
+It measures the path that matters for a workstation where an RDP connection
+must show the same LXQt session as the physical monitor. The benchmark uses
+the versions installed by the host distribution and keeps all benchmark
+services on private ports. The workspace also carries a reproducible,
+host-native xrdp candidate with the measured VNC optimizations and the
+upstream resize-state fix. It is built and activated explicitly; a normal
+CMake install never replaces the system daemon.
+
+The end-to-end benchmark is one program, `xrdp_vnc_bench.py`. It supports
+graphics latency, input round trips, controlled compositor churn, classic RFX
+or GFX negotiation, and a Linux network namespace with symmetric `tc netem`
+delay, jitter, loss, and rate limits. Small C helpers provide X11 pixel and
+input probes, GL workloads, scroll stimuli, and Vulkan reporting.
+
+## Build
+
+On Debian or Ubuntu, install the development dependencies first:
+
+```sh
+sudo apt install \
+  cmake ninja-build build-essential pkg-config python3 \
+  libx11-dev libxtst-dev libgl-dev libvulkan-dev \
+  xrdp x11vnc freerdp2-x11 xvfb
+```
+
+Configure an out-of-tree Release build. `-march=native` is optional and
+should only be used for a benchmark build that will run on the same machine:
+
+```sh
+cmake -S . -B build -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+cmake --build build --parallel 1
+ctest --test-dir build --output-on-failure
+cmake --install build
+cpack --config build/CPackConfig.cmake
+```
+
+The build installs the unified command as `xrdp-vnc-bench`, helper binaries
+under `libexec/xrdp-vnc-bench`, and read-only diagnostics under the data
+directory. CPack produces a relocatable `.tar.gz` and, on Debian systems, a
+`.deb`. The optional offline codec probe is built when both `rfxcodec` and
+`x264` development files are available; its absence does not affect the
+end-to-end benchmark. Vulkan development files are optional too; without them
+the Vulkan capability helper is omitted while the rest of the toolkit remains
+buildable.
+
+For a local native helper build:
+
+```sh
+cmake -S . -B build-native -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release -DXRDP_VNC_NATIVE=ON
+cmake --build build-native
+```
+
+## Run the benchmark
+
+The physical X server's Xauthority cookie must be readable by the invoking
+user. Pass it explicitly when SDDM keeps the cookie root-only:
+
+```sh
+AUTH=/run/user/$(id -u)/xrdp-console.xauth
+export XRDP_VNC_BENCH_HELPER_DIR="$PWD/build/bin"
+export XRDP_VNC_RESULTS="$PWD/results"
+python3 -B src/python/xrdp_vnc_bench.py \
+  --auth "$AUTH" --mode input-roundtrip \
+  --pipeline rfx --disable-gfx-for-vnc \
+  --input-churn-fps 15 --duration 20 --repetitions 2 \
+  --only lan --network-mode localhost
+```
+
+The namespace transport needs a cached sudo ticket for short-lived network
+setup and cleanup commands. The benchmark itself remains a normal-user
+process:
+
+```sh
+sudo -v
+python3 -B src/python/xrdp_vnc_bench.py \
+  --network-self-test --network-delay-ms 2.5 --network-jitter-ms 1
+```
+
+The `scripts/run-network-latency-matrix.sh` wrapper runs the validated 0,
+2.5, and 5 ms one-way matrix at 0, 15, and 30 fps. Zero-delay controls use
+loopback and no jitter; impaired cases use a temporary veth namespace. See
+[`docs/network-latency.md`](docs/network-latency.md).
+The timestamp definitions and percentile convention are documented in
+[`docs/measurement-model.md`](docs/measurement-model.md).
+
+The isolated x11vnc profiles are `baseline`, `lan`, `noxdamage`, and
+`lan-noxdamage`. The last profile changes XDamage while retaining the LAN
+speed hint, so it is the orthogonal comparison for the normal `lan` profile.
+
+The benchmark never connects to the production ports unless the caller
+explicitly overrides the executable/configuration inputs. Each run creates a
+private x11vnc listener, xrdp configuration, RDP client display, and log
+directory. Interrupting a run cleans up child processes and network
+namespaces.
+
+For a live, read-only comparison of VS Code and Firefox, use the episode
+sampler. The `--rdp-port` option must match the local xrdp listener; it is not
+hard-coded to 3389:
+
+```sh
+python3 -B src/python/xrdp_console_episode_sampler.py \
+  --duration 600 --interval 1 --rdp-port 3389 \
+  --output results/vscode-episode.csv
+```
+
+The input-roundtrip report separates RDP input delivery, local X11 draw
+completion, returned graphics, and the full T0-to-T2 round trip. The relay
+used by the private VNC path is bounded and event-driven, so a blocked peer
+does not consume a full CPU while a run is waiting for network backpressure.
+The optional `vscode_gpu_probe.py --expect-device-regex` argument is the only
+host-specific GPU assertion; without it the probe reports capabilities without
+requiring a particular adapter model.
+
+## Console profile
+
+The toolkit documents the measured x11vnc profile for a local network, but it
+does not silently rewrite `/etc/xrdp` or install a privileged systemd unit. A
+deployment that wants the Windows-like shared-console behavior can use the
+installed systemd template in `share/xrdp-vnc-bench/systemd` as a starting
+point and review every path and Xauthority policy for its display manager. See
+[`docs/console-profile.md`](docs/console-profile.md).
+
+The optimized daemon source is kept under
+`third_party/xrdp-0.10.6.1-optimized`. Build it without root privileges with:
+
+```sh
+scripts/build-optimized-xrdp.sh
+```
+
+After reviewing the candidate and closing the RDP connection, switch only the
+xrdp service to it with:
+
+```sh
+sudo scripts/use-matched-xrdp-console-daemon.sh
+```
+
+The script backs up the systemd drop-in and restores it automatically if the
+new daemon fails to stay active. It preserves the existing x11vnc profile,
+clipboard channel, and VNC scheduling/encoding optimizations.
+
+## Source layout
+
+```text
+src/c/          benchmark helper sources
+src/python/     one end-to-end benchmark and read-only diagnostics
+tests/          fast unprivileged Python tests
+scripts/        reproducible matrix runner
+docs/           design, deployment, and validation records
+packaging/      systemd templates for an explicit console deployment
+third_party/    canonical optimized xrdp source and provenance
+deps/           small reproducible development sysroots for that build
+```
+
+Generated builds, raw run logs, credentials, Xauthority files, production
+backups, and private runtime binaries are deliberately excluded by `.gitignore`.
+The optimized xrdp source and its small dependency sysroots are retained under
+`third_party/` and `deps/` so the candidate can be rebuilt after a reboot or
+package upgrade. The checked-in `libxkbfile` sysroot is an x86_64 Linux build
+input; other architectures should use the distribution's development package
+or provide an equivalent sysroot through the build script's existing paths.
+
+## License
+
+Copyright (C) 2026 Keivan Moradi. This project is licensed under the GNU
+General Public License version 3 or later. See [`LICENSE`](LICENSE) and
+[`THIRD_PARTY.md`](THIRD_PARTY.md).

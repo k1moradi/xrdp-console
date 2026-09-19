@@ -1,0 +1,74 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -eu
+
+display=${XRDP_VNC_DISPLAY:-:0}
+password_file=${XRDP_VNC_PASSWORD_FILE:-/etc/x11vnc.pass}
+auth=${XRDP_VNC_AUTH:-}
+
+find_auth()
+{
+    if [ -n "$auth" ] && [ -r "$auth" ]; then
+        return 0
+    fi
+    auth=
+    detected=$(
+        ps -eo args= |
+        awk '/\/Xorg / {
+            for (i = 1; i < NF; i++) {
+                if ($i == "-auth") {
+                    print $(i + 1)
+                    exit
+                }
+            }
+        }'
+    )
+    if [ -n "$detected" ] && [ -r "$detected" ]; then
+        auth=$detected
+        return 0
+    fi
+    for candidate in /run/sddm/xauth_* /run/user/*/xrdp-console.xauth; do
+        if [ -r "$candidate" ]; then
+            auth=$candidate
+            return 0
+        fi
+    done
+    return 1
+}
+
+if [ -n "$auth" ] && [ ! -r "$auth" ]; then
+    echo "Configured Xauthority file is not readable: $auth" >&2
+    exit 1
+fi
+if [ -z "$auth" ] && [ "${XRDP_VNC_ALLOW_AUTH_DISCOVERY:-0}" != "1" ]; then
+    echo "Set XRDP_VNC_AUTH to the intended Xauthority file (or explicitly set XRDP_VNC_ALLOW_AUTH_DISCOVERY=1)" >&2
+    exit 1
+fi
+
+attempt=0
+while [ "$attempt" -lt 60 ] && ! find_auth; do
+    attempt=$((attempt + 1))
+    sleep 1
+done
+if [ -z "$auth" ] || [ ! -r "$auth" ]; then
+    echo "Could not find a readable Xauthority file for $display" >&2
+    exit 1
+fi
+if [ ! -f "$password_file" ]; then
+    echo "Missing VNC password file: $password_file" >&2
+    exit 1
+fi
+
+if [ -x /usr/bin/xset ]; then
+    DISPLAY="$display" XAUTHORITY="$auth" /usr/bin/xset r on || true
+fi
+
+exec "${XRDP_VNC_X11VNC:-/usr/bin/x11vnc}" \
+    -display "$display" -auth "$auth" \
+    -localhost -listen 127.0.0.1 -no6 \
+    -rfbport "${XRDP_VNC_RFB_PORT:-5900}" \
+    -rfbauth "$password_file" -forever -shared \
+    -xdamage -xd_mem 0 -threads -repeat -input_skip 1 \
+    -speeds lan -wait 5 -defer 5 -deferupdate 5 \
+    -wait_ui 2 -setdefer -1 -scrollcopyrect never \
+    -afteraccept /usr/@CMAKE_INSTALL_LIBEXECDIR@/xrdp-vnc-bench/x11vnc-console-refresh

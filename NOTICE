@@ -1,0 +1,8 @@
+xrdp-vnc-bench
+
+Copyright (C) 2026 Keivan Moradi
+
+This project contains original benchmark harness code and small C helper
+programs. It runs against independently installed xrdp, x11vnc, FreeRDP,
+Xvfb, X11, OpenGL, and Vulkan components; those dependencies remain under
+their own licenses.

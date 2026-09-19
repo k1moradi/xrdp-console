@@ -1,0 +1,17 @@
+xrdp optimized shared-console source provenance
+
+Base source: xrdp v0.10.6.1, upstream commit 80c52879fead585d6347df5b3c587718adf8f5a5.
+Performance work: the eight input/VNC/GFX changes from the external consultation
+were integrated directly into this tree and remain opt-in where they alter
+graphics flow control. The source contains the input-first scheduler and VNC
+capture/encoding changes; there is no separate patch directory in this release.
+Resize fix: upstream change a11ee461a70e16163f8e8e75ccd6ef876d9c99e4 (PR #3755)
+was integrated into the VNC resize state machine to keep EGFX alive and reset
+surfaces correctly when a client changes desktop size. This addresses the
+cursor-only/black-frame behavior reported for xrdp 0.10.6.1 VNC proxy sessions.
+Build profile: -O3 -march=native, one make worker, x264 enabled, strict module
+locations, and /run/xrdp/sockdir for the system socket root.
+
+The source retains the upstream Apache-2.0 notices in COPYING and the bundled
+subdirectories. See docs/console-profile.md and scripts/build-optimized-xrdp.sh
+for the reproducible build and activation workflow.
