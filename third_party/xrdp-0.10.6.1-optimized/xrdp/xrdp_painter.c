@@ -161,6 +161,7 @@ struct xrdp_painter *
 xrdp_painter_create(struct xrdp_wm *wm, struct xrdp_session *session)
 {
     struct xrdp_painter *self;
+    const char *direct_bitmap_env;
     int use_direct_bitmap_output;
 
     LOG_DEVEL(LOG_LEVEL_DEBUG, "xrdp_painter_create:");
@@ -178,6 +179,22 @@ xrdp_painter_create(struct xrdp_wm *wm, struct xrdp_session *session)
      */
     use_direct_bitmap_output = wm->mm != 0 && wm->mm->mod != 0 &&
                                XRDP_MM_IS_VNC(wm->mm);
+
+    direct_bitmap_env = g_getenv("XRDP_VNC_DIRECT_BITMAP");
+    if (use_direct_bitmap_output &&
+            direct_bitmap_env != NULL &&
+            direct_bitmap_env[0] != '\0')
+    {
+        use_direct_bitmap_output = g_text2bool(direct_bitmap_env);
+    }
+
+    if (wm->mm != NULL && wm->mm->mod != NULL &&
+            XRDP_MM_IS_VNC(wm->mm))
+    {
+        LOG(LOG_LEVEL_INFO,
+            "VNC direct bitmap output: %s",
+            use_direct_bitmap_output ? "enabled" : "disabled");
+    }
 
     if (self->session->client_info->no_orders_supported ||
             self->session->client_info->gfx || use_direct_bitmap_output)
