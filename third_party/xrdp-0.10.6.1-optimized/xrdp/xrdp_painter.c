@@ -315,6 +315,8 @@ xrdp_painter_begin_update(struct xrdp_painter *self)
 int
 xrdp_painter_end_update(struct xrdp_painter *self)
 {
+    int rv;
+
     LOG_DEVEL(LOG_LEVEL_DEBUG, "xrdp_painter_end_update:");
     if (self == 0)
     {
@@ -333,7 +335,10 @@ xrdp_painter_end_update(struct xrdp_painter *self)
 #endif
     }
 
-    return libxrdp_orders_send(self->session);
+    rv = libxrdp_orders_send(self->session);
+    LOG(rv == 0 ? LOG_LEVEL_INFO : LOG_LEVEL_ERROR,
+        "RDP bitmap-cache/orders flush: result=%d", rv);
+    return rv;
 }
 
 /*****************************************************************************/
