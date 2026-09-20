@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Measure the complete local x11vnc -> xrdp -> RDP-client display path.
+"""Measure the local x11vnc -> xrdp -> RDP-client display path.
 
 The benchmark starts only user-owned, loopback services:
 
     physical X :0 -> isolated x11vnc -> isolated xrdp -> FreeRDP on Xvfb
 
     An OpenGL workload toggles a solid red/blue marker on the physical display.
-    The benchmark timestamps the completed GL swap and polls the corresponding
-    pixel in the FreeRDP window.  This measures the path that the previous raw RFB
-    benchmark could not cover, including xrdp's RemoteFX/GFX encoder and a real
-    RDP client renderer.  It never connects to the production ports 5900/3389 and
-    does not modify system configuration.
+    The default RDP transport timestamps the completed GL swap and polls the
+    corresponding pixel in the FreeRDP window.  ``--transport rfb`` instead
+    starts a private no-password x11vnc and timestamps the same marker in RAW
+    RFB bytes on the loopback socket.  Neither mode connects to production
+    ports 5900/3389 or modifies system configuration.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ import shutil
 import signal
 import socket
 import statistics
+import struct
 import subprocess
 import sys
 import tempfile
@@ -105,6 +106,226 @@ VNC_PROFILES = {
     "noxdamage": ("-noxdamage",),
     "lan-noxdamage": ("-speeds", "lan", "-noxdamage"),
 }
+
+
+class TcpSnapshot:
+    """Best-effort counters for the private benchmark TCP connection."""
+
+    def __init__(self, bytes_sent: int | None = None,
+                 bytes_received: int | None = None,
+                 retransmissions: int | None = None,
+                 send_queue: int | None = None,
+                 rtt_ms: float | None = None) -> None:
+        self.bytes_sent = bytes_sent
+        self.bytes_received = bytes_received
+        self.retransmissions = retransmissions
+        self.send_queue = send_queue
+        self.rtt_ms = rtt_ms
+
+    @property
+    def wire_bytes(self) -> int | None:
+        if self.bytes_sent is None or self.bytes_received is None:
+            return None
+        return self.bytes_sent + self.bytes_received
+
+
+def tcp_snapshot(port: int) -> TcpSnapshot | None:
+    """Read the established private connection from ``ss`` when available."""
+    try:
+        result = subprocess.run(
+            ["ss", "-tin"], capture_output=True, text=True, check=False,
+        )
+    except OSError:
+        return None
+    lines = result.stdout.splitlines()
+    for index, line in enumerate(lines):
+        fields = line.split()
+        if len(fields) < 5 or fields[0] not in {
+                "ESTAB", "SYN-SENT", "SYN-RECV", "FIN-WAIT-1", "FIN-WAIT-2",
+                "CLOSE-WAIT", "LAST-ACK", "CLOSING", "TIME-WAIT"}:
+            continue
+        if not any(re.search(rf":{port}(?:%|$)", endpoint)
+                   for endpoint in fields[3:5]):
+            continue
+        detail = ""
+        if index + 1 < len(lines) and lines[index + 1][:1].isspace():
+            detail = lines[index + 1]
+        values: dict[str, str] = {}
+        for token in detail.split():
+            key, separator, value = token.partition(":")
+            if separator:
+                values[key] = value
+        retransmissions = None
+        if "retrans" in values:
+            try:
+                retransmissions = int(values["retrans"].split("/", 1)[0])
+            except ValueError:
+                pass
+        rtt_ms = None
+        if "rtt" in values:
+            try:
+                rtt_ms = float(values["rtt"].split("/", 1)[0])
+            except ValueError:
+                pass
+        bytes_sent = None
+        bytes_received = None
+        for key, target in (("bytes_sent", "bytes_sent"),
+                            ("bytes_received", "bytes_received")):
+            if key in values:
+                try:
+                    if target == "bytes_sent":
+                        bytes_sent = int(values[key])
+                    else:
+                        bytes_received = int(values[key])
+                except ValueError:
+                    pass
+        try:
+            send_queue = int(fields[2])
+        except ValueError:
+            send_queue = None
+        return TcpSnapshot(bytes_sent, bytes_received, retransmissions,
+                           send_queue, rtt_ms)
+    return None
+
+
+class RfbClient:
+    """Minimal RFB 3.x client for an isolated, RAW-only benchmark."""
+
+    def __init__(self, sock: socket.socket) -> None:
+        self.sock = sock
+        self.width = 0
+        self.height = 0
+        self.bytes_sent = 0
+        self.bytes_received = 0
+
+    def _recv_exact(self, size: int) -> bytes:
+        data = bytearray()
+        while len(data) < size:
+            chunk = self.sock.recv(size - len(data))
+            if not chunk:
+                raise RuntimeError("RFB peer closed the connection")
+            data.extend(chunk)
+            self.bytes_received += len(chunk)
+        return bytes(data)
+
+    def _send(self, data: bytes) -> None:
+        self.sock.sendall(data)
+        self.bytes_sent += len(data)
+
+    def connect(self) -> None:
+        server_version = self._recv_exact(12)
+        if not server_version.startswith(b"RFB "):
+            raise RuntimeError(f"invalid RFB version {server_version!r}")
+        self._send(b"RFB 003.008\n")
+
+        if server_version[8:11] == b"003":
+            security_type = struct.unpack(">I", self._recv_exact(4))[0]
+            if security_type != 1:
+                raise RuntimeError(
+                    f"private RFB server requires unsupported security {security_type}"
+                )
+        else:
+            security_types = self._recv_exact(1)[0]
+            if security_types == 0:
+                reason_length = struct.unpack(">I", self._recv_exact(4))[0]
+                reason = self._recv_exact(reason_length).decode(errors="replace")
+                raise RuntimeError(f"RFB security negotiation failed: {reason}")
+            offered = self._recv_exact(security_types)
+            if 1 not in offered:
+                raise RuntimeError(
+                    f"private RFB server does not offer security None: {offered!r}"
+                )
+            self._send(b"\x01")
+        result = struct.unpack(">I", self._recv_exact(4))[0]
+        if result != 0:
+            raise RuntimeError(f"RFB security result was {result}")
+
+        self._send(b"\x01")  # ClientInit: shared desktop.
+        init = self._recv_exact(24)
+        self.width, self.height = struct.unpack(">HH", init[:4])
+        name_length = struct.unpack(">I", init[20:24])[0]
+        self._recv_exact(name_length)
+        if self.width <= 0 or self.height <= 0:
+            raise RuntimeError(f"invalid RFB framebuffer {self.width}x{self.height}")
+
+        # 32-bit little-endian true colour with RGB shifts.  This makes the
+        # marker decode independent of x11vnc's native XImage format.
+        pixel_format = struct.pack(
+            ">BBBBHHHBBBBBB",
+            32, 24, 0, 1, 255, 255, 255, 16, 8, 0, 0, 0, 0,
+        )
+        self._send(b"\x00\x00\x00\x00" + pixel_format)
+        self._send(struct.pack(">BBH i", 2, 0, 1, 0))  # RAW only.
+        self.request(incremental=False)
+
+    def request(self, *, incremental: bool) -> None:
+        self._send(struct.pack(
+            ">BBHHHH", 3, int(incremental), 0, 0, self.width, self.height,
+        ))
+
+    @staticmethod
+    def _pixel_rgb(pixel: bytes) -> tuple[int, int, int]:
+        value = int.from_bytes(pixel, "little")
+        return ((value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff)
+
+    def read_update(self, marker_x: int, marker_y: int,
+                    deadline: float) -> tuple[int, tuple[int, int, int]] | None:
+        self.sock.settimeout(max(0.1, deadline - time.monotonic()))
+        message_type = self._recv_exact(1)[0]
+        if message_type == 0:  # FramebufferUpdate
+            self._recv_exact(1)
+            rectangles = struct.unpack(">H", self._recv_exact(2))[0]
+            found: tuple[int, tuple[int, int, int]] | None = None
+            for _ in range(rectangles):
+                x, y, width, height, encoding = struct.unpack(
+                    ">HHHHi", self._recv_exact(12)
+                )
+                if encoding == 0:  # RAW
+                    payload = self._recv_exact(width * height * 4)
+                    if (found is None and x <= marker_x < x + width and
+                            y <= marker_y < y + height):
+                        offset = ((marker_y - y) * width + marker_x - x) * 4
+                        found = (time.monotonic_ns(),
+                                 self._pixel_rgb(payload[offset:offset + 4]))
+                elif encoding == 1:  # CopyRect
+                    self._recv_exact(4)
+                elif encoding in (-224, -223, -239, -240, -232):
+                    raise RuntimeError(
+                        f"private RAW RFB server sent unsupported encoding {encoding}"
+                    )
+                else:
+                    raise RuntimeError(f"private RFB server sent encoding {encoding}")
+            return found
+        if message_type == 2:  # Bell
+            return None
+        if message_type == 3:  # ServerCutText
+            self._recv_exact(3)
+            length = struct.unpack(">I", self._recv_exact(4))[0]
+            self._recv_exact(length)
+            return None
+        raise RuntimeError(f"private RFB server sent message type {message_type}")
+
+    def wait_for_marker(self, state: int, visible_ns: int, marker_x: int,
+                        marker_y: int, timeout: float,
+                        *, pending_update: bool = False) -> float | None:
+        deadline = time.monotonic() + timeout
+        pending = pending_update
+        while time.monotonic() < deadline:
+            if not pending:
+                self.request(incremental=True)
+            pending = False
+            try:
+                observed = self.read_update(marker_x, marker_y, deadline)
+            except socket.timeout:
+                return None
+            if observed is not None:
+                timestamp_ns, rgb = observed
+                red, green, blue = rgb
+                matches = ((red > 200 and green < 80 and blue < 80) if state
+                           else (blue > 200 and red < 80 and green < 80))
+                if matches:
+                    return (timestamp_ns - visible_ns) / 1e6
+        return None
 
 
 def _interrupt_benchmark(signum, frame) -> None:
@@ -817,7 +1038,10 @@ def parse_physical_marker(line: bytes) -> tuple[int, int, int]:
 def summarize(name: str, latencies: list[float], misses: int,
               samples: int, render_ns: list[int], processes: list,
               cpu_start: dict[int, float], wall_start: float,
-              rss_start: dict[int, int]) -> None:
+              rss_start: dict[int, int], *,
+              transport_label: str | None = None,
+              transport_start: TcpSnapshot | None = None,
+              transport_end: TcpSnapshot | None = None) -> None:
     ordered = sorted(latencies)
     if ordered:
         p50 = statistics.median(ordered)
@@ -850,6 +1074,32 @@ def summarize(name: str, latencies: list[float], misses: int,
         start_rss = rss_start.get(proc.pid, 0)
         metrics.append(f"pid{proc.pid} cpu={cpu:.1f}% rss={start_rss / 1048576:.1f}->{process_rss_tree(proc) / 1048576:.1f}MiB")
     print(f"{'':10} " + "; ".join(metrics))
+    if transport_label is not None:
+        wire_bytes = None
+        if transport_start is not None and transport_end is not None:
+            start_bytes = transport_start.wire_bytes
+            end_bytes = transport_end.wire_bytes
+            if start_bytes is not None and end_bytes is not None:
+                wire_bytes = max(0, end_bytes - start_bytes)
+        rate = (wire_bytes / elapsed / 1024.0) if wire_bytes is not None else None
+        retrans = None
+        if (transport_end is not None and
+                transport_end.retransmissions is not None):
+            retrans = transport_end.retransmissions
+            if (transport_start is not None and
+                    transport_start.retransmissions is not None):
+                retrans = max(0, retrans - transport_start.retransmissions)
+        send_queue = (None if transport_end is None
+                      else transport_end.send_queue)
+        rtt_ms = None if transport_end is None else transport_end.rtt_ms
+        print(
+            f"{'':10} transport={transport_label} "
+            f"wire_bytes={('NA' if wire_bytes is None else wire_bytes)} "
+            f"wire_kib_s={('NA' if rate is None else f'{rate:.1f}')} "
+            f"retrans={('NA' if retrans is None else retrans)} "
+            f"sendq={('NA' if send_queue is None else send_queue)} "
+            f"rtt_ms={('NA' if rtt_ms is None else f'{rtt_ms:.3f}')}"
+        )
 
 
 
@@ -872,6 +1122,128 @@ def summarize_input_latencies(label: str, values: list[float]) -> None:
         f"p99={percentile(values, 0.99):7.1f}ms "
         f"max={max(values):7.1f}ms"
     )
+
+
+def run_direct_rfb_case(args: argparse.Namespace, name: str, profile: str,
+                        auth: str, runtime: Path, base_port: int,
+                        repetition: int) -> None:
+    """Measure the physical X -> private x11vnc RAW-RFB wire path."""
+    x, y = 20, 20
+    vnc_port = base_port + 2575
+    case_dir = runtime / f"{name}-{repetition}"
+    case_dir.mkdir()
+    env_source = os.environ.copy()
+    env_source.update({"DISPLAY": args.display, "XAUTHORITY": auth})
+    vnc_command = [
+        str(X11VNC), "-display", args.display, "-auth", auth, "-localhost",
+        "-listen", "127.0.0.1", "-no6", "-rfbport", str(vnc_port),
+        "-nopw", "-forever", "-shared", "-xdamage", "-xd_mem", "0",
+        "-threads", "-repeat", "-input_skip", "1", "-wait", "5",
+        "-defer", "5", "-deferupdate", "5", "-wait_ui", "2",
+        "-setdefer", "-1", "-scrollcopyrect", args.scrollcopyrect, "-quiet",
+    ]
+    profile_flags = list(VNC_PROFILES[profile])
+    if "-noxdamage" in profile_flags:
+        vnc_command[vnc_command.index("-xdamage")] = "-noxdamage"
+        profile_flags.remove("-noxdamage")
+    vnc_command += profile_flags
+    vnc: subprocess.Popen[bytes] | None = None
+    stimulus: subprocess.Popen[bytes] | None = None
+    client: RfbClient | None = None
+    try:
+        assert_tcp_port_available("127.0.0.1", vnc_port, check_ipv6=True)
+        print(f"{name}#{repetition}: transport=direct-rfb private-loopback")
+        vnc = start_process(vnc_command, env_source, case_dir / "x11vnc.log")
+        probe = wait_vnc_port(vnc_port, time.monotonic() + 8)
+        probe.close()
+        client = RfbClient(wait_vnc_port(vnc_port, time.monotonic() + 8))
+        client.connect()
+        if client.width < x + args.width or client.height < y + args.height:
+            raise RuntimeError(
+                f"RFB framebuffer {client.width}x{client.height} is smaller "
+                f"than the {args.width}x{args.height} stimulus"
+            )
+        marker_x = x + args.width // 2
+        marker_y = y + args.height // 2
+        stimulus = subprocess.Popen(
+            [str(GPU_STIMULUS), args.display, str(args.width), str(args.height)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env_source, bufsize=0, start_new_session=True,
+        )
+        assert stimulus.stdin is not None and stimulus.stdout is not None
+        stimulus_reader = LineReader(stimulus.stdout)
+        first = stimulus_reader.readline(5)
+        if first.startswith(b"SWAP_CONTROL "):
+            print(f"{name}: {first.decode(errors='replace').strip()}")
+            first = stimulus_reader.readline(5)
+        if not first.startswith(b"READY "):
+            raise RuntimeError(f"stimulus did not become ready: {first!r}")
+        fields = first.split()
+        if len(fields) < 2 or fields[1] != f"{args.width}x{args.height}".encode():
+            raise RuntimeError(f"stimulus dimensions differ from request: {first!r}")
+
+        # The initial non-incremental request sent by connect() is consumed by
+        # the warm-up. Subsequent requests are incremental and RAW-only.
+        stimulus.stdin.write(b"frame\n")
+        stimulus.stdin.flush()
+        warmup = stimulus_reader.readline(5)
+        if not warmup:
+            raise RuntimeError("stimulus warm-up failed")
+        warmup_visible_ns, warmup_state, _ = parse_physical_marker(warmup)
+        warmup_latency = client.wait_for_marker(
+            warmup_state, warmup_visible_ns, marker_x, marker_y, args.timeout,
+            pending_update=True,
+        )
+        if warmup_latency is None:
+            raise RuntimeError("direct RFB marker did not arrive during warm-up")
+
+        samples = max(1, int(args.duration * args.fps))
+        latencies: list[float] = []
+        render_ns: list[int] = []
+        misses = 0
+        process_list = [vnc]
+        cpu_start = {proc.pid: process_cpu_tree(proc) for proc in process_list}
+        rss_start = {proc.pid: process_rss_tree(proc) for proc in process_list}
+        transport_start = tcp_snapshot(vnc_port)
+        if transport_start is None:
+            transport_start = TcpSnapshot(client.bytes_sent, client.bytes_received)
+        wall_start = time.monotonic()
+        next_tick = wall_start
+        for _ in range(samples):
+            next_tick += 1.0 / args.fps
+            stimulus.stdin.write(b"frame\n")
+            stimulus.stdin.flush()
+            line = stimulus_reader.readline(5)
+            try:
+                visible_ns, state, render_duration_ns = parse_physical_marker(line)
+            except (RuntimeError, ValueError):
+                misses += 1
+            else:
+                render_ns.append(render_duration_ns)
+                latency = client.wait_for_marker(
+                    state, visible_ns, marker_x, marker_y, args.timeout,
+                )
+                if latency is None:
+                    misses += 1
+                else:
+                    latencies.append(latency)
+            delay = next_tick - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+        transport_end = tcp_snapshot(vnc_port)
+        if transport_end is None:
+            transport_end = TcpSnapshot(client.bytes_sent, client.bytes_received)
+        summarize(
+            f"{name}#{repetition}", latencies, misses, samples, render_ns,
+            process_list, cpu_start, wall_start, rss_start,
+            transport_label="rfb-direct-wire-visible",
+            transport_start=transport_start, transport_end=transport_end,
+        )
+    finally:
+        if client is not None:
+            client.sock.close()
+        for proc in (stimulus, vnc):
+            kill_process(proc)
 
 
 def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
@@ -1289,6 +1661,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         process_list = measured_processes
         cpu_start = {proc.pid: process_cpu_tree(proc) for proc in process_list}
         rss_start = {proc.pid: process_rss_tree(proc) for proc in process_list}
+        transport_start = tcp_snapshot(xrdp_port)
         wall_start = time.monotonic()
         next_tick = wall_start
         for _ in range(samples):
@@ -1314,8 +1687,11 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             delay = next_tick - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
+        transport_end = tcp_snapshot(xrdp_port)
         summarize(f"{name}#{repetition}", latencies, misses, samples, render_ns,
-                  process_list, cpu_start, wall_start, rss_start)
+                  process_list, cpu_start, wall_start, rss_start,
+                  transport_label="rdp-private-wire",
+                  transport_start=transport_start, transport_end=transport_end)
     finally:
         for proc in (probe, stimulus, client, xrdp, proxy, vnc, chansrv, xvfb):
             kill_process(proc, privileged=(proc is client and network.enabled))
@@ -1332,6 +1708,9 @@ def main() -> int:
     parser.add_argument("--mode", choices=("graphics", "input-roundtrip"),
                         default="graphics",
                         help="measure graphics latency or full input round-trip")
+    parser.add_argument("--transport", choices=("rdp", "rfb"), default="rdp",
+                        help=("client transport: complete private RDP path or "
+                              "direct RAW-RFB wire baseline (default: rdp)"))
     parser.add_argument("--input-hz", type=float, default=5.0,
                         help="key pulses per second in input-roundtrip mode")
     parser.add_argument("--input-churn-fps", type=float,
@@ -1429,6 +1808,13 @@ def main() -> int:
         parser.error("dimensions, rates, duration, and repetitions must be valid")
     if args.disable_gfx_for_vnc and args.enable_gfx_for_vnc:
         parser.error("--enable-gfx-for-vnc and --disable-gfx-for-vnc are mutually exclusive")
+    if args.transport == "rfb" and args.mode != "graphics":
+        parser.error("--transport rfb is available only with --mode graphics")
+    if args.transport == "rfb" and (
+            args.network_mode == "namespace" or args.network_self_test or
+            args.network_delay_ms != 0 or args.network_jitter_ms != 0 or
+            args.network_loss_percent != 0 or args.network_rate_mbps is not None):
+        parser.error("direct RFB uses the private loopback path; network impairment is RDP-only")
     if args.network_self_test and args.network_mode == "localhost":
         parser.error("--network-self-test requires --network-mode namespace or auto")
     if args.network_self_test:
@@ -1467,10 +1853,12 @@ def main() -> int:
             return 2
         finally:
             network.cleanup()
-    required_executables = [
-        X11VNC, GPU_STIMULUS, PIXEL_PROBE, V6_V4_PROXY, FREERDP, XRDP,
-        Path("/usr/bin/Xvfb"), Path("/usr/bin/xwininfo"),
-    ]
+    required_executables = [X11VNC, GPU_STIMULUS]
+    if args.transport == "rdp":
+        required_executables += [
+            PIXEL_PROBE, V6_V4_PROXY, FREERDP, XRDP,
+            Path("/usr/bin/Xvfb"), Path("/usr/bin/xwininfo"),
+        ]
     if args.mode == "input-roundtrip":
         required_executables += [KEY_STIMULUS, KEY_INJECTOR]
     for required in required_executables:
@@ -1486,7 +1874,8 @@ def main() -> int:
                   f"client_size={args.client_width}x{args.client_height} "
                   f"workload={args.width}x{args.height} "
                   f"duration={args.duration:.1f}s fps={args.fps:.1f} "
-                  f"mode={args.mode} rdp_pipeline={args.pipeline.upper()} "
+                  f"mode={args.mode} transport={args.transport} "
+                  f"rdp_pipeline={args.pipeline.upper()} "
                   f"max_bpp={args.max_bpp} "
                   f"disable_gfx_for_vnc={args.disable_gfx_for_vnc} "
                   f"enable_gfx_for_vnc={args.enable_gfx_for_vnc} "
@@ -1505,8 +1894,13 @@ def main() -> int:
         for index, (name, use_lan) in enumerate(cases):
             for repetition in range(1, args.repetitions + 1):
                 port_offset = (index * args.repetitions + repetition - 1) * 10
-                run_case(args, name, use_lan, auth, runtime,
-                         args.base_port + port_offset, repetition)
+                if args.transport == "rfb":
+                    run_direct_rfb_case(
+                        args, name, use_lan, auth, runtime,
+                        args.base_port + port_offset, repetition)
+                else:
+                    run_case(args, name, use_lan, auth, runtime,
+                             args.base_port + port_offset, repetition)
         print(f"runtime logs: {runtime}")
         return 0
     except KeyboardInterrupt:

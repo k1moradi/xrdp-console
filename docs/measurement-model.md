@@ -24,6 +24,23 @@ injected until the previous event has either completed or timed out; the
 configured input rate is therefore a target cadence rather than a guarantee
 when a path stalls.
 
+Graphics runs also support `--transport rfb`. This mode starts an isolated
+loopback `x11vnc -nopw`, requests RAW RFB rectangles, and records **T2_rfb**
+when the marker pixel's bytes arrive at the benchmark socket:
+
+```text
+GL swap-complete -> T2_rfb   direct-VNC wire-visible latency
+GL swap-complete -> T2        full private x11vnc -> xrdp -> RDP-client path
+```
+
+The direct value is a transport baseline, not a desktop-window paint or
+compositor-present measurement. It uses the same physical X display and GL
+stimulus as the RDP mode, while the private `-nopw` listener is unrelated to
+the production x11vnc authentication. Each graphics report includes p50, p95,
+p99, maximum, misses, GL render time, process CPU/RSS, and best-effort TCP
+wire bytes/sec, retransmissions, send queue, and RTT. `ss`-unavailable fields
+are reported as `NA` rather than inferred.
+
 The private IPv6-to-IPv4 RFB relay uses bounded per-direction buffers and
 selector write readiness. It closes a run if a peer leaves more than 16 MiB
 queued, which prevents a stalled destination from turning into unbounded

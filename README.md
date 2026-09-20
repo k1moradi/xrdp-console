@@ -100,6 +100,21 @@ The isolated x11vnc profiles are `baseline`, `lan`, `noxdamage`, and
 `lan-noxdamage`. The last profile changes XDamage while retaining the LAN
 speed hint, so it is the orthogonal comparison for the normal `lan` profile.
 
+For a same-stimulus direct-VNC baseline, use the canonical benchmark's RAW-RFB
+transport. It starts only a private loopback `x11vnc -nopw` and reports
+wire-visible marker latency; it does not weaken the production listener's
+authentication:
+
+```sh
+python3 -B src/python/xrdp_vnc_bench.py \
+  --transport rfb --only baseline --duration 20 --fps 15 --repetitions 3
+```
+
+The normal `--transport rdp` report measures the complete private x11vnc ->
+xrdp -> FreeRDP path. Both graphics reports include p50/p95/p99/max, misses,
+GL render time, process CPU/RSS, and best-effort TCP wire bytes/sec,
+retransmissions, send queue, and RTT from `ss`.
+
 The benchmark never connects to the production ports unless the caller
 explicitly overrides the executable/configuration inputs. Each run creates a
 private x11vnc listener, xrdp configuration, RDP client display, and log
