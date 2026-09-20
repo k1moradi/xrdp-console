@@ -1035,6 +1035,32 @@ def parse_physical_marker(line: bytes) -> tuple[int, int, int]:
     raise RuntimeError(f"invalid physical marker line: {line!r}")
 
 
+def print_transport_summary(label: str, start: TcpSnapshot | None,
+                            end: TcpSnapshot | None, elapsed: float) -> None:
+    wire_bytes = None
+    if start is not None and end is not None:
+        start_bytes = start.wire_bytes
+        end_bytes = end.wire_bytes
+        if start_bytes is not None and end_bytes is not None:
+            wire_bytes = max(0, end_bytes - start_bytes)
+    rate = (wire_bytes / elapsed / 1024.0) if wire_bytes is not None else None
+    retrans = None
+    if end is not None and end.retransmissions is not None:
+        retrans = end.retransmissions
+        if start is not None and start.retransmissions is not None:
+            retrans = max(0, retrans - start.retransmissions)
+    send_queue = None if end is None else end.send_queue
+    rtt_ms = None if end is None else end.rtt_ms
+    print(
+        f"{'':10} transport={label} "
+        f"wire_bytes={('NA' if wire_bytes is None else wire_bytes)} "
+        f"wire_kib_s={('NA' if rate is None else f'{rate:.1f}')} "
+        f"retrans={('NA' if retrans is None else retrans)} "
+        f"sendq={('NA' if send_queue is None else send_queue)} "
+        f"rtt_ms={('NA' if rtt_ms is None else f'{rtt_ms:.3f}')}"
+    )
+
+
 def summarize(name: str, latencies: list[float], misses: int,
               samples: int, render_ns: list[int], processes: list,
               cpu_start: dict[int, float], wall_start: float,
@@ -1075,31 +1101,8 @@ def summarize(name: str, latencies: list[float], misses: int,
         metrics.append(f"pid{proc.pid} cpu={cpu:.1f}% rss={start_rss / 1048576:.1f}->{process_rss_tree(proc) / 1048576:.1f}MiB")
     print(f"{'':10} " + "; ".join(metrics))
     if transport_label is not None:
-        wire_bytes = None
-        if transport_start is not None and transport_end is not None:
-            start_bytes = transport_start.wire_bytes
-            end_bytes = transport_end.wire_bytes
-            if start_bytes is not None and end_bytes is not None:
-                wire_bytes = max(0, end_bytes - start_bytes)
-        rate = (wire_bytes / elapsed / 1024.0) if wire_bytes is not None else None
-        retrans = None
-        if (transport_end is not None and
-                transport_end.retransmissions is not None):
-            retrans = transport_end.retransmissions
-            if (transport_start is not None and
-                    transport_start.retransmissions is not None):
-                retrans = max(0, retrans - transport_start.retransmissions)
-        send_queue = (None if transport_end is None
-                      else transport_end.send_queue)
-        rtt_ms = None if transport_end is None else transport_end.rtt_ms
-        print(
-            f"{'':10} transport={transport_label} "
-            f"wire_bytes={('NA' if wire_bytes is None else wire_bytes)} "
-            f"wire_kib_s={('NA' if rate is None else f'{rate:.1f}')} "
-            f"retrans={('NA' if retrans is None else retrans)} "
-            f"sendq={('NA' if send_queue is None else send_queue)} "
-            f"rtt_ms={('NA' if rtt_ms is None else f'{rtt_ms:.3f}')}"
-        )
+        print_transport_summary(transport_label, transport_start,
+                                transport_end, elapsed)
 
 
 
@@ -1249,7 +1252,8 @@ def run_direct_rfb_case(args: argparse.Namespace, name: str, profile: str,
 def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
                         window: str, client_display: str,
                         env_source: dict[str, str], env_client: dict[str, str],
-                        case_dir: Path, processes: list[subprocess.Popen[bytes]]) -> None:
+                        case_dir: Path, xrdp_port: int,
+                        processes: list[subprocess.Popen[bytes]]) -> None:
     """Measure client key injection -> physical X11 -> returned RDP pixels."""
     key_stimulus: subprocess.Popen[bytes] | None = None
     key_injector: subprocess.Popen[bytes] | None = None
@@ -1360,6 +1364,7 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
             measured_processes.append(churn)
         cpu_start = {proc.pid: process_cpu_tree(proc) for proc in measured_processes}
         rss_start = {proc.pid: process_rss_tree(proc) for proc in measured_processes}
+        transport_start = tcp_snapshot(xrdp_port)
         wall_start = time.monotonic()
         next_tick = wall_start
 
@@ -1413,6 +1418,9 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
                 f"rss={rss_start.get(proc.pid, 0) / 1048576:.1f}->"
                 f"{process_rss_tree(proc) / 1048576:.1f}MiB")
         print(f"{'':18} " + "; ".join(metrics))
+        transport_end = tcp_snapshot(xrdp_port)
+        print_transport_summary("rdp-private-wire", transport_start,
+                                transport_end, elapsed)
     finally:
         churn_stop.set()
         if churn_thread is not None:
@@ -1607,7 +1615,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         if args.mode == "input-roundtrip":
             run_input_roundtrip(
                 args, name, repetition, window, client_display, env_source,
-                env_client, case_dir, measured_processes)
+                env_client, case_dir, xrdp_port, measured_processes)
             return
         marker_x = x + args.width // 2
         marker_y = y + args.height // 2
