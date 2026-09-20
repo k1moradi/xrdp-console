@@ -8,8 +8,10 @@ ConditionPathExists=/etc/x11vnc.pass
 [Service]
 Type=simple
 User=root
+EnvironmentFile=-/etc/default/xrdp-console
+# Keep the old name readable for existing deployments during the migration.
 EnvironmentFile=-/etc/default/xrdp-vnc-bench
-ExecStart=/usr/@CMAKE_INSTALL_LIBEXECDIR@/xrdp-vnc-bench/x11vnc-console
+ExecStart=/usr/@CMAKE_INSTALL_LIBEXECDIR@/xrdp-console/x11vnc-console
 Restart=on-failure
 RestartSec=2
 # x11vnc returns status 2 when stopped with SIGTERM, while SIGINT is its

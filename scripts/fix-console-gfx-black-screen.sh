@@ -49,7 +49,7 @@ then
 fi
 
 stamp=$(date +%Y%m%d-%H%M%S)
-backup="$config.xrdp-vnc-bench-before-console-gfx-disable-$stamp"
+backup="$config.xrdp-console-before-console-gfx-disable-$stamp"
 cp -a -- "$config" "$backup"
 
 CONFIG="$config" python3 - <<'PY'

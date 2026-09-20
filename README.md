@@ -1,7 +1,11 @@
-# xrdp-vnc-bench
+# xrdp-console
 
-`xrdp-vnc-bench` is a GPLv3 benchmark and diagnostic toolkit for the
-console-sharing path:
+`xrdp-console` is the first-party GPLv3 shared-console project. The current
+migration slice contains the measured VNC bridge and its developer tooling;
+the direct-X11 runtime is intentionally reserved under `src/` for the next
+implementation step.
+
+The current measured path is:
 
 ```text
 physical X11 display -> x11vnc -> xrdp libvnc.so -> RDP client
@@ -15,7 +19,7 @@ host-native xrdp candidate with the measured VNC optimizations and the
 upstream resize-state fix. It is built and activated explicitly; a normal
 CMake install never replaces the system daemon.
 
-The end-to-end benchmark is one program, `xrdp_vnc_bench.py`. It supports
+The end-to-end benchmark is a developer tool, `xrdp_console_bench.py`. It supports
 graphics latency, input round trips, controlled compositor churn, classic RFX
 or GFX negotiation, and a Linux network namespace with symmetric `tc netem`
 delay, jitter, loss, and rate limits. Small C helpers provide X11 pixel and
@@ -45,9 +49,10 @@ cmake --install build
 cpack --config build/CPackConfig.cmake
 ```
 
-The build installs helper binaries under `libexec/xrdp-vnc-bench` and
-read-only diagnostics under the data directory. Run the benchmark directly
-from `src/python/xrdp_vnc_bench.py` or its installed data path. CPack produces
+The build installs benchmark helper binaries under
+`libexec/xrdp-console/benchmark/helpers` and developer tools under the data
+directory. Run the benchmark directly from
+`tools/benchmark/xrdp_console_bench.py` or its installed data path. CPack produces
 a relocatable `.tar.gz` and, on Debian systems, a `.deb`. The optional offline
 codec probe is built when both `rfxcodec` and
 `x264` development files are available; its absence does not affect the
@@ -72,7 +77,7 @@ user. Pass it explicitly when SDDM keeps the cookie root-only:
 AUTH=/run/user/$(id -u)/xrdp-console.xauth
 export XRDP_VNC_BENCH_HELPER_DIR="$PWD/build/bin"
 export XRDP_VNC_RESULTS="$PWD/results"
-python3 -B src/python/xrdp_vnc_bench.py \
+python3 -B tools/benchmark/xrdp_console_bench.py \
   --auth "$AUTH" --mode input-roundtrip \
   --pipeline rfx --disable-gfx-for-vnc \
   --input-churn-fps 15 --duration 20 --repetitions 2 \
@@ -85,7 +90,7 @@ process:
 
 ```sh
 sudo -v
-python3 -B src/python/xrdp_vnc_bench.py \
+python3 -B tools/benchmark/xrdp_console_bench.py \
   --network-self-test --network-delay-ms 2.5 --network-jitter-ms 1
 ```
 
@@ -107,7 +112,7 @@ wire-visible marker latency; it does not weaken the production listener's
 authentication:
 
 ```sh
-python3 -B src/python/xrdp_vnc_bench.py \
+python3 -B tools/benchmark/xrdp_console_bench.py \
   --transport rfb --only baseline --duration 20 --fps 15 --repetitions 3
 ```
 
@@ -117,7 +122,7 @@ mode uses and reports the same input, local-draw, returned-graphics, and total
 stages while omitting xrdp and FreeRDP:
 
 ```sh
-python3 -B src/python/xrdp_vnc_bench.py \
+python3 -B tools/benchmark/xrdp_console_bench.py \
   --transport rfb --mode input-roundtrip --only baseline \
   --duration 20 --input-hz 5 --input-churn-fps 15 --repetitions 3
 ```
@@ -133,7 +138,7 @@ measurement.
 For a real VNC desktop-present comparison, use the installed TigerVNC viewer:
 
 ```sh
-python3 -B src/python/xrdp_vnc_bench.py \
+python3 -B tools/benchmark/xrdp_console_bench.py \
   --transport vnc-viewer --mode input-roundtrip --only baseline \
   --duration 20 --fps 15 --input-hz 5 --input-churn-fps 15 --repetitions 3
 ```
@@ -149,7 +154,7 @@ For server-side attribution, enable the opt-in profile on the private xrdp
 process:
 
 ```sh
-python3 -B src/python/xrdp_vnc_bench.py \
+python3 -B tools/benchmark/xrdp_console_bench.py \
   --transport rdp --only baseline --duration 20 --fps 15 --repetitions 3 \
   --xrdp "$PWD/build/prefix/xrdp-optimized-resize/sbin/xrdp" \
   --console-lib libvnc.so \
@@ -173,7 +178,7 @@ To correlate a physical marker with the VNC-side paint and classic RDP
 flush, add a point coordinate to the same private-daemon invocation:
 
 ```sh
-python3 -B src/python/xrdp_vnc_bench.py \
+python3 -B tools/benchmark/xrdp_console_bench.py \
   --transport rdp --mode input-roundtrip --only lan \
   --xrdp-env XRDP_VNC_PROFILE=1 \
   --xrdp-env XRDP_VNC_PROFILE_POINT_X=1260 \
@@ -197,7 +202,7 @@ It keeps `server_paint_rect()` as the backing-store update and does not issue
 another RFB update request:
 
 ```sh
-python3 -B src/python/xrdp_vnc_bench.py \
+python3 -B tools/benchmark/xrdp_console_bench.py \
   --transport rdp --mode input-roundtrip --only lan \
   --xrdp-env XRDP_VNC_INCREMENTAL_FB=1 \
   --xrdp-env XRDP_VNC_PROGRESSIVE_FLUSH=1 \
@@ -217,7 +222,7 @@ still being processed. It is disabled by default and is restricted to the
 same incremental, unsuppressed, non-GFX, direct-bitmap path:
 
 ```sh
-python3 -B src/python/xrdp_vnc_bench.py \
+python3 -B tools/benchmark/xrdp_console_bench.py \
   --transport rdp --mode input-roundtrip --only lan \
   --pipeline rfx --disable-gfx-for-vnc \
   --xrdp-env XRDP_VNC_INCREMENTAL_FB=1 \
@@ -245,7 +250,7 @@ sampler. The `--rdp-port` option must match the local xrdp listener; it is not
 hard-coded to 3389:
 
 ```sh
-python3 -B src/python/xrdp_console_episode_sampler.py \
+python3 -B tools/diagnostics/xrdp_console_episode_sampler.py \
   --duration 600 --interval 1 --rdp-port 3389 \
   --output results/vscode-episode.csv
 ```
@@ -263,7 +268,7 @@ requiring a particular adapter model.
 The toolkit documents the measured x11vnc profile for a local network, but it
 does not silently rewrite `/etc/xrdp` or install a privileged systemd unit. A
 deployment that wants the Windows-like shared-console behavior can use the
-installed systemd template in `share/xrdp-vnc-bench/systemd` as a starting
+installed systemd template in `share/xrdp-console/systemd` as a starting
 point and review every path and Xauthority policy for its display manager. See
 [`docs/console-profile.md`](docs/console-profile.md).
 
@@ -324,21 +329,24 @@ manager itself is part of the failure.
 ## Source layout
 
 ```text
-src/c/          benchmark helper sources
-src/python/     one end-to-end benchmark and read-only diagnostics
-tests/          fast unprivileged Python tests
-scripts/        reproducible matrix runner
-docs/           design, deployment, and validation records
-packaging/      systemd templates for an explicit console deployment
-third_party/    canonical optimized xrdp source and provenance
-deps/           small reproducible development sysroots for that build
+src/                    first-party runtime (direct-X11 backend in development)
+tools/benchmark/        benchmark client, relay, and native helper sources
+tools/diagnostics/      read-only diagnostic tools
+tests/                  fast unprivileged Python tests
+scripts/                deployment and experiment orchestration
+docs/                   design, deployment, and validation records
+packaging/              systemd templates for explicit console deployment
+third_party/            transitional optimized xrdp dependency
+deps/                   transitional build sysroots
 ```
 
 Generated builds, raw run logs, credentials, Xauthority files, production
 backups, and private runtime binaries are deliberately excluded by `.gitignore`.
-The optimized xrdp source and its small dependency sysroots are retained under
-`third_party/` and `deps/` so the candidate can be rebuilt after a reboot or
-package upgrade. The checked-in `libxkbfile` sysroot is an x86_64 Linux build
+The optimized xrdp source and its small dependency sysroots remain temporarily
+under `third_party/` and `deps/` so the current candidate can be rebuilt after
+a reboot or package upgrade. The next dependency-migration step will replace
+these checked-in inputs with a pinned build-directory checkout and a small
+patch series. The checked-in `libxkbfile` sysroot is an x86_64 Linux build
 input; other architectures should use the distribution's development package
 or provide an equivalent sysroot through the build script's existing paths.
 

@@ -40,7 +40,7 @@ then
 fi
 
 stamp=$(date +%Y%m%d-%H%M%S)
-backup="$config.xrdp-vnc-bench-before-console-dynamic-resize-$stamp"
+backup="$config.xrdp-console-before-console-dynamic-resize-$stamp"
 cp -a -- "$config" "$backup"
 
 CONFIG="$config" python3 - <<'PY'

@@ -29,7 +29,7 @@ tar -tJf "$HOME/xrdp-x11vnc-workspace.tar.xz"
 ```
 
 ```text
-You are reviewing the open-source project xrdp-vnc-bench. The attached
+You are reviewing the open-source project xrdp-console. The attached
 xrdp-x11vnc-workspace.tar.xz is the authoritative source snapshot. There is no
 public GitHub repository yet; use the archive as the source of truth.
 
@@ -88,7 +88,7 @@ What is in the archive
 ----------------------
 - CMake build with Release/native options, CTest, CPack TGZ/DEB packaging, and
   a GitHub Actions build/test workflow.
-- One canonical benchmark: `src/python/xrdp_vnc_bench.py`.
+- One canonical benchmark: `tools/benchmark/xrdp_console_bench.py`.
 - C helpers for X11 pixel/input probes, GL redraw churn, scrolling, and Vulkan
   capability reporting.
 - Read-only diagnostic tools for VS Code GPU information and live process,

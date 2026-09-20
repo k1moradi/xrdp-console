@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 
 
-PROXY = Path(__file__).parents[1] / "src/python/rfb_v6_v4_proxy.py"
+PROXY = Path(__file__).parents[1] / "tools/benchmark/rfb_v6_v4_proxy.py"
 
 
 def process_cpu_seconds(pid: int) -> float:

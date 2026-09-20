@@ -5,7 +5,7 @@ set -eu
 # Run the recommendation's first matrix without touching the production
 # listeners. The benchmark creates and removes a private veth/netns per case.
 PROJECT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-BENCH=${BENCH:-$PROJECT_ROOT/src/python/xrdp_vnc_bench.py}
+BENCH=${BENCH:-$PROJECT_ROOT/tools/benchmark/xrdp_console_bench.py}
 AUTH=${1:?usage: $0 /path/to/readable-Xauthority}
 DURATION=${DURATION:-30}
 JITTER=${JITTER:-0}

@@ -36,6 +36,6 @@ For a release, update `project(VERSION ...)` in `CMakeLists.txt`, run the
 maintainer workflow in `docs/maintainers.md`, and tag the commit:
 
 ```sh
-git tag -a v1.0.0 -m "xrdp-vnc-bench 1.0.0"
-git push origin v1.0.0
+git tag -a v0.1.0 -m "xrdp-console 0.1.0"
+git push origin v0.1.0
 ```

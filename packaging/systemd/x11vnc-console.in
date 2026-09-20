@@ -71,4 +71,4 @@ exec "${XRDP_VNC_X11VNC:-/usr/bin/x11vnc}" \
     -xdamage -xd_mem 0 -threads -repeat -input_skip 1 \
     -speeds lan -wait 5 -defer 5 -deferupdate 5 \
     -wait_ui 2 -setdefer -1 -scrollcopyrect never \
-    -afteraccept /usr/@CMAKE_INSTALL_LIBEXECDIR@/xrdp-vnc-bench/x11vnc-console-refresh
+    -afteraccept /usr/@CMAKE_INSTALL_LIBEXECDIR@/xrdp-console/x11vnc-console-refresh

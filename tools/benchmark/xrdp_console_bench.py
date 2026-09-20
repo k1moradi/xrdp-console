@@ -59,7 +59,7 @@ elif (WORKSPACE / "src").is_dir():
 else:
     # An installed launcher must not try to create /usr/results. Keep run
     # artifacts beside the caller unless an explicit result directory is set.
-    RESULTS = Path.cwd() / "xrdp-vnc-results"
+        RESULTS = Path.cwd() / "xrdp-console-results"
 ISOLATED = RESULTS / "isolated-runs"
 
 
@@ -71,8 +71,25 @@ def first_path(*candidates: Path) -> Path:
     return candidates[0]
 
 
+def first_directory(*candidates: Path) -> Path:
+    """Select the first existing directory, retaining a useful fallback."""
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return candidates[0]
+
+
+installed_helper_dir = (
+    WORKSPACE.parent / "libexec" / "xrdp-console" /
+    "benchmark" / "helpers"
+)
 HELPER_DIR = Path(os.environ.get(
-    "XRDP_VNC_BENCH_HELPER_DIR", str(WORKSPACE / "build/bin")))
+    "XRDP_CONSOLE_HELPER_DIR",
+    os.environ.get(
+        "XRDP_VNC_BENCH_HELPER_DIR",
+        str(first_directory(WORKSPACE / "build/bin", installed_helper_dir)),
+    ),
+))
 GPU_STIMULUS = HELPER_DIR / "x11vnc-gpu-stimulus"
 PIXEL_PROBE = HELPER_DIR / "x11-pixel-probe"
 KEY_STIMULUS = HELPER_DIR / "x11vnc-latency-stimulus"

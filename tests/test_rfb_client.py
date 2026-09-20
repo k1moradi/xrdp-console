@@ -11,8 +11,8 @@ import unittest
 from pathlib import Path
 
 
-BENCHMARK = Path(__file__).parents[1] / "src/python/xrdp_vnc_bench.py"
-spec = importlib.util.spec_from_file_location("xrdp_vnc_bench", BENCHMARK)
+BENCHMARK = Path(__file__).parents[1] / "tools/benchmark/xrdp_console_bench.py"
+spec = importlib.util.spec_from_file_location("xrdp_console_bench", BENCHMARK)
 assert spec is not None and spec.loader is not None
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)

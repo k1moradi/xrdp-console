@@ -17,7 +17,7 @@ Namespace setup requires a cached sudo ticket:
 
 ```sh
 sudo -v
-python3 -B src/python/xrdp_vnc_bench.py \
+python3 -B tools/benchmark/xrdp_console_bench.py \
   --network-self-test --network-delay-ms 2.5 --network-jitter-ms 1
 ```
 

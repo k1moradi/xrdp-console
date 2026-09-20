@@ -70,11 +70,11 @@ in place. The build and unit tests are validated locally; the black-screen fix
 still requires a fresh Mac-client reconnection on the target machine.
 
 This repository ships a systemd template for a system-prefix installation as a
-deployment aid (`/usr/libexec/xrdp-vnc-bench`). It is not installed or enabled
+deployment aid (`/usr/libexec/xrdp-console`). It is not installed or enabled
 automatically because display-manager Xauthority paths,
 VNC password policy, xrdp package layout, and the local user differ between
 systems. The template requires an explicit `XRDP_VNC_AUTH` path in
-`/etc/default/xrdp-vnc-bench`; this avoids selecting another user's cookie on
+`/etc/default/xrdp-console`; this avoids selecting another user's cookie on
 multi-user systems. If the display manager has a stable, administrator-reviewed
 cookie discovery policy, set `XRDP_VNC_ALLOW_AUTH_DISCOVERY=1` explicitly.
 Validate the generated `[Console]` section before enabling it. Keep the VNC

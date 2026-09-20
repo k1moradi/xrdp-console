@@ -20,7 +20,7 @@ Before publishing a change:
 1. run `ctest --test-dir build --output-on-failure`;
 2. run `cmake --install build --prefix "$PWD/_dist"` and inspect the file list;
 3. run `cpack --config build/CPackConfig.cmake`;
-4. run `python3 -B src/python/xrdp_vnc_bench.py --help`;
+4. run `python3 -B tools/benchmark/xrdp_console_bench.py --help`;
 5. run the network self-test only when a cached sudo ticket is available.
 
 The shared-console daemon is a separate, host-specific build. Rebuild it from
@@ -36,8 +36,10 @@ and therefore never happens as a side effect of a normal CMake install.
 
 Do not commit Xauthority files, VNC password files, systemd backups, raw
 isolated-run logs, private xrdp binaries, or dependency archives. Keep one
-canonical benchmark (`src/python/xrdp_vnc_bench.py`) and add a mode or a
+canonical benchmark (`tools/benchmark/xrdp_console_bench.py`) and add a mode or a
 focused helper instead of creating another top-level benchmark variant. The
-vendored xrdp source is the one deliberate exception: keep it at the canonical
-path, preserve its upstream notices, and update the persistent build script
-when its patch sequence changes.
+transitional xrdp source is currently the deliberate exception: preserve its
+upstream notices, and update the persistent build script when its patch
+sequence changes. Do not add new runtime code below `third_party/`; first-party
+code belongs under `src/`, while benchmark and diagnostic code belongs under
+`tools/`.

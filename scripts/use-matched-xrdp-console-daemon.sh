@@ -39,8 +39,8 @@ if ! strings "$daemon" | grep -q "Disabling GFX as 'drdynvc' isn't available"; t
 fi
 
 stamp=$(date +%Y%m%d-%H%M%S)
-backup="$dropin.xrdp-vnc-bench-before-optimized-resize-$stamp"
-candidate_dropin="$dropin.xrdp-vnc-bench-optimized-resize-$stamp.new"
+backup="$dropin.xrdp-console-before-optimized-resize-$stamp"
+candidate_dropin="$dropin.xrdp-console-optimized-resize-$stamp.new"
 
 install -d -m 0755 "$(dirname "$dropin")"
 cat >"$candidate_dropin" <<EOF

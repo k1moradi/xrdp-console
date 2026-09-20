@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 cmake_minimum_required(VERSION 3.20)
 
-project(xrdp-vnc-bench
-    VERSION 1.0.0
-    DESCRIPTION "Reproducible xrdp and x11vnc console-path benchmark toolkit"
+project(xrdp_console
+    VERSION 0.1.0
+    DESCRIPTION "Shared physical-console backend and benchmark tooling"
     LANGUAGES C)
 
 include(GNUInstallDirs)
@@ -23,6 +23,14 @@ set(CMAKE_C_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 add_compile_options(-Wall -Wextra -Wpedantic)
+
+set(XRDP_CONSOLE_INSTALL_DIR xrdp-console)
+set(XRDP_CONSOLE_DATA_DIR
+    "${CMAKE_INSTALL_DATADIR}/${XRDP_CONSOLE_INSTALL_DIR}")
+set(XRDP_CONSOLE_HELPER_DIR
+    "${CMAKE_INSTALL_LIBEXECDIR}/${XRDP_CONSOLE_INSTALL_DIR}/benchmark/helpers")
+set(CMAKE_INSTALL_DOCDIR
+    "${CMAKE_INSTALL_DATADIR}/doc/${XRDP_CONSOLE_INSTALL_DIR}")
 
 if(XRDP_VNC_NATIVE)
     add_compile_options(-march=native -mtune=native)
@@ -55,26 +63,26 @@ set(BENCHMARK_BINARIES
     x11vnc-latency-stimulus
     x11vnc-scroll-stimulus)
 
-add_executable(x11-pixel-probe src/c/x11_pixel_probe.c)
+add_executable(x11-pixel-probe tools/benchmark/helpers/x11_pixel_probe.c)
 target_link_libraries(x11-pixel-probe PRIVATE PkgConfig::X11)
 
-add_executable(x11-xtest-key src/c/x11_xtest_key.c)
+add_executable(x11-xtest-key tools/benchmark/helpers/x11_xtest_key.c)
 target_link_libraries(x11-xtest-key PRIVATE PkgConfig::X11 ${XTST_LIBRARY})
 
-add_executable(x11vnc-glx-probe src/c/x11vnc_glx_probe.c)
+add_executable(x11vnc-glx-probe tools/benchmark/helpers/x11vnc_glx_probe.c)
 target_link_libraries(x11vnc-glx-probe PRIVATE PkgConfig::X11 PkgConfig::GL)
 
-add_executable(x11vnc-gpu-stimulus src/c/x11vnc_gpu_stimulus.c)
+add_executable(x11vnc-gpu-stimulus tools/benchmark/helpers/x11vnc_gpu_stimulus.c)
 target_link_libraries(x11vnc-gpu-stimulus PRIVATE PkgConfig::X11 PkgConfig::GL)
 
-add_executable(x11vnc-latency-stimulus src/c/x11vnc_latency_stimulus.c)
+add_executable(x11vnc-latency-stimulus tools/benchmark/helpers/x11vnc_latency_stimulus.c)
 target_link_libraries(x11vnc-latency-stimulus PRIVATE PkgConfig::X11)
 
-add_executable(x11vnc-scroll-stimulus src/c/x11vnc_scroll_stimulus.c)
+add_executable(x11vnc-scroll-stimulus tools/benchmark/helpers/x11vnc_scroll_stimulus.c)
 target_link_libraries(x11vnc-scroll-stimulus PRIVATE PkgConfig::X11)
 
 if(VULKAN_FOUND)
-    add_executable(vulkan-probe src/c/vulkan_probe.c)
+    add_executable(vulkan-probe tools/benchmark/helpers/vulkan_probe.c)
     target_link_libraries(vulkan-probe PRIVATE PkgConfig::VULKAN)
     list(APPEND BENCHMARK_BINARIES vulkan-probe)
 else()
@@ -88,7 +96,7 @@ if(XRDP_VNC_ENABLE_CODEC_BENCH)
     find_library(X264_LIBRARY NAMES x264)
     if(RFXCODEC_INCLUDE_DIR AND RFXCODEC_LIBRARY AND
        X264_INCLUDE_DIR AND X264_LIBRARY)
-        add_executable(xrdp-codec-bench src/c/xrdp_codec_bench.c)
+        add_executable(xrdp-codec-bench tools/benchmark/helpers/xrdp_codec_bench.c)
         target_include_directories(xrdp-codec-bench PRIVATE
             ${RFXCODEC_INCLUDE_DIR} ${X264_INCLUDE_DIR})
         target_link_libraries(xrdp-codec-bench PRIVATE
@@ -102,11 +110,15 @@ endif()
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
+set(BENCHMARK_PYTHON_SOURCES
+    tools/benchmark/xrdp_console_bench.py
+    tools/benchmark/rfb_v6_v4_proxy.py)
+set(DIAGNOSTIC_PYTHON_SOURCES
+    tools/diagnostics/xrdp_console_episode_sampler.py
+    tools/diagnostics/vscode_gpu_probe.py)
 set(PYTHON_SOURCES
-    src/python/xrdp_vnc_bench.py
-    src/python/rfb_v6_v4_proxy.py
-    src/python/xrdp_console_episode_sampler.py
-    src/python/vscode_gpu_probe.py)
+    ${BENCHMARK_PYTHON_SOURCES}
+    ${DIAGNOSTIC_PYTHON_SOURCES})
 set(PYTHON_SOURCE_PATHS)
 foreach(source IN LISTS PYTHON_SOURCES)
     list(APPEND PYTHON_SOURCE_PATHS "${CMAKE_CURRENT_SOURCE_DIR}/${source}")
@@ -155,40 +167,42 @@ if(XRDP_VNC_BUILD_TESTS)
 endif()
 
 install(TARGETS ${BENCHMARK_BINARIES}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/xrdp-vnc-bench)
-install(PROGRAMS ${PYTHON_SOURCES}
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench)
+    RUNTIME DESTINATION ${XRDP_CONSOLE_HELPER_DIR})
+install(PROGRAMS ${BENCHMARK_PYTHON_SOURCES}
+    DESTINATION ${XRDP_CONSOLE_DATA_DIR}/benchmark)
+install(PROGRAMS ${DIAGNOSTIC_PYTHON_SOURCES}
+    DESTINATION ${XRDP_CONSOLE_DATA_DIR}/diagnostics)
 install(PROGRAMS scripts/run-network-latency-matrix.sh
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench)
+    DESTINATION ${XRDP_CONSOLE_DATA_DIR})
 install(PROGRAMS scripts/fix-console-dynamic-resizing.sh
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench)
+    DESTINATION ${XRDP_CONSOLE_DATA_DIR})
 install(PROGRAMS scripts/fix-console-gfx-black-screen.sh
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench)
+    DESTINATION ${XRDP_CONSOLE_DATA_DIR})
 install(PROGRAMS scripts/use-matched-xrdp-console-daemon.sh
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench)
+    DESTINATION ${XRDP_CONSOLE_DATA_DIR})
 install(PROGRAMS scripts/build-optimized-xrdp.sh
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench)
+    DESTINATION ${XRDP_CONSOLE_DATA_DIR})
 install(PROGRAMS scripts/diagnose-console-stack.sh
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench)
+    DESTINATION ${XRDP_CONSOLE_DATA_DIR})
 install(PROGRAMS scripts/restart-console-stack.sh
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench)
+    DESTINATION ${XRDP_CONSOLE_DATA_DIR})
 install(FILES README.md LICENSE NOTICE THIRD_PARTY.md
     DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(FILES third_party/xrdp-optimized-provenance.txt
     DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(DIRECTORY docs/ DESTINATION ${CMAKE_INSTALL_DOCDIR}/docs)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/x11vnc-console.service
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench/systemd)
+    DESTINATION ${XRDP_CONSOLE_DATA_DIR}/systemd)
 install(FILES packaging/systemd/x11vnc-console-clean-shutdown.conf
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench/systemd)
+    DESTINATION ${XRDP_CONSOLE_DATA_DIR}/systemd)
 install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/x11vnc-console
     ${CMAKE_CURRENT_BINARY_DIR}/x11vnc-console-refresh
-    DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/xrdp-vnc-bench)
+    DESTINATION ${CMAKE_INSTALL_LIBEXECDIR}/${XRDP_CONSOLE_INSTALL_DIR})
 
-set(CPACK_PACKAGE_NAME "xrdp-vnc-bench")
+set(CPACK_PACKAGE_NAME "xrdp-console")
 set(CPACK_PACKAGE_VENDOR "Keivan Moradi")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
-    "Reproducible xrdp and x11vnc console-path benchmark toolkit")
+    "Shared physical-console backend and benchmark tooling")
 set(CPACK_PACKAGE_CONTACT "Keivan Moradi")
 set(CPACK_RESOURCE_FILE_LICENSE ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE)
 set(CPACK_RESOURCE_FILE_README ${CMAKE_CURRENT_SOURCE_DIR}/README.md)
