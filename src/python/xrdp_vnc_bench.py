@@ -1443,10 +1443,6 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         check=True,
     )
     key.chmod(0o600)
-    vnc_password = case_dir / "vnc.pass"
-    subprocess.run([str(X11VNC), "-storepasswd", "na", str(vnc_password)],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                   check=True)
     xrdp_log = case_dir / "xrdp.log"
     config = case_dir / "xrdp.ini"
     chansrv_path = Path("/run/xrdp/sockdir") / str(os.getuid()) / \
@@ -1476,7 +1472,11 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
     vnc_command = [
         str(X11VNC), "-display", args.display, "-auth", auth, "-localhost",
         "-listen", "127.0.0.1", "-no6", "-rfbport", str(vnc_backend_port),
-        "-rfbauth", str(vnc_password), "-forever",
+        # This x11vnc is a private, loopback-only backend.  Keeping its RFB
+        # security type at None avoids a legacy xrdp VNC-module password
+        # exchange that is not needed for this isolated harness; production
+        # x11vnc continues to use its configured -rfbauth password.
+        "-nopw", "-forever",
         "-shared", "-xdamage", "-xd_mem", "0", "-threads", "-repeat",
         "-input_skip", "1", "-wait", "5", "-defer", "5", "-deferupdate",
         "5", "-wait_ui", "2", "-setdefer", "-1", "-scrollcopyrect",

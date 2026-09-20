@@ -49,7 +49,11 @@ def update_interest(selector: selectors.BaseSelector, sock: socket.socket,
     if pending:
         events |= selectors.EVENT_WRITE
     try:
-        selector.modify(sock, events)
+        # ``modify()`` defaults data to None.  Preserve the peer socket so a
+        # readable event can still find its destination after the first
+        # buffered write enables EVENT_WRITE.
+        peer = selector.get_key(sock).data
+        selector.modify(sock, events, peer)
     except (KeyError, ValueError):
         pass
 
