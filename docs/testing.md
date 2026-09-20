@@ -12,6 +12,7 @@ Xauthority, x11vnc, and client binaries.
 | `rfb-client-unit` | RFB KeyEvent wire encoding for both press and release |
 | `proxy-backpressure-unit` | bounded relay buffering, selector write readiness, and peer cleanup |
 | `python-syntax` | source compilation for the installed Python helpers |
+| `systemd-unit` | clean SIGINT shutdown contract, no exit-status masking, and compatibility drop-in parity |
 
 The marker correlation contract is:
 

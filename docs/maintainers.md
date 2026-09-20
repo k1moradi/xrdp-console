@@ -11,7 +11,7 @@ cmake --install build
 cpack --config build/CPackConfig.cmake
 ```
 
-The default build is portable. `-DXRDP_VNC_NATIVE=ON` enables `-march=native`
+The default build is portable. `-DXRDP_CONSOLE_NATIVE=ON` enables `-march=native`
 for local helper microbenchmarks and must not be used for a binary intended for
 other machines.
 

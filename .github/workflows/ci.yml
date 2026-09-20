@@ -19,7 +19,7 @@ jobs:
         run: >-
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
-          -DXRDP_VNC_BUILD_TESTS=ON
+          -DBUILD_TESTING=ON
       - name: Build
         run: cmake --build build --parallel 2
       - name: Test

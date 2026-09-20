@@ -63,7 +63,8 @@ if [ -x /usr/bin/xset ]; then
     DISPLAY="$display" XAUTHORITY="$auth" /usr/bin/xset r on || true
 fi
 
-exec "${XRDP_VNC_X11VNC:-/usr/bin/x11vnc}" \
+x11vnc_binary=${XRDP_CONSOLE_X11VNC:-${XRDP_VNC_X11VNC:-/usr/bin/x11vnc}}
+exec "$x11vnc_binary" \
     -display "$display" -auth "$auth" \
     -localhost -listen 127.0.0.1 -no6 \
     -rfbport "${XRDP_VNC_RFB_PORT:-5900}" \

@@ -3,14 +3,14 @@ Description=Export the physical X11 console to local xrdp
 After=display-manager.service
 Requires=display-manager.service
 PartOf=display-manager.service
-ConditionPathExists=/etc/x11vnc.pass
 
 [Service]
 Type=simple
 User=root
-EnvironmentFile=-/etc/default/xrdp-console
 # Keep the old name readable for existing deployments during the migration.
 EnvironmentFile=-/etc/default/xrdp-vnc-bench
+# Canonical settings override the legacy file during migration.
+EnvironmentFile=-/etc/default/xrdp-console
 ExecStart=/usr/@CMAKE_INSTALL_LIBEXECDIR@/xrdp-console/x11vnc-console
 Restart=on-failure
 RestartSec=2

@@ -64,7 +64,7 @@ For a local native helper build:
 
 ```sh
 cmake -S . -B build-native -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DXRDP_VNC_NATIVE=ON
+  -DCMAKE_BUILD_TYPE=Release -DXRDP_CONSOLE_NATIVE=ON
 cmake --build build-native
 ```
 
@@ -75,8 +75,8 @@ user. Pass it explicitly when SDDM keeps the cookie root-only:
 
 ```sh
 AUTH=/run/user/$(id -u)/xrdp-console.xauth
-export XRDP_VNC_BENCH_HELPER_DIR="$PWD/build/bin"
-export XRDP_VNC_RESULTS="$PWD/results"
+export XRDP_CONSOLE_HELPER_DIR="$PWD/build/bin"
+export XRDP_CONSOLE_RESULTS="$PWD/results"
 python3 -B tools/benchmark/xrdp_console_bench.py \
   --auth "$AUTH" --mode input-roundtrip \
   --pipeline rfx --disable-gfx-for-vnc \
@@ -101,6 +101,11 @@ loopback and no jitter; impaired cases use a temporary veth namespace. See
 The timestamp definitions and percentile convention are documented in
 [`docs/measurement-model.md`](docs/measurement-model.md).
 The focused test plan is in [`docs/testing.md`](docs/testing.md).
+
+Product-level workspace, result, helper, and executable overrides use the
+`XRDP_CONSOLE_*` prefix. The former `XRDP_VNC_*` workspace/result/helper and
+executable names remain accepted as compatibility fallbacks. VNC-specific
+runtime and profiling settings retain the `XRDP_VNC_*` prefix.
 
 The isolated x11vnc profiles are `baseline`, `lan`, `noxdamage`, and
 `lan-noxdamage`. The last profile changes XDamage while retaining the LAN

@@ -44,22 +44,33 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 
+def environment_value(canonical: str, legacy: str) -> str | None:
+    """Read a canonical product setting with a legacy compatibility alias."""
+    value = os.environ.get(canonical)
+    if value is None:
+        value = os.environ.get(legacy)
+    return value
+
+
 # Resolve paths from the installed/source tree, never from the caller's home.
 # The benchmark is often invoked through sudo for namespace setup; relying on
 # Path.home() in that case points at the administrator's home and loses the
 # project's helpers.
 SCRIPT_DIR = Path(__file__).resolve().parent
 SCRIPT_WORKSPACE = SCRIPT_DIR.parents[1]
-WORKSPACE = Path(os.environ.get("XRDP_VNC_WORKSPACE", str(SCRIPT_WORKSPACE)))
+workspace_value = environment_value(
+    "XRDP_CONSOLE_WORKSPACE", "XRDP_VNC_WORKSPACE")
+WORKSPACE = Path(workspace_value or str(SCRIPT_WORKSPACE))
 HOME = Path.home()
-if "XRDP_VNC_RESULTS" in os.environ:
-    RESULTS = Path(os.environ["XRDP_VNC_RESULTS"])
+results_value = environment_value("XRDP_CONSOLE_RESULTS", "XRDP_VNC_RESULTS")
+if results_value is not None:
+    RESULTS = Path(results_value)
 elif (WORKSPACE / "src").is_dir():
     RESULTS = WORKSPACE / "results"
 else:
     # An installed launcher must not try to create /usr/results. Keep run
     # artifacts beside the caller unless an explicit result directory is set.
-        RESULTS = Path.cwd() / "xrdp-console-results"
+    RESULTS = Path.cwd() / "xrdp-console-results"
 ISOLATED = RESULTS / "isolated-runs"
 
 
@@ -83,44 +94,46 @@ installed_helper_dir = (
     WORKSPACE.parent / "libexec" / "xrdp-console" /
     "benchmark" / "helpers"
 )
-HELPER_DIR = Path(os.environ.get(
-    "XRDP_CONSOLE_HELPER_DIR",
-    os.environ.get(
-        "XRDP_VNC_BENCH_HELPER_DIR",
-        str(first_directory(WORKSPACE / "build/bin", installed_helper_dir)),
-    ),
-))
+helper_value = environment_value(
+    "XRDP_CONSOLE_HELPER_DIR", "XRDP_VNC_BENCH_HELPER_DIR")
+HELPER_DIR = Path(
+    helper_value or str(first_directory(WORKSPACE / "build/bin", installed_helper_dir))
+)
 GPU_STIMULUS = HELPER_DIR / "x11vnc-gpu-stimulus"
 PIXEL_PROBE = HELPER_DIR / "x11-pixel-probe"
 KEY_STIMULUS = HELPER_DIR / "x11vnc-latency-stimulus"
 KEY_INJECTOR = HELPER_DIR / "x11-xtest-key"
 V6_V4_PROXY = SCRIPT_DIR / "rfb_v6_v4_proxy.py"
 PRIVATE_FREERDP = ISOLATED / "rdp-bench-root/usr/bin/xfreerdp"
+freerdp_override = environment_value(
+    "XRDP_CONSOLE_FREERDP", "XRDP_VNC_FREERDP")
 FREERDP = first_path(
-    Path(os.environ["XRDP_VNC_FREERDP"])
-    if "XRDP_VNC_FREERDP" in os.environ else PRIVATE_FREERDP,
+    Path(freerdp_override) if freerdp_override else PRIVATE_FREERDP,
     Path("/usr/bin/xfreerdp"),
 )
+viewer_override = environment_value(
+    "XRDP_CONSOLE_VIEWER", "XRDP_VNC_VIEWER")
 VNC_VIEWER = first_path(
-    Path(os.environ["XRDP_VNC_VIEWER"])
-    if "XRDP_VNC_VIEWER" in os.environ else Path("/usr/bin/xtigervncviewer"),
+    Path(viewer_override) if viewer_override else Path("/usr/bin/xtigervncviewer"),
     Path("/usr/bin/vncviewer"),
 )
+xrdp_override = environment_value("XRDP_CONSOLE_XRDP", "XRDP_VNC_XRDP")
 XRDP = first_path(
-    Path(os.environ["XRDP_VNC_XRDP"])
-    if "XRDP_VNC_XRDP" in os.environ else Path("/usr/local/sbin/xrdp"),
+    Path(xrdp_override) if xrdp_override else Path("/usr/local/sbin/xrdp"),
     Path("/usr/sbin/xrdp"),
 )
+x11vnc_override = environment_value(
+    "XRDP_CONSOLE_X11VNC", "XRDP_VNC_X11VNC")
 X11VNC = first_path(
-    Path(os.environ["XRDP_VNC_X11VNC"])
-    if "XRDP_VNC_X11VNC" in os.environ else Path("/usr/bin/x11vnc"),
+    Path(x11vnc_override) if x11vnc_override else Path("/usr/bin/x11vnc"),
 )
 # Keep xrdp and chansrv from the same installation when a private prefix is
 # explicitly selected. Mixing socket-root builds can otherwise make a run
 # wait forever for a socket that the other binary never creates.
+chansrv_override = environment_value(
+    "XRDP_CONSOLE_CHANSRV", "XRDP_VNC_CHANSRV")
 CHANSRV = first_path(
-    Path(os.environ["XRDP_VNC_CHANSRV"])
-    if "XRDP_VNC_CHANSRV" in os.environ else XRDP.parent / "xrdp-chansrv",
+    Path(chansrv_override) if chansrv_override else XRDP.parent / "xrdp-chansrv",
     Path("/usr/local/sbin/xrdp-chansrv"),
     Path("/usr/sbin/xrdp-chansrv"),
     Path("/usr/lib/xrdp/xrdp-chansrv"),

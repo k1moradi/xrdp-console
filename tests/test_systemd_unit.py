@@ -18,6 +18,13 @@ class X11vncServiceTests(unittest.TestCase):
         text = SERVICE.read_text(encoding="utf-8")
         self.assertIn("KillSignal=SIGINT", text)
         self.assertNotIn("SuccessExitStatus=2", text)
+        self.assertNotIn("ConditionPathExists=", text)
+
+    def test_canonical_environment_overrides_legacy_environment(self):
+        text = SERVICE.read_text(encoding="utf-8")
+        legacy = text.index("EnvironmentFile=-/etc/default/xrdp-vnc-bench")
+        canonical = text.index("EnvironmentFile=-/etc/default/xrdp-console")
+        self.assertLess(legacy, canonical)
 
     def test_compatibility_dropin_matches_template(self):
         service = SERVICE.read_text(encoding="utf-8")

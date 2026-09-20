@@ -9,13 +9,15 @@ project(xrdp_console
 include(GNUInstallDirs)
 include(CTest)
 
-option(XRDP_VNC_NATIVE
+option(XRDP_CONSOLE_NATIVE
     "Enable -march=native for local benchmark helpers (non-portable)"
     OFF)
-option(XRDP_VNC_ENABLE_CODEC_BENCH
+option(XRDP_CONSOLE_ENABLE_CODEC_BENCH
     "Build the optional offline RFX/x264 codec benchmark"
     ON)
-option(XRDP_VNC_BUILD_TESTS "Enable Python/CMake tests" ON)
+option(XRDP_CONSOLE_BUILD_TOOLS
+    "Build benchmark and diagnostic tools"
+    ON)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -32,97 +34,22 @@ set(XRDP_CONSOLE_HELPER_DIR
 set(CMAKE_INSTALL_DOCDIR
     "${CMAKE_INSTALL_DATADIR}/doc/${XRDP_CONSOLE_INSTALL_DIR}")
 
-if(XRDP_VNC_NATIVE)
+if(XRDP_CONSOLE_NATIVE)
     add_compile_options(-march=native -mtune=native)
 endif()
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
-pkg_check_modules(GL REQUIRED IMPORTED_TARGET gl)
-pkg_check_modules(VULKAN QUIET IMPORTED_TARGET vulkan)
-find_library(XTST_LIBRARY NAMES Xtst)
-if(NOT XTST_LIBRARY)
-    # Some minimal benchmark images have the runtime library but not the
-    # libxtst-dev linker symlink. The source declares the stable XTest ABI, so
-    # accepting the soname keeps the diagnostics buildable while a normal
-    # developer install still uses libXtst.so from libxtst-dev.
-    find_file(XTST_LIBRARY NAMES libXtst.so.6
-        PATHS /usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}
-              /lib/${CMAKE_LIBRARY_ARCHITECTURE}
-        NO_DEFAULT_PATH)
-endif()
-if(NOT XTST_LIBRARY)
-    message(FATAL_ERROR "XTest library not found; install libxtst-dev")
+# The first-party runtime is intentionally empty until the direct-X11 module
+# is introduced. Keeping this subdirectory first makes the ownership boundary
+# explicit in the build graph.
+add_subdirectory(src)
+
+if(XRDP_CONSOLE_BUILD_TOOLS)
+    add_subdirectory(tools)
 endif()
 
-set(BENCHMARK_BINARIES
-    x11-pixel-probe
-    x11-xtest-key
-    x11vnc-glx-probe
-    x11vnc-gpu-stimulus
-    x11vnc-latency-stimulus
-    x11vnc-scroll-stimulus)
-
-add_executable(x11-pixel-probe tools/benchmark/helpers/x11_pixel_probe.c)
-target_link_libraries(x11-pixel-probe PRIVATE PkgConfig::X11)
-
-add_executable(x11-xtest-key tools/benchmark/helpers/x11_xtest_key.c)
-target_link_libraries(x11-xtest-key PRIVATE PkgConfig::X11 ${XTST_LIBRARY})
-
-add_executable(x11vnc-glx-probe tools/benchmark/helpers/x11vnc_glx_probe.c)
-target_link_libraries(x11vnc-glx-probe PRIVATE PkgConfig::X11 PkgConfig::GL)
-
-add_executable(x11vnc-gpu-stimulus tools/benchmark/helpers/x11vnc_gpu_stimulus.c)
-target_link_libraries(x11vnc-gpu-stimulus PRIVATE PkgConfig::X11 PkgConfig::GL)
-
-add_executable(x11vnc-latency-stimulus tools/benchmark/helpers/x11vnc_latency_stimulus.c)
-target_link_libraries(x11vnc-latency-stimulus PRIVATE PkgConfig::X11)
-
-add_executable(x11vnc-scroll-stimulus tools/benchmark/helpers/x11vnc_scroll_stimulus.c)
-target_link_libraries(x11vnc-scroll-stimulus PRIVATE PkgConfig::X11)
-
-if(VULKAN_FOUND)
-    add_executable(vulkan-probe tools/benchmark/helpers/vulkan_probe.c)
-    target_link_libraries(vulkan-probe PRIVATE PkgConfig::VULKAN)
-    list(APPEND BENCHMARK_BINARIES vulkan-probe)
-else()
-    message(STATUS "Skipping vulkan-probe: Vulkan loader development files were not found")
+if(BUILD_TESTING)
+    add_subdirectory(tests)
 endif()
-
-if(XRDP_VNC_ENABLE_CODEC_BENCH)
-    find_path(RFXCODEC_INCLUDE_DIR rfxcodec_encode.h)
-    find_library(RFXCODEC_LIBRARY NAMES rfxencode)
-    find_path(X264_INCLUDE_DIR x264.h)
-    find_library(X264_LIBRARY NAMES x264)
-    if(RFXCODEC_INCLUDE_DIR AND RFXCODEC_LIBRARY AND
-       X264_INCLUDE_DIR AND X264_LIBRARY)
-        add_executable(xrdp-codec-bench tools/benchmark/helpers/xrdp_codec_bench.c)
-        target_include_directories(xrdp-codec-bench PRIVATE
-            ${RFXCODEC_INCLUDE_DIR} ${X264_INCLUDE_DIR})
-        target_link_libraries(xrdp-codec-bench PRIVATE
-            ${RFXCODEC_LIBRARY} ${X264_LIBRARY})
-        list(APPEND BENCHMARK_BINARIES xrdp-codec-bench)
-    else()
-        message(STATUS
-            "Skipping xrdp-codec-bench: rfxcodec and/or x264 development files were not found")
-    endif()
-endif()
-
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
-
-set(BENCHMARK_PYTHON_SOURCES
-    tools/benchmark/xrdp_console_bench.py
-    tools/benchmark/rfb_v6_v4_proxy.py)
-set(DIAGNOSTIC_PYTHON_SOURCES
-    tools/diagnostics/xrdp_console_episode_sampler.py
-    tools/diagnostics/vscode_gpu_probe.py)
-set(PYTHON_SOURCES
-    ${BENCHMARK_PYTHON_SOURCES}
-    ${DIAGNOSTIC_PYTHON_SOURCES})
-set(PYTHON_SOURCE_PATHS)
-foreach(source IN LISTS PYTHON_SOURCES)
-    list(APPEND PYTHON_SOURCE_PATHS "${CMAKE_CURRENT_SOURCE_DIR}/${source}")
-endforeach()
 
 configure_file(packaging/systemd/x11vnc-console.service.in
     ${CMAKE_CURRENT_BINARY_DIR}/x11vnc-console.service @ONLY)
@@ -131,47 +58,6 @@ configure_file(packaging/systemd/x11vnc-console.in
 configure_file(packaging/systemd/x11vnc-console-refresh.in
     ${CMAKE_CURRENT_BINARY_DIR}/x11vnc-console-refresh @ONLY)
 
-if(XRDP_VNC_BUILD_TESTS)
-    add_test(NAME python-syntax
-        COMMAND ${Python3_EXECUTABLE} -B -m py_compile ${PYTHON_SOURCE_PATHS})
-    set_tests_properties(python-syntax PROPERTIES
-        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-    add_test(NAME network-unit
-        COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_network.py)
-    set_tests_properties(network-unit PROPERTIES
-        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-    add_test(NAME measurement-profile-unit
-        COMMAND ${Python3_EXECUTABLE} -B
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_measurement_profile.py)
-    set_tests_properties(measurement-profile-unit PROPERTIES
-        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-    add_test(NAME rfb-client-unit
-        COMMAND ${Python3_EXECUTABLE} -B
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_rfb_client.py)
-    set_tests_properties(rfb-client-unit PROPERTIES
-        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-    add_test(NAME proxy-backpressure-unit
-        COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_proxy.py)
-    set_tests_properties(proxy-backpressure-unit PROPERTIES
-        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-
-    add_test(NAME systemd-unit
-        COMMAND ${Python3_EXECUTABLE} -B
-        ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_systemd_unit.py)
-    set_tests_properties(systemd-unit PROPERTIES
-        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
-endif()
-
-install(TARGETS ${BENCHMARK_BINARIES}
-    RUNTIME DESTINATION ${XRDP_CONSOLE_HELPER_DIR})
-install(PROGRAMS ${BENCHMARK_PYTHON_SOURCES}
-    DESTINATION ${XRDP_CONSOLE_DATA_DIR}/benchmark)
-install(PROGRAMS ${DIAGNOSTIC_PYTHON_SOURCES}
-    DESTINATION ${XRDP_CONSOLE_DATA_DIR}/diagnostics)
 install(PROGRAMS scripts/run-network-latency-matrix.sh
     DESTINATION ${XRDP_CONSOLE_DATA_DIR})
 install(PROGRAMS scripts/fix-console-dynamic-resizing.sh
