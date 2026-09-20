@@ -150,6 +150,8 @@ install(PROGRAMS scripts/use-matched-xrdp-console-daemon.sh
     DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench)
 install(PROGRAMS scripts/build-optimized-xrdp.sh
     DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench)
+install(PROGRAMS scripts/diagnose-console-stack.sh
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench)
 install(FILES README.md LICENSE NOTICE THIRD_PARTY.md
     DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(FILES third_party/xrdp-optimized-provenance.txt
