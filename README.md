@@ -29,7 +29,7 @@ On Debian or Ubuntu, install the development dependencies first:
 sudo apt install \
   cmake ninja-build build-essential pkg-config python3 \
   libx11-dev libxtst-dev libgl-dev libvulkan-dev \
-  xrdp x11vnc freerdp3-x11 xvfb
+  xrdp x11vnc freerdp3-x11 tigervnc-viewer xvfb
 ```
 
 Configure an out-of-tree Release build. `-march=native` is optional and
@@ -129,6 +129,21 @@ the same fields plus the four explicit latency stages. Direct-RFB input is a
 lower-bound comparison, not a production authentication or desktop-present
 measurement.
 
+For a real VNC desktop-present comparison, use the installed TigerVNC viewer:
+
+```sh
+python3 -B src/python/xrdp_vnc_bench.py \
+  --transport vnc-viewer --mode input-roundtrip --only baseline \
+  --duration 20 --fps 15 --input-hz 5 --input-churn-fps 15 --repetitions 3
+```
+
+This starts `xtigervncviewer` on a private Xvfb display and measures the
+marker after the viewer has presented it. `--transport rfb` is the direct
+RFB-wire baseline; `--transport vnc-viewer` includes a real VNC client's
+decode and X11 presentation, while `--transport rdp` remains the complete
+x11vnc -> xrdp -> FreeRDP path. The viewer transport is a comparison tool
+and does not connect to the production VNC listener.
+
 For server-side attribution, enable the opt-in profile on the private xrdp
 process:
 
@@ -151,6 +166,25 @@ per-update request wait, parser/process, server flush, and next-request-gap
 times, plus rectangle and raw-byte counts. Profiling is observational and
 adds logging work, so use `XRDP_VNC_PROFILE=0` for clean latency A/B tests and
 use the profile timings for attribution rather than as a latency baseline.
+
+To correlate a physical marker with the VNC-side paint and classic RDP
+flush, add a point coordinate to the same private-daemon invocation:
+
+```sh
+python3 -B src/python/xrdp_vnc_bench.py \
+  --transport rdp --mode input-roundtrip --only lan \
+  --xrdp-env XRDP_VNC_PROFILE=1 \
+  --xrdp-env XRDP_VNC_PROFILE_POINT_X=1260 \
+  --xrdp-env XRDP_VNC_PROFILE_POINT_Y=70
+```
+
+The xrdp log then contains `VNC_POINT` records with monotonic paint,
+flush-start, and send-return timestamps. The benchmark correlates those
+records with its physical draw and FreeRDP-visible timestamps and prints the
+stage percentiles. `VNC_SCHED` records are also parsed and summarized by the
+benchmark; they report request wait, parser/process, server flush, and the
+gap before the next RFB request. Point profiling is opt-in and should be
+used for attribution runs, not clean latency A/B measurements.
 
 The opt-in progressive-visibility experiment closes and reopens the classic
 bitmap painter while an incremental RAW VNC rectangle is still being received.

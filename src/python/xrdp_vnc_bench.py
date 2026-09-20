@@ -10,10 +10,12 @@ The benchmark starts only user-owned, loopback services:
     The default RDP transport timestamps the completed GL swap and polls the
     corresponding pixel in the FreeRDP window.  ``--transport rfb`` instead
     starts a private no-password x11vnc and timestamps the same marker in RAW
-    RFB bytes on the loopback socket.  In input-roundtrip mode it sends the
-    same F9 key stimulus as an RFB KeyEvent, so the direct-RFB and RDP modes
-    share the physical X11 marker and four-stage timing model.  Neither mode
-    connects to production ports 5900/3389 or modifies system configuration.
+    RFB bytes on the loopback socket.  ``--transport vnc-viewer`` puts an
+    actual TigerVNC viewer between that private server and a private Xvfb
+    display.  In input-roundtrip mode the RFB and viewer transports send the
+    same F9 key stimulus as the RDP mode, so all paths share the physical X11
+    marker and four-stage timing model.  No transport connects to production
+    ports 5900/3389 or modifies system configuration.
 """
 
 from __future__ import annotations
@@ -81,6 +83,11 @@ FREERDP = first_path(
     Path(os.environ["XRDP_VNC_FREERDP"])
     if "XRDP_VNC_FREERDP" in os.environ else PRIVATE_FREERDP,
     Path("/usr/bin/xfreerdp"),
+)
+VNC_VIEWER = first_path(
+    Path(os.environ["XRDP_VNC_VIEWER"])
+    if "XRDP_VNC_VIEWER" in os.environ else Path("/usr/bin/xtigervncviewer"),
+    Path("/usr/bin/vncviewer"),
 )
 XRDP = first_path(
     Path(os.environ["XRDP_VNC_XRDP"])
@@ -905,6 +912,30 @@ def find_window(display: str, title: str, deadline: float) -> str:
     raise RuntimeError(f"FreeRDP window {title!r} did not appear:\n{last_tree}")
 
 
+def find_vnc_viewer_window(display: str, port: int, deadline: float) -> str:
+    """Find the TigerVNC content window without assuming its title wording."""
+    pattern = re.compile(r'^\s*(0x[0-9a-fA-F]+) "([^"]*)"')
+    last_tree = ""
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            ["xwininfo", "-root", "-tree", "-display", display],
+            capture_output=True, text=True, check=False,
+        )
+        last_tree = result.stdout
+        for line in last_tree.splitlines():
+            match = pattern.match(line)
+            if match is None:
+                continue
+            title = match.group(2)
+            if (str(port) in title or "TigerVNC" in title or
+                    "VNC Viewer" in title):
+                return match.group(1)
+        time.sleep(0.1)
+    raise RuntimeError(
+        f"VNC viewer window for port {port} did not appear:\n{last_tree}"
+    )
+
+
 def wait_log_marker(path: Path, marker: str, deadline: float) -> None:
     """Wait for a short-lived helper to announce readiness in its log."""
     while time.monotonic() < deadline:
@@ -1014,7 +1045,8 @@ def marker_rgb_matches(parts: list[bytes], state: int) -> bool:
 
 def wait_marker(probe: LineReader, probe_stdin, state: int,
                 visible_ns: int, timeout: float,
-                poll_interval: float, *, diagnostic: bool = False) -> float | None:
+                poll_interval: float, *, diagnostic: bool = False,
+                observed_ns_out: list[int] | None = None) -> float | None:
     deadline = time.monotonic() + timeout
     latest = b""
     while time.monotonic() < deadline:
@@ -1026,7 +1058,10 @@ def wait_marker(probe: LineReader, probe_stdin, state: int,
             fields = line.split()
             if marker_rgb_matches(fields, state):
                 try:
-                    return (int(fields[0]) - visible_ns) / 1e6
+                    observed_ns = int(fields[0])
+                    if observed_ns_out is not None:
+                        observed_ns_out.append(observed_ns)
+                    return (observed_ns - visible_ns) / 1e6
                 except (IndexError, ValueError):
                     pass
         time.sleep(poll_interval)
@@ -1141,6 +1176,119 @@ def summarize_input_latencies(label: str, values: list[float]) -> None:
         f"p99={percentile(values, 0.99):7.1f}ms "
         f"max={max(values):7.1f}ms"
     )
+
+
+VNC_SCHED_FIELDS = (
+    ("wait_us", "request_wait_us"),
+    ("process_us", "process_us"),
+    ("flush_us", "flush_us"),
+    ("next_request_gap_us", "next_request_gap_us"),
+    ("logical_update_us", "logical_update_us"),
+)
+VNC_SCHED_RE = re.compile(r"\bVNC_SCHED\s+(?P<fields>.*)$")
+VNC_POINT_RE = re.compile(r"\bVNC_POINT\s+(?P<fields>.*)$")
+
+
+def _parse_profile_fields(line: str, pattern: re.Pattern[str]) -> dict[str, int] | None:
+    match = pattern.search(line)
+    if match is None:
+        return None
+    fields: dict[str, int] = {}
+    for key, value in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)=(-?\d+)",
+                                 match.group("fields")):
+        fields[key] = int(value)
+    return fields
+
+
+def parse_vnc_sched_lines(text: str) -> list[dict[str, int]]:
+    records = []
+    for line in text.splitlines():
+        fields = _parse_profile_fields(line, VNC_SCHED_RE)
+        if fields is not None:
+            records.append(fields)
+    return records
+
+
+def parse_vnc_point_lines(text: str) -> list[dict[str, int]]:
+    records = []
+    for line in text.splitlines():
+        fields = _parse_profile_fields(line, VNC_POINT_RE)
+        if fields is not None:
+            records.append(fields)
+    return records
+
+
+def _format_profile_percentiles(values: list[float]) -> str:
+    return (
+        f"p50={statistics.median(values):7.1f}us "
+        f"p95={percentile(values, .95):7.1f}us "
+        f"p99={percentile(values, .99):7.1f}us"
+    )
+
+
+def _summarize_point_stage(label: str, values: list[float]) -> None:
+    if values:
+        print(f"{'':18} {label:26} {_format_profile_percentiles(values)} "
+              f"n={len(values)}")
+
+
+def summarize_xrdp_profile(log_path: Path, workload: str,
+                           draw_ns: list[int] | None = None,
+                           visible_ns: list[int] | None = None) -> None:
+    """Print scheduler and optional marker-point percentiles from one run."""
+    if not log_path.is_file():
+        return
+    text = log_path.read_text(errors="replace")
+    sched = parse_vnc_sched_lines(text)
+    points = parse_vnc_point_lines(text)
+    if sched:
+        print(f"{'':18} VNC_SCHED workload={workload} updates={len(sched)}")
+        for field, label in VNC_SCHED_FIELDS:
+            values = [float(record[field]) for record in sched if field in record]
+            if values:
+                print(f"{'':18} {label:26} {_format_profile_percentiles(values)}")
+
+    if not points or not draw_ns or not visible_ns:
+        return
+
+    pairs: list[tuple[int, int, dict[str, int]]] = []
+    point_index = 0
+    for draw, visible in zip(draw_ns, visible_ns):
+        while point_index < len(points) and \
+                points[point_index].get("paint_ns", 0) < draw:
+            point_index += 1
+        if point_index >= len(points):
+            break
+        point = points[point_index]
+        paint = point.get("paint_ns")
+        send = point.get("send_end_ns")
+        if paint is None or send is None or paint > visible:
+            continue
+        pairs.append((draw, visible, point))
+        point_index += 1
+
+    print(f"{'':18} VNC_POINT workload={workload} records={len(points)} "
+          f"matched={len(pairs)} unmatched={len(draw_ns) - len(pairs)}")
+    stages: dict[str, list[float]] = {
+        "draw -> VNC paint": [],
+        "VNC paint -> flush begin": [],
+        "flush begin -> RDP send": [],
+        "VNC paint -> RDP send": [],
+        "RDP send -> client visible": [],
+        "draw -> client visible": [],
+    }
+    for draw, visible, point in pairs:
+        paint = point["paint_ns"]
+        flush_begin = point.get("flush_begin_ns", paint)
+        send = point["send_end_ns"]
+        stages["draw -> VNC paint"].append((paint - draw) / 1000.0)
+        stages["VNC paint -> flush begin"].append((flush_begin - paint) / 1000.0)
+        stages["flush begin -> RDP send"].append((send - flush_begin) / 1000.0)
+        stages["VNC paint -> RDP send"].append((send - paint) / 1000.0)
+        stages["RDP send -> client visible"].append((visible - send) / 1000.0)
+        stages["draw -> client visible"].append((visible - draw) / 1000.0)
+    for label, values in stages.items():
+        _summarize_point_stage(label, values)
 
 
 def run_direct_rfb_case(args: argparse.Namespace, name: str, profile: str,
@@ -1453,7 +1601,9 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
                         window: str, client_display: str,
                         env_source: dict[str, str], env_client: dict[str, str],
                         case_dir: Path, xrdp_port: int,
-                        processes: list[subprocess.Popen[bytes]]) -> None:
+                        processes: list[subprocess.Popen[bytes]],
+                        xrdp_log: Path | None,
+                        transport_label: str = "rdp-private-wire") -> None:
     """Measure client key injection -> physical X11 -> returned RDP pixels."""
     key_stimulus: subprocess.Popen[bytes] | None = None
     key_injector: subprocess.Popen[bytes] | None = None
@@ -1557,6 +1707,8 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
         local_draw_ms: list[float] = []
         return_graphics_ms: list[float] = []
         roundtrip_ms: list[float] = []
+        point_draw_ns: list[int] = []
+        point_visible_ns: list[int] = []
         delivery_misses = 0
         return_misses = 0
         measured_processes = list(processes)
@@ -1587,16 +1739,20 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
                     local_ms = (t1_draw_done_ns - t1_event_ns) / 1e6
                     input_delivery_ms.append(input_ms)
                     local_draw_ms.append(local_ms)
+                    observed_ns: list[int] = []
                     return_ms = wait_marker(
                         probe_reader, probe.stdin, 1 - physical_state,
                         t1_draw_done_ns,
                         args.timeout, args.poll_ms / 1000.0,
+                        observed_ns_out=observed_ns,
                     )
                     if return_ms is None:
                         return_misses += 1
                     else:
                         return_graphics_ms.append(return_ms)
                         roundtrip_ms.append(input_ms + local_ms + return_ms)
+                        point_draw_ns.append(t1_draw_done_ns)
+                        point_visible_ns.append(observed_ns[0])
             delay = next_tick - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
@@ -1619,13 +1775,165 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
                 f"{process_rss_tree(proc) / 1048576:.1f}MiB")
         print(f"{'':18} " + "; ".join(metrics))
         transport_end = tcp_snapshot(xrdp_port)
-        print_transport_summary("rdp-private-wire", transport_start,
+        print_transport_summary(transport_label, transport_start,
                                 transport_end, elapsed)
+        if xrdp_log is not None:
+            summarize_xrdp_profile(
+                xrdp_log, f"{name}#{repetition} fps={churn_fps:.1f}",
+                point_draw_ns, point_visible_ns)
     finally:
         churn_stop.set()
         if churn_thread is not None:
             churn_thread.join(timeout=2)
         for proc in (probe, key_injector, key_stimulus, churn):
+            kill_process(proc)
+
+
+def run_vnc_viewer_case(args: argparse.Namespace, name: str, profile: str,
+                        auth: str, runtime: Path, base_port: int,
+                        repetition: int) -> None:
+    """Measure the physical X -> x11vnc -> real VNC viewer path."""
+    x, y = 20, 20
+    vnc_port = base_port + 2575
+    client_display = f":{args.client_display}"
+    case_dir = runtime / f"{name}-{repetition}"
+    case_dir.mkdir()
+    env_source = os.environ.copy()
+    env_source.update({"DISPLAY": args.display, "XAUTHORITY": auth})
+    env_client = os.environ.copy()
+    env_client.update({"DISPLAY": client_display})
+    vnc_command = [
+        str(X11VNC), "-display", args.display, "-auth", auth, "-localhost",
+        "-listen", "127.0.0.1", "-no6", "-rfbport", str(vnc_port),
+        "-nopw", "-forever", "-shared", "-xdamage", "-xd_mem", "0",
+        "-threads", "-repeat", "-input_skip", "1", "-wait", "5",
+        "-defer", "5", "-deferupdate", "5", "-wait_ui", "2",
+        "-setdefer", "-1", "-scrollcopyrect", args.scrollcopyrect, "-quiet",
+    ]
+    profile_flags = list(VNC_PROFILES[profile])
+    if "-noxdamage" in profile_flags:
+        vnc_command[vnc_command.index("-xdamage")] = "-noxdamage"
+        profile_flags.remove("-noxdamage")
+    vnc_command += profile_flags
+    viewer_command = [
+        str(VNC_VIEWER), "-display", client_display,
+        "-SecurityTypes", "None", "-PreferredEncoding", "Raw",
+        "-FullColor", "-Shared", "-RemoteResize=0", "-ViewOnly=0",
+        "-SendClipboard=0", "-AcceptClipboard=0", "-AlertOnFatalError=0",
+        "-ReconnectOnError=0", "-geometry",
+        f"{args.client_width}x{args.client_height}+0+0",
+        f"127.0.0.1::{vnc_port}",
+    ]
+    xvfb: subprocess.Popen[bytes] | None = None
+    vnc: subprocess.Popen[bytes] | None = None
+    viewer: subprocess.Popen[bytes] | None = None
+    stimulus: subprocess.Popen[bytes] | None = None
+    probe: subprocess.Popen[bytes] | None = None
+    try:
+        assert_tcp_port_available("127.0.0.1", vnc_port, check_ipv6=True)
+        print(f"{name}#{repetition}: transport=vnc-viewer private-loopback")
+        xvfb = start_process(
+            ["/usr/bin/Xvfb", client_display, "-screen", "0",
+             f"{args.client_width}x{args.client_height}x24", "-nolisten", "tcp"],
+            env_client, case_dir / "xvfb.log")
+        time.sleep(0.4)
+        if xvfb.poll() is not None:
+            raise RuntimeError(f"Xvfb exited; see {case_dir / 'xvfb.log'}")
+        vnc = start_process(vnc_command, env_source, case_dir / "x11vnc.log")
+        vnc_probe = wait_vnc_port(vnc_port, time.monotonic() + 8)
+        vnc_probe.close()
+        viewer = start_process(
+            viewer_command, env_client, case_dir / "vncviewer.log")
+        window = find_vnc_viewer_window(
+            client_display, vnc_port, time.monotonic() + 15)
+        measured_processes = [proc for proc in (xvfb, vnc, viewer)
+                              if proc is not None]
+        if args.mode == "input-roundtrip":
+            run_input_roundtrip(
+                args, name, repetition, window, client_display, env_source,
+                env_client, case_dir, vnc_port, measured_processes, None,
+                transport_label="vnc-viewer-wire")
+            return
+
+        marker_x = x + args.width // 2
+        marker_y = y + args.height // 2
+        stimulus = subprocess.Popen(
+            [str(GPU_STIMULUS), args.display, str(args.width), str(args.height)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env_source, bufsize=0, start_new_session=True,
+        )
+        assert stimulus.stdin is not None and stimulus.stdout is not None
+        stimulus_reader = LineReader(stimulus.stdout)
+        first = stimulus_reader.readline(5)
+        if first.startswith(b"SWAP_CONTROL "):
+            print(f"{name}: {first.decode(errors='replace').strip()}")
+            first = stimulus_reader.readline(5)
+        if not first.startswith(b"READY "):
+            raise RuntimeError(f"stimulus did not become ready: {first!r}")
+        fields = first.split()
+        if len(fields) < 2 or fields[1] != f"{args.width}x{args.height}".encode():
+            raise RuntimeError(f"stimulus dimensions differ from request: {first!r}")
+        probe = subprocess.Popen(
+            [str(PIXEL_PROBE), client_display, window,
+             str(marker_x), str(marker_y)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            env=env_client, bufsize=0, start_new_session=True,
+        )
+        assert probe.stdin is not None and probe.stdout is not None
+        probe_reader = LineReader(probe.stdout)
+        if not probe_reader.readline(5).startswith(b"READY "):
+            raise RuntimeError("VNC viewer pixel probe did not become ready")
+        stimulus.stdin.write(b"frame\n")
+        stimulus.stdin.flush()
+        warmup = stimulus_reader.readline(5)
+        if not warmup:
+            raise RuntimeError("stimulus warm-up failed")
+        warmup_fields = warmup.split()
+        if wait_marker(
+                probe_reader, probe.stdin, int(warmup_fields[1]),
+                int(warmup_fields[0]), args.timeout, args.poll_ms / 1000.0,
+                diagnostic=True) is None:
+            raise RuntimeError("VNC viewer marker did not arrive during warm-up")
+        samples = max(1, int(args.duration * args.fps))
+        latencies: list[float] = []
+        render_ns: list[int] = []
+        misses = 0
+        cpu_start = {proc.pid: process_cpu_tree(proc)
+                     for proc in measured_processes}
+        rss_start = {proc.pid: process_rss_tree(proc)
+                     for proc in measured_processes}
+        transport_start = tcp_snapshot(vnc_port)
+        wall_start = time.monotonic()
+        next_tick = wall_start
+        for _ in range(samples):
+            next_tick += 1.0 / args.fps
+            stimulus.stdin.write(b"frame\n")
+            stimulus.stdin.flush()
+            line = stimulus_reader.readline(5)
+            fields = line.split()
+            if len(fields) < 3:
+                misses += 1
+            else:
+                visible_ns = int(fields[0])
+                state = int(fields[1])
+                render_ns.append(int(fields[2]))
+                latency = wait_marker(
+                        probe_reader, probe.stdin, state, visible_ns,
+                        args.timeout, args.poll_ms / 1000.0)
+                if latency is None:
+                    misses += 1
+                else:
+                    latencies.append(latency)
+            delay = next_tick - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+        transport_end = tcp_snapshot(vnc_port)
+        summarize(f"{name}#{repetition}", latencies, misses, samples, render_ns,
+                  measured_processes, cpu_start, wall_start, rss_start,
+                  transport_label="vnc-viewer-wire",
+                  transport_start=transport_start, transport_end=transport_end)
+    finally:
+        for proc in (probe, stimulus, viewer, vnc, xvfb):
             kill_process(proc)
 
 
@@ -1815,7 +2123,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         if args.mode == "input-roundtrip":
             run_input_roundtrip(
                 args, name, repetition, window, client_display, env_source,
-                env_client, case_dir, xrdp_port, measured_processes)
+                env_client, case_dir, xrdp_port, measured_processes, xrdp_log)
             return
         marker_x = x + args.width // 2
         marker_y = y + args.height // 2
@@ -1865,6 +2173,8 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         samples = max(1, int(args.duration * args.fps))
         latencies: list[float] = []
         render_ns: list[int] = []
+        point_draw_ns: list[int] = []
+        point_visible_ns: list[int] = []
         misses = 0
         process_list = measured_processes
         cpu_start = {proc.pid: process_cpu_tree(proc) for proc in process_list}
@@ -1884,14 +2194,17 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                 visible_ns = int(fields[0])
                 state = int(fields[1])
                 render_ns.append(int(fields[2]))
+                observed_ns: list[int] = []
                 latency = wait_marker(
                     probe_reader, probe.stdin, state, visible_ns, args.timeout,
-                    args.poll_ms / 1000.0,
+                    args.poll_ms / 1000.0, observed_ns_out=observed_ns,
                 )
                 if latency is None:
                     misses += 1
                 else:
                     latencies.append(latency)
+                    point_draw_ns.append(visible_ns)
+                    point_visible_ns.append(observed_ns[0])
             delay = next_tick - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
@@ -1900,6 +2213,9 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                   process_list, cpu_start, wall_start, rss_start,
                   transport_label="rdp-private-wire",
                   transport_start=transport_start, transport_end=transport_end)
+        summarize_xrdp_profile(
+            xrdp_log, f"{name}#{repetition} fps={args.fps:.1f}",
+            point_draw_ns, point_visible_ns)
     finally:
         for proc in (probe, stimulus, client, xrdp, proxy, vnc, chansrv, xvfb):
             kill_process(proc, privileged=(proc is client and network.enabled))
@@ -1916,9 +2232,10 @@ def main() -> int:
     parser.add_argument("--mode", choices=("graphics", "input-roundtrip"),
                         default="graphics",
                         help="measure graphics latency or full input round-trip")
-    parser.add_argument("--transport", choices=("rdp", "rfb"), default="rdp",
-                        help=("client transport: complete private RDP path or "
-                              "direct RAW-RFB wire baseline (default: rdp)"))
+    parser.add_argument(
+        "--transport", choices=("rdp", "rfb", "vnc-viewer"), default="rdp",
+        help=("client transport: complete private RDP path, direct RAW-RFB "
+              "wire baseline, or a real VNC viewer (default: rdp)"))
     parser.add_argument("--input-hz", type=float, default=5.0,
                         help="key pulses per second in input-roundtrip mode")
     parser.add_argument("--input-churn-fps", type=float,
@@ -2016,11 +2333,13 @@ def main() -> int:
         parser.error("dimensions, rates, duration, and repetitions must be valid")
     if args.disable_gfx_for_vnc and args.enable_gfx_for_vnc:
         parser.error("--enable-gfx-for-vnc and --disable-gfx-for-vnc are mutually exclusive")
-    if args.transport == "rfb" and (
+    if args.transport in {"rfb", "vnc-viewer"} and (
             args.network_mode == "namespace" or args.network_self_test or
             args.network_delay_ms != 0 or args.network_jitter_ms != 0 or
             args.network_loss_percent != 0 or args.network_rate_mbps is not None):
-        parser.error("direct RFB uses the private loopback path; network impairment is RDP-only")
+        parser.error(
+            "direct RFB and the VNC-viewer baseline use private loopback; "
+            "network impairment is RDP-only")
     if args.network_self_test and args.network_mode == "localhost":
         parser.error("--network-self-test requires --network-mode namespace or auto")
     if args.network_self_test:
@@ -2065,9 +2384,14 @@ def main() -> int:
             PIXEL_PROBE, V6_V4_PROXY, FREERDP, XRDP,
             Path("/usr/bin/Xvfb"), Path("/usr/bin/xwininfo"),
         ]
+    elif args.transport == "vnc-viewer":
+        required_executables += [
+            PIXEL_PROBE, VNC_VIEWER, Path("/usr/bin/Xvfb"),
+            Path("/usr/bin/xwininfo"),
+        ]
     if args.mode == "input-roundtrip":
         required_executables.append(KEY_STIMULUS)
-        if args.transport == "rdp":
+        if args.transport in {"rdp", "vnc-viewer"}:
             required_executables.append(KEY_INJECTOR)
     for required in required_executables:
         if not required.is_file() and not shutil.which(str(required)):
@@ -2111,6 +2435,10 @@ def main() -> int:
                         run_direct_rfb_case(
                             args, name, use_lan, auth, runtime,
                             args.base_port + port_offset, repetition)
+                elif args.transport == "vnc-viewer":
+                    run_vnc_viewer_case(
+                        args, name, use_lan, auth, runtime,
+                        args.base_port + port_offset, repetition)
                 else:
                     run_case(args, name, use_lan, auth, runtime,
                              args.base_port + port_offset, repetition)

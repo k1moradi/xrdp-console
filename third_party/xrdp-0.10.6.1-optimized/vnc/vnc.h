@@ -227,6 +227,14 @@ struct vnc
     int profile_update_rects;
     int profile_update_raw_rects;
     long long profile_update_raw_bytes;
+    int profile_point_enabled;
+    int profile_point_x;
+    int profile_point_y;
+    int profile_point_pending;
+    tui64 profile_point_paint_ns;
+    tui64 profile_point_flush_begin_ns;
+    tui64 profile_point_send_end_ns;
+    unsigned long long profile_point_seq;
 };
 
 /*

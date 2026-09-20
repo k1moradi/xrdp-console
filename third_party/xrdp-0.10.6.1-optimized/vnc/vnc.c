@@ -137,6 +137,70 @@ vnc_profile_server_end(struct vnc *v)
     }
 }
 
+static int
+vnc_profile_point_in_rect(const struct vnc *v, int x, int y, int cx, int cy)
+{
+    return v->profile_point_enabled && cx > 0 && cy > 0 &&
+           v->profile_point_x >= x && v->profile_point_y >= y &&
+           v->profile_point_x - x < cx && v->profile_point_y - y < cy;
+}
+
+static void
+vnc_profile_point_painted(struct vnc *v, int x, int y, int cx, int cy)
+{
+    if (!v->profile_point_pending &&
+            vnc_profile_point_in_rect(v, x, y, cx, cy))
+    {
+        v->profile_point_pending = 1;
+        v->profile_point_paint_ns = g_time_monotonic_ns();
+        ++v->profile_point_seq;
+    }
+}
+
+static void
+vnc_profile_point_flush_begin(struct vnc *v)
+{
+    if (v->profile_point_pending)
+    {
+        v->profile_point_flush_begin_ns = g_time_monotonic_ns();
+    }
+}
+
+static void
+vnc_profile_point_flush_end(struct vnc *v, int result)
+{
+    if (v->profile_point_pending && result == 0)
+    {
+        v->profile_point_send_end_ns = g_time_monotonic_ns();
+        LOG(LOG_LEVEL_INFO,
+            "VNC_POINT seq=%llu paint_ns=%llu flush_begin_ns=%llu "
+            "send_end_ns=%llu paint_to_send_us=%llu",
+            v->profile_point_seq,
+            (unsigned long long)v->profile_point_paint_ns,
+            (unsigned long long)v->profile_point_flush_begin_ns,
+            (unsigned long long)v->profile_point_send_end_ns,
+            vnc_profile_elapsed_us(v->profile_point_paint_ns,
+                                   v->profile_point_send_end_ns));
+        v->profile_point_pending = 0;
+        v->profile_point_paint_ns = 0;
+        v->profile_point_flush_begin_ns = 0;
+        v->profile_point_send_end_ns = 0;
+    }
+}
+
+static int
+vnc_server_end_update(struct vnc *v)
+{
+    int error;
+
+    vnc_profile_server_begin(v);
+    vnc_profile_point_flush_begin(v);
+    error = v->server_end_update(v);
+    vnc_profile_server_end(v);
+    vnc_profile_point_flush_end(v, error);
+    return error;
+}
+
 static void
 vnc_profile_framebuffer_request_sent(struct vnc *v, int result)
 {
@@ -1537,6 +1601,7 @@ lib_framebuffer_update(struct vnc *v)
                     error = v->server_paint_rect(v, x, y, cx, cy, pixel_s->data, cx, cy, 0, 0);
                     if (error == 0)
                     {
+                        vnc_profile_point_painted(v, x, y, cx, cy);
                         ++raw_rects;
                         raw_bytes += need_size;
                     }
@@ -1633,9 +1698,7 @@ lib_framebuffer_update(struct vnc *v)
 
     if (error == 0)
     {
-        vnc_profile_server_begin(v);
-        error = v->server_end_update(v);
-        vnc_profile_server_end(v);
+        error = vnc_server_end_update(v);
         if (error == 0)
         {
             LOG_DEVEL(LOG_LEVEL_TRACE,
@@ -1790,9 +1853,7 @@ lib_framebuffer_incremental_progressive_flush(struct vnc *v)
     tui64 flush_end_ns;
     int error;
 
-    vnc_profile_server_begin(v);
-    error = v->server_end_update(v);
-    vnc_profile_server_end(v);
+    error = vnc_server_end_update(v);
     if (error != 0)
     {
         LOG(LOG_LEVEL_ERROR,
@@ -1838,9 +1899,7 @@ lib_framebuffer_incremental_finish_update(struct vnc *v)
     struct stream *s;
     int error;
 
-    vnc_profile_server_begin(v);
-    error = v->server_end_update(v);
-    vnc_profile_server_end(v);
+    error = vnc_server_end_update(v);
     if (error == 0)
     {
         LOG_DEVEL(LOG_LEVEL_TRACE,
@@ -2143,6 +2202,10 @@ lib_framebuffer_incremental_data(struct vnc *v, struct stream *s)
                         s->data, v->framebuffer_cx, rows, 0, 0);
             if (error == 0)
             {
+                vnc_profile_point_painted(
+                    v, v->framebuffer_x,
+                    v->framebuffer_y + v->framebuffer_raw_rows_done,
+                    v->framebuffer_cx, rows);
                 if (v->profile_enabled)
                 {
                     v->profile_update_raw_bytes += bytes;
@@ -2867,6 +2930,12 @@ lib_mod_connect(struct vnc *v)
                 v->direct_bitmap_output, v->gfx_active,
                 v->suppress_output != 0);
         }
+        if (v->profile_point_enabled)
+        {
+            LOG(LOG_LEVEL_INFO,
+                "VNC point profiler enabled: point=%d,%d",
+                v->profile_point_x, v->profile_point_y);
+        }
     }
 
     return error;
@@ -3147,6 +3216,8 @@ mod_init(void)
         const char *progressive_bytes =
             g_getenv("XRDP_VNC_PROGRESSIVE_FLUSH_BYTES");
         const char *direct_bitmap = g_getenv("XRDP_VNC_DIRECT_BITMAP");
+        const char *point_x = g_getenv("XRDP_VNC_PROFILE_POINT_X");
+        const char *point_y = g_getenv("XRDP_VNC_PROFILE_POINT_Y");
 
         v->profile_enabled = profile != NULL && g_text2bool(profile);
         v->incremental_framebuffer = incremental_fb != NULL &&
@@ -3163,6 +3234,14 @@ mod_init(void)
         if (direct_bitmap != NULL && direct_bitmap[0] != '\0')
         {
             v->direct_bitmap_output = g_text2bool(direct_bitmap);
+        }
+        v->profile_point_enabled = point_x != NULL && point_y != NULL &&
+                                   g_atoi(point_x) >= 0 &&
+                                   g_atoi(point_y) >= 0;
+        if (v->profile_point_enabled)
+        {
+            v->profile_point_x = g_atoi(point_x);
+            v->profile_point_y = g_atoi(point_y);
         }
         v->framebuffer_read_quantum = 32768;
         if (read_quantum != NULL)

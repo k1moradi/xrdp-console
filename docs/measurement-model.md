@@ -55,6 +55,21 @@ measuring direct-RFB returned graphics. This is a lower-bound comparison for
 the RDP path because it omits xrdp, FreeRDP, and the RDP client presentation
 stage.
 
+The benchmark also supports `--transport vnc-viewer --mode input-roundtrip`.
+This starts `xtigervncviewer` on a private Xvfb display and injects the same
+F9 pulse into the viewer window. Its returned-graphics timestamp is the
+marker observed in the viewer's X11 window:
+
+```text
+T1_draw -> T2_rfb       direct RFB bytes at the benchmark socket
+T1_draw -> T2_viewer    real VNC viewer decode and X11 presentation
+T1_draw -> T2            FreeRDP decode and RDP-client presentation
+```
+
+The viewer path is useful for separating VNC-client presentation cost from
+the server-side path. It is still a private comparison path; it does not
+replace the production VNC listener or the complete RDP measurement.
+
 The optimized xrdp candidate also has an opt-in server profile. Set
 `XRDP_VNC_PROFILE=1` only on the private daemon with the benchmark's
 `--xrdp-env XRDP_VNC_PROFILE=1` option. It emits aggregate `VNC_PERF` lines,
@@ -70,6 +85,27 @@ the next request, and `rects`/`raw_bytes`. These fields distinguish time spent
 waiting for a requested update from time processing or flushing it. Because
 the profile logs on the update path, profile-enabled latency is not a clean
 performance baseline; keep profiling disabled for A/B latency comparisons.
+
+Set `XRDP_VNC_PROFILE_POINT_X` and `XRDP_VNC_PROFILE_POINT_Y` together to
+enable the narrow point profiler. When a successful RAW rectangle paints the
+configured point, xrdp records a monotonic `VNC_POINT` timestamp; the next
+server flush records `flush_begin_ns` and `send_end_ns`. The benchmark joins
+these records, in monotonic order, with the physical draw and client-visible
+timestamps and reports:
+
+```text
+draw -> VNC paint
+VNC paint -> flush begin
+flush begin -> RDP send return
+RDP send return -> client visible
+draw -> client visible
+```
+
+`send_end_ns` is sampled after the xrdp painter's flush callback returns, so
+it is a server-side completion boundary rather than proof that the client has
+already presented the bytes. In particular, a negative send-to-visible value
+can occur when the client renders data before the server-side write call has
+returned.
 
 With `XRDP_VNC_PROGRESSIVE_FLUSH=1`, the incremental RAW path may close and
 reopen the classic direct-bitmap painter after each configured byte threshold
