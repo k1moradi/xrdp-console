@@ -172,6 +172,21 @@ socket, removes only the distribution `xrdp` package, and leaves `xorgxrdp`
 installed but unused. It stores recoverable backups under
 `/var/backups/xrdp-x11vnc/`.
 
+After a transient remote-desktop failure, collect a read-only state report
+with `scripts/diagnose-console-stack.sh`. If Xorg and the logged-in session
+are still alive, the non-destructive recovery helper is:
+
+```sh
+sudo scripts/restart-console-stack.sh
+```
+
+It refreshes x11vnc, restarts sesman/xrdp in dependency order, refreshes the
+optional physical-console chansrv service, and validates the live Xauthority,
+Xorg VT, and ports 5900/3389. It does not restart SDDM. The optional
+`--with-display-manager` mode is destructive and terminates the graphical
+session; use it only as an explicit control when testing whether the display
+manager itself is part of the failure.
+
 ## Source layout
 
 ```text
