@@ -130,6 +130,18 @@ if(XRDP_VNC_BUILD_TESTS)
     set_tests_properties(network-unit PROPERTIES
         ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+    add_test(NAME measurement-profile-unit
+        COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_measurement_profile.py)
+    set_tests_properties(measurement-profile-unit PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+    add_test(NAME rfb-client-unit
+        COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_rfb_client.py)
+    set_tests_properties(rfb-client-unit PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
     add_test(NAME proxy-backpressure-unit
         COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_proxy.py)
     set_tests_properties(proxy-backpressure-unit PROPERTIES

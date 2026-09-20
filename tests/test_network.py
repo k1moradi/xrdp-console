@@ -7,8 +7,6 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
-import socket
-import struct
 import unittest
 from pathlib import Path
 
@@ -77,48 +75,6 @@ class SyntheticNetworkTests(unittest.TestCase):
                          (10, 10, 1))
         self.assertEqual(module.percentile([1.0, 2.0, 3.0, 4.0], 0.95), 4.0)
         self.assertEqual(module.percentile([1.0, 2.0, 3.0, 4.0], 0.50), 2.0)
-
-    def test_vnc_profile_lines_parse_numeric_fields(self):
-        text = (
-            "VNC_SCHED seq=7 wait_us=11 process_us=22 flush_us=33 "
-            "next_request_gap_us=44 logical_update_us=55 rects=2 raw_bytes=66\n"
-            "VNC_POINT seq=3 paint_ns=1000 flush_begin_ns=2000 "
-            "send_end_ns=4000 paint_to_send_us=3\n"
-        )
-        sched = module.parse_vnc_sched_lines(text)
-        points = module.parse_vnc_point_lines(text)
-        self.assertEqual(sched[0]["logical_update_us"], 55)
-        self.assertEqual(sched[0]["raw_bytes"], 66)
-        self.assertEqual(points[0]["send_end_ns"], 4000)
-
-    def test_vnc_point_stage_correlation_uses_monotonic_timestamps(self):
-        text = (
-            "VNC_POINT seq=1 paint_ns=1100 flush_begin_ns=1300 "
-            "send_end_ns=1600 paint_to_send_us=0\n"
-        )
-        records = module.parse_vnc_point_lines(text)
-        self.assertEqual(records[0]["paint_ns"] - 1000, 100)
-        self.assertEqual(records[0]["send_end_ns"] - records[0]["paint_ns"],
-                         500)
-
-    def test_rfb_key_event_uses_x11_keysym_wire_format(self):
-        left, right = socket.socketpair()
-        try:
-            client = module.RfbClient(left)
-            client.key_event(pressed=True)
-            self.assertEqual(
-                right.recv(8),
-                struct.pack(">BBxxI", 4, 1, module.RFB_KEY_F9),
-            )
-            client.key_event(pressed=False)
-            self.assertEqual(
-                right.recv(8),
-                struct.pack(">BBxxI", 4, 0, module.RFB_KEY_F9),
-            )
-        finally:
-            left.close()
-            right.close()
-
 
 if __name__ == "__main__":
     unittest.main()

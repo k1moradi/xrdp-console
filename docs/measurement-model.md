@@ -89,9 +89,11 @@ performance baseline; keep profiling disabled for A/B latency comparisons.
 Set `XRDP_VNC_PROFILE_POINT_X` and `XRDP_VNC_PROFILE_POINT_Y` together to
 enable the narrow point profiler. When a successful RAW rectangle paints the
 configured point, xrdp records a monotonic `VNC_POINT` timestamp; the next
-server flush records `flush_begin_ns` and `send_end_ns`. The benchmark joins
-these records, in monotonic order, with the physical draw and client-visible
-timestamps and reports:
+server flush records `flush_begin_ns` and `send_end_ns`. It also decodes the
+RAW pixel as marker state `1` for red or `0` for blue and records the flush
+`result`. The benchmark joins only successful records with the same expected
+marker state, in monotonic order, rather than pairing unrelated updates that
+happen to cover the same coordinate. It reports:
 
 ```text
 draw -> VNC paint
@@ -117,6 +119,19 @@ non-GFX unsuppressed output are all active. `VNC_SCHED` adds
 `first_flush_us` (update header to the first completed intermediate flush),
 `progressive_flushes`, `bytes_before_first_flush`, and `logical_update_us`
 (update header to the final `server_end_update`).
+
+The separate `XRDP_VNC_REQUEST_AHEAD=1` experiment arms at most one
+incremental RFB request after the current update header and a single nonempty
+RAW rectangle header are received, before that update's RDP flush completes.
+It is restricted to incremental, direct-bitmap, unsuppressed, non-GFX output
+and is disabled by default. The request remains bounded: the next request is
+not armed again until the current logical update completes. Restricting the
+experiment to one RAW rectangle avoids sending a request with stale geometry
+when an update contains resize or other pseudo-encoding rectangles. In
+`VNC_SCHED`, `next_request_lead_us` measures how far ahead that request was
+sent; `next_request_gap_us` remains the gap when the request is sent after the
+server flush. This path is for a fixed-variable A/B experiment, not a
+production default.
 
 The direct-RFB T2 is the target pixel observed in decoded RFB bytes, whereas
 the RDP T2 is the pixel observed in the FreeRDP X11 window. Direct RFB is

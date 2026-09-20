@@ -607,7 +607,8 @@ class SyntheticNetwork:
         return result
 
     def _exec_ns(self, *command: str, check: bool = True) -> subprocess.CompletedProcess:
-        assert self.namespace is not None
+        if self.namespace is None:
+            raise RuntimeError("network namespace is not initialized")
         return self._sudo("ip", "netns", "exec", self.namespace, *command,
                           check=check)
 
@@ -668,7 +669,8 @@ class SyntheticNetwork:
     def wrap_client_command(self, command: list[str], env: dict[str, str]) -> list[str]:
         if not self.enabled:
             return command
-        assert self.namespace is not None
+        if self.namespace is None:
+            raise RuntimeError("network namespace is not initialized")
         # ``setpriv`` runs after entering the netns and drops root before
         # FreeRDP starts.  Pass only the environment needed by X11/FreeRDP;
         # this avoids relying on sudo's distribution-specific env policy.
@@ -1016,7 +1018,8 @@ def sample_remote_pixels(display: str, window: str, points: list[tuple[int, int]
             env=env, bufsize=0, start_new_session=True,
         )
         try:
-            assert sample.stdin is not None and sample.stdout is not None
+            if sample.stdin is None or sample.stdout is None:
+                raise RuntimeError("pixel probe pipes were not created")
             reader = LineReader(sample.stdout)
             ready = reader.readline(1)
             sample.stdin.write(b"sample\n")
@@ -1183,6 +1186,7 @@ VNC_SCHED_FIELDS = (
     ("process_us", "process_us"),
     ("flush_us", "flush_us"),
     ("next_request_gap_us", "next_request_gap_us"),
+    ("next_request_lead_us", "next_request_lead_us"),
     ("logical_update_us", "logical_update_us"),
 )
 VNC_SCHED_RE = re.compile(r"\bVNC_SCHED\s+(?P<fields>.*)$")
@@ -1204,7 +1208,7 @@ def parse_vnc_sched_lines(text: str) -> list[dict[str, int]]:
     records = []
     for line in text.splitlines():
         fields = _parse_profile_fields(line, VNC_SCHED_RE)
-        if fields is not None:
+        if fields:
             records.append(fields)
     return records
 
@@ -1213,9 +1217,56 @@ def parse_vnc_point_lines(text: str) -> list[dict[str, int]]:
     records = []
     for line in text.splitlines():
         fields = _parse_profile_fields(line, VNC_POINT_RE)
-        if fields is not None:
+        if fields:
             records.append(fields)
     return records
+
+
+def correlate_vnc_points(
+        points: list[dict[str, int]], draw_ns: list[int],
+        visible_ns: list[int], expected_states: list[int | None] | None = None,
+        ) -> list[tuple[int, int, dict[str, int]]]:
+    """Match marker-state-specific VNC paints to benchmark samples.
+
+    Point records are ordered by their monotonic paint timestamp.  A record
+    is eligible only when it is a successful, classified marker paint between
+    the corresponding physical draw and client-visible timestamps.  A wrong
+    color state is skipped, which prevents unrelated same-coordinate churn
+    from being paired with the sample.
+    """
+    if len(draw_ns) != len(visible_ns):
+        raise ValueError("draw and visible timestamp counts differ")
+    if expected_states is None:
+        expected_states = [None] * len(draw_ns)
+    if len(expected_states) != len(draw_ns):
+        raise ValueError("expected marker-state count differs from timestamps")
+
+    ordered_points = sorted(
+        points, key=lambda point: point.get("paint_ns", 0))
+    pairs: list[tuple[int, int, dict[str, int]]] = []
+    point_index = 0
+    for draw, visible, expected_state in zip(
+            draw_ns, visible_ns, expected_states):
+        while point_index < len(ordered_points):
+            point = ordered_points[point_index]
+            paint = point.get("paint_ns")
+            if paint is None or paint < draw:
+                point_index += 1
+                continue
+            if paint > visible:
+                break
+            point_index += 1
+            if point.get("result", 0) != 0:
+                continue
+            send = point.get("send_end_ns")
+            if send is None or send <= 0:
+                continue
+            marker_state = point.get("marker_state")
+            if expected_state is not None and marker_state != expected_state:
+                continue
+            pairs.append((draw, visible, point))
+            break
+    return pairs
 
 
 def _format_profile_percentiles(values: list[float]) -> str:
@@ -1234,7 +1285,9 @@ def _summarize_point_stage(label: str, values: list[float]) -> None:
 
 def summarize_xrdp_profile(log_path: Path, workload: str,
                            draw_ns: list[int] | None = None,
-                           visible_ns: list[int] | None = None) -> None:
+                           visible_ns: list[int] | None = None,
+                           expected_states: list[int | None] | None = None,
+                           ) -> None:
     """Print scheduler and optional marker-point percentiles from one run."""
     if not log_path.is_file():
         return
@@ -1251,21 +1304,8 @@ def summarize_xrdp_profile(log_path: Path, workload: str,
     if not points or not draw_ns or not visible_ns:
         return
 
-    pairs: list[tuple[int, int, dict[str, int]]] = []
-    point_index = 0
-    for draw, visible in zip(draw_ns, visible_ns):
-        while point_index < len(points) and \
-                points[point_index].get("paint_ns", 0) < draw:
-            point_index += 1
-        if point_index >= len(points):
-            break
-        point = points[point_index]
-        paint = point.get("paint_ns")
-        send = point.get("send_end_ns")
-        if paint is None or send is None or paint > visible:
-            continue
-        pairs.append((draw, visible, point))
-        point_index += 1
+    pairs = correlate_vnc_points(
+        points, draw_ns, visible_ns, expected_states)
 
     print(f"{'':18} VNC_POINT workload={workload} records={len(points)} "
           f"matched={len(pairs)} unmatched={len(draw_ns) - len(pairs)}")
@@ -1337,7 +1377,8 @@ def run_direct_rfb_case(args: argparse.Namespace, name: str, profile: str,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env_source, bufsize=0, start_new_session=True,
         )
-        assert stimulus.stdin is not None and stimulus.stdout is not None
+        if stimulus.stdin is None or stimulus.stdout is None:
+            raise RuntimeError("GPU stimulus pipes were not created")
         stimulus_reader = LineReader(stimulus.stdout)
         first = stimulus_reader.readline(5)
         if first.startswith(b"SWAP_CONTROL "):
@@ -1470,7 +1511,8 @@ def run_direct_rfb_input_case(args: argparse.Namespace, name: str,
                 stderr=subprocess.PIPE, env=env_source, bufsize=0,
                 start_new_session=True,
             )
-            assert churn.stdin is not None and churn.stdout is not None
+            if churn.stdin is None or churn.stdout is None:
+                raise RuntimeError("churn stimulus pipes were not created")
             churn_reader = LineReader(churn.stdout)
             first = churn_reader.readline(5)
             if first.startswith(b"SWAP_CONTROL "):
@@ -1502,7 +1544,8 @@ def run_direct_rfb_input_case(args: argparse.Namespace, name: str,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env_source,
             bufsize=0, start_new_session=True,
         )
-        assert key_stimulus.stdout is not None
+        if key_stimulus.stdout is None:
+            raise RuntimeError("key stimulus output pipe was not created")
         key_reader = LineReader(key_stimulus.stdout)
         if not key_reader.readline(5).startswith(b"READY "):
             raise RuntimeError("physical key stimulus did not become ready")
@@ -1624,7 +1667,8 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 env=env_source, bufsize=0, start_new_session=True,
             )
-            assert churn.stdin is not None and churn.stdout is not None
+            if churn.stdin is None or churn.stdout is None:
+                raise RuntimeError("churn stimulus pipes were not created")
             churn_reader = LineReader(churn.stdout)
             first = churn_reader.readline(5)
             if first.startswith(b"SWAP_CONTROL "):
@@ -1657,7 +1701,8 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env_source, bufsize=0, start_new_session=True,
         )
-        assert key_stimulus.stdout is not None
+        if key_stimulus.stdout is None:
+            raise RuntimeError("key stimulus output pipe was not created")
         key_reader = LineReader(key_stimulus.stdout)
         if not key_reader.readline(5).startswith(b"READY "):
             raise RuntimeError("physical key stimulus did not become ready")
@@ -1667,7 +1712,8 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env_client, bufsize=0, start_new_session=True,
         )
-        assert key_injector.stdin is not None and key_injector.stdout is not None
+        if key_injector.stdin is None or key_injector.stdout is None:
+            raise RuntimeError("key injector pipes were not created")
         injector_reader = LineReader(key_injector.stdout)
         if not injector_reader.readline(5).startswith(b"READY "):
             raise RuntimeError("client key injector did not become ready")
@@ -1680,7 +1726,8 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env_client, bufsize=0, start_new_session=True,
         )
-        assert probe.stdin is not None and probe.stdout is not None
+        if probe.stdin is None or probe.stdout is None:
+            raise RuntimeError("pixel probe pipes were not created")
         probe_reader = LineReader(probe.stdout)
         if not probe_reader.readline(5).startswith(b"READY "):
             raise RuntimeError("input pixel probe did not become ready")
@@ -1709,6 +1756,7 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
         roundtrip_ms: list[float] = []
         point_draw_ns: list[int] = []
         point_visible_ns: list[int] = []
+        point_expected_states: list[int] = []
         delivery_misses = 0
         return_misses = 0
         measured_processes = list(processes)
@@ -1740,8 +1788,9 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
                     input_delivery_ms.append(input_ms)
                     local_draw_ms.append(local_ms)
                     observed_ns: list[int] = []
+                    expected_marker_state = 1 - physical_state
                     return_ms = wait_marker(
-                        probe_reader, probe.stdin, 1 - physical_state,
+                        probe_reader, probe.stdin, expected_marker_state,
                         t1_draw_done_ns,
                         args.timeout, args.poll_ms / 1000.0,
                         observed_ns_out=observed_ns,
@@ -1753,6 +1802,7 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
                         roundtrip_ms.append(input_ms + local_ms + return_ms)
                         point_draw_ns.append(t1_draw_done_ns)
                         point_visible_ns.append(observed_ns[0])
+                        point_expected_states.append(expected_marker_state)
             delay = next_tick - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
@@ -1780,7 +1830,7 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
         if xrdp_log is not None:
             summarize_xrdp_profile(
                 xrdp_log, f"{name}#{repetition} fps={churn_fps:.1f}",
-                point_draw_ns, point_visible_ns)
+                point_draw_ns, point_visible_ns, point_expected_states)
     finally:
         churn_stop.set()
         if churn_thread is not None:
@@ -1862,7 +1912,8 @@ def run_vnc_viewer_case(args: argparse.Namespace, name: str, profile: str,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env_source, bufsize=0, start_new_session=True,
         )
-        assert stimulus.stdin is not None and stimulus.stdout is not None
+        if stimulus.stdin is None or stimulus.stdout is None:
+            raise RuntimeError("GPU stimulus pipes were not created")
         stimulus_reader = LineReader(stimulus.stdout)
         first = stimulus_reader.readline(5)
         if first.startswith(b"SWAP_CONTROL "):
@@ -1879,7 +1930,8 @@ def run_vnc_viewer_case(args: argparse.Namespace, name: str, profile: str,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env_client, bufsize=0, start_new_session=True,
         )
-        assert probe.stdin is not None and probe.stdout is not None
+        if probe.stdin is None or probe.stdout is None:
+            raise RuntimeError("pixel probe pipes were not created")
         probe_reader = LineReader(probe.stdout)
         if not probe_reader.readline(5).startswith(b"READY "):
             raise RuntimeError("VNC viewer pixel probe did not become ready")
@@ -2132,7 +2184,8 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env_source, bufsize=0, start_new_session=True,
         )
-        assert stimulus.stdin is not None and stimulus.stdout is not None
+        if stimulus.stdin is None or stimulus.stdout is None:
+            raise RuntimeError("GPU stimulus pipes were not created")
         stimulus_reader = LineReader(stimulus.stdout)
         first = stimulus_reader.readline(5)
         if first.startswith(b"SWAP_CONTROL "):
@@ -2148,7 +2201,8 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env_client, bufsize=0, start_new_session=True,
         )
-        assert probe.stdin is not None and probe.stdout is not None
+        if probe.stdin is None or probe.stdout is None:
+            raise RuntimeError("pixel probe pipes were not created")
         probe_reader = LineReader(probe.stdout)
         if not probe_reader.readline(5).startswith(b"READY "):
             raise RuntimeError("pixel probe did not become ready")
@@ -2175,6 +2229,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         render_ns: list[int] = []
         point_draw_ns: list[int] = []
         point_visible_ns: list[int] = []
+        point_expected_states: list[int] = []
         misses = 0
         process_list = measured_processes
         cpu_start = {proc.pid: process_cpu_tree(proc) for proc in process_list}
@@ -2205,6 +2260,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                     latencies.append(latency)
                     point_draw_ns.append(visible_ns)
                     point_visible_ns.append(observed_ns[0])
+                    point_expected_states.append(state)
             delay = next_tick - time.monotonic()
             if delay > 0:
                 time.sleep(delay)
@@ -2215,7 +2271,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                   transport_start=transport_start, transport_end=transport_end)
         summarize_xrdp_profile(
             xrdp_log, f"{name}#{repetition} fps={args.fps:.1f}",
-            point_draw_ns, point_visible_ns)
+            point_draw_ns, point_visible_ns, point_expected_states)
     finally:
         for proc in (probe, stimulus, client, xrdp, proxy, vnc, chansrv, xvfb):
             kill_process(proc, privileged=(proc is client and network.enabled))

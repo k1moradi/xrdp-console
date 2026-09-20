@@ -198,9 +198,12 @@ struct vnc
     enum vnc_resize_support_status resize_supported;
     /* Optional steady-state framebuffer parser which yields between raw strips. */
     int incremental_framebuffer;
+    int request_ahead_enabled;
+    int request_ahead_sent;
     int framebuffer_read_quantum;
     enum vnc_framebuffer_parse_state framebuffer_parse_state;
     int framebuffer_rects_remaining;
+    int framebuffer_rects_total;
     int framebuffer_x;
     int framebuffer_y;
     int framebuffer_cx;
@@ -222,8 +225,9 @@ struct vnc
     tui64 profile_update_begin_ns;
     tui64 profile_update_server_begin_ns;
     tui64 profile_update_server_end_ns;
+    tui64 profile_update_next_request_sent_ns;
     tui64 profile_update_first_flush_ns;
-    unsigned long long profile_update_seq;
+    tui64 profile_update_seq;
     int profile_update_rects;
     int profile_update_raw_rects;
     long long profile_update_raw_bytes;
@@ -234,7 +238,8 @@ struct vnc
     tui64 profile_point_paint_ns;
     tui64 profile_point_flush_begin_ns;
     tui64 profile_point_send_end_ns;
-    unsigned long long profile_point_seq;
+    tui64 profile_point_seq;
+    int profile_point_marker_state;
 };
 
 /*

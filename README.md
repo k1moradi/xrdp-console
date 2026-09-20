@@ -95,6 +95,7 @@ loopback and no jitter; impaired cases use a temporary veth namespace. See
 [`docs/network-latency.md`](docs/network-latency.md).
 The timestamp definitions and percentile convention are documented in
 [`docs/measurement-model.md`](docs/measurement-model.md).
+The focused test plan is in [`docs/testing.md`](docs/testing.md).
 
 The isolated x11vnc profiles are `baseline`, `lan`, `noxdamage`, and
 `lan-noxdamage`. The last profile changes XDamage while retaining the LAN
@@ -163,7 +164,8 @@ does not include TCP/TLS framing. The environment variable is false by
 default and does not change the production daemon unless its service
 environment is explicitly configured. It also emits `VNC_SCHED` lines with
 per-update request wait, parser/process, server flush, and next-request-gap
-times, plus rectangle and raw-byte counts. Profiling is observational and
+times (and, for the request-ahead experiment, request lead), plus rectangle
+and raw-byte counts. Profiling is observational and
 adds logging work, so use `XRDP_VNC_PROFILE=0` for clean latency A/B tests and
 use the profile timings for attribution rather than as a latency baseline.
 
@@ -179,12 +181,15 @@ python3 -B src/python/xrdp_vnc_bench.py \
 ```
 
 The xrdp log then contains `VNC_POINT` records with monotonic paint,
-flush-start, and send-return timestamps. The benchmark correlates those
-records with its physical draw and FreeRDP-visible timestamps and prints the
-stage percentiles. `VNC_SCHED` records are also parsed and summarized by the
-benchmark; they report request wait, parser/process, server flush, and the
-gap before the next RFB request. Point profiling is opt-in and should be
-used for attribution runs, not clean latency A/B measurements.
+flush-start, send-return, result, and decoded red/blue `marker_state` values.
+The configured coordinate must be inside the benchmark marker; the default
+input-roundtrip marker is `(1260,70)`. The benchmark correlates only a
+successful point record with the matching marker state, rather than pairing
+same-coordinate updates by time alone. `VNC_SCHED` records are also parsed
+and summarized by the benchmark; they report request wait, parser/process,
+server flush, and the gap before the next RFB request. Point profiling is
+opt-in and should be used for attribution runs, not clean latency A/B
+measurements.
 
 The opt-in progressive-visibility experiment closes and reopens the classic
 bitmap painter while an incremental RAW VNC rectangle is still being received.
@@ -205,6 +210,25 @@ blocking parser, and the normal next-request boundary are unchanged. Its
 `VNC_SCHED` additions are `first_flush_us`, `progressive_flushes`,
 `bytes_before_first_flush`, and `logical_update_us`; keep profiling disabled
 when using the latency result as an A/B comparison.
+
+The bounded request-ahead experiment sends at most one incremental RFB request
+while a single nonempty RAW rectangle in the current incremental update is
+still being processed. It is disabled by default and is restricted to the
+same incremental, unsuppressed, non-GFX, direct-bitmap path:
+
+```sh
+python3 -B src/python/xrdp_vnc_bench.py \
+  --transport rdp --mode input-roundtrip --only lan \
+  --pipeline rfx --disable-gfx-for-vnc \
+  --xrdp-env XRDP_VNC_INCREMENTAL_FB=1 \
+  --xrdp-env XRDP_VNC_REQUEST_AHEAD=1
+```
+
+The invariant is at most one outstanding incremental request. The scheduler
+profile reports `next_request_lead_us` when the next request was written before
+the current RDP flush completed; the normal `next_request_gap_us` remains the
+post-flush gap. Keep this as an experiment until repeated fixed-variable A/B
+runs show a durable latency improvement.
 
 The `--console-lib` value is a module filename resolved from the optimized
 xrdp installation's compiled module directory; do not pass the full module

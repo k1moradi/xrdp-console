@@ -31,6 +31,7 @@
 #endif
 
 #include <limits.h>
+#include <inttypes.h>
 
 #include "vnc.h"
 #include "vnc_clip.h"
@@ -40,6 +41,9 @@
 #include "ssl_calls.h"
 #include "string_calls.h"
 #include "xrdp_client_info.h"
+
+int get_pixel_safe(char *data, int x, int y, int width, int height, int bpp);
+int split_color(int pixel, int *r, int *g, int *b, int bpp, int *palette);
 
 /* elements in above list */
 #define EDS_STATUS_MSG_COUNT \
@@ -75,25 +79,26 @@ vnc_log_profile(const struct vnc *v, const char *parser, tui64 start_ns,
     elapsed_ns = (end_ns > start_ns) ? end_ns - start_ns : 0;
     LOG(LOG_LEVEL_INFO,
         "VNC_PERF parser=%s rects=%d raw_rects=%d raw_bytes=%lld "
-        "update_us=%llu result=%d",
+        "update_us=%" PRIu64 " result=%d",
         parser, rects, raw_rects, raw_bytes,
-        (unsigned long long)(elapsed_ns / 1000), result);
+        elapsed_ns / 1000, result);
 }
 
 /******************************************************************************
  * Record the scheduler-visible age of one logical framebuffer update.  The
  * request timestamp is captured after the RFB request is written; the update
- * timestamp is captured after the RFB update header is available.  Logging is
- * delayed until the next request is written so next_request_gap_us is known.
+ * timestamp is captured after the RFB update header is available. Logging is
+ * delayed until the next request is written so the post-flush gap or the
+ * request-ahead lead is known.
  */
-static unsigned long long
+static uint64_t
 vnc_profile_elapsed_us(tui64 start_ns, tui64 end_ns)
 {
     if (start_ns == 0 || end_ns <= start_ns)
     {
         return 0;
     }
-    return (unsigned long long)((end_ns - start_ns) / 1000);
+    return (uint64_t)((end_ns - start_ns) / 1000);
 }
 
 static void
@@ -138,67 +143,209 @@ vnc_profile_server_end(struct vnc *v)
 }
 
 static int
-vnc_profile_point_in_rect(const struct vnc *v, int x, int y, int cx, int cy)
+vnc_profile_point_in_rect(const struct vnc *vnc, int rectangle_x,
+                          int rectangle_y, int rectangle_width,
+                          int rectangle_height)
 {
-    return v->profile_point_enabled && cx > 0 && cy > 0 &&
-           v->profile_point_x >= x && v->profile_point_y >= y &&
-           v->profile_point_x - x < cx && v->profile_point_y - y < cy;
+    return vnc->profile_point_enabled && rectangle_width > 0 &&
+           rectangle_height > 0 && vnc->profile_point_x >= rectangle_x &&
+           vnc->profile_point_y >= rectangle_y &&
+           vnc->profile_point_x - rectangle_x < rectangle_width &&
+           vnc->profile_point_y - rectangle_y < rectangle_height;
 }
 
 static void
-vnc_profile_point_painted(struct vnc *v, int x, int y, int cx, int cy)
+vnc_profile_point_painted(struct vnc *vnc, const char *pixel_data,
+                          int rectangle_x, int rectangle_y,
+                          int rectangle_width, int rectangle_height)
 {
-    if (!v->profile_point_pending &&
-            vnc_profile_point_in_rect(v, x, y, cx, cy))
+    int local_x;
+    int local_y;
+    int pixel_value;
+    int red;
+    int green;
+    int blue;
+    int marker_state;
+
+    if (vnc->profile_point_pending ||
+            !vnc_profile_point_in_rect(vnc, rectangle_x, rectangle_y,
+                                       rectangle_width, rectangle_height))
     {
-        v->profile_point_pending = 1;
-        v->profile_point_paint_ns = g_time_monotonic_ns();
-        ++v->profile_point_seq;
+        return;
+    }
+
+    local_x = vnc->profile_point_x - rectangle_x;
+    local_y = vnc->profile_point_y - rectangle_y;
+    pixel_value = get_pixel_safe((char *)pixel_data, local_x, local_y,
+                                 rectangle_width, rectangle_height,
+                                 vnc->server_bpp);
+    split_color(pixel_value, &red, &green, &blue, vnc->server_bpp,
+                vnc->palette);
+    if (red > 200 && green < 80 && blue < 80)
+    {
+        marker_state = 1;
+    }
+    else if (blue > 200 && red < 80 && green < 80)
+    {
+        marker_state = 0;
+    }
+    else
+    {
+        return;
+    }
+
+    vnc->profile_point_pending = 1;
+    vnc->profile_point_marker_state = marker_state;
+    vnc->profile_point_paint_ns = g_time_monotonic_ns();
+    ++vnc->profile_point_seq;
+}
+
+static void
+vnc_profile_point_flush_begin(struct vnc *vnc)
+{
+    if (vnc->profile_point_pending)
+    {
+        vnc->profile_point_flush_begin_ns = g_time_monotonic_ns();
     }
 }
 
 static void
-vnc_profile_point_flush_begin(struct vnc *v)
+vnc_profile_point_reset(struct vnc *vnc)
 {
-    if (v->profile_point_pending)
-    {
-        v->profile_point_flush_begin_ns = g_time_monotonic_ns();
-    }
+    vnc->profile_point_pending = 0;
+    vnc->profile_point_marker_state = -1;
+    vnc->profile_point_paint_ns = 0;
+    vnc->profile_point_flush_begin_ns = 0;
+    vnc->profile_point_send_end_ns = 0;
 }
 
 static void
-vnc_profile_point_flush_end(struct vnc *v, int result)
+vnc_profile_point_flush_end(struct vnc *vnc, int result)
 {
-    if (v->profile_point_pending && result == 0)
+    tui64 send_end_ns = 0;
+
+    if (!vnc->profile_point_pending)
     {
-        v->profile_point_send_end_ns = g_time_monotonic_ns();
-        LOG(LOG_LEVEL_INFO,
-            "VNC_POINT seq=%llu paint_ns=%llu flush_begin_ns=%llu "
-            "send_end_ns=%llu paint_to_send_us=%llu",
-            v->profile_point_seq,
-            (unsigned long long)v->profile_point_paint_ns,
-            (unsigned long long)v->profile_point_flush_begin_ns,
-            (unsigned long long)v->profile_point_send_end_ns,
-            vnc_profile_elapsed_us(v->profile_point_paint_ns,
-                                   v->profile_point_send_end_ns));
-        v->profile_point_pending = 0;
-        v->profile_point_paint_ns = 0;
-        v->profile_point_flush_begin_ns = 0;
-        v->profile_point_send_end_ns = 0;
+        return;
     }
+
+    if (result == 0)
+    {
+        send_end_ns = g_time_monotonic_ns();
+        vnc->profile_point_send_end_ns = send_end_ns;
+    }
+    LOG(LOG_LEVEL_INFO,
+        "VNC_POINT seq=%" PRIu64 " marker_state=%d paint_ns=%" PRIu64
+        " flush_begin_ns=%" PRIu64 " send_end_ns=%" PRIu64
+        " paint_to_send_us=%" PRIu64 " result=%d",
+        vnc->profile_point_seq, vnc->profile_point_marker_state,
+        vnc->profile_point_paint_ns, vnc->profile_point_flush_begin_ns,
+        send_end_ns,
+        vnc_profile_elapsed_us(vnc->profile_point_paint_ns, send_end_ns),
+        result);
+    vnc_profile_point_reset(vnc);
 }
 
 static int
-vnc_server_end_update(struct vnc *v)
+vnc_server_end_update(struct vnc *vnc)
 {
     int error;
 
-    vnc_profile_server_begin(v);
-    vnc_profile_point_flush_begin(v);
-    error = v->server_end_update(v);
-    vnc_profile_server_end(v);
-    vnc_profile_point_flush_end(v, error);
+    vnc_profile_server_begin(vnc);
+    vnc_profile_point_flush_begin(vnc);
+    error = vnc->server_end_update(vnc);
+    vnc_profile_server_end(vnc);
+    vnc_profile_point_flush_end(vnc, error);
     return error;
+}
+
+static void
+vnc_profile_log_scheduler(const struct vnc *vnc, tui64 next_request_sent_ns)
+{
+    tui64 next_request_gap_us;
+    tui64 next_request_lead_us;
+
+    if (!vnc->profile_enabled || next_request_sent_ns == 0 ||
+            vnc->profile_update_request_sent_ns == 0 ||
+            vnc->profile_update_begin_ns == 0 ||
+            vnc->profile_update_server_begin_ns == 0 ||
+            vnc->profile_update_server_end_ns == 0)
+    {
+        return;
+    }
+
+    next_request_gap_us =
+        vnc_profile_elapsed_us(vnc->profile_update_server_end_ns,
+                               next_request_sent_ns);
+    next_request_lead_us =
+        vnc_profile_elapsed_us(next_request_sent_ns,
+                               vnc->profile_update_server_end_ns);
+    LOG(LOG_LEVEL_INFO,
+        "VNC_SCHED seq=%" PRIu64 " wait_us=%" PRIu64
+        " process_us=%" PRIu64 " flush_us=%" PRIu64
+        " next_request_gap_us=%" PRIu64
+        " next_request_lead_us=%" PRIu64
+        " first_flush_us=%" PRIu64 " progressive_flushes=%d"
+        " bytes_before_first_flush=%lld logical_update_us=%" PRIu64 " "
+        "rects=%d raw_bytes=%lld",
+        vnc->profile_update_seq,
+        vnc_profile_elapsed_us(vnc->profile_update_request_sent_ns,
+                               vnc->profile_update_begin_ns),
+        vnc_profile_elapsed_us(vnc->profile_update_begin_ns,
+                               vnc->profile_update_server_begin_ns),
+        vnc_profile_elapsed_us(vnc->profile_update_server_begin_ns,
+                               vnc->profile_update_server_end_ns),
+        next_request_gap_us, next_request_lead_us,
+        vnc_profile_elapsed_us(vnc->profile_update_begin_ns,
+                               vnc->profile_update_first_flush_ns),
+        vnc->progressive_flushes,
+        vnc->progressive_bytes_before_first_flush,
+        vnc_profile_elapsed_us(vnc->profile_update_begin_ns,
+                               vnc->profile_update_server_end_ns),
+        vnc->profile_update_rects, vnc->profile_update_raw_bytes);
+}
+
+static void
+vnc_profile_advance_request(struct vnc *vnc, tui64 request_sent_ns)
+{
+    ++vnc->profile_update_seq;
+    vnc->profile_update_request_sent_ns = request_sent_ns;
+    vnc->profile_update_next_request_sent_ns = 0;
+    vnc->profile_update_begin_ns = 0;
+    vnc->profile_update_server_begin_ns = 0;
+    vnc->profile_update_server_end_ns = 0;
+    vnc->profile_update_start_ns = 0;
+}
+
+static void
+vnc_profile_framebuffer_request_ahead_sent(struct vnc *vnc, int result)
+{
+    if (!vnc->profile_enabled || result != 0)
+    {
+        return;
+    }
+
+    vnc->profile_update_next_request_sent_ns = g_time_monotonic_ns();
+}
+
+static void
+vnc_profile_framebuffer_request_ahead_completed(struct vnc *vnc)
+{
+    tui64 next_request_sent_ns;
+
+    if (!vnc->request_ahead_sent)
+    {
+        return;
+    }
+
+    next_request_sent_ns = vnc->profile_update_next_request_sent_ns;
+    if (vnc->profile_enabled && next_request_sent_ns != 0)
+    {
+        vnc_profile_log_scheduler(vnc, next_request_sent_ns);
+        vnc_profile_advance_request(vnc, next_request_sent_ns);
+    }
+    vnc->request_ahead_sent = 0;
+    vnc->profile_update_next_request_sent_ns = 0;
 }
 
 static void
@@ -212,40 +359,28 @@ vnc_profile_framebuffer_request_sent(struct vnc *v, int result)
     }
 
     now_ns = g_time_monotonic_ns();
-    if (v->profile_update_request_sent_ns != 0 &&
-            v->profile_update_begin_ns != 0 &&
-            v->profile_update_server_begin_ns != 0 &&
-            v->profile_update_server_end_ns != 0)
-    {
-        LOG(LOG_LEVEL_INFO,
-            "VNC_SCHED seq=%llu wait_us=%llu process_us=%llu "
-            "flush_us=%llu next_request_gap_us=%llu "
-            "first_flush_us=%llu progressive_flushes=%d "
-            "bytes_before_first_flush=%lld logical_update_us=%llu "
-            "rects=%d raw_bytes=%lld",
-            v->profile_update_seq,
-            vnc_profile_elapsed_us(v->profile_update_request_sent_ns,
-                                   v->profile_update_begin_ns),
-            vnc_profile_elapsed_us(v->profile_update_begin_ns,
-                                   v->profile_update_server_begin_ns),
-            vnc_profile_elapsed_us(v->profile_update_server_begin_ns,
-                                   v->profile_update_server_end_ns),
-            vnc_profile_elapsed_us(v->profile_update_server_end_ns, now_ns),
-            vnc_profile_elapsed_us(v->profile_update_begin_ns,
-                                   v->profile_update_first_flush_ns),
-            v->progressive_flushes,
-            v->progressive_bytes_before_first_flush,
-            vnc_profile_elapsed_us(v->profile_update_begin_ns,
-                                   v->profile_update_server_end_ns),
-            v->profile_update_rects, v->profile_update_raw_bytes);
-    }
+    vnc_profile_log_scheduler(v, now_ns);
+    vnc_profile_advance_request(v, now_ns);
+}
 
-    ++v->profile_update_seq;
-    v->profile_update_request_sent_ns = now_ns;
-    v->profile_update_begin_ns = 0;
-    v->profile_update_server_begin_ns = 0;
-    v->profile_update_server_end_ns = 0;
-    v->profile_update_start_ns = 0;
+static int
+vnc_send_incremental_framebuffer_request(struct vnc *vnc)
+{
+    struct stream *stream;
+    int error;
+
+    make_stream(stream);
+    init_stream(stream, 8192);
+    out_uint8(stream, RFB_C2S_FRAMEBUFFER_UPDATE_REQUEST);
+    out_uint8(stream, 1); /* incremental == 1 : Changes only */
+    out_uint16_be(stream, 0);
+    out_uint16_be(stream, 0);
+    out_uint16_be(stream, vnc->server_layout.total_width);
+    out_uint16_be(stream, vnc->server_layout.total_height);
+    s_mark_end(stream);
+    error = lib_send_copy(vnc, stream);
+    free_stream(stream);
+    return error;
 }
 
 /******************************************************************************/
@@ -1601,7 +1736,8 @@ lib_framebuffer_update(struct vnc *v)
                     error = v->server_paint_rect(v, x, y, cx, cy, pixel_s->data, cx, cy, 0, 0);
                     if (error == 0)
                     {
-                        vnc_profile_point_painted(v, x, y, cx, cy);
+                        vnc_profile_point_painted(v, pixel_s->data,
+                                                   x, y, cx, cy);
                         ++raw_rects;
                         raw_bytes += need_size;
                     }
@@ -1737,15 +1873,7 @@ lib_framebuffer_update(struct vnc *v)
     {
         if (v->suppress_output == 0)
         {
-            init_stream(s, 8192);
-            out_uint8(s, RFB_C2S_FRAMEBUFFER_UPDATE_REQUEST);
-            out_uint8(s, 1); /* incremental == 1 : Changes only */
-            out_uint16_be(s, 0);
-            out_uint16_be(s, 0);
-            out_uint16_be(s, v->server_layout.total_width);
-            out_uint16_be(s, v->server_layout.total_height);
-            s_mark_end(s);
-            error = lib_send_copy(v, s);
+            error = vnc_send_incremental_framebuffer_request(v);
             vnc_profile_framebuffer_request_sent(v, error);
             if (error == 0)
             {
@@ -1848,6 +1976,44 @@ vnc_progressive_flush_allowed(const struct vnc *v)
 }
 
 static int
+vnc_framebuffer_request_ahead_allowed(const struct vnc *vnc)
+{
+    return vnc->request_ahead_enabled &&
+           vnc->incremental_framebuffer &&
+           vnc->direct_bitmap_output &&
+           !vnc->gfx_active &&
+           vnc->suppress_output == 0 &&
+           !vnc->request_ahead_sent;
+}
+
+static int
+vnc_send_framebuffer_request_ahead(struct vnc *vnc)
+{
+    int error;
+
+    error = vnc_send_incremental_framebuffer_request(vnc);
+    if (error == 0)
+    {
+        vnc->request_ahead_sent = 1;
+        vnc_profile_framebuffer_request_ahead_sent(vnc, error);
+        LOG_DEVEL(LOG_LEVEL_TRACE,
+                  "VNC framebuffer request: incremental=1 sent ahead "
+                  "geometry=%dx%d result=%d",
+                  vnc->server_layout.total_width,
+                  vnc->server_layout.total_height, error);
+    }
+    else
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "VNC framebuffer request: incremental=1 sent ahead "
+            "geometry=%dx%d result=%d",
+            vnc->server_layout.total_width,
+            vnc->server_layout.total_height, error);
+    }
+    return error;
+}
+
+static int
 lib_framebuffer_incremental_progressive_flush(struct vnc *v)
 {
     tui64 flush_end_ns;
@@ -1896,7 +2062,6 @@ lib_framebuffer_incremental_progressive_flush(struct vnc *v)
 static int
 lib_framebuffer_incremental_finish_update(struct vnc *v)
 {
-    struct stream *s;
     int error;
 
     error = vnc_server_end_update(v);
@@ -1918,18 +2083,18 @@ lib_framebuffer_incremental_finish_update(struct vnc *v)
                     v->profile_update_rects, v->profile_update_raw_rects,
                     v->profile_update_raw_bytes, error);
     v->profile_update_start_ns = 0;
-    if (error == 0 && v->suppress_output == 0)
+    if (error == 0 && v->request_ahead_sent)
     {
-        make_stream(s);
-        init_stream(s, 8192);
-        out_uint8(s, RFB_C2S_FRAMEBUFFER_UPDATE_REQUEST);
-        out_uint8(s, 1); /* incremental == 1 : Changes only */
-        out_uint16_be(s, 0);
-        out_uint16_be(s, 0);
-        out_uint16_be(s, v->server_layout.total_width);
-        out_uint16_be(s, v->server_layout.total_height);
-        s_mark_end(s);
-        error = lib_send_copy(v, s);
+        vnc_profile_framebuffer_request_ahead_completed(v);
+        LOG_DEVEL(LOG_LEVEL_TRACE,
+                  "VNC framebuffer request: incremental=1 already sent "
+                  "ahead geometry=%dx%d result=%d",
+                  v->server_layout.total_width,
+                  v->server_layout.total_height, error);
+    }
+    else if (error == 0 && v->suppress_output == 0)
+    {
+        error = vnc_send_incremental_framebuffer_request(v);
         vnc_profile_framebuffer_request_sent(v, error);
         if (error == 0)
         {
@@ -1947,7 +2112,11 @@ lib_framebuffer_incremental_finish_update(struct vnc *v)
                 v->server_layout.total_width,
                 v->server_layout.total_height, error);
         }
-        free_stream(s);
+    }
+    else if (error != 0)
+    {
+        v->request_ahead_sent = 0;
+        v->profile_update_next_request_sent_ns = 0;
     }
 
     if (error == 0)
@@ -2053,6 +2222,7 @@ lib_framebuffer_incremental_data(struct vnc *v, struct stream *s)
         case VNC_FB_WAIT_UPDATE_HEADER:
             in_uint8s(s, 1);
             in_uint16_be(s, v->framebuffer_rects_remaining);
+            v->framebuffer_rects_total = v->framebuffer_rects_remaining;
             vnc_profile_update_begin(v, v->framebuffer_rects_remaining);
             LOG_DEVEL(LOG_LEVEL_TRACE,
                       "VNC framebuffer update begin: parser=incremental "
@@ -2092,6 +2262,17 @@ lib_framebuffer_incremental_data(struct vnc *v, struct stream *s)
 
             if (encoding == RFB_ENC_RAW)
             {
+                if (v->framebuffer_rects_total == 1 &&
+                        v->framebuffer_rects_remaining == 1 &&
+                        v->framebuffer_cx > 0 && v->framebuffer_cy > 0 &&
+                        vnc_framebuffer_request_ahead_allowed(v))
+                {
+                    error = vnc_send_framebuffer_request_ahead(v);
+                    if (error != 0)
+                    {
+                        break;
+                    }
+                }
                 v->framebuffer_raw_row_bytes =
                     v->framebuffer_cx * get_bytes_per_pixel(v->server_bpp);
                 v->framebuffer_raw_rows_done = 0;
@@ -2203,7 +2384,7 @@ lib_framebuffer_incremental_data(struct vnc *v, struct stream *s)
             if (error == 0)
             {
                 vnc_profile_point_painted(
-                    v, v->framebuffer_x,
+                    v, s->data, v->framebuffer_x,
                     v->framebuffer_y + v->framebuffer_raw_rows_done,
                     v->framebuffer_cx, rows);
                 if (v->profile_enabled)
@@ -2921,6 +3102,12 @@ lib_mod_connect(struct vnc *v)
                 "VNC incremental framebuffer parser enabled, RAW quantum %d bytes",
                 v->framebuffer_read_quantum);
         }
+        if (v->request_ahead_enabled)
+        {
+            LOG(LOG_LEVEL_INFO,
+                "VNC bounded request-ahead scheduling enabled for "
+                "incremental direct-bitmap output");
+        }
         if (v->progressive_flush_enabled)
         {
             LOG(LOG_LEVEL_INFO,
@@ -3210,6 +3397,7 @@ mod_init(void)
     {
         const char *profile = g_getenv("XRDP_VNC_PROFILE");
         const char *incremental_fb = g_getenv("XRDP_VNC_INCREMENTAL_FB");
+        const char *request_ahead = g_getenv("XRDP_VNC_REQUEST_AHEAD");
         const char *read_quantum = g_getenv("XRDP_VNC_RAW_QUANTUM_BYTES");
         const char *progressive_flush =
             g_getenv("XRDP_VNC_PROGRESSIVE_FLUSH");
@@ -3222,6 +3410,15 @@ mod_init(void)
         v->profile_enabled = profile != NULL && g_text2bool(profile);
         v->incremental_framebuffer = incremental_fb != NULL &&
                                      g_text2bool(incremental_fb);
+        v->request_ahead_enabled = request_ahead != NULL &&
+                                   g_text2bool(request_ahead);
+        if (v->request_ahead_enabled && !v->incremental_framebuffer)
+        {
+            LOG(LOG_LEVEL_WARNING,
+                "VNC request-ahead scheduling requires incremental "
+                "framebuffer parsing; disabling it");
+            v->request_ahead_enabled = 0;
+        }
         v->progressive_flush_enabled = progressive_flush != NULL &&
                                        g_text2bool(progressive_flush);
         v->progressive_flush_bytes = 262144;
