@@ -110,10 +110,24 @@ python3 -B src/python/xrdp_vnc_bench.py \
   --transport rfb --only baseline --duration 20 --fps 15 --repetitions 3
 ```
 
+For the same-stimulus direct-RFB input lower bound, use the private client's
+RFB KeyEvent messages. This sends the same F9 key pulse that the RDP input
+mode uses and reports the same input, local-draw, returned-graphics, and total
+stages while omitting xrdp and FreeRDP:
+
+```sh
+python3 -B src/python/xrdp_vnc_bench.py \
+  --transport rfb --mode input-roundtrip --only baseline \
+  --duration 20 --input-hz 5 --input-churn-fps 15 --repetitions 3
+```
+
 The normal `--transport rdp` report measures the complete private x11vnc ->
-xrdp -> FreeRDP path. Both graphics reports include p50/p95/p99/max, misses,
-GL render time, process CPU/RSS, and best-effort TCP wire bytes/sec,
-retransmissions, send queue, and RTT from `ss`.
+xrdp -> FreeRDP path. Graphics reports include p50/p95/p99/max, misses, GL
+render time, process CPU/RSS, and best-effort TCP wire bytes/sec,
+retransmissions, send queue, and RTT from `ss`; input-roundtrip reports use
+the same fields plus the four explicit latency stages. Direct-RFB input is a
+lower-bound comparison, not a production authentication or desktop-present
+measurement.
 
 For server-side attribution, enable the opt-in profile on the private xrdp
 process:
@@ -132,7 +146,11 @@ bitmap handling, encoding, send time, PDU count, and bitmap stream bytes.
 `wire_bytes` in the server log means bytes in the RDP bitmap PDU stream; it
 does not include TCP/TLS framing. The environment variable is false by
 default and does not change the production daemon unless its service
-environment is explicitly configured.
+environment is explicitly configured. It also emits `VNC_SCHED` lines with
+per-update request wait, parser/process, server flush, and next-request-gap
+times, plus rectangle and raw-byte counts. Profiling is observational and
+adds logging work, so use `XRDP_VNC_PROFILE=0` for clean latency A/B tests and
+use the profile timings for attribution rather than as a latency baseline.
 
 The `--console-lib` value is a module filename resolved from the optimized
 xrdp installation's compiled module directory; do not pass the full module

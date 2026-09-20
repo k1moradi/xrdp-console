@@ -80,6 +80,95 @@ vnc_log_profile(const struct vnc *v, const char *parser, tui64 start_ns,
         (unsigned long long)(elapsed_ns / 1000), result);
 }
 
+/******************************************************************************
+ * Record the scheduler-visible age of one logical framebuffer update.  The
+ * request timestamp is captured after the RFB request is written; the update
+ * timestamp is captured after the RFB update header is available.  Logging is
+ * delayed until the next request is written so next_request_gap_us is known.
+ */
+static unsigned long long
+vnc_profile_elapsed_us(tui64 start_ns, tui64 end_ns)
+{
+    if (start_ns == 0 || end_ns <= start_ns)
+    {
+        return 0;
+    }
+    return (unsigned long long)((end_ns - start_ns) / 1000);
+}
+
+static void
+vnc_profile_update_begin(struct vnc *v, int rects)
+{
+    if (!v->profile_enabled)
+    {
+        return;
+    }
+
+    v->profile_update_start_ns = g_time_monotonic_ns();
+    v->profile_update_begin_ns = v->profile_update_start_ns;
+    v->profile_update_server_begin_ns = 0;
+    v->profile_update_server_end_ns = 0;
+    v->profile_update_rects = rects;
+    v->profile_update_raw_rects = 0;
+    v->profile_update_raw_bytes = 0;
+}
+
+static void
+vnc_profile_server_begin(struct vnc *v)
+{
+    if (v->profile_enabled)
+    {
+        v->profile_update_server_begin_ns = g_time_monotonic_ns();
+    }
+}
+
+static void
+vnc_profile_server_end(struct vnc *v)
+{
+    if (v->profile_enabled)
+    {
+        v->profile_update_server_end_ns = g_time_monotonic_ns();
+    }
+}
+
+static void
+vnc_profile_framebuffer_request_sent(struct vnc *v, int result)
+{
+    tui64 now_ns;
+
+    if (!v->profile_enabled || result != 0)
+    {
+        return;
+    }
+
+    now_ns = g_time_monotonic_ns();
+    if (v->profile_update_request_sent_ns != 0 &&
+            v->profile_update_begin_ns != 0 &&
+            v->profile_update_server_begin_ns != 0 &&
+            v->profile_update_server_end_ns != 0)
+    {
+        LOG(LOG_LEVEL_INFO,
+            "VNC_SCHED seq=%llu wait_us=%llu process_us=%llu "
+            "flush_us=%llu next_request_gap_us=%llu rects=%d raw_bytes=%lld",
+            v->profile_update_seq,
+            vnc_profile_elapsed_us(v->profile_update_request_sent_ns,
+                                   v->profile_update_begin_ns),
+            vnc_profile_elapsed_us(v->profile_update_begin_ns,
+                                   v->profile_update_server_begin_ns),
+            vnc_profile_elapsed_us(v->profile_update_server_begin_ns,
+                                   v->profile_update_server_end_ns),
+            vnc_profile_elapsed_us(v->profile_update_server_end_ns, now_ns),
+            v->profile_update_rects, v->profile_update_raw_bytes);
+    }
+
+    ++v->profile_update_seq;
+    v->profile_update_request_sent_ns = now_ns;
+    v->profile_update_begin_ns = 0;
+    v->profile_update_server_begin_ns = 0;
+    v->profile_update_server_end_ns = 0;
+    v->profile_update_start_ns = 0;
+}
+
 /******************************************************************************/
 /* taken from vncauth.c */
 /* performing the des3 crypt on the password so it can not be seen
@@ -659,6 +748,7 @@ lib_mod_event(struct vnc *v, int msg, long param1, long param2,
             out_uint16_be(s, cy);
             s_mark_end(s);
             error = lib_send_copy(v, s);
+            vnc_profile_framebuffer_request_sent(v, error);
         }
     }
 
@@ -1150,6 +1240,11 @@ send_update_request_for_resize_status(struct vnc *v)
             break;
     }
 
+    if (error == 0 && request_width > 0)
+    {
+        vnc_profile_framebuffer_request_sent(v, error);
+    }
+
     if (error == 0)
     {
         LOG_DEVEL(LOG_LEVEL_TRACE,
@@ -1383,6 +1478,7 @@ lib_framebuffer_update(struct vnc *v)
     {
         in_uint8s(s, 1);
         in_uint16_be(s, num_recs);
+        vnc_profile_update_begin(v, num_recs);
         LOG_DEVEL(LOG_LEVEL_TRACE,
                   "VNC framebuffer update begin: parser=blocking rects=%d "
                   "server=%dx%d",
@@ -1522,7 +1618,9 @@ lib_framebuffer_update(struct vnc *v)
 
     if (error == 0)
     {
+        vnc_profile_server_begin(v);
         error = v->server_end_update(v);
+        vnc_profile_server_end(v);
         if (error == 0)
         {
             LOG_DEVEL(LOG_LEVEL_TRACE,
@@ -1536,6 +1634,11 @@ lib_framebuffer_update(struct vnc *v)
                 "VNC framebuffer server_end_update: parser=blocking "
                 "rects=%d raw_rects=%d raw_bytes=%lld result=%d",
                 num_recs, raw_rects, raw_bytes, error);
+        }
+        if (v->profile_enabled)
+        {
+            v->profile_update_raw_rects = raw_rects;
+            v->profile_update_raw_bytes = raw_bytes;
         }
         vnc_log_profile(v, "blocking", profile_start_ns, num_recs,
                         raw_rects, raw_bytes, error);
@@ -1565,6 +1668,7 @@ lib_framebuffer_update(struct vnc *v)
             out_uint16_be(s, v->server_layout.total_height);
             s_mark_end(s);
             error = lib_send_copy(v, s);
+            vnc_profile_framebuffer_request_sent(v, error);
             if (error == 0)
             {
                 LOG_DEVEL(LOG_LEVEL_TRACE,
@@ -1656,7 +1760,9 @@ lib_framebuffer_incremental_finish_update(struct vnc *v)
     struct stream *s;
     int error;
 
+    vnc_profile_server_begin(v);
     error = v->server_end_update(v);
+    vnc_profile_server_end(v);
     if (error == 0)
     {
         LOG_DEVEL(LOG_LEVEL_TRACE,
@@ -1687,6 +1793,7 @@ lib_framebuffer_incremental_finish_update(struct vnc *v)
         out_uint16_be(s, v->server_layout.total_height);
         s_mark_end(s);
         error = lib_send_copy(v, s);
+        vnc_profile_framebuffer_request_sent(v, error);
         if (error == 0)
         {
             LOG_DEVEL(LOG_LEVEL_TRACE,
@@ -1809,13 +1916,7 @@ lib_framebuffer_incremental_data(struct vnc *v, struct stream *s)
         case VNC_FB_WAIT_UPDATE_HEADER:
             in_uint8s(s, 1);
             in_uint16_be(s, v->framebuffer_rects_remaining);
-            if (v->profile_enabled)
-            {
-                v->profile_update_start_ns = g_time_monotonic_ns();
-                v->profile_update_rects = v->framebuffer_rects_remaining;
-                v->profile_update_raw_rects = 0;
-                v->profile_update_raw_bytes = 0;
-            }
+            vnc_profile_update_begin(v, v->framebuffer_rects_remaining);
             LOG_DEVEL(LOG_LEVEL_TRACE,
                       "VNC framebuffer update begin: parser=incremental "
                       "rects=%d server=%dx%d",
@@ -2858,6 +2959,7 @@ lib_mod_suppress_output(struct vnc *v, int suppress,
         out_uint16_be(s, v->server_layout.total_height);
         s_mark_end(s);
         error = lib_send_copy(v, s);
+        vnc_profile_framebuffer_request_sent(v, error);
         free_stream(s);
     }
     return error;

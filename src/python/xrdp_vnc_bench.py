@@ -10,8 +10,10 @@ The benchmark starts only user-owned, loopback services:
     The default RDP transport timestamps the completed GL swap and polls the
     corresponding pixel in the FreeRDP window.  ``--transport rfb`` instead
     starts a private no-password x11vnc and timestamps the same marker in RAW
-    RFB bytes on the loopback socket.  Neither mode connects to production
-    ports 5900/3389 or modifies system configuration.
+    RFB bytes on the loopback socket.  In input-roundtrip mode it sends the
+    same F9 key stimulus as an RFB KeyEvent, so the direct-RFB and RDP modes
+    share the physical X11 marker and four-stage timing model.  Neither mode
+    connects to production ports 5900/3389 or modifies system configuration.
 """
 
 from __future__ import annotations
@@ -106,6 +108,9 @@ VNC_PROFILES = {
     "noxdamage": ("-noxdamage",),
     "lan-noxdamage": ("-speeds", "lan", "-noxdamage"),
 }
+
+# X11 keysym for F9, the key consumed by x11vnc-latency-stimulus.
+RFB_KEY_F9 = 0xFFC6
 
 
 class TcpSnapshot:
@@ -262,6 +267,17 @@ class RfbClient:
         self._send(struct.pack(
             ">BBHHHH", 3, int(incremental), 0, 0, self.width, self.height,
         ))
+
+    def key_event(self, *, pressed: bool, keysym: int = RFB_KEY_F9) -> None:
+        """Send one RFB KeyEvent using an X11 keysym."""
+        self._send(struct.pack(">BBxxI", 4, int(pressed), keysym))
+
+    def send_key_pulse(self, keysym: int = RFB_KEY_F9) -> int:
+        """Send F9 down/up and return the pre-send monotonic timestamp."""
+        event_ns = time.monotonic_ns()
+        self.key_event(pressed=True, keysym=keysym)
+        self.key_event(pressed=False, keysym=keysym)
+        return event_ns
 
     @staticmethod
     def _pixel_rgb(pixel: bytes) -> tuple[int, int, int]:
@@ -1249,6 +1265,190 @@ def run_direct_rfb_case(args: argparse.Namespace, name: str, profile: str,
             kill_process(proc)
 
 
+def run_direct_rfb_input_case(args: argparse.Namespace, name: str,
+                              profile: str, auth: str, runtime: Path,
+                              base_port: int, repetition: int) -> None:
+    """Measure client RFB KeyEvent -> physical X11 -> RAW-RFB pixels."""
+    vnc_port = base_port + 2575
+    case_dir = runtime / f"{name}-{repetition}"
+    case_dir.mkdir()
+    env_source = os.environ.copy()
+    env_source.update({"DISPLAY": args.display, "XAUTHORITY": auth})
+    vnc_command = [
+        str(X11VNC), "-display", args.display, "-auth", auth, "-localhost",
+        "-listen", "127.0.0.1", "-no6", "-rfbport", str(vnc_port),
+        "-nopw", "-forever", "-shared", "-xdamage", "-xd_mem", "0",
+        "-threads", "-repeat", "-input_skip", "1", "-wait", "5",
+        "-defer", "5", "-deferupdate", "5", "-wait_ui", "2",
+        "-setdefer", "-1", "-scrollcopyrect", args.scrollcopyrect, "-quiet",
+    ]
+    profile_flags = list(VNC_PROFILES[profile])
+    if "-noxdamage" in profile_flags:
+        vnc_command[vnc_command.index("-xdamage")] = "-noxdamage"
+        profile_flags.remove("-noxdamage")
+    vnc_command += profile_flags
+    vnc: subprocess.Popen[bytes] | None = None
+    key_stimulus: subprocess.Popen[bytes] | None = None
+    churn: subprocess.Popen[bytes] | None = None
+    churn_thread: threading.Thread | None = None
+    churn_stop = threading.Event()
+    client: RfbClient | None = None
+    try:
+        assert_tcp_port_available("127.0.0.1", vnc_port, check_ipv6=True)
+        print(f"{name}#{repetition}: transport=direct-rfb input-roundtrip")
+        vnc = start_process(vnc_command, env_source, case_dir / "x11vnc.log")
+        probe = wait_vnc_port(vnc_port, time.monotonic() + 8)
+        probe.close()
+        client = RfbClient(wait_vnc_port(vnc_port, time.monotonic() + 8))
+        client.connect()
+
+        input_x = args.input_x
+        input_y = args.input_y
+        marker_x = input_x + 80
+        marker_y = input_y + 50
+        if client.width <= marker_x or client.height <= marker_y:
+            raise RuntimeError(
+                f"RFB framebuffer {client.width}x{client.height} does not "
+                f"contain the key marker at {marker_x}x{marker_y}"
+            )
+
+        churn_fps = args.input_churn_fps
+        if churn_fps is None:
+            churn_fps = args.fps
+        if churn_fps > 0:
+            churn = subprocess.Popen(
+                [str(GPU_STIMULUS), args.display, str(args.width), str(args.height)],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE, env=env_source, bufsize=0,
+                start_new_session=True,
+            )
+            assert churn.stdin is not None and churn.stdout is not None
+            churn_reader = LineReader(churn.stdout)
+            first = churn_reader.readline(5)
+            if first.startswith(b"SWAP_CONTROL "):
+                print(f"{name}: {first.decode(errors='replace').strip()}")
+                first = churn_reader.readline(5)
+            if not first.startswith(b"READY "):
+                raise RuntimeError(f"churn stimulus did not become ready: {first!r}")
+
+            def churn_frames() -> None:
+                next_tick = time.monotonic()
+                while not churn_stop.is_set():
+                    next_tick += 1.0 / churn_fps
+                    try:
+                        churn.stdin.write(b"frame\n")
+                        churn.stdin.flush()
+                        if not churn_reader.readline(2):
+                            break
+                    except (BrokenPipeError, OSError):
+                        break
+                    churn_stop.wait(max(0.0, next_tick - time.monotonic()))
+
+            churn_thread = threading.Thread(
+                target=churn_frames, name="xrdp-bench-churn", daemon=True)
+            churn_thread.start()
+
+        key_stimulus = subprocess.Popen(
+            [str(KEY_STIMULUS), args.display, "--key",
+             str(input_x), str(input_y)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env_source,
+            bufsize=0, start_new_session=True,
+        )
+        assert key_stimulus.stdout is not None
+        key_reader = LineReader(key_stimulus.stdout)
+        if not key_reader.readline(5).startswith(b"READY "):
+            raise RuntimeError("physical key stimulus did not become ready")
+
+        # The initial non-incremental request sent by connect() is consumed by
+        # this first key pulse. Subsequent requests are incremental RAW-only.
+        t0_ns = client.send_key_pulse()
+        physical_line = key_reader.readline(args.timeout)
+        if not physical_line:
+            raise RuntimeError("direct RFB input warm-up did not reach X11")
+        t1_event_ns, t1_draw_done_ns, physical_state = \
+            parse_physical_marker(physical_line)
+        warmup_latency = client.wait_for_marker(
+            1 - physical_state, t1_draw_done_ns, marker_x, marker_y,
+            args.timeout, pending_update=True,
+        )
+        if warmup_latency is None:
+            raise RuntimeError("direct RFB input warm-up marker did not return")
+        del t0_ns, t1_event_ns
+
+        samples = max(1, int(args.duration * args.input_hz))
+        input_delivery_ms: list[float] = []
+        local_draw_ms: list[float] = []
+        return_graphics_ms: list[float] = []
+        roundtrip_ms: list[float] = []
+        delivery_misses = 0
+        return_misses = 0
+        measured_processes = [vnc, key_stimulus]
+        if churn is not None:
+            measured_processes.append(churn)
+        cpu_start = {proc.pid: process_cpu_tree(proc)
+                     for proc in measured_processes}
+        rss_start = {proc.pid: process_rss_tree(proc)
+                     for proc in measured_processes}
+        transport_start = tcp_snapshot(vnc_port)
+        wall_start = time.monotonic()
+        next_tick = wall_start
+
+        for _ in range(samples):
+            next_tick += 1.0 / args.input_hz
+            t0_ns = client.send_key_pulse()
+            physical_line = key_reader.readline(args.timeout)
+            if not physical_line:
+                delivery_misses += 1
+            else:
+                t1_event_ns, t1_draw_done_ns, physical_state = \
+                    parse_physical_marker(physical_line)
+                input_ms = (t1_event_ns - t0_ns) / 1e6
+                local_ms = (t1_draw_done_ns - t1_event_ns) / 1e6
+                input_delivery_ms.append(input_ms)
+                local_draw_ms.append(local_ms)
+                return_ms = client.wait_for_marker(
+                    1 - physical_state, t1_draw_done_ns, marker_x, marker_y,
+                    args.timeout,
+                )
+                if return_ms is None:
+                    return_misses += 1
+                else:
+                    return_graphics_ms.append(return_ms)
+                    roundtrip_ms.append(input_ms + local_ms + return_ms)
+            delay = next_tick - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+
+        print(f"{name}#{repetition}: input-roundtrip churn={churn_fps:.1f}fps "
+              f"input={args.input_hz:.1f}Hz samples={samples} "
+              f"delivery_misses={delivery_misses} return_misses={return_misses}")
+        summarize_input_latencies("input T0->T1_event", input_delivery_ms)
+        summarize_input_latencies("local T1_event->draw", local_draw_ms)
+        summarize_input_latencies("graphics draw->T2", return_graphics_ms)
+        summarize_input_latencies("roundtrip T0->T2", roundtrip_ms)
+        elapsed = max(0.001, time.monotonic() - wall_start)
+        metrics = []
+        for proc in measured_processes:
+            before = cpu_start.get(proc.pid, 0.0)
+            cpu = max(0.0, process_cpu_tree(proc) - before) / elapsed * 100.0
+            metrics.append(
+                f"pid{proc.pid} cpu={cpu:.1f}% "
+                f"rss={rss_start.get(proc.pid, 0) / 1048576:.1f}->"
+                f"{process_rss_tree(proc) / 1048576:.1f}MiB")
+        print(f"{'':18} " + "; ".join(metrics))
+        transport_end = tcp_snapshot(vnc_port)
+        print_transport_summary("rfb-direct-input-wire", transport_start,
+                                transport_end, elapsed)
+    finally:
+        churn_stop.set()
+        if churn_thread is not None:
+            churn_thread.join(timeout=2)
+        if client is not None:
+            client.sock.close()
+        for proc in (key_stimulus, churn, vnc):
+            kill_process(proc)
+
+
 def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
                         window: str, client_display: str,
                         env_source: dict[str, str], env_client: dict[str, str],
@@ -1816,8 +2016,6 @@ def main() -> int:
         parser.error("dimensions, rates, duration, and repetitions must be valid")
     if args.disable_gfx_for_vnc and args.enable_gfx_for_vnc:
         parser.error("--enable-gfx-for-vnc and --disable-gfx-for-vnc are mutually exclusive")
-    if args.transport == "rfb" and args.mode != "graphics":
-        parser.error("--transport rfb is available only with --mode graphics")
     if args.transport == "rfb" and (
             args.network_mode == "namespace" or args.network_self_test or
             args.network_delay_ms != 0 or args.network_jitter_ms != 0 or
@@ -1868,7 +2066,9 @@ def main() -> int:
             Path("/usr/bin/Xvfb"), Path("/usr/bin/xwininfo"),
         ]
     if args.mode == "input-roundtrip":
-        required_executables += [KEY_STIMULUS, KEY_INJECTOR]
+        required_executables.append(KEY_STIMULUS)
+        if args.transport == "rdp":
+            required_executables.append(KEY_INJECTOR)
     for required in required_executables:
         if not required.is_file() and not shutil.which(str(required)):
             parser.error(f"required executable is missing: {required}")
@@ -1903,9 +2103,14 @@ def main() -> int:
             for repetition in range(1, args.repetitions + 1):
                 port_offset = (index * args.repetitions + repetition - 1) * 10
                 if args.transport == "rfb":
-                    run_direct_rfb_case(
-                        args, name, use_lan, auth, runtime,
-                        args.base_port + port_offset, repetition)
+                    if args.mode == "input-roundtrip":
+                        run_direct_rfb_input_case(
+                            args, name, use_lan, auth, runtime,
+                            args.base_port + port_offset, repetition)
+                    else:
+                        run_direct_rfb_case(
+                            args, name, use_lan, auth, runtime,
+                            args.base_port + port_offset, repetition)
                 else:
                     run_case(args, name, use_lan, auth, runtime,
                              args.base_port + port_offset, repetition)

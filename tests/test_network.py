@@ -7,6 +7,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import socket
+import struct
 import unittest
 from pathlib import Path
 
@@ -75,6 +77,24 @@ class SyntheticNetworkTests(unittest.TestCase):
                          (10, 10, 1))
         self.assertEqual(module.percentile([1.0, 2.0, 3.0, 4.0], 0.95), 4.0)
         self.assertEqual(module.percentile([1.0, 2.0, 3.0, 4.0], 0.50), 2.0)
+
+    def test_rfb_key_event_uses_x11_keysym_wire_format(self):
+        left, right = socket.socketpair()
+        try:
+            client = module.RfbClient(left)
+            client.key_event(pressed=True)
+            self.assertEqual(
+                right.recv(8),
+                struct.pack(">BBxxI", 4, 1, module.RFB_KEY_F9),
+            )
+            client.key_event(pressed=False)
+            self.assertEqual(
+                right.recv(8),
+                struct.pack(">BBxxI", 4, 0, module.RFB_KEY_F9),
+            )
+        finally:
+            left.close()
+            right.close()
 
 
 if __name__ == "__main__":

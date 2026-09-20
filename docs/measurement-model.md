@@ -46,6 +46,15 @@ p99, maximum, misses, GL render time, process CPU/RSS, and best-effort TCP
 wire bytes/sec, retransmissions, send queue, and RTT. `ss`-unavailable fields
 are reported as `NA` rather than inferred.
 
+Input-roundtrip also supports `--transport rfb --mode input-roundtrip`. The
+benchmark sends the same F9 RFB KeyEvent pulse as the RDP input path to the
+private `-nopw` listener, while the physical X11 stimulus and marker probe
+remain unchanged. It therefore reports the same four stages above, with
+`T0 -> T1_event` measuring direct-RFB input delivery and `T1_draw -> T2`
+measuring direct-RFB returned graphics. This is a lower-bound comparison for
+the RDP path because it omits xrdp, FreeRDP, and the RDP client presentation
+stage.
+
 The optimized xrdp candidate also has an opt-in server profile. Set
 `XRDP_VNC_PROFILE=1` only on the private daemon with the benchmark's
 `--xrdp-env XRDP_VNC_PROFILE=1` option. It emits aggregate `VNC_PERF` lines,
@@ -55,6 +64,12 @@ raw framebuffer bytes copied, copy time, bitmap-path time, encode time, send
 time, PDU count, and RDP bitmap stream bytes. These are server-stage timings,
 not a replacement for the client-visible T2 measurement. `wire_bytes` in
 these lines is the RDP bitmap PDU stream size and excludes TCP/TLS framing.
+The same profile emits `VNC_SCHED` per-update lines with `seq`, request
+`wait_us`, parser/process `process_us`, server flush `flush_us`, the gap to
+the next request, and `rects`/`raw_bytes`. These fields distinguish time spent
+waiting for a requested update from time processing or flushing it. Because
+the profile logs on the update path, profile-enabled latency is not a clean
+performance baseline; keep profiling disabled for A/B latency comparisons.
 
 The private IPv6-to-IPv4 RFB relay uses bounded per-direction buffers and
 selector write readiness. It closes a run if a peer leaves more than 16 MiB

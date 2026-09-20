@@ -210,6 +210,11 @@ struct vnc
     int first_frame_logged;
     int profile_enabled;
     tui64 profile_update_start_ns;
+    tui64 profile_update_request_sent_ns;
+    tui64 profile_update_begin_ns;
+    tui64 profile_update_server_begin_ns;
+    tui64 profile_update_server_end_ns;
+    unsigned long long profile_update_seq;
     int profile_update_rects;
     int profile_update_raw_rects;
     long long profile_update_raw_bytes;
