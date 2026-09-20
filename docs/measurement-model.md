@@ -17,6 +17,11 @@ T1_draw -> T2        capture, VNC/RDP encoding, transport, and client display
 T0 -> T2             full interactive round trip
 ```
 
+Input-roundtrip reports also include per-process CPU/RSS and a best-effort
+`rdp-private-wire` transport line with wire bytes/sec, retransmissions, send
+queue, and RTT. Values unavailable from unprivileged `ss` are reported as
+`NA`.
+
 The pixel probe polls at a configurable interval (`--poll-ms`, default 3 ms),
 so T2 includes at most one polling interval of observation quantization. The
 benchmark reports nearest-rank p95 and p99 values. An input event is not

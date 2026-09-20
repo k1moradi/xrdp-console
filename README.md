@@ -29,7 +29,7 @@ On Debian or Ubuntu, install the development dependencies first:
 sudo apt install \
   cmake ninja-build build-essential pkg-config python3 \
   libx11-dev libxtst-dev libgl-dev libvulkan-dev \
-  xrdp x11vnc freerdp2-x11 xvfb
+  xrdp x11vnc freerdp3-x11 xvfb
 ```
 
 Configure an out-of-tree Release build. `-march=native` is optional and
@@ -122,7 +122,7 @@ process:
 python3 -B src/python/xrdp_vnc_bench.py \
   --transport rdp --only baseline --duration 20 --fps 15 --repetitions 3 \
   --xrdp "$PWD/build/prefix/xrdp-optimized-resize/sbin/xrdp" \
-  --console-lib "$PWD/build/prefix/xrdp-optimized-resize/lib/xrdp/libvnc.so" \
+  --console-lib libvnc.so \
   --xrdp-env XRDP_VNC_PROFILE=1
 ```
 
@@ -133,6 +133,10 @@ bitmap handling, encoding, send time, PDU count, and bitmap stream bytes.
 does not include TCP/TLS framing. The environment variable is false by
 default and does not change the production daemon unless its service
 environment is explicitly configured.
+
+The `--console-lib` value is a module filename resolved from the optimized
+xrdp installation's compiled module directory; do not pass the full module
+path.
 
 The benchmark never connects to the production ports unless the caller
 explicitly overrides the executable/configuration inputs. Each run creates a
