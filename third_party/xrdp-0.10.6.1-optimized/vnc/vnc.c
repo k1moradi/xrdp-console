@@ -99,6 +99,12 @@ vnc_profile_elapsed_us(tui64 start_ns, tui64 end_ns)
 static void
 vnc_profile_update_begin(struct vnc *v, int rects)
 {
+    v->progressive_flushes = 0;
+    v->progressive_bytes_since_flush = 0;
+    v->progressive_update_raw_bytes = 0;
+    v->progressive_bytes_before_first_flush = 0;
+    v->profile_update_first_flush_ns = 0;
+
     if (!v->profile_enabled)
     {
         return;
@@ -149,7 +155,10 @@ vnc_profile_framebuffer_request_sent(struct vnc *v, int result)
     {
         LOG(LOG_LEVEL_INFO,
             "VNC_SCHED seq=%llu wait_us=%llu process_us=%llu "
-            "flush_us=%llu next_request_gap_us=%llu rects=%d raw_bytes=%lld",
+            "flush_us=%llu next_request_gap_us=%llu "
+            "first_flush_us=%llu progressive_flushes=%d "
+            "bytes_before_first_flush=%lld logical_update_us=%llu "
+            "rects=%d raw_bytes=%lld",
             v->profile_update_seq,
             vnc_profile_elapsed_us(v->profile_update_request_sent_ns,
                                    v->profile_update_begin_ns),
@@ -158,6 +167,12 @@ vnc_profile_framebuffer_request_sent(struct vnc *v, int result)
             vnc_profile_elapsed_us(v->profile_update_server_begin_ns,
                                    v->profile_update_server_end_ns),
             vnc_profile_elapsed_us(v->profile_update_server_end_ns, now_ns),
+            vnc_profile_elapsed_us(v->profile_update_begin_ns,
+                                   v->profile_update_first_flush_ns),
+            v->progressive_flushes,
+            v->progressive_bytes_before_first_flush,
+            vnc_profile_elapsed_us(v->profile_update_begin_ns,
+                                   v->profile_update_server_end_ns),
             v->profile_update_rects, v->profile_update_raw_bytes);
     }
 
@@ -1752,6 +1767,69 @@ lib_framebuffer_incremental_schedule_raw(struct vnc *v)
 }
 
 /******************************************************************************
+ * Progressive flushing is deliberately restricted to the incremental RAW
+ * path.  The painter update is closed and reopened without sending another
+ * RFB request, so the VNC framebuffer remains the source of truth while
+ * already-painted pixels can reach the RDP client before the RAW rectangle
+ * is complete.
+ */
+static int
+vnc_progressive_flush_allowed(const struct vnc *v)
+{
+    return v->progressive_flush_enabled &&
+           v->incremental_framebuffer &&
+           v->direct_bitmap_output &&
+           !v->gfx_active &&
+           v->suppress_output == 0 &&
+           v->progressive_flush_bytes > 0;
+}
+
+static int
+lib_framebuffer_incremental_progressive_flush(struct vnc *v)
+{
+    tui64 flush_end_ns;
+    int error;
+
+    vnc_profile_server_begin(v);
+    error = v->server_end_update(v);
+    vnc_profile_server_end(v);
+    if (error != 0)
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "VNC progressive flush: server_end_update failed result=%d",
+            error);
+        return error;
+    }
+
+    flush_end_ns = v->profile_update_server_end_ns;
+    error = v->server_begin_update(v);
+    if (error != 0)
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "VNC progressive flush: server_begin_update failed result=%d",
+            error);
+        return error;
+    }
+
+    if (v->progressive_flushes == 0)
+    {
+        v->progressive_bytes_before_first_flush =
+            v->progressive_update_raw_bytes;
+        if (v->profile_enabled)
+        {
+            v->profile_update_first_flush_ns = flush_end_ns;
+        }
+    }
+    ++v->progressive_flushes;
+    v->progressive_bytes_since_flush = 0;
+    LOG_DEVEL(LOG_LEVEL_TRACE,
+              "VNC progressive flush: count=%d bytes=%lld threshold=%d",
+              v->progressive_flushes, v->progressive_update_raw_bytes,
+              v->progressive_flush_bytes);
+    return 0;
+}
+
+/******************************************************************************
  * Completes a steady-state framebuffer update and requests the next one.
  */
 static int
@@ -2075,13 +2153,25 @@ lib_framebuffer_incremental_data(struct vnc *v, struct stream *s)
                     }
                 }
                 v->framebuffer_raw_rows_done += rows;
-                if (v->framebuffer_raw_rows_done < v->framebuffer_cy)
+                v->progressive_update_raw_bytes += bytes;
+                v->progressive_bytes_since_flush += bytes;
+                if (v->framebuffer_raw_rows_done < v->framebuffer_cy &&
+                        vnc_progressive_flush_allowed(v) &&
+                        v->progressive_bytes_since_flush >=
+                        v->progressive_flush_bytes)
                 {
-                    error = lib_framebuffer_incremental_schedule_raw(v);
+                    error = lib_framebuffer_incremental_progressive_flush(v);
                 }
-                else
+                if (error == 0)
                 {
-                    error = lib_framebuffer_incremental_finish_rect(v);
+                    if (v->framebuffer_raw_rows_done < v->framebuffer_cy)
+                    {
+                        error = lib_framebuffer_incremental_schedule_raw(v);
+                    }
+                    else
+                    {
+                        error = lib_framebuffer_incremental_finish_rect(v);
+                    }
                 }
             }
             break;
@@ -2768,6 +2858,15 @@ lib_mod_connect(struct vnc *v)
                 "VNC incremental framebuffer parser enabled, RAW quantum %d bytes",
                 v->framebuffer_read_quantum);
         }
+        if (v->progressive_flush_enabled)
+        {
+            LOG(LOG_LEVEL_INFO,
+                "VNC progressive RAW flush requested, threshold=%d bytes "
+                "incremental=%d direct_bitmap=%d gfx=%d suppressed=%d",
+                v->progressive_flush_bytes, v->incremental_framebuffer,
+                v->direct_bitmap_output, v->gfx_active,
+                v->suppress_output != 0);
+        }
     }
 
     return error;
@@ -2869,6 +2968,7 @@ lib_mod_set_param(struct vnc *v, const char *name, const char *value)
         const struct xrdp_client_info *client_info =
             (const struct xrdp_client_info *) value;
 
+        v->gfx_active = client_info->gfx != 0;
         v->multimon_configured = client_info->multimon;
 
         /* Save monitor information from the client
@@ -3042,10 +3142,28 @@ mod_init(void)
         const char *profile = g_getenv("XRDP_VNC_PROFILE");
         const char *incremental_fb = g_getenv("XRDP_VNC_INCREMENTAL_FB");
         const char *read_quantum = g_getenv("XRDP_VNC_RAW_QUANTUM_BYTES");
+        const char *progressive_flush =
+            g_getenv("XRDP_VNC_PROGRESSIVE_FLUSH");
+        const char *progressive_bytes =
+            g_getenv("XRDP_VNC_PROGRESSIVE_FLUSH_BYTES");
+        const char *direct_bitmap = g_getenv("XRDP_VNC_DIRECT_BITMAP");
 
         v->profile_enabled = profile != NULL && g_text2bool(profile);
         v->incremental_framebuffer = incremental_fb != NULL &&
                                      g_text2bool(incremental_fb);
+        v->progressive_flush_enabled = progressive_flush != NULL &&
+                                       g_text2bool(progressive_flush);
+        v->progressive_flush_bytes = 262144;
+        if (progressive_bytes != NULL && g_atoi(progressive_bytes) > 0)
+        {
+            v->progressive_flush_bytes =
+                MIN(16 * 1024 * 1024, g_atoi(progressive_bytes));
+        }
+        v->direct_bitmap_output = 1;
+        if (direct_bitmap != NULL && direct_bitmap[0] != '\0')
+        {
+            v->direct_bitmap_output = g_text2bool(direct_bitmap);
+        }
         v->framebuffer_read_quantum = 32768;
         if (read_quantum != NULL)
         {

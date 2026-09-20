@@ -152,6 +152,26 @@ times, plus rectangle and raw-byte counts. Profiling is observational and
 adds logging work, so use `XRDP_VNC_PROFILE=0` for clean latency A/B tests and
 use the profile timings for attribution rather than as a latency baseline.
 
+The opt-in progressive-visibility experiment closes and reopens the classic
+bitmap painter while an incremental RAW VNC rectangle is still being received.
+It keeps `server_paint_rect()` as the backing-store update and does not issue
+another RFB update request:
+
+```sh
+python3 -B src/python/xrdp_vnc_bench.py \
+  --transport rdp --mode input-roundtrip --only lan \
+  --xrdp-env XRDP_VNC_INCREMENTAL_FB=1 \
+  --xrdp-env XRDP_VNC_PROGRESSIVE_FLUSH=1 \
+  --xrdp-env XRDP_VNC_PROGRESSIVE_FLUSH_BYTES=262144
+```
+
+The switch is disabled by default and is accepted only for incremental RAW,
+unsuppressed, non-GFX, direct-bitmap output. CopyRect, cursor, resize, the
+blocking parser, and the normal next-request boundary are unchanged. Its
+`VNC_SCHED` additions are `first_flush_us`, `progressive_flushes`,
+`bytes_before_first_flush`, and `logical_update_us`; keep profiling disabled
+when using the latency result as an A/B comparison.
+
 The `--console-lib` value is a module filename resolved from the optimized
 xrdp installation's compiled module directory; do not pass the full module
 path.

@@ -71,6 +71,22 @@ waiting for a requested update from time processing or flushing it. Because
 the profile logs on the update path, profile-enabled latency is not a clean
 performance baseline; keep profiling disabled for A/B latency comparisons.
 
+With `XRDP_VNC_PROGRESSIVE_FLUSH=1`, the incremental RAW path may close and
+reopen the classic direct-bitmap painter after each configured byte threshold
+while the current RAW rectangle is incomplete. `server_paint_rect()` remains
+the backing-store update, no extra RFB `FramebufferUpdateRequest` is sent,
+and the final logical update still has exactly one next request. The opt-in
+switch is ignored unless incremental parsing, direct bitmap output, and
+non-GFX unsuppressed output are all active. `VNC_SCHED` adds
+`first_flush_us` (update header to the first completed intermediate flush),
+`progressive_flushes`, `bytes_before_first_flush`, and `logical_update_us`
+(update header to the final `server_end_update`).
+
+The direct-RFB T2 is the target pixel observed in decoded RFB bytes, whereas
+the RDP T2 is the pixel observed in the FreeRDP X11 window. Direct RFB is
+therefore a lower-bound transport/capture baseline rather than an exactly
+equivalent viewer-present measurement.
+
 The private IPv6-to-IPv4 RFB relay uses bounded per-direction buffers and
 selector write readiness. It closes a run if a peer leaves more than 16 MiB
 queued, which prevents a stalled destination from turning into unbounded
