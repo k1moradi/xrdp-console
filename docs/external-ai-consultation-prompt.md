@@ -95,8 +95,9 @@ What is in the archive
   memory, PSI, swap, and TCP_INFO sampling.
 - Generic systemd templates and documentation; no credentials, Xauthority
   files, private runtime binaries, backups, or raw run logs are part of the
-  publication tree. The one canonical optimized xrdp source tree is included
-  under `third_party/xrdp-0.10.6.1-optimized` with provenance and notices.
+  publication tree. The optimized xrdp dependency is reproduced from its
+  hash-pinned archive and the patch series under `patches/xrdp/`; generated
+  source and binaries are excluded.
 
 Please review both implementation and project structure. In particular check
 that installed paths are relocatable where they should be, the systemd sample

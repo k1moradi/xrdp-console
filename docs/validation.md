@@ -41,11 +41,10 @@ its framebuffer readback to a Vulkan video encoder. The benchmark therefore
 reports local GL render time separately from capture, xrdp encoding, and RDP
 presentation time.
 
-The optimized daemon source is retained in
-`third_party/xrdp-0.10.6.1-optimized`. The input-first scheduler and bounded
-VNC capture/encoding changes remain in that tree, with graphics-flow-control
-experiments opt-in through their documented environment variables. The
-upstream resize-state fix is integrated in the same source, so activation does
-not roll back the measured scheduling or encoding work. The clean build and
-unit suite pass with `-O3 -march=native`; a live Mac reconnect is still needed
-to validate the black-screen symptom on this machine.
+The optimized daemon is generated from the hash-pinned xrdp archive and
+`patches/xrdp/series`. The retained series contains only the fixed-console
+resize/error-recovery, direct VNC path, and input transport checks; the old
+profiling, parser, request-ahead, progressive-flush, cache, and experimental
+GFX changes are not permanent dependency patches. The clean build and unit
+suite pass with `-O3 -march=native`; a live Mac reconnect is still needed to
+validate the black-screen symptom on this machine.

@@ -1,14 +1,13 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Use the persistent optimized xrdp 0.10.6.1 daemon for the physical x11vnc
-# console.  It contains the VNC scheduling/encoding optimizations and the
-# upstream resize-state fix.  The service drop-in is backed up and restored on
-# failure; no source or binary is copied through /tmp.
+# Use the generated patched xrdp 0.10.6.1 daemon for the physical x11vnc
+# console. The service drop-in is backed up and restored on failure; no source
+# or binary is copied through /tmp.
 
 set -eu
 
 workspace_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-prefix=$workspace_root/build/prefix/xrdp-optimized-resize
+prefix=${XRDP_CONSOLE_XRDP_INSTALL_DIR:-$workspace_root/build/_deps/xrdp-install}
 daemon=$prefix/sbin/xrdp
 module=$prefix/lib/xrdp/libvnc.so
 dropin=/etc/systemd/system/xrdp.service.d/upstream-local.conf
@@ -29,15 +28,6 @@ if [ ! -f "$module" ]; then
     echo "Missing optimized module $module" >&2
     exit 1
 fi
-if ! strings "$daemon" | grep -q 'XRDP_VNC_GFX_PROFILE'; then
-    echo "$daemon does not contain the VNC optimization profile" >&2
-    exit 1
-fi
-if ! strings "$daemon" | grep -q "Disabling GFX as 'drdynvc' isn't available"; then
-    echo "$daemon does not contain the GFX compatibility path" >&2
-    exit 1
-fi
-
 stamp=$(date +%Y%m%d-%H%M%S)
 backup="$dropin.xrdp-console-before-optimized-resize-$stamp"
 candidate_dropin="$dropin.xrdp-console-optimized-resize-$stamp.new"

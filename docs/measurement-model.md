@@ -70,68 +70,12 @@ The viewer path is useful for separating VNC-client presentation cost from
 the server-side path. It is still a private comparison path; it does not
 replace the production VNC listener or the complete RDP measurement.
 
-The optimized xrdp candidate also has an opt-in server profile. Set
-`XRDP_VNC_PROFILE=1` only on the private daemon with the benchmark's
-`--xrdp-env XRDP_VNC_PROFILE=1` option. It emits aggregate `VNC_PERF` lines,
-rather than restoring per-PDU INFO logging. The VNC-side line measures the
-framebuffer parser through `server_end_update`; the painter-side line reports
-raw framebuffer bytes copied, copy time, bitmap-path time, encode time, send
-time, PDU count, and RDP bitmap stream bytes. These are server-stage timings,
-not a replacement for the client-visible T2 measurement. `wire_bytes` in
-these lines is the RDP bitmap PDU stream size and excludes TCP/TLS framing.
-The same profile emits `VNC_SCHED` per-update lines with `seq`, request
-`wait_us`, parser/process `process_us`, server flush `flush_us`, the gap to
-the next request, and `rects`/`raw_bytes`. These fields distinguish time spent
-waiting for a requested update from time processing or flushing it. Because
-the profile logs on the update path, profile-enabled latency is not a clean
-performance baseline; keep profiling disabled for A/B latency comparisons.
-
-Set `XRDP_VNC_PROFILE_POINT_X` and `XRDP_VNC_PROFILE_POINT_Y` together to
-enable the narrow point profiler. When a successful RAW rectangle paints the
-configured point, xrdp records a monotonic `VNC_POINT` timestamp; the next
-server flush records `flush_begin_ns` and `send_end_ns`. It also decodes the
-RAW pixel as marker state `1` for red or `0` for blue and records the flush
-`result`. The benchmark joins only successful records with the same expected
-marker state, in monotonic order, rather than pairing unrelated updates that
-happen to cover the same coordinate. It reports:
-
-```text
-draw -> VNC paint
-VNC paint -> flush begin
-flush begin -> RDP send return
-RDP send return -> client visible
-draw -> client visible
-```
-
-`send_end_ns` is sampled after the xrdp painter's flush callback returns, so
-it is a server-side completion boundary rather than proof that the client has
-already presented the bytes. In particular, a negative send-to-visible value
-can occur when the client renders data before the server-side write call has
-returned.
-
-With `XRDP_VNC_PROGRESSIVE_FLUSH=1`, the incremental RAW path may close and
-reopen the classic direct-bitmap painter after each configured byte threshold
-while the current RAW rectangle is incomplete. `server_paint_rect()` remains
-the backing-store update, no extra RFB `FramebufferUpdateRequest` is sent,
-and the final logical update still has exactly one next request. The opt-in
-switch is ignored unless incremental parsing, direct bitmap output, and
-non-GFX unsuppressed output are all active. `VNC_SCHED` adds
-`first_flush_us` (update header to the first completed intermediate flush),
-`progressive_flushes`, `bytes_before_first_flush`, and `logical_update_us`
-(update header to the final `server_end_update`).
-
-The separate `XRDP_VNC_REQUEST_AHEAD=1` experiment arms at most one
-incremental RFB request after the current update header and a single nonempty
-RAW rectangle header are received, before that update's RDP flush completes.
-It is restricted to incremental, direct-bitmap, unsuppressed, non-GFX output
-and is disabled by default. The request remains bounded: the next request is
-not armed again until the current logical update completes. Restricting the
-experiment to one RAW rectangle avoids sending a request with stale geometry
-when an update contains resize or other pseudo-encoding rectangles. In
-`VNC_SCHED`, `next_request_lead_us` measures how far ahead that request was
-sent; `next_request_gap_us` remains the gap when the request is sent after the
-server flush. This path is for a fixed-variable A/B experiment, not a
-production default.
+The generated xrdp dependency intentionally excludes the old
+`XRDP_VNC_PROFILE`/`VNC_SCHED` server instrumentation. The benchmark's
+profile parser remains available for historical logs, but these records are
+not emitted by the current native daemon. Server-side attribution is therefore
+not part of the current measurement contract; add it later as a separately
+justified diagnostic change.
 
 The direct-RFB T2 is the target pixel observed in decoded RFB bytes, whereas
 the RDP T2 is the pixel observed in the FreeRDP X11 window. Direct RFB is

@@ -1,12 +1,12 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Install the checked-out optimized xrdp build as the physical-console service.
+# Install the generated patched xrdp build as the physical-console service.
 # This deliberately keeps /etc/xrdp and the existing x11vnc service intact.
 
 set -eu
 
 workspace_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-prefix=$workspace_root/build/prefix/xrdp-optimized-resize
+prefix=${XRDP_CONSOLE_XRDP_INSTALL_DIR:-$workspace_root/build/_deps/xrdp-install}
 daemon=$prefix/sbin/xrdp
 sesman=$prefix/sbin/xrdp-sesman
 chansrv=$prefix/sbin/xrdp-chansrv
@@ -22,8 +22,8 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 if [ ! -x "$daemon" ] || [ ! -x "$sesman" ] || [ ! -x "$chansrv" ]; then
-    echo "The optimized xrdp build is incomplete under $prefix" >&2
-    echo "Build it first with: XRDP_X264_SYSROOT=/ $workspace_root/scripts/build-optimized-xrdp.sh" >&2
+    echo "The patched xrdp build is incomplete under $prefix" >&2
+    echo "Build it first with: $workspace_root/scripts/build-optimized-xrdp.sh" >&2
     exit 1
 fi
 if [ ! -f "$module" ]; then
@@ -32,10 +32,6 @@ if [ ! -f "$module" ]; then
 fi
 if ! "$daemon" --version 2>/dev/null | grep -q '^xrdp 0\.10\.6\.1'; then
     echo "$daemon is not the expected xrdp 0.10.6.1 build" >&2
-    exit 1
-fi
-if ! strings "$daemon" | grep -q 'XRDP_VNC_GFX_PROFILE'; then
-    echo "$daemon does not contain the optimized VNC profile" >&2
     exit 1
 fi
 if [ ! -r /etc/xrdp/xrdp.ini ] || [ ! -r /etc/xrdp/sesman.ini ]; then

@@ -1,4 +1,0 @@
-
-SUBDIRS = \
-  chkpriv \
-  devel

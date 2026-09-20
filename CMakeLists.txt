@@ -10,14 +10,17 @@ include(GNUInstallDirs)
 include(CTest)
 
 option(XRDP_CONSOLE_NATIVE
-    "Enable -march=native for local benchmark helpers (non-portable)"
-    OFF)
+    "Enable host-native optimization for all project targets (non-portable)"
+    ON)
 option(XRDP_CONSOLE_ENABLE_CODEC_BENCH
     "Build the optional offline RFX/x264 codec benchmark"
     ON)
 option(XRDP_CONSOLE_BUILD_TOOLS
     "Build benchmark and diagnostic tools"
     ON)
+option(XRDP_CONSOLE_BUILD_XRDP
+    "Build the pinned patched xrdp dependency under build/_deps"
+    OFF)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -35,7 +38,11 @@ set(CMAKE_INSTALL_DOCDIR
     "${CMAKE_INSTALL_DATADIR}/doc/${XRDP_CONSOLE_INSTALL_DIR}")
 
 if(XRDP_CONSOLE_NATIVE)
-    add_compile_options(-march=native -mtune=native)
+    add_compile_options(-O3 -march=native -mtune=native)
+endif()
+
+if(XRDP_CONSOLE_BUILD_XRDP)
+    include(cmake/xrdp_dependency.cmake)
 endif()
 
 # The first-party runtime is intentionally empty until the direct-X11 module
@@ -73,8 +80,6 @@ install(PROGRAMS scripts/diagnose-console-stack.sh
 install(PROGRAMS scripts/restart-console-stack.sh
     DESTINATION ${XRDP_CONSOLE_DATA_DIR})
 install(FILES README.md LICENSE NOTICE THIRD_PARTY.md
-    DESTINATION ${CMAKE_INSTALL_DOCDIR})
-install(FILES third_party/xrdp-optimized-provenance.txt
     DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(DIRECTORY docs/ DESTINATION ${CMAKE_INSTALL_DOCDIR}/docs)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/x11vnc-console.service

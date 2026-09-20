@@ -1,0 +1,34 @@
+--- a/xrdp/xrdp_process.c
++++ b/xrdp/xrdp_process.c
+@@ -284,11 +284,31 @@
+                 break;
+             }
+ 
++            /*
++             * Service the RDP client transport before backend/window-manager
++             * work.  In particular, the VNC backend can synchronously consume
++             * a complete framebuffer update, so processing it first can delay
++             * keyboard and mouse PDUs that are already waiting on the client
++             * socket.  This changes service order only; it does not add polling
++             * or change the graphics update rate.
++             */
++            if (trans_check_wait_objs(self->server_trans) != 0)
++            {
++                break;
++            }
++
+             if (xrdp_wm_check_wait_objs(self->wm) != 0)
+             {
+                 break;
+             }
+ 
++            /*
++             * Backend work can take long enough for fresh input to arrive
++             * after the first client check.  Re-check the client transport
++             * before sleeping again so that input is not deferred for another
++             * backend/update cycle.  Keep this as an experimental follow-up:
++             * it adds one non-blocking transport check per loop iteration.
++             */
+             if (trans_check_wait_objs(self->server_trans) != 0)
+             {
+                 break;

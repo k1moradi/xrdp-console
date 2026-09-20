@@ -50,7 +50,9 @@ recreating the surfaces, leaving a black framebuffer with only a cursor. The
 upstream fix is tracked in [issue #3833](https://github.com/neutrinolabs/xrdp/issues/3833)
 and [PR #3755](https://github.com/neutrinolabs/xrdp/pull/3755). This workspace
 applies that state-machine fix on top of the VNC input/encoding optimizations
-in `third_party/xrdp-0.10.6.1-optimized`.
+in the pinned xrdp dependency generated under `build/_deps/`. The retained
+changes and their reasons are documented in
+[`docs/xrdp-dependency.md`](xrdp-dependency.md).
 
 The VNC module also honors `enable_dynamic_resizing=false` during its initial
 connection. It requests the physical framebuffer immediately instead of
@@ -60,9 +62,10 @@ for a fixed X11 console when the Mac client opens at a different resolution.
 Build the candidate with `scripts/build-optimized-xrdp.sh`. It uses one worker,
 `-O3`, and `-march=native` because this binary is for the current laptop. Use
 `scripts/use-matched-xrdp-console-daemon.sh` to switch the service drop-in
-reversibly. The script selects the persistent workspace binary and matching
-`libvnc.so`, preserves the existing GFX-disabled console settings, and restores
-the old drop-in if the service does not remain active.
+reversibly. The script selects the generated
+`build/_deps/xrdp-install/{sbin,lib/xrdp}` artifacts, preserves the existing
+GFX-disabled console settings, and restores the old drop-in if the service
+does not remain active.
 
 This activation changes only the xrdp daemon. The existing xrdp-sesman,
 xrdp-chansrv, x11vnc service, clipboard channel, and performance profile stay
@@ -87,6 +90,6 @@ matching `x11vnc-console-clean-shutdown.conf` drop-in in the installed systemd
 template directory can be applied instead.
 
 The project does not replace the distribution x11vnc binary. The optimized
-xrdp source is included under `third_party/xrdp-0.10.6.1-optimized` as the
-single reproducible daemon candidate; its build output stays below the local
-workspace prefix until the administrator explicitly activates it.
+xrdp candidate is reproducible from the hash-pinned archive and
+`patches/xrdp/series`; its generated build output stays below
+`build/_deps/xrdp-install` until the administrator explicitly activates it.

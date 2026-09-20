@@ -1,25 +1,16 @@
 # Third-party components
 
-The current runtime bridge uses xrdp, x11vnc, FreeRDP, Xvfb, Mesa, and Vulkan from
-the operating system. The workspace additionally retains the xrdp 0.10.6.1
-source used for the optional optimized shared-console daemon under
-`third_party/xrdp-0.10.6.1-optimized`; that tree is built locally and is never
-installed by the CMake package automatically. Its upstream license and notices
-remain in that source tree. This checkout is transitional: the planned
-dependency migration will fetch xrdp under `build/_deps/` and apply only the
-small required patch series from `patches/xrdp/`.
+The runtime bridge uses xrdp, x11vnc, FreeRDP, Xvfb, Mesa, and Vulkan from the
+operating system. The optional optimized xrdp daemon is reproduced from the
+hash-pinned xrdp 0.10.6.1 archive and the small patch series under
+`patches/xrdp/`. CMake downloads and builds it below `build/_deps/`; the
+generated source and binaries are not first-party files and are never
+installed into the system automatically.
 
-The benchmark can optionally link the offline codec probe against the system
-`rfxcodec` and `x264` development libraries. That target is disabled at
-configure time when either dependency is absent. The codec probe is not used
-by the end-to-end benchmark.
-
-The optimized xrdp build currently uses the small x86_64 `libxkbfile` development
-sysroot under `deps/sysroot-xkbfile`. Its static archive and headers are
-redistributed with the permissive notices in
-`usr/share/doc/libxkbfile-dev/copyright`; this sysroot is a build convenience,
-not a replacement for the host's X11 runtime libraries and is scheduled for
-removal in the dependency-migration step.
+The xrdp build uses the host's development packages by default. Private
+dependency locations can be supplied with the CMake cache variables documented
+in `docs/xrdp-dependency.md`. No dependency sysroot or generated binary is
+checked in.
 
 The following interfaces are used:
 

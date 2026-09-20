@@ -1,10 +1,10 @@
 # Publishing checklist
 
-The repository is a standalone GPLv3 project. It publishes the patched xrdp
-source needed to reproduce the optimized shared-console daemon under
-`third_party/xrdp-0.10.6.1-optimized`, together with its license notices. It
-does not publish private binaries, credentials, Xauthority cookies, systemd
-backups, or raw benchmark logs.
+The repository is a standalone GPLv3 project. It publishes the upstream xrdp
+version and archive hash together with the small patch series needed to
+reproduce the optimized shared-console daemon. The generated source, private
+binaries, credentials, Xauthority cookies, systemd backups, and raw benchmark
+logs are not published.
 
 Work directly on `main`; this project does not create release or publication
 branches. Set a real Git identity and verify that the remote is the intended
@@ -18,7 +18,7 @@ git remote -v
 git fetch origin --prune
 git status --short
 git switch main
-git diff --cached --check -- . ':(exclude)third_party'
+git diff --cached --check
 git commit -m "Publish optimized xrdp and x11vnc benchmark toolkit"
 git push -u origin main
 ```
