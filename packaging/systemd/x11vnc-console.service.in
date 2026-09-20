@@ -12,6 +12,10 @@ EnvironmentFile=-/etc/default/xrdp-vnc-bench
 ExecStart=/usr/@CMAKE_INSTALL_LIBEXECDIR@/xrdp-vnc-bench/x11vnc-console
 Restart=on-failure
 RestartSec=2
+# x11vnc returns status 2 when stopped with SIGTERM, while SIGINT is its
+# clean shutdown path. Keep intentional systemd stops successful without
+# treating status 2 as a successful startup or runtime exit.
+KillSignal=SIGINT
 TimeoutStopSec=5
 
 [Install]

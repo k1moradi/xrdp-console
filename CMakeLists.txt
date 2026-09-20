@@ -146,6 +146,12 @@ if(XRDP_VNC_BUILD_TESTS)
         COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_proxy.py)
     set_tests_properties(proxy-backpressure-unit PROPERTIES
         ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+    add_test(NAME systemd-unit
+        COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_systemd_unit.py)
+    set_tests_properties(systemd-unit PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 endif()
 
 install(TARGETS ${BENCHMARK_BINARIES}
@@ -172,6 +178,8 @@ install(FILES third_party/xrdp-optimized-provenance.txt
     DESTINATION ${CMAKE_INSTALL_DOCDIR})
 install(DIRECTORY docs/ DESTINATION ${CMAKE_INSTALL_DOCDIR}/docs)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/x11vnc-console.service
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench/systemd)
+install(FILES packaging/systemd/x11vnc-console-clean-shutdown.conf
     DESTINATION ${CMAKE_INSTALL_DATADIR}/xrdp-vnc-bench/systemd)
 install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/x11vnc-console
     ${CMAKE_CURRENT_BINARY_DIR}/x11vnc-console-refresh

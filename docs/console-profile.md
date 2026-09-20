@@ -79,7 +79,12 @@ multi-user systems. If the display manager has a stable, administrator-reviewed
 cookie discovery policy, set `XRDP_VNC_ALLOW_AUTH_DISCOVERY=1` explicitly.
 Validate the generated `[Console]` section before enabling it. Keep the VNC
 listener on loopback and do not reuse a login or sudo password as the VNC
-password.
+password. The service template sets `KillSignal=SIGINT`: x11vnc returns status
+2 for SIGTERM but uses status 0 for its clean SIGINT shutdown path. Do not
+add `SuccessExitStatus=2`, since status 2 must remain visible for genuine
+startup or runtime failures. For an already-installed hand-written unit, the
+matching `x11vnc-console-clean-shutdown.conf` drop-in in the installed systemd
+template directory can be applied instead.
 
 The project does not replace the distribution x11vnc binary. The optimized
 xrdp source is included under `third_party/xrdp-0.10.6.1-optimized` as the
