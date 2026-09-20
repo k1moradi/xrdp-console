@@ -128,9 +128,22 @@ xrdp_painter_send_dirty(struct xrdp_painter *self)
             send_error = libxrdp_send_bitmap(self->session, cx, cy, bpp,
                                              ldata, rect.left, rect.top,
                                              cx, cy);
-            LOG(send_error == 0 ? LOG_LEVEL_INFO : LOG_LEVEL_ERROR,
-                "RDP direct bitmap output: rect=%dx%d+%d+%d bytes=%d result=%d",
-                cx, cy, rect.left, rect.top, cx * cy * Bpp, send_error);
+            if (send_error == 0)
+            {
+                LOG_DEVEL(LOG_LEVEL_TRACE,
+                          "RDP direct bitmap output: rect=%dx%d+%d+%d "
+                          "bytes=%d result=%d",
+                          cx, cy, rect.left, rect.top, cx * cy * Bpp,
+                          send_error);
+            }
+            else
+            {
+                LOG(LOG_LEVEL_ERROR,
+                    "RDP direct bitmap output: rect=%dx%d+%d+%d "
+                    "bytes=%d result=%d",
+                    cx, cy, rect.left, rect.top, cx * cy * Bpp,
+                    send_error);
+            }
             g_free(ldata);
 
             if (send_error != 0)
@@ -336,8 +349,16 @@ xrdp_painter_end_update(struct xrdp_painter *self)
     }
 
     rv = libxrdp_orders_send(self->session);
-    LOG(rv == 0 ? LOG_LEVEL_INFO : LOG_LEVEL_ERROR,
-        "RDP bitmap-cache/orders flush: result=%d", rv);
+    if (rv == 0)
+    {
+        LOG_DEVEL(LOG_LEVEL_TRACE,
+                  "RDP bitmap-cache/orders flush: result=%d", rv);
+    }
+    else
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "RDP bitmap-cache/orders flush: result=%d", rv);
+    }
     return rv;
 }
 

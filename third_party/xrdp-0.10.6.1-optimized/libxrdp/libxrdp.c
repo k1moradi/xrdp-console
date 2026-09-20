@@ -607,10 +607,20 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
 
             rv = xrdp_rdp_send_data((struct xrdp_rdp *)session->rdp, s,
                                     RDP_DATA_PDU_UPDATE);
-            LOG(LOG_LEVEL_INFO,
-                "RDP bitmap compressed PDU: updates=%d bytes=%d "
-                "remaining_lines=%d result=%d",
-                num_updates, total_bufsize, i, rv);
+            if (rv == 0)
+            {
+                LOG_DEVEL(LOG_LEVEL_TRACE,
+                          "RDP bitmap compressed PDU: updates=%d bytes=%d "
+                          "remaining_lines=%d result=%d",
+                          num_updates, total_bufsize, i, rv);
+            }
+            else
+            {
+                LOG(LOG_LEVEL_ERROR,
+                    "RDP bitmap compressed PDU: updates=%d bytes=%d "
+                    "remaining_lines=%d result=%d",
+                    num_updates, total_bufsize, i, rv);
+            }
             if (rv != 0)
             {
                 LOG(LOG_LEVEL_ERROR,
@@ -734,10 +744,22 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
                           RDP_UPDATE_BITMAP);
                 rv = xrdp_rdp_send_data((struct xrdp_rdp *)session->rdp, s,
                                         RDP_DATA_PDU_UPDATE);
-                LOG(LOG_LEVEL_INFO,
-                    "RDP bitmap raw PDU: rect=%dx%d+%d+%d bytes=%d result=%d",
-                    cx, lines_sending, x, y + i,
-                    line_pad_bytes * lines_sending, rv);
+                if (rv == 0)
+                {
+                    LOG_DEVEL(LOG_LEVEL_TRACE,
+                              "RDP bitmap raw PDU: rect=%dx%d+%d+%d "
+                              "bytes=%d result=%d",
+                              cx, lines_sending, x, y + i,
+                              line_pad_bytes * lines_sending, rv);
+                }
+                else
+                {
+                    LOG(LOG_LEVEL_ERROR,
+                        "RDP bitmap raw PDU: rect=%dx%d+%d+%d "
+                        "bytes=%d result=%d",
+                        cx, lines_sending, x, y + i,
+                        line_pad_bytes * lines_sending, rv);
+                }
                 if (rv != 0)
                 {
                     LOG(LOG_LEVEL_ERROR,

@@ -1128,11 +1128,22 @@ send_update_request_for_resize_status(struct vnc *v)
             break;
     }
 
-    LOG(error == 0 ? LOG_LEVEL_INFO : LOG_LEVEL_ERROR,
-        "VNC framebuffer request: incremental=0 geometry=%dx%d "
-        "resize_status=%d suppress=%d result=%d",
-        request_width, request_height, v->resize_status,
-        v->suppress_output, error);
+    if (error == 0)
+    {
+        LOG_DEVEL(LOG_LEVEL_TRACE,
+                  "VNC framebuffer request: incremental=0 geometry=%dx%d "
+                  "resize_status=%d suppress=%d result=%d",
+                  request_width, request_height, v->resize_status,
+                  v->suppress_output, error);
+    }
+    else
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "VNC framebuffer request: incremental=0 geometry=%dx%d "
+            "resize_status=%d suppress=%d result=%d",
+            request_width, request_height, v->resize_status,
+            v->suppress_output, error);
+    }
 
     free_stream(s);
 
@@ -1346,11 +1357,11 @@ lib_framebuffer_update(struct vnc *v)
     {
         in_uint8s(s, 1);
         in_uint16_be(s, num_recs);
-        LOG(LOG_LEVEL_INFO,
-            "VNC framebuffer update begin: parser=blocking rects=%d "
-            "server=%dx%d",
-            num_recs, v->server_layout.total_width,
-            v->server_layout.total_height);
+        LOG_DEVEL(LOG_LEVEL_TRACE,
+                  "VNC framebuffer update begin: parser=blocking rects=%d "
+                  "server=%dx%d",
+                  num_recs, v->server_layout.total_width,
+                  v->server_layout.total_height);
         error = v->server_begin_update(v);
     }
 
@@ -1486,10 +1497,20 @@ lib_framebuffer_update(struct vnc *v)
     if (error == 0)
     {
         error = v->server_end_update(v);
-        LOG(error == 0 ? LOG_LEVEL_INFO : LOG_LEVEL_ERROR,
-            "VNC framebuffer server_end_update: parser=blocking "
-            "rects=%d raw_rects=%d raw_bytes=%lld result=%d",
-            num_recs, raw_rects, raw_bytes, error);
+        if (error == 0)
+        {
+            LOG_DEVEL(LOG_LEVEL_TRACE,
+                      "VNC framebuffer server_end_update: parser=blocking "
+                      "rects=%d raw_rects=%d raw_bytes=%lld result=%d",
+                      num_recs, raw_rects, raw_bytes, error);
+        }
+        else
+        {
+            LOG(LOG_LEVEL_ERROR,
+                "VNC framebuffer server_end_update: parser=blocking "
+                "rects=%d raw_rects=%d raw_bytes=%lld result=%d",
+                num_recs, raw_rects, raw_bytes, error);
+        }
     }
 
     if (error == 0 && raw_rects > 0 && !v->first_frame_logged)
@@ -1515,17 +1536,38 @@ lib_framebuffer_update(struct vnc *v)
             out_uint16_be(s, v->server_layout.total_height);
             s_mark_end(s);
             error = lib_send_copy(v, s);
-            LOG(error == 0 ? LOG_LEVEL_INFO : LOG_LEVEL_ERROR,
-                "VNC framebuffer request: incremental=1 "
-                "geometry=%dx%d result=%d",
-                v->server_layout.total_width,
-                v->server_layout.total_height, error);
+            if (error == 0)
+            {
+                LOG_DEVEL(LOG_LEVEL_TRACE,
+                          "VNC framebuffer request: incremental=1 "
+                          "geometry=%dx%d result=%d",
+                          v->server_layout.total_width,
+                          v->server_layout.total_height, error);
+            }
+            else
+            {
+                LOG(LOG_LEVEL_ERROR,
+                    "VNC framebuffer request: incremental=1 "
+                    "geometry=%dx%d result=%d",
+                    v->server_layout.total_width,
+                    v->server_layout.total_height, error);
+            }
         }
     }
 
-    LOG(error == 0 ? LOG_LEVEL_INFO : LOG_LEVEL_ERROR,
-        "VNC framebuffer update end: parser=blocking rects=%d result=%d",
-        num_recs, error);
+    if (error == 0)
+    {
+        LOG_DEVEL(LOG_LEVEL_TRACE,
+                  "VNC framebuffer update end: parser=blocking rects=%d "
+                  "result=%d",
+                  num_recs, error);
+    }
+    else
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "VNC framebuffer update end: parser=blocking rects=%d result=%d",
+            num_recs, error);
+    }
 
     free_stream(s);
     free_stream(pixel_s);
@@ -1580,10 +1622,20 @@ lib_framebuffer_incremental_finish_update(struct vnc *v)
     int error;
 
     error = v->server_end_update(v);
-    LOG(error == 0 ? LOG_LEVEL_INFO : LOG_LEVEL_ERROR,
-        "VNC framebuffer server_end_update: parser=incremental "
-        "result=%d",
-        error);
+    if (error == 0)
+    {
+        LOG_DEVEL(LOG_LEVEL_TRACE,
+                  "VNC framebuffer server_end_update: parser=incremental "
+                  "result=%d",
+                  error);
+    }
+    else
+    {
+        LOG(LOG_LEVEL_ERROR,
+            "VNC framebuffer server_end_update: parser=incremental "
+            "result=%d",
+            error);
+    }
     if (error == 0 && v->suppress_output == 0)
     {
         make_stream(s);
@@ -1596,11 +1648,22 @@ lib_framebuffer_incremental_finish_update(struct vnc *v)
         out_uint16_be(s, v->server_layout.total_height);
         s_mark_end(s);
         error = lib_send_copy(v, s);
-        LOG(error == 0 ? LOG_LEVEL_INFO : LOG_LEVEL_ERROR,
-            "VNC framebuffer request: incremental=1 "
-            "geometry=%dx%d result=%d",
-            v->server_layout.total_width,
-            v->server_layout.total_height, error);
+        if (error == 0)
+        {
+            LOG_DEVEL(LOG_LEVEL_TRACE,
+                      "VNC framebuffer request: incremental=1 "
+                      "geometry=%dx%d result=%d",
+                      v->server_layout.total_width,
+                      v->server_layout.total_height, error);
+        }
+        else
+        {
+            LOG(LOG_LEVEL_ERROR,
+                "VNC framebuffer request: incremental=1 "
+                "geometry=%dx%d result=%d",
+                v->server_layout.total_width,
+                v->server_layout.total_height, error);
+        }
         free_stream(s);
     }
 
@@ -1707,12 +1770,12 @@ lib_framebuffer_incremental_data(struct vnc *v, struct stream *s)
         case VNC_FB_WAIT_UPDATE_HEADER:
             in_uint8s(s, 1);
             in_uint16_be(s, v->framebuffer_rects_remaining);
-            LOG(LOG_LEVEL_INFO,
-                "VNC framebuffer update begin: parser=incremental "
-                "rects=%d server=%dx%d",
-                v->framebuffer_rects_remaining,
-                v->server_layout.total_width,
-                v->server_layout.total_height);
+            LOG_DEVEL(LOG_LEVEL_TRACE,
+                      "VNC framebuffer update begin: parser=incremental "
+                      "rects=%d server=%dx%d",
+                      v->framebuffer_rects_remaining,
+                      v->server_layout.total_width,
+                      v->server_layout.total_height);
             error = v->server_begin_update(v);
             if (error != 0)
             {
@@ -1748,12 +1811,12 @@ lib_framebuffer_incremental_data(struct vnc *v, struct stream *s)
                 v->framebuffer_raw_row_bytes =
                     v->framebuffer_cx * get_bytes_per_pixel(v->server_bpp);
                 v->framebuffer_raw_rows_done = 0;
-                LOG(LOG_LEVEL_INFO,
-                    "VNC framebuffer rect: parser=incremental "
-                    "encoding=RAW rect=%dx%d+%d+%d row_bytes=%d",
-                    v->framebuffer_cx, v->framebuffer_cy,
-                    v->framebuffer_x, v->framebuffer_y,
-                    v->framebuffer_raw_row_bytes);
+                LOG_DEVEL(LOG_LEVEL_TRACE,
+                          "VNC framebuffer rect: parser=incremental "
+                          "encoding=RAW rect=%dx%d+%d+%d row_bytes=%d",
+                          v->framebuffer_cx, v->framebuffer_cy,
+                          v->framebuffer_x, v->framebuffer_y,
+                          v->framebuffer_raw_row_bytes);
                 if (v->framebuffer_cx == 0 || v->framebuffer_cy == 0)
                 {
                     /* A zero-area RAW rectangle has no payload. */
@@ -1886,8 +1949,8 @@ lib_framebuffer_incremental_data(struct vnc *v, struct stream *s)
 static int
 lib_framebuffer_incremental_begin(struct vnc *v)
 {
-    LOG(LOG_LEVEL_INFO,
-        "VNC framebuffer message received: parser=incremental");
+    LOG_DEVEL(LOG_LEVEL_TRACE,
+              "VNC framebuffer message received: parser=incremental");
     v->framebuffer_parse_state = VNC_FB_WAIT_UPDATE_HEADER;
     v->trans->header_size = 3;
     return 0;
@@ -2030,11 +2093,11 @@ lib_mod_process_message(struct vnc *v, struct stream *s)
 int
 lib_mod_start(struct vnc *v, int w, int h, int bpp)
 {
-    LOG(LOG_LEVEL_INFO,
-        "VNC module initial RDP clear: geometry=%dx%d bpp=%d "
-        "server_geometry=%dx%d",
-        w, h, bpp, v->server_layout.total_width,
-        v->server_layout.total_height);
+    LOG_DEVEL(LOG_LEVEL_TRACE,
+              "VNC module initial RDP clear: geometry=%dx%d bpp=%d "
+              "server_geometry=%dx%d",
+              w, h, bpp, v->server_layout.total_width,
+              v->server_layout.total_height);
 
     v->server_begin_update(v);
     v->server_set_fgcolor(v, 0);
