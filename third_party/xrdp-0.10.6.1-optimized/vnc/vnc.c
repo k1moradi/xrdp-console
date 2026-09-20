@@ -59,6 +59,28 @@ lib_send_copy(struct vnc *v, struct stream *s)
 }
 
 /******************************************************************************/
+static void
+vnc_log_profile(const struct vnc *v, const char *parser, tui64 start_ns,
+                int rects, int raw_rects, long long raw_bytes, int result)
+{
+    tui64 end_ns;
+    tui64 elapsed_ns;
+
+    if (!v->profile_enabled)
+    {
+        return;
+    }
+
+    end_ns = g_time_monotonic_ns();
+    elapsed_ns = (end_ns > start_ns) ? end_ns - start_ns : 0;
+    LOG(LOG_LEVEL_INFO,
+        "VNC_PERF parser=%s rects=%d raw_rects=%d raw_bytes=%lld "
+        "update_us=%llu result=%d",
+        parser, rects, raw_rects, raw_bytes,
+        (unsigned long long)(elapsed_ns / 1000), result);
+}
+
+/******************************************************************************/
 /* taken from vncauth.c */
 /* performing the des3 crypt on the password so it can not be seen
    on the wire
@@ -1338,14 +1360,18 @@ lib_framebuffer_update(struct vnc *v)
     int error;
     int need_size;
     int raw_rects;
+    int profile_logged;
     long long raw_bytes;
+    tui64 profile_start_ns;
     struct stream *s;
     struct stream *pixel_s;
     struct vnc_screen_layout layout = { 0 };
 
     num_recs = 0;
     raw_rects = 0;
+    profile_logged = 0;
     raw_bytes = 0;
+    profile_start_ns = v->profile_enabled ? g_time_monotonic_ns() : 0;
 
     make_stream(pixel_s);
 
@@ -1511,6 +1537,9 @@ lib_framebuffer_update(struct vnc *v)
                 "rects=%d raw_rects=%d raw_bytes=%lld result=%d",
                 num_recs, raw_rects, raw_bytes, error);
         }
+        vnc_log_profile(v, "blocking", profile_start_ns, num_recs,
+                        raw_rects, raw_bytes, error);
+        profile_logged = 1;
     }
 
     if (error == 0 && raw_rects > 0 && !v->first_frame_logged)
@@ -1567,6 +1596,12 @@ lib_framebuffer_update(struct vnc *v)
         LOG(LOG_LEVEL_ERROR,
             "VNC framebuffer update end: parser=blocking rects=%d result=%d",
             num_recs, error);
+    }
+
+    if (v->profile_enabled && !profile_logged)
+    {
+        vnc_log_profile(v, "blocking", profile_start_ns, num_recs,
+                        raw_rects, raw_bytes, error);
     }
 
     free_stream(s);
@@ -1636,6 +1671,10 @@ lib_framebuffer_incremental_finish_update(struct vnc *v)
             "result=%d",
             error);
     }
+    vnc_log_profile(v, "incremental", v->profile_update_start_ns,
+                    v->profile_update_rects, v->profile_update_raw_rects,
+                    v->profile_update_raw_bytes, error);
+    v->profile_update_start_ns = 0;
     if (error == 0 && v->suppress_output == 0)
     {
         make_stream(s);
@@ -1770,6 +1809,13 @@ lib_framebuffer_incremental_data(struct vnc *v, struct stream *s)
         case VNC_FB_WAIT_UPDATE_HEADER:
             in_uint8s(s, 1);
             in_uint16_be(s, v->framebuffer_rects_remaining);
+            if (v->profile_enabled)
+            {
+                v->profile_update_start_ns = g_time_monotonic_ns();
+                v->profile_update_rects = v->framebuffer_rects_remaining;
+                v->profile_update_raw_rects = 0;
+                v->profile_update_raw_bytes = 0;
+            }
             LOG_DEVEL(LOG_LEVEL_TRACE,
                       "VNC framebuffer update begin: parser=incremental "
                       "rects=%d server=%dx%d",
@@ -1918,6 +1964,15 @@ lib_framebuffer_incremental_data(struct vnc *v, struct stream *s)
                         s->data, v->framebuffer_cx, rows, 0, 0);
             if (error == 0)
             {
+                if (v->profile_enabled)
+                {
+                    v->profile_update_raw_bytes += bytes;
+                    if (v->framebuffer_raw_rows_done + rows >=
+                            v->framebuffer_cy)
+                    {
+                        v->profile_update_raw_rects++;
+                    }
+                }
                 v->framebuffer_raw_rows_done += rows;
                 if (v->framebuffer_raw_rows_done < v->framebuffer_cy)
                 {
@@ -2882,9 +2937,11 @@ mod_init(void)
     v->enabled_encodings_mask = -1;
     v->dynamic_resizing = 1;
     {
+        const char *profile = g_getenv("XRDP_VNC_PROFILE");
         const char *incremental_fb = g_getenv("XRDP_VNC_INCREMENTAL_FB");
         const char *read_quantum = g_getenv("XRDP_VNC_RAW_QUANTUM_BYTES");
 
+        v->profile_enabled = profile != NULL && g_text2bool(profile);
         v->incremental_framebuffer = incremental_fb != NULL &&
                                      g_text2bool(incremental_fb);
         v->framebuffer_read_quantum = 32768;

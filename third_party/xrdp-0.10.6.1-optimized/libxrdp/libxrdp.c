@@ -431,8 +431,22 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
     struct stream *s = (struct stream *)NULL;
     struct stream *temp_s = (struct stream *)NULL;
     tui32 pixel;
+    int profile_enabled;
+    tui64 bitmap_start_ns;
+    tui64 encode_start_ns;
+    tui64 send_start_ns;
+    tui64 now_ns;
 
     LOG_DEVEL(LOG_LEVEL_DEBUG, "libxrdp_send_bitmap: sending bitmap");
+    profile_enabled = session->vnc_profile_enabled;
+    bitmap_start_ns = 0;
+    encode_start_ns = 0;
+    send_start_ns = 0;
+    now_ns = 0;
+    if (profile_enabled)
+    {
+        bitmap_start_ns = g_time_monotonic_ns();
+    }
     Bpp = (bpp + 7) / 8;
     e = (4 - width) & 3;
     switch (bpp)
@@ -475,6 +489,10 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
 
             total_bufsize = 0;
             num_updates = 0;
+            if (profile_enabled)
+            {
+                encode_start_ns = g_time_monotonic_ns();
+            }
             rv = xrdp_rdp_init_data((struct xrdp_rdp *)session->rdp, s);
             if (rv != 0)
             {
@@ -605,8 +623,28 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
                       "rectangles <omitted from log>",
                       RDP_UPDATE_BITMAP, num_updates);
 
+            if (profile_enabled)
+            {
+                now_ns = g_time_monotonic_ns();
+                if (now_ns > encode_start_ns)
+                {
+                    session->vnc_profile_encode_ns += now_ns - encode_start_ns;
+                }
+                send_start_ns = now_ns;
+                session->vnc_profile_pdus++;
+                session->vnc_profile_wire_bytes +=
+                    (tui64)(s->end - s->data);
+            }
             rv = xrdp_rdp_send_data((struct xrdp_rdp *)session->rdp, s,
                                     RDP_DATA_PDU_UPDATE);
+            if (profile_enabled)
+            {
+                now_ns = g_time_monotonic_ns();
+                if (now_ns > send_start_ns)
+                {
+                    session->vnc_profile_send_ns += now_ns - send_start_ns;
+                }
+            }
             if (rv == 0)
             {
                 LOG_DEVEL(LOG_LEVEL_TRACE,
@@ -665,6 +703,10 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
                 }
 
                 p += server_line_bytes * lines_sending;
+                if (profile_enabled)
+                {
+                    encode_start_ns = g_time_monotonic_ns();
+                }
                 rv = xrdp_rdp_init_data((struct xrdp_rdp *)session->rdp, s);
                 if (rv != 0)
                 {
@@ -738,12 +780,34 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
                 }
 
                 s_mark_end(s);
+                if (profile_enabled)
+                {
+                    now_ns = g_time_monotonic_ns();
+                    if (now_ns > encode_start_ns)
+                    {
+                        session->vnc_profile_encode_ns +=
+                            now_ns - encode_start_ns;
+                    }
+                    send_start_ns = now_ns;
+                    session->vnc_profile_pdus++;
+                    session->vnc_profile_wire_bytes +=
+                        (tui64)(s->end - s->data);
+                }
                 LOG_DEVEL(LOG_LEVEL_TRACE, "Sending [MS-RDPBCGR] TS_UPDATE_BITMAP_DATA "
                           "updateType %d (UPDATETYPE_BITMAP), numberRectangles 1, "
                           "rectangles <omitted from log>",
                           RDP_UPDATE_BITMAP);
                 rv = xrdp_rdp_send_data((struct xrdp_rdp *)session->rdp, s,
                                         RDP_DATA_PDU_UPDATE);
+                if (profile_enabled)
+                {
+                    now_ns = g_time_monotonic_ns();
+                    if (now_ns > send_start_ns)
+                    {
+                        session->vnc_profile_send_ns +=
+                            now_ns - send_start_ns;
+                    }
+                }
                 if (rv == 0)
                 {
                     LOG_DEVEL(LOG_LEVEL_TRACE,
@@ -773,6 +837,14 @@ libxrdp_send_bitmap(struct xrdp_session *session, int width, int height,
     }
 
 done:
+    if (profile_enabled)
+    {
+        now_ns = g_time_monotonic_ns();
+        if (now_ns > bitmap_start_ns)
+        {
+            session->vnc_profile_bitmap_ns += now_ns - bitmap_start_ns;
+        }
+    }
     if (temp_s != NULL)
     {
         free_stream(temp_s);

@@ -208,6 +208,11 @@ struct vnc
     int framebuffer_raw_row_bytes;
     int framebuffer_raw_rows_done;
     int first_frame_logged;
+    int profile_enabled;
+    tui64 profile_update_start_ns;
+    int profile_update_rects;
+    int profile_update_raw_rects;
+    long long profile_update_raw_bytes;
 };
 
 /*

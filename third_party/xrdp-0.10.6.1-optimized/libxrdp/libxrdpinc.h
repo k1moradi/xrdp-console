@@ -79,6 +79,19 @@ struct xrdp_session
 
     struct source_info si;
     char *xrdp_ini; /* path to xrdp.ini */
+
+    /* Opt-in VNC path profiling. Counters are reset for each logical update. */
+    int vnc_profile_enabled;
+    tui64 vnc_profile_frame_id;
+    int vnc_profile_rects;
+    tui64 vnc_profile_source_bytes;
+    tui64 vnc_profile_copy_bytes;
+    tui64 vnc_profile_copy_ns;
+    tui64 vnc_profile_bitmap_ns;
+    tui64 vnc_profile_encode_ns;
+    tui64 vnc_profile_send_ns;
+    int vnc_profile_pdus;
+    tui64 vnc_profile_wire_bytes;
 };
 
 struct xrdp_drdynvc_procs

@@ -3898,6 +3898,24 @@ g_time3(void)
 #endif
 }
 
+/*****************************************************************************/
+/* returns monotonic time in nanoseconds, or zero if unavailable. */
+tui64
+g_time_monotonic_ns(void)
+{
+#if defined(_WIN32) || !defined(CLOCK_MONOTONIC)
+    return 0;
+#else
+    struct timespec ts;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0 || ts.tv_sec < 0)
+    {
+        return 0;
+    }
+    return ((tui64)ts.tv_sec * (tui64)1000000000) + (tui64)ts.tv_nsec;
+#endif
+}
+
 /******************************************************************************/
 /******************************************************************************/
 struct bmp_magic

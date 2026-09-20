@@ -35,6 +35,30 @@
 #if defined(XRDP_PAINTER)
 
 /*****************************************************************************/
+static void
+xrdp_painter_log_profile(struct xrdp_session *session, int result)
+{
+    if (session->vnc_profile_enabled)
+    {
+        LOG(LOG_LEVEL_INFO,
+            "VNC_PERF frame=%llu rects=%d source_bytes=%llu "
+            "copy_bytes=%llu copy_us=%llu bitmap_us=%llu "
+            "encode_us=%llu send_us=%llu pdus=%d wire_bytes=%llu result=%d",
+            (unsigned long long)session->vnc_profile_frame_id,
+            session->vnc_profile_rects,
+            (unsigned long long)session->vnc_profile_source_bytes,
+            (unsigned long long)session->vnc_profile_copy_bytes,
+            (unsigned long long)(session->vnc_profile_copy_ns / 1000),
+            (unsigned long long)(session->vnc_profile_bitmap_ns / 1000),
+            (unsigned long long)(session->vnc_profile_encode_ns / 1000),
+            (unsigned long long)(session->vnc_profile_send_ns / 1000),
+            session->vnc_profile_pdus,
+            (unsigned long long)session->vnc_profile_wire_bytes,
+            result);
+    }
+}
+
+/*****************************************************************************/
 static int
 xrdp_painter_add_dirty_rect(struct xrdp_painter *self, int x, int y,
                             int cx, int cy, struct xrdp_rect *clip_rect)
@@ -84,8 +108,26 @@ xrdp_painter_send_dirty(struct xrdp_painter *self)
     char *src;
     char *dst;
     struct xrdp_rect rect;
+    int profile_enabled;
+    tui64 copy_start_ns;
+    tui64 copy_end_ns;
+    tui64 copy_bytes;
 
     LOG_DEVEL(LOG_LEVEL_DEBUG, "xrdp_painter_send_dirty:");
+    profile_enabled = self->session->vnc_profile_enabled;
+    if (profile_enabled)
+    {
+        self->session->vnc_profile_frame_id++;
+        self->session->vnc_profile_rects = 0;
+        self->session->vnc_profile_source_bytes = 0;
+        self->session->vnc_profile_copy_bytes = 0;
+        self->session->vnc_profile_copy_ns = 0;
+        self->session->vnc_profile_bitmap_ns = 0;
+        self->session->vnc_profile_encode_ns = 0;
+        self->session->vnc_profile_send_ns = 0;
+        self->session->vnc_profile_pdus = 0;
+        self->session->vnc_profile_wire_bytes = 0;
+    }
 
     bpp = self->wm->screen->bpp;
     Bpp = (bpp + 7) / 8;
@@ -107,9 +149,15 @@ xrdp_painter_send_dirty(struct xrdp_painter *self)
         {
             cx = rect.right - rect.left;
             cy = rect.bottom - rect.top;
+            copy_start_ns = 0;
+            if (profile_enabled)
+            {
+                copy_start_ns = g_time_monotonic_ns();
+            }
             ldata = (char *)g_malloc(cx * cy * Bpp, 0);
             if (ldata == 0)
             {
+                xrdp_painter_log_profile(self->session, 1);
                 return 1;
             }
             src = self->wm->screen->data;
@@ -121,6 +169,19 @@ xrdp_painter_send_dirty(struct xrdp_painter *self)
                 g_memcpy(dst, src, cx * Bpp);
                 src += self->wm->screen->line_size;
                 dst += cx * Bpp;
+            }
+            if (profile_enabled)
+            {
+                copy_end_ns = g_time_monotonic_ns();
+                copy_bytes = (tui64)cx * (tui64)cy * (tui64)Bpp;
+                self->session->vnc_profile_rects++;
+                self->session->vnc_profile_source_bytes += copy_bytes;
+                self->session->vnc_profile_copy_bytes += copy_bytes;
+                if (copy_end_ns > copy_start_ns)
+                {
+                    self->session->vnc_profile_copy_ns +=
+                        copy_end_ns - copy_start_ns;
+                }
             }
             LOG_DEVEL(LOG_LEVEL_DEBUG, "xrdp_painter_send_dirty:"
                       " x %d y %d cx %d cy %d",
@@ -148,6 +209,7 @@ xrdp_painter_send_dirty(struct xrdp_painter *self)
 
             if (send_error != 0)
             {
+                xrdp_painter_log_profile(self->session, send_error);
                 return send_error;
             }
 
@@ -163,6 +225,7 @@ xrdp_painter_send_dirty(struct xrdp_painter *self)
 
     xrdp_region_delete(self->dirty_region);
     self->dirty_region = xrdp_region_create(self->wm);
+    xrdp_painter_log_profile(self->session, 0);
 
     return 0;
 }

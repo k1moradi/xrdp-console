@@ -41,6 +41,16 @@ p99, maximum, misses, GL render time, process CPU/RSS, and best-effort TCP
 wire bytes/sec, retransmissions, send queue, and RTT. `ss`-unavailable fields
 are reported as `NA` rather than inferred.
 
+The optimized xrdp candidate also has an opt-in server profile. Set
+`XRDP_VNC_PROFILE=1` only on the private daemon with the benchmark's
+`--xrdp-env XRDP_VNC_PROFILE=1` option. It emits aggregate `VNC_PERF` lines,
+rather than restoring per-PDU INFO logging. The VNC-side line measures the
+framebuffer parser through `server_end_update`; the painter-side line reports
+raw framebuffer bytes copied, copy time, bitmap-path time, encode time, send
+time, PDU count, and RDP bitmap stream bytes. These are server-stage timings,
+not a replacement for the client-visible T2 measurement. `wire_bytes` in
+these lines is the RDP bitmap PDU stream size and excludes TCP/TLS framing.
+
 The private IPv6-to-IPv4 RFB relay uses bounded per-direction buffers and
 selector write readiness. It closes a run if a peer leaves more than 16 MiB
 queued, which prevents a stalled destination from turning into unbounded

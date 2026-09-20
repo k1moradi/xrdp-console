@@ -3361,6 +3361,17 @@ cleanup_states(struct xrdp_mm *self)
         self->display = 0; /* 10 for :10.0, 11 for :11.0, etc */
         guid_clear(&self->guid);
         self->code = 0; /* ???_SESSION_CODE value */
+        self->wm->session->vnc_profile_enabled = 0;
+        self->wm->session->vnc_profile_frame_id = 0;
+        self->wm->session->vnc_profile_rects = 0;
+        self->wm->session->vnc_profile_source_bytes = 0;
+        self->wm->session->vnc_profile_copy_bytes = 0;
+        self->wm->session->vnc_profile_copy_ns = 0;
+        self->wm->session->vnc_profile_bitmap_ns = 0;
+        self->wm->session->vnc_profile_encode_ns = 0;
+        self->wm->session->vnc_profile_send_ns = 0;
+        self->wm->session->vnc_profile_pdus = 0;
+        self->wm->session->vnc_profile_wire_bytes = 0;
     }
 }
 
@@ -3602,6 +3613,13 @@ xrdp_mm_connect(struct xrdp_mm *self)
     {
         LOG(LOG_LEVEL_INFO, "non-FIPS: defaulting to a VNC session over TCP");
         self->code = XVNC_SESSION_CODE;
+    }
+
+    if (XRDP_MM_IS_VNC(self))
+    {
+        const char *profile = g_getenv("XRDP_VNC_PROFILE");
+        self->wm->session->vnc_profile_enabled =
+            profile != NULL && g_text2bool(profile);
     }
 
     /* Look at our module parameters to decide if we need to connect
