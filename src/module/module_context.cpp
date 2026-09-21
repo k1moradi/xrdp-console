@@ -656,7 +656,18 @@ ModuleContext::check_wait_objs() noexcept
     if (impl_->cursorTracker->pending() &&
         impl_->rdpUpdateSink.pointerAvailable())
     {
-        if (!impl_->cursorTracker->refresh() ||
+        if (!impl_->cursorTracker->refresh())
+        {
+            return 1;
+        }
+        if (impl_->cursorTracker->takeUnsupportedCursorWarning())
+        {
+            log_message(
+                LOG_LEVEL_WARNING,
+                "xrdp-console: XFixes cursor exceeds the classic 32x32 "
+                "pointer limit; retaining the previous/default cursor");
+        }
+        if (impl_->cursorTracker->hasImage() &&
             !impl_->rdpUpdateSink.setPointer(
                 impl_->cursorTracker->hotspotX(),
                 impl_->cursorTracker->hotspotY(),

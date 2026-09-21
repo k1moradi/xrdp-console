@@ -28,6 +28,8 @@ public:
 
     [[nodiscard]] bool pending() const noexcept;
     [[nodiscard]] bool refresh() noexcept;
+    [[nodiscard]] bool hasImage() const noexcept;
+    [[nodiscard]] bool takeUnsupportedCursorWarning() noexcept;
     void acknowledge() noexcept;
 
     [[nodiscard]] std::uint32_t widthPixels() const noexcept;
@@ -48,6 +50,8 @@ private:
     std::uint32_t heightPixels_{0};
     std::int32_t hotspotX_{0};
     std::int32_t hotspotY_{0};
+    bool unsupportedCursor_{false};
+    bool unsupportedWarningLogged_{false};
     std::vector<std::byte> pixels_{};
     std::vector<std::byte> mask_{};
     const char *failureReason_{"not initialized"};

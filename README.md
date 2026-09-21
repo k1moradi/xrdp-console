@@ -107,7 +107,10 @@ dynamic resizing; stages the module into the private xrdp installation; sets
 `code=0` for the direct classic-bitmap path; and forces the FreeRDP geometry to
 the physical X11 geometry. Graphics mode reports the draw-completion to
 FreeRDP-framebuffer-visible stage. Input-roundtrip mode additionally forwards
-RDP keyboard events through XTest and measures the full marker round trip.
+RDP keyboard events through XTest and measures the full marker round trip. The
+current classic pointer path uses a 32x32 cursor canvas; larger X cursors are
+ignored while the previous/default remote cursor is retained. Held XTest keys
+and mouse buttons are released when the module session ends.
 
 The namespace transport needs a cached sudo ticket for short-lived network
 setup and cleanup commands. The benchmark itself remains a normal-user

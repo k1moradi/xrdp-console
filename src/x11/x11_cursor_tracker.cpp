@@ -149,16 +149,27 @@ X11CursorTracker::refresh() noexcept
     const std::uint32_t height = cursor->height;
     const std::uint32_t xhot = cursor->xhot;
     const std::uint32_t yhot = cursor->yhot;
-    if (width == 0 || height == 0 || width > kMaximumCursorDimension ||
-        height > kMaximumCursorDimension || width > kOutputCursorDimension ||
-        height > kOutputCursorDimension || sourceArea == 0 ||
+    if (width > kMaximumCursorDimension || height > kMaximumCursorDimension ||
+        width > kOutputCursorDimension || height > kOutputCursorDimension)
+    {
+        std::free(cursorError);
+        std::free(cursor);
+        // The classic xrdp pointer callback currently has a fixed 32x32
+        // compatibility path. Keep the last valid cursor (or the client's
+        // default cursor before the first valid image) instead of terminating
+        // an otherwise healthy desktop session.
+        unsupportedCursor_ = true;
+        return true;
+    }
+
+    if (width == 0 || height == 0 || sourceArea == 0 || imageLength < 0 ||
         sourceArea > std::numeric_limits<std::size_t>::max() / kBytesPerPixel ||
         sourceArea > static_cast<std::uint64_t>(imageLength) ||
         xhot >= width || yhot >= height)
     {
         std::free(cursorError);
         std::free(cursor);
-        fail("XFixes cursor image exceeds xrdp pointer limits");
+        fail("XFixes cursor image is invalid");
         return false;
     }
 
@@ -220,8 +231,26 @@ X11CursorTracker::refresh() noexcept
     heightPixels_ = kOutputCursorDimension;
     hotspotX_ = static_cast<std::int32_t>(xhot);
     hotspotY_ = static_cast<std::int32_t>(yhot);
+    unsupportedCursor_ = false;
     std::free(cursorError);
     std::free(cursor);
+    return true;
+}
+
+bool
+X11CursorTracker::hasImage() const noexcept
+{
+    return !pixels_.empty() && !mask_.empty();
+}
+
+bool
+X11CursorTracker::takeUnsupportedCursorWarning() noexcept
+{
+    if (!unsupportedCursor_ || unsupportedWarningLogged_)
+    {
+        return false;
+    }
+    unsupportedWarningLogged_ = true;
     return true;
 }
 

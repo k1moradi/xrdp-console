@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <poll.h>
 
 #include <ms-rdpbcgr.h>
@@ -176,6 +177,71 @@ wait_for_input_events(xcb_connection_t *connection, xcb_window_t window,
     return false;
 }
 
+bool
+wait_for_teardown_releases(xcb_connection_t *connection,
+                            xcb_window_t window) noexcept
+{
+    bool keyRelease = false;
+    bool buttonRelease = false;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        xcb_generic_event_t *event = nullptr;
+        while ((event = xcb_poll_for_event(connection)) != nullptr)
+        {
+            const std::uint8_t type = event->response_type & 0x7f;
+            switch (type)
+            {
+                case XCB_KEY_RELEASE:
+                {
+                    const auto *key = reinterpret_cast<
+                        const xcb_key_release_event_t *>(event);
+                    if (key->event == window)
+                    {
+                        keyRelease = true;
+                    }
+                    break;
+                }
+                case XCB_BUTTON_RELEASE:
+                {
+                    const auto *button = reinterpret_cast<
+                        const xcb_button_release_event_t *>(event);
+                    if (button->event == window && button->detail == 1)
+                    {
+                        buttonRelease = true;
+                    }
+                    break;
+                }
+                case 0:
+                    std::free(event);
+                    return false;
+                default:
+                    break;
+            }
+            std::free(event);
+        }
+
+        if (keyRelease && buttonRelease)
+        {
+            return true;
+        }
+        if (xcb_connection_has_error(connection) != 0)
+        {
+            return false;
+        }
+
+        pollfd descriptor{};
+        descriptor.fd = xcb_get_file_descriptor(connection);
+        descriptor.events = POLLIN | POLLERR | POLLHUP;
+        if (descriptor.fd < 0 || poll(&descriptor, 1, 100) < 0)
+        {
+            return false;
+        }
+    }
+    return false;
+}
+
 int
 run() noexcept
 {
@@ -249,29 +315,32 @@ run() noexcept
         return 1;
     }
 
-    X11InputController controller(*connection, screen->root, bounds);
-    if (!controller.valid())
+    auto controller = std::make_unique<X11InputController>(
+        *connection, screen->root, bounds);
+    if (!controller->valid())
     {
         std::fprintf(stderr, "XTest setup failed: %s\n",
-                     controller.failureReason() != nullptr
-                         ? controller.failureReason()
+                     controller->failureReason() != nullptr
+                         ? controller->failureReason()
                          : "unknown error");
+        controller.reset();
         xcb_destroy_window(connection, window);
         xcb_flush(connection);
         xcb_disconnect(connection);
         return 1;
     }
 
-    if (!controller.handle(WM_MOUSEMOVE, pointerX, pointerY, 0, 0) ||
-        !controller.handle(WM_LBUTTONDOWN, pointerX, pointerY, 0, 0) ||
-        !controller.handle(WM_LBUTTONUP, pointerX, pointerY, 0, 0) ||
-        !controller.handle(WM_KEYDOWN, 0, XK_a, 30, KBD_FLAG_DOWN) ||
-        !controller.handle(WM_KEYUP, 0, XK_a, 30, KBD_FLAG_UP))
+    if (!controller->handle(WM_MOUSEMOVE, pointerX, pointerY, 0, 0) ||
+        !controller->handle(WM_LBUTTONDOWN, pointerX, pointerY, 0, 0) ||
+        !controller->handle(WM_LBUTTONUP, pointerX, pointerY, 0, 0) ||
+        !controller->handle(WM_KEYDOWN, 0, XK_a, 30, KBD_FLAG_DOWN) ||
+        !controller->handle(WM_KEYUP, 0, XK_a, 30, KBD_FLAG_UP))
     {
         std::fprintf(stderr, "XTest controller rejected an input event: %s\n",
-                     controller.failureReason() != nullptr
-                         ? controller.failureReason()
+                     controller->failureReason() != nullptr
+                         ? controller->failureReason()
                          : "unknown error");
+        controller.reset();
         xcb_destroy_window(connection, window);
         xcb_flush(connection);
         xcb_disconnect(connection);
@@ -291,13 +360,51 @@ run() noexcept
                      observed.buttonPress, observed.buttonRelease);
     }
 
+    bool teardownReleased = false;
+    if (received)
+    {
+        bool heldInputSent = false;
+        {
+            X11InputController heldController(*connection, screen->root,
+                                              bounds);
+            heldInputSent =
+                heldController.valid() &&
+                heldController.handle(WM_KEYDOWN, 0, XK_Control_L, 29,
+                                      KBD_FLAG_DOWN) &&
+                heldController.handle(WM_LBUTTONDOWN, pointerX, pointerY, 0,
+                                      0);
+            if (!heldInputSent)
+            {
+                std::fprintf(stderr,
+                             "XTest controller could not create held input: "
+                             "%s\n",
+                             heldController.failureReason() != nullptr
+                                 ? heldController.failureReason()
+                                 : "unknown error");
+            }
+        }
+        teardownReleased =
+            heldInputSent && wait_for_teardown_releases(connection, window);
+        if (!teardownReleased)
+        {
+            std::fprintf(stderr,
+                         "XTest controller teardown did not release the "
+                         "held key and button\n");
+        }
+    }
+
+    // The controller must release any remaining XTest state before the XCB
+    // connection is torn down.
+    controller.reset();
+
     const bool destroyed = check_request(
         connection, xcb_destroy_window_checked(connection, window),
         "destroy input window");
     const bool flushed = xcb_flush(connection) > 0;
     const bool healthy = xcb_connection_has_error(connection) == 0;
     xcb_disconnect(connection);
-    return received && destroyed && flushed && healthy ? 0 : 1;
+    return received && teardownReleased && destroyed && flushed && healthy ? 0
+                                                                          : 1;
 }
 
 } // namespace

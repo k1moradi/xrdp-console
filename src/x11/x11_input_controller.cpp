@@ -19,6 +19,7 @@ namespace
 constexpr std::size_t kLockCaps = 0;
 constexpr std::size_t kLockNum = 1;
 constexpr std::size_t kLockScroll = 2;
+constexpr int kMaximumButton = 9;
 
 bool
 isButtonDownMessage(int message) noexcept
@@ -210,6 +211,11 @@ X11InputController::X11InputController(xcb_connection_t &connection,
     failureReason_ = nullptr;
 }
 
+X11InputController::~X11InputController() noexcept
+{
+    releaseAll();
+}
+
 bool
 X11InputController::valid() const noexcept
 {
@@ -266,7 +272,13 @@ X11InputController::handle(int message, long param1, long param2,
             const std::uint8_t type = isButtonDownMessage(message)
                                            ? XCB_BUTTON_PRESS
                                            : XCB_BUTTON_RELEASE;
-            return fakeButton(type, button, param1, param2);
+            const bool sent = fakeButton(type, button, param1, param2);
+            if (sent && button > 0 && button <= kMaximumButton)
+            {
+                pressedButtons_[static_cast<std::size_t>(button)] =
+                    type == XCB_BUTTON_PRESS;
+            }
+            return sent;
         }
         default:
             // Keep lifecycle/control messages ABI-compatible until their
@@ -279,6 +291,50 @@ void
 X11InputController::fail(const char *reason) noexcept
 {
     failureReason_ = reason;
+}
+
+void
+X11InputController::releaseAll() noexcept
+{
+    if (connection_ == nullptr || rootWindow_ == XCB_WINDOW_NONE ||
+        xcb_connection_has_error(connection_) != 0)
+    {
+        activeKeycodes_.fill(XCB_NO_SYMBOL);
+        pressedButtons_.fill(false);
+        return;
+    }
+
+    bool sent = false;
+    for (xcb_keycode_t &keycode : activeKeycodes_)
+    {
+        if (keycode == XCB_NO_SYMBOL)
+        {
+            continue;
+        }
+        xcb_test_fake_input(connection_, XCB_KEY_RELEASE, keycode,
+                            XCB_CURRENT_TIME, rootWindow_, 0, 0, 0);
+        keycode = XCB_NO_SYMBOL;
+        sent = true;
+    }
+
+    for (int button = 1; button <= kMaximumButton; ++button)
+    {
+        if (!pressedButtons_[static_cast<std::size_t>(button)])
+        {
+            continue;
+        }
+        xcb_test_fake_input(
+            connection_, XCB_BUTTON_RELEASE,
+            static_cast<std::uint8_t>(button), XCB_CURRENT_TIME, rootWindow_,
+            0, 0, 0);
+        pressedButtons_[static_cast<std::size_t>(button)] = false;
+        sent = true;
+    }
+
+    if (sent && xcb_flush(connection_) <= 0)
+    {
+        fail("XTEST input release failed");
+    }
 }
 
 xcb_keycode_t

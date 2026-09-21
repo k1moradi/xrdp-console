@@ -15,7 +15,7 @@ class X11InputController final
 public:
     X11InputController(xcb_connection_t &connection, xcb_window_t rootWindow,
                        PixelSize bounds) noexcept;
-    ~X11InputController() noexcept = default;
+    ~X11InputController() noexcept;
 
     X11InputController(const X11InputController &) = delete;
     X11InputController &operator=(const X11InputController &) = delete;
@@ -34,6 +34,7 @@ private:
     };
 
     void fail(const char *reason) noexcept;
+    void releaseAll() noexcept;
     [[nodiscard]] xcb_keycode_t keycodeFor(xcb_keysym_t keysym) const noexcept;
     [[nodiscard]] bool handleKey(bool pressed, long keysym, long scanCode,
                                  long deviceFlags) noexcept;
@@ -54,6 +55,7 @@ private:
     PixelSize bounds_{};
     std::vector<KeyMapping> keyMappings_{};
     std::array<xcb_keycode_t, 512> activeKeycodes_{};
+    std::array<bool, 10> pressedButtons_{};
     std::array<xcb_keycode_t, 3> lockKeycodes_{};
     std::array<std::uint16_t, 3> lockMasks_{};
     const char *failureReason_{"not initialized"};
