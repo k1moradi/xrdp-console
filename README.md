@@ -5,19 +5,22 @@ migration slice contains the measured VNC bridge, its developer tooling, and
 the first direct-X11 C++ runtime vertical slice: XCB/XDamage/XShm capture into
 xrdp's classic bitmap callbacks.
 
-The current measured path is:
+The current measured paths are:
 
 ```text
 physical X11 display -> x11vnc -> xrdp libvnc.so -> RDP client
+physical X11 display -> xrdp-console XCB/XDamage/XShm -> classic RDP bitmap -> RDP client
 ```
 
-It measures the path that matters for a workstation where an RDP connection
-must show the same LXQt session as the physical monitor. The benchmark uses
-the versions installed by the host distribution and keeps all benchmark
-services on private ports. The workspace also carries a reproducible,
-host-native xrdp candidate with fixed-console geometry, direct-bitmap/error
-propagation, and resize-state recovery. It is built and activated explicitly;
-a normal CMake install never replaces the system daemon.
+The default `--backend vnc` measures the existing workstation path where an
+RDP connection must show the same LXQt session as the physical monitor.
+`--backend direct-x11` measures the first-party XCB/XDamage/XShm module against
+the same private xrdp and FreeRDP stages, without starting x11vnc or the RFB
+proxy. Both modes keep benchmark services on private ports. The workspace
+also carries a reproducible, host-native xrdp candidate with fixed-console
+geometry, direct-bitmap/error propagation, and resize-state recovery. It is
+built and activated explicitly; a normal CMake install never replaces the
+system daemon.
 
 The end-to-end benchmark is a developer tool, `xrdp_console_bench.py`. It supports
 graphics latency, input round trips, controlled compositor churn, classic RFX
@@ -86,6 +89,27 @@ python3 -B tools/benchmark/xrdp_console_bench.py \
   --only lan --network-mode localhost
 ```
 
+For the first-party direct-X11 graphics path, use the private xrdp build and
+the module produced by the native build:
+
+```sh
+python3 -B tools/benchmark/xrdp_console_bench.py \
+  --backend direct-x11 --transport rdp --mode graphics \
+  --auth "$AUTH" \
+  --xrdp "$PWD/build/_deps/xrdp-install/sbin/xrdp" \
+  --direct-module "$PWD/build/src/libxrdp_console.so" \
+  --duration 20 --fps 15 --repetitions 3 \
+  --network-mode localhost
+```
+
+This mode is intentionally graphics-only while XTest input is not implemented.
+It skips x11vnc, the IPv6-to-IPv4 RFB proxy, chansrv, GFX/drdynvc, and dynamic
+resizing; stages the module into the private xrdp installation; sets `code=0`
+for the direct classic-bitmap path; and forces the FreeRDP geometry to the
+physical X11 geometry. The reported marker latency is therefore the
+draw-completion to FreeRDP-framebuffer-visible stage needed for the first
+direct-backend comparison.
+
 The namespace transport needs a cached sudo ticket for short-lived network
 setup and cleanup commands. The benchmark itself remains a normal-user
 process:
@@ -134,9 +158,11 @@ python3 -B tools/benchmark/xrdp_console_bench.py \
   --duration 20 --input-hz 5 --input-churn-fps 15 --repetitions 3
 ```
 
-The normal `--transport rdp` report measures the complete private x11vnc ->
-xrdp -> FreeRDP path. Graphics reports include p50/p95/p99/max, misses, GL
-render time, process CPU/RSS, and best-effort TCP wire bytes/sec,
+The normal `--backend vnc --transport rdp` report measures the complete
+private x11vnc -> xrdp -> FreeRDP path. The direct backend uses the same
+`--transport rdp` measurement but omits the VNC bridge. Graphics reports
+include p50/p95/p99/max, misses, GL render time, process CPU/RSS, and
+best-effort TCP wire bytes/sec,
 retransmissions, send queue, and RTT from `ss`; input-roundtrip reports use
 the same fields plus the four explicit latency stages. Direct-RFB input is a
 lower-bound comparison, not a production authentication or desktop-present

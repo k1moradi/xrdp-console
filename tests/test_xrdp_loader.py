@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import os
+import re
+import select
 import shutil
 import signal
 import socket
@@ -94,6 +96,102 @@ def wait_for_log(process: subprocess.Popen[object], log: Path, marker: str,
     raise AssertionError(f"xrdp did not report {marker!r}:\n{details}")
 
 
+def read_line(stream, timeout: float) -> bytes:
+    ready, _, _ = select.select([stream], [], [], timeout)
+    return stream.readline() if ready else b""
+
+
+def find_window(display: str, title: str, timeout: float) -> str:
+    pattern = re.compile(
+        r"^\s*(0x[0-9a-fA-F]+) \"" + re.escape(title) + r"\"",
+        re.MULTILINE,
+    )
+    deadline = time.monotonic() + timeout
+    last_tree = ""
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            ["xwininfo", "-root", "-tree", "-display", display],
+            capture_output=True, text=True, check=False,
+        )
+        last_tree = result.stdout
+        match = pattern.search(last_tree)
+        if match:
+            return match.group(1)
+        time.sleep(0.05)
+    raise AssertionError(
+        f"FreeRDP window {title!r} did not appear:\n{last_tree}"
+    )
+
+
+def assert_client_pixel(display: str, window_title: str, pixel_probe: Path,
+                        stimulus_path: Path, environment: dict[str, str],
+                        log_path: Path) -> None:
+    """Draw a known source color and require it in the FreeRDP framebuffer."""
+    window = find_window(display, window_title, 8.0)
+    stimulus: subprocess.Popen[object] | None = None
+    probe: subprocess.Popen[object] | None = None
+    try:
+        stimulus = subprocess.Popen(
+            [str(stimulus_path), display],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=environment, bufsize=0,
+            start_new_session=True,
+        )
+        probe = subprocess.Popen(
+            [str(pixel_probe), display, window, "30", "30"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=environment, bufsize=0,
+            start_new_session=True,
+        )
+        if (stimulus.stdin is None or stimulus.stdout is None or
+                probe.stdin is None or probe.stdout is None):
+            raise AssertionError("pixel assertion pipes were not created")
+        if not read_line(probe.stdout, 5.0).startswith(b"READY "):
+            raise AssertionError("pixel probe did not become ready")
+
+        stimulus.stdin.write(b"frame\n")
+        stimulus.stdin.flush()
+        source_line = read_line(stimulus.stdout, 5.0)
+        fields = source_line.split()
+        if len(fields) < 3:
+            raise AssertionError(f"source stimulus did not draw a frame: {source_line!r}")
+        state = int(fields[2])
+        expected_red = state == 0
+
+        deadline = time.monotonic() + 8.0
+        last_pixel = b""
+        while time.monotonic() < deadline:
+            probe.stdin.write(b"sample\n")
+            probe.stdin.flush()
+            line = read_line(probe.stdout, min(0.5, deadline - time.monotonic()))
+            if not line:
+                continue
+            last_pixel = line
+            pixel = line.split()
+            if len(pixel) < 4:
+                continue
+            red, green, blue = (int(value) for value in pixel[1:4])
+            matches = (
+                red > 200 and green < 80 and blue < 80
+                if expected_red else
+                blue > 200 and red < 80 and green < 80
+            )
+            if matches:
+                return
+        raise AssertionError(
+            "known source pixel did not reach the FreeRDP framebuffer: "
+            f"last={last_pixel!r}\n{xrdp_log_excerpt(log_path)}"
+        )
+    finally:
+        stop_process(probe)
+        stop_process(stimulus)
+
+
+def xrdp_log_excerpt(path: Path) -> str:
+    text = read_text(path)
+    return text[-12000:]
+
+
 def display_is_usable() -> bool:
     display = os.environ.get("DISPLAY")
     if not display:
@@ -146,9 +244,10 @@ def ensure_test_display() -> None:
 
 
 def main() -> int:
-    if len(sys.argv) != 5:
+    if len(sys.argv) != 7:
         raise SystemExit(
-            f"usage: {sys.argv[0]} MODULE XRDP INSTALL_ROOT FREERDP"
+            f"usage: {sys.argv[0]} MODULE XRDP INSTALL_ROOT FREERDP "
+            "PIXEL_PROBE STIMULUS"
         )
 
     ensure_test_display()
@@ -157,7 +256,10 @@ def main() -> int:
     xrdp_path = Path(sys.argv[2]).resolve()
     install_root = Path(sys.argv[3]).resolve()
     freerdp_path = Path(sys.argv[4]).resolve()
-    for required in (module_path, xrdp_path, freerdp_path):
+    pixel_probe = Path(sys.argv[5]).resolve()
+    stimulus_path = Path(sys.argv[6]).resolve()
+    for required in (
+            module_path, xrdp_path, freerdp_path, pixel_probe, stimulus_path):
         if not required.is_file():
             raise AssertionError(f"missing smoke-test executable or module: {required}")
 
@@ -190,7 +292,6 @@ bulk_compression=false
 allow_channels=false
 max_bpp=32
 autorun=console
-display={os.environ["DISPLAY"]}
 
 [Logging]
 LogFile={log_path}
@@ -211,6 +312,7 @@ name=console
 lib={module_name}
 # Temporary benchmark selection: code=0 selects xrdp's complete-pixel path.
 code=0
+display={os.environ["DISPLAY"]}
 username=smoke
 password=smoke
 """,
@@ -242,6 +344,7 @@ password=smoke
                     "/p:smoke",
                     "/cert:ignore",
                     "/size:1024x768",
+                    "/t:xrdp-console-loader",
                     "-gfx",
                     "-compression",
                     "/network:lan",
@@ -266,7 +369,9 @@ password=smoke
                         4.0,
                         stdout_path,
                     )
-                    time.sleep(0.25)
+                    assert_client_pixel(
+                        os.environ["DISPLAY"], "xrdp-console-loader",
+                        pixel_probe, stimulus_path, os.environ.copy(), log_path)
         finally:
             stop_process(client)
             stop_process(server)

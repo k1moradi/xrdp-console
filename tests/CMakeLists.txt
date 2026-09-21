@@ -98,19 +98,22 @@ if(TARGET xrdp-console)
 
     find_program(XRDP_CONSOLE_FREERDP_EXECUTABLE
         NAMES xfreerdp3 xfreerdp)
-    if(XRDP_CONSOLE_FREERDP_EXECUTABLE)
+    if(XRDP_CONSOLE_FREERDP_EXECUTABLE AND
+       TARGET x11-pixel-probe AND TARGET x11vnc-latency-stimulus)
         add_test(NAME xrdp-loader-smoke
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
             $<TARGET_FILE:xrdp-console>
             "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
             "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
-            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}")
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11vnc-latency-stimulus>)
         set_tests_properties(xrdp-loader-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 30)
     else()
         message(STATUS
-            "Skipping xrdp-loader-smoke: no xfreerdp3 or xfreerdp found")
+            "Skipping xrdp-loader-smoke: FreeRDP and benchmark pixel helpers are required")
     endif()
 endif()

@@ -16,7 +16,7 @@ Xauthority, x11vnc, and client binaries.
 | `damage-region-unit` | clipping, overlap/adjacency coalescing, empty input, and bounded full-screen fallback |
 | `x11-damage-integration` | authenticated-Xvfb XDamage resource setup, raw rectangle delivery, persistent XShm capture of a known pixel, acknowledge/re-arm, and teardown |
 | `module-lifecycle` | C++23 XCB module construction, authenticated-Xvfb connect/reconnect, fd-0 handling, geometry setup, dead-server failure, teardown, and wait-state preservation |
-| `xrdp-loader-smoke` | generated xrdp loading the module through FreeRDP with xrdp and the client sharing a display |
+| `xrdp-loader-smoke` | generated xrdp loading the module through FreeRDP, then drawing a known red/blue source marker and asserting that the expected pixel reaches the FreeRDP framebuffer |
 
 The marker correlation contract is:
 
@@ -32,5 +32,8 @@ The graphical benchmark smoke runs are documented in
 [`docs/measurement-model.md`](measurement-model.md). They validate process
 startup/cleanup and the complete private path, but are not part of CTest because
 they depend on the physical display stack. The `xrdp-loader-smoke` test is a
-smaller private-server ABI check; it uses the generated xrdp install and
-FreeRDP, with `xvfb-run` when no display is available.
+smaller private-server ABI and pixel-path check; it uses the generated xrdp
+install and FreeRDP, with `xvfb-run` when no display is available. The
+graphical benchmark also supports `--backend direct-x11` for the graphics-only
+XCB/XDamage/XShm comparison; that mode forces the client geometry to the
+physical display and does not yet test input round trips.

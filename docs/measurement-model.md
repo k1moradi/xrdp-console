@@ -46,6 +46,21 @@ p99, maximum, misses, GL render time, process CPU/RSS, and best-effort TCP
 wire bytes/sec, retransmissions, send queue, and RTT. `ss`-unavailable fields
 are reported as `NA` rather than inferred.
 
+Graphics runs also support `--backend direct-x11 --transport rdp`. This mode
+does not start x11vnc or the RFB relay. It loads the first-party
+XCB/XDamage/XShm module into the private xrdp build, disables GFX/drdynvc and
+dynamic resizing, and forces the FreeRDP window to the physical X11 geometry:
+
+```text
+GL swap-complete -> T2   direct XCB/XDamage/XShm -> classic bitmap -> FreeRDP presentation
+```
+
+The direct backend is graphics-only until XTest input support is implemented.
+It uses the same marker stimulus and FreeRDP pixel probe as the VNC backend, so
+`T1_draw -> T2` is the controlled comparison for the capture/output path. The
+loader smoke test separately verifies the same vertical path with one known
+red/blue marker assertion.
+
 Input-roundtrip also supports `--transport rfb --mode input-roundtrip`. The
 benchmark sends the same F9 RFB KeyEvent pulse as the RDP input path to the
 private `-nopw` listener, while the physical X11 stimulus and marker probe

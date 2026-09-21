@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Measure the local x11vnc -> xrdp -> RDP-client display path.
+"""Measure the local x11vnc or direct-X11 -> xrdp -> RDP-client path.
 
 The benchmark starts only user-owned, loopback services:
 
     physical X :0 -> isolated x11vnc -> isolated xrdp -> FreeRDP on Xvfb
+    physical X :0 -> xrdp-console (XCB/XDamage/XShm) -> FreeRDP on Xvfb
 
     An OpenGL workload toggles a solid red/blue marker on the physical display.
-    The default RDP transport timestamps the completed GL swap and polls the
-    corresponding pixel in the FreeRDP window.  ``--transport rfb`` instead
+    ``--backend vnc`` is the default and timestamps the completed GL swap and
+    polls the corresponding pixel in the FreeRDP window.  ``--backend
+    direct-x11`` selects the first-party module and the same graphics-only
+    client-visible pixel measurement; it uses fixed source/presentation
+    geometry and classic bitmap output.  ``--transport rfb`` instead
     starts a private no-password x11vnc and timestamps the same marker in RAW
     RFB bytes on the loopback socket.  ``--transport vnc-viewer`` puts an
     actual TigerVNC viewer between that private server and a private Xvfb
@@ -82,6 +86,14 @@ def first_path(*candidates: Path) -> Path:
     return candidates[0]
 
 
+def first_file(*candidates: Path) -> Path:
+    """Select the first existing regular file without requiring executable bits."""
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
+
+
 def first_directory(*candidates: Path) -> Path:
     """Select the first existing directory, retaining a useful fallback."""
     for candidate in candidates:
@@ -126,6 +138,14 @@ x11vnc_override = environment_value(
     "XRDP_CONSOLE_X11VNC", "XRDP_VNC_X11VNC")
 X11VNC = first_path(
     Path(x11vnc_override) if x11vnc_override else Path("/usr/bin/x11vnc"),
+)
+module_override = environment_value(
+    "XRDP_CONSOLE_MODULE", "XRDP_VNC_CONSOLE_MODULE")
+DIRECT_MODULE = first_file(
+    Path(module_override) if module_override else
+    WORKSPACE / "build" / "src" / "libxrdp_console.so",
+    WORKSPACE / "build" / "install-check" / "lib" /
+    "xrdp-console" / "libxrdp_console.so",
 )
 # Keep xrdp and chansrv from the same installation when a private prefix is
 # explicitly selected. Mixing socket-root builds can otherwise make a run
@@ -789,6 +809,106 @@ def discover_auth(explicit: str | None) -> str:
     )
 
 
+def display_geometry(display: str, auth: str) -> tuple[int, int]:
+    """Read the physical X11 geometry used by the direct backend."""
+    environment = os.environ.copy()
+    environment.update({"DISPLAY": display, "XAUTHORITY": auth})
+    try:
+        result = subprocess.run(
+            ["xdpyinfo"], env=environment, capture_output=True,
+            text=True, check=False, timeout=5.0,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"could not query X11 geometry for {display}") from exc
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"xdpyinfo failed for {display}: {result.stderr.strip()}"
+        )
+    match = re.search(r"^\s*dimensions:\s+(\d+)x(\d+) pixels",
+                      result.stdout, re.MULTILINE)
+    if match is None:
+        raise RuntimeError(f"xdpyinfo did not report dimensions for {display}")
+    width, height = (int(value) for value in match.groups())
+    if width <= 0 or height <= 0:
+        raise RuntimeError(f"invalid X11 geometry {width}x{height}")
+    return width, height
+
+
+def stage_direct_module(module_path: Path, xrdp_path: Path,
+                        case_dir: Path) -> tuple[Path, str]:
+    """Stage the first-party module into a private xrdp installation."""
+    module_path = module_path.resolve()
+    if not module_path.is_file():
+        raise RuntimeError(f"direct-x11 module does not exist: {module_path}")
+    install_root = xrdp_path.resolve().parent.parent
+    if install_root in {Path("/usr"), Path("/usr/local")}:
+        raise RuntimeError(
+            "direct-x11 requires a private xrdp installation; pass "
+            "--xrdp build/_deps/xrdp-install/sbin/xrdp"
+        )
+    module_directory = install_root / "lib" / "xrdp"
+    if not module_directory.is_dir() or not os.access(module_directory, os.W_OK):
+        raise RuntimeError(
+            f"direct-x11 xrdp module directory is not writable: {module_directory}"
+        )
+    module_name = f"libxrdp_console_bench_{os.getpid()}_{case_dir.name}.so"
+    module_link = module_directory / module_name
+    module_link.symlink_to(module_path)
+    return module_link, module_name
+
+
+def write_direct_xrdp_config(target: Path, port: int, log_path: Path,
+                             cert: Path, key: Path, module_name: str,
+                             display: str, bind_host: str,
+                             bitmap_compression: bool | None,
+                             bulk_compression: bool | None) -> None:
+    """Write the minimal fixed-geometry direct-X11 benchmark profile."""
+    bitmap = "true" if bitmap_compression is not False else "false"
+    bulk = "true" if bulk_compression is not False else "false"
+    target.write_text(
+        f"""[Globals]
+ini_version=1
+fork=true
+port=tcp://{bind_host}:{port}
+security_layer=negotiate
+crypt_level=high
+certificate={cert}
+key_file={key}
+bitmap_cache=true
+bitmap_compression={bitmap}
+bulk_compression={bulk}
+allow_channels=false
+max_bpp=32
+autorun=Console
+
+[Logging]
+LogFile={log_path}
+LogLevel=DEBUG
+EnableSyslog=false
+EnableConsole=false
+
+[Channels]
+rdpdr=false
+rdpsnd=false
+drdynvc=false
+cliprdr=false
+rail=false
+xrdpvr=false
+
+[Console]
+name=direct-x11
+lib={module_name}
+code=0
+display={display}
+username=na
+password=na
+enable_dynamic_resizing=false
+""",
+        encoding="utf-8",
+    )
+    target.chmod(0o600)
+
+
 def rewrite_xrdp_config(source: Path, target: Path, port: int,
                         vnc_port: int, log_path: Path,
                         chansrv_path: Path, cert: Path, key: Path,
@@ -976,6 +1096,31 @@ def wait_log_marker(path: Path, marker: str, deadline: float) -> None:
         time.sleep(0.05)
     contents = path.read_text(errors="replace") if path.is_file() else ""
     raise RuntimeError(f"helper did not become ready; log={contents!r}")
+
+
+def wait_process_log(process: subprocess.Popen[bytes], log: Path,
+                     marker: str, timeout: float,
+                     diagnostics: Path | None = None) -> None:
+    """Wait for a marker while reporting early child exit diagnostics."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        contents = log.read_text(errors="replace") if log.is_file() else ""
+        if marker in contents:
+            return
+        if process.poll() is not None:
+            detail = contents
+            if diagnostics is not None:
+                diagnostic_text = (
+                    diagnostics.read_text(errors="replace")
+                    if diagnostics.is_file() else ""
+                )
+                detail += "\n" + diagnostic_text
+            raise RuntimeError(
+                f"process exited before {marker!r}: {detail[-12000:]}"
+            )
+        time.sleep(0.05)
+    detail = log.read_text(errors="replace") if log.is_file() else ""
+    raise RuntimeError(f"process did not report {marker!r}: {detail[-12000:]}")
 
 
 def wait_path(path: Path, deadline: float) -> None:
@@ -2023,10 +2168,11 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
              auth: str, runtime: Path, base_port: int,
              repetition: int) -> None:
     x, y = 20, 20
+    direct_backend = args.backend == "direct-x11"
     # Keep the two private listeners in distinct ranges.  The high VNC port
     # also avoids colliding with any development RDP listener a user may have.
-    vnc_port = base_port + 2575
-    vnc_backend_port = vnc_port + 1
+    vnc_port = None if direct_backend else base_port + 2575
+    vnc_backend_port = None if direct_backend else vnc_port + 1
     xrdp_port = base_port
     client_display = f":{args.client_display}"
     network = SyntheticNetwork(args)
@@ -2043,23 +2189,37 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
     key.chmod(0o600)
     xrdp_log = case_dir / "xrdp.log"
     config = case_dir / "xrdp.ini"
+    module_link: Path | None = None
     chansrv_path = Path("/run/xrdp/sockdir") / str(os.getuid()) / \
         f"xrdp_chansrv_socket_{args.client_display}"
     chansrv_api_path = Path("/run/xrdp/sockdir") / str(os.getuid()) / \
         f"xrdpapi_{args.client_display}"
-    if not args.no_chansrv:
+    if not direct_backend and not args.no_chansrv:
         for stale_socket in (chansrv_path, chansrv_api_path):
             remove_stale_unix_socket(stale_socket)
-    rewrite_xrdp_config(
-        Path("/etc/xrdp/xrdp.ini"), config, xrdp_port, vnc_port,
-        xrdp_log, chansrv_path, cert, key, args.max_bpp,
-        args.disable_gfx_for_vnc, args.enable_gfx_for_vnc, args.console_lib,
-        args.bitmap_compression, args.bulk_compression,
-        args.disable_dynamic_resizing,
-        network.host_ip,
-    )
-    if args.no_chansrv:
-        remove_chansrv_from_config(config)
+    try:
+        if direct_backend:
+            module_link, module_name = stage_direct_module(
+                args.direct_module, XRDP, case_dir)
+            write_direct_xrdp_config(
+                config, xrdp_port, xrdp_log, cert, key, module_name,
+                args.display, network.host_ip, args.bitmap_compression,
+                args.bulk_compression)
+        else:
+            rewrite_xrdp_config(
+                Path("/etc/xrdp/xrdp.ini"), config, xrdp_port, vnc_port,
+                xrdp_log, chansrv_path, cert, key, args.max_bpp,
+                args.disable_gfx_for_vnc, args.enable_gfx_for_vnc, args.console_lib,
+                args.bitmap_compression, args.bulk_compression,
+                args.disable_dynamic_resizing,
+                network.host_ip,
+            )
+        if args.no_chansrv or direct_backend:
+            remove_chansrv_from_config(config)
+    except Exception:
+        if module_link is not None:
+            module_link.unlink(missing_ok=True)
+        raise
     env_source = os.environ.copy()
     env_source.update({"DISPLAY": args.display, "XAUTHORITY": auth})
     env_client = os.environ.copy()
@@ -2067,24 +2227,26 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         "DISPLAY": client_display,
         "LD_LIBRARY_PATH": str(ISOLATED / "rdp-bench-root/usr/lib/x86_64-linux-gnu") + ":/usr/local/lib:/usr/local/lib/xrdp",
     })
-    vnc_command = [
-        str(X11VNC), "-display", args.display, "-auth", auth, "-localhost",
-        "-listen", "127.0.0.1", "-no6", "-rfbport", str(vnc_backend_port),
-        # This x11vnc is a private, loopback-only backend.  Keeping its RFB
-        # security type at None avoids a legacy xrdp VNC-module password
-        # exchange that is not needed for this isolated harness; production
-        # x11vnc continues to use its configured -rfbauth password.
-        "-nopw", "-forever",
-        "-shared", "-xdamage", "-xd_mem", "0", "-threads", "-repeat",
-        "-input_skip", "1", "-wait", "5", "-defer", "5", "-deferupdate",
-        "5", "-wait_ui", "2", "-setdefer", "-1", "-scrollcopyrect",
-        args.scrollcopyrect, "-quiet",
-    ]
-    profile_flags = list(VNC_PROFILES[profile])
-    if "-noxdamage" in profile_flags:
-        vnc_command[vnc_command.index("-xdamage")] = "-noxdamage"
-        profile_flags.remove("-noxdamage")
-    vnc_command += profile_flags
+    vnc_command: list[str] | None = None
+    if not direct_backend:
+        vnc_command = [
+            str(X11VNC), "-display", args.display, "-auth", auth, "-localhost",
+            "-listen", "127.0.0.1", "-no6", "-rfbport", str(vnc_backend_port),
+            # This x11vnc is a private, loopback-only backend.  Keeping its RFB
+            # security type at None avoids a legacy xrdp VNC-module password
+            # exchange that is not needed for this isolated harness; production
+            # x11vnc continues to use its configured -rfbauth password.
+            "-nopw", "-forever",
+            "-shared", "-xdamage", "-xd_mem", "0", "-threads", "-repeat",
+            "-input_skip", "1", "-wait", "5", "-defer", "5", "-deferupdate",
+            "5", "-wait_ui", "2", "-setdefer", "-1", "-scrollcopyrect",
+            args.scrollcopyrect, "-quiet",
+        ]
+        profile_flags = list(VNC_PROFILES[profile])
+        if "-noxdamage" in profile_flags:
+            vnc_command[vnc_command.index("-xdamage")] = "-noxdamage"
+            profile_flags.remove("-noxdamage")
+        vnc_command += profile_flags
     xvfb: subprocess.Popen[bytes] | None = None
     vnc: subprocess.Popen[bytes] | None = None
     proxy: subprocess.Popen[bytes] | None = None
@@ -2096,8 +2258,9 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
     try:
         network.setup()
         assert_tcp_port_available(network.host_ip, xrdp_port)
-        assert_tcp_port_available("127.0.0.1", vnc_port, check_ipv6=True)
-        assert_tcp_port_available("127.0.0.1", vnc_backend_port)
+        if not direct_backend:
+            assert_tcp_port_available("127.0.0.1", vnc_port, check_ipv6=True)
+            assert_tcp_port_available("127.0.0.1", vnc_backend_port)
         print(f"{name}#{repetition}: {network.header()}")
         xvfb = start_process(
             ["/usr/bin/Xvfb", client_display, "-screen", "0",
@@ -2114,24 +2277,25 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             "XDG_RUNTIME_DIR": f"/run/user/{os.getuid()}",
             "CHANSRV_LOG_PATH": str(case_dir),
         })
-        if not args.no_chansrv:
+        if not direct_backend and not args.no_chansrv:
             chansrv = start_process(
                 [str(CHANSRV)], chansrv_env, case_dir / "chansrv-stderr.log",
             )
             wait_path(chansrv_path, time.monotonic() + 8)
-        vnc = start_process(vnc_command, env_source, case_dir / "x11vnc.log")
-        vnc_probe = wait_vnc_port(vnc_backend_port, time.monotonic() + 8)
-        vnc_probe.close()
-        # xrdp's VNC transport opens an IPv6 socket for a 127.0.0.1 backend
-        # and tries ::1 first. Keep x11vnc IPv4-only (matching production),
-        # while forwarding that local IPv6 hop to its IPv4 listener. This
-        # helper is loopback-only and is part of the benchmark harness.
-        proxy = start_process(
-            [sys.executable, str(V6_V4_PROXY), str(vnc_port),
-             str(vnc_backend_port)], env_source, case_dir / "vnc-proxy.log",
-        )
-        wait_log_marker(case_dir / "vnc-proxy.log", "READY ",
-                        time.monotonic() + 8)
+        if not direct_backend:
+            vnc = start_process(vnc_command, env_source, case_dir / "x11vnc.log")
+            vnc_probe = wait_vnc_port(vnc_backend_port, time.monotonic() + 8)
+            vnc_probe.close()
+            # xrdp's VNC transport opens an IPv6 socket for a 127.0.0.1 backend
+            # and tries ::1 first. Keep x11vnc IPv4-only (matching production),
+            # while forwarding that local IPv6 hop to its IPv4 listener. This
+            # helper is loopback-only and is part of the benchmark harness.
+            proxy = start_process(
+                [sys.executable, str(V6_V4_PROXY), str(vnc_port),
+                 str(vnc_backend_port)], env_source, case_dir / "vnc-proxy.log",
+            )
+            wait_log_marker(case_dir / "vnc-proxy.log", "READY ",
+                            time.monotonic() + 8)
         xrdp_env = env_source.copy()
         xrdp_env.update(args.xrdp_env)
         xrdp = start_process(
@@ -2141,7 +2305,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         xrdp_probe = wait_tcp_port(network.host_ip, xrdp_port,
                                    time.monotonic() + 8)
         xrdp_probe.close()
-        pipeline_option = f"/{args.pipeline}"
+        pipeline_option = "/rfx" if direct_backend else f"/{args.pipeline}"
         client_command = network.wrap_client_command(
             [str(FREERDP), f"/v:{network.host_ip}:{xrdp_port}", "/u:na", "/p:na",
              "/cert:ignore",
@@ -2154,50 +2318,58 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             client_command, env_client, case_dir / "xfreerdp.log",
             preserve_tty=network.enabled,
         )
-        complete_deadline = time.monotonic() + 20
-        while time.monotonic() < complete_deadline:
-            if client.poll() is not None:
-                raise RuntimeError(f"FreeRDP exited with {client.returncode}; see {case_dir / 'xfreerdp.log'}")
-            xrdp_state = xrdp_log.read_text(errors="replace")
-            # libvnc reports successful protocol negotiation through these
-            # normal xrdp manager messages.  The older "VNC connection
-            # complete" text is not emitted by current xrdp builds.
-            if ("VNC User disabled EXTENDED_DESKTOP_SIZE" in xrdp_state or
-                    "VNC: Clipboard (if available)" in xrdp_state):
-                break
-            time.sleep(0.1)
+        if direct_backend:
+            wait_process_log(
+                xrdp, xrdp_log, "status from xrdp_mm_connect() : 0", 20.0,
+                case_dir / "xrdp-stderr.log")
+            negotiated = "CLASSIC_BITMAP"
         else:
-            raise RuntimeError(f"xrdp did not complete VNC connection; see {xrdp_log}")
-        negotiated = "unknown"
-        log_text = xrdp_log.read_text(errors="replace")
-        # The private xrdp instance can log an initial capability probe before
-        # the real FreeRDP connection.  Use the last encoder-start message so
-        # a per-profile GFX fallback is reported accurately.
-        gfx_pos = log_text.rfind("starting gfx")
-        rfx_pos = log_text.rfind("starting rfx codec session")
-        policy_pos = max(
-            log_text.rfind(
-                "Disabling GFX for the selected VNC backend before capability negotiation"
-            ),
-            log_text.rfind("Disabling GFX as 'drdynvc' isn't available"),
-        )
-        # An RFX encoder start after the VNC connection is the stronger
-        # observation: it proves that GFX was not selected.  Keep the policy
-        # message as a fallback for builds which suppress both encoder
-        # diagnostics and GFX at low colour depth.
-        latest_encoder_pos = max(gfx_pos, rfx_pos)
-        if policy_pos > latest_encoder_pos or (
-                args.max_bpp < 32 and latest_encoder_pos < 0):
-            negotiated = "GFX_DISABLED"
-        elif latest_encoder_pos >= 0:
-            negotiated = "GFX" if gfx_pos > rfx_pos else "RFX"
-        else:
-            raise RuntimeError(
-                "xrdp did not report a negotiated graphics encoder"
+            complete_deadline = time.monotonic() + 20
+            while time.monotonic() < complete_deadline:
+                if client.poll() is not None:
+                    raise RuntimeError(f"FreeRDP exited with {client.returncode}; see {case_dir / 'xfreerdp.log'}")
+                xrdp_state = xrdp_log.read_text(errors="replace")
+                # libvnc reports successful protocol negotiation through these
+                # normal xrdp manager messages.  The older "VNC connection
+                # complete" text is not emitted by current xrdp builds.
+                if ("VNC User disabled EXTENDED_DESKTOP_SIZE" in xrdp_state or
+                        "VNC: Clipboard (if available)" in xrdp_state):
+                    break
+                time.sleep(0.1)
+            else:
+                raise RuntimeError(f"xrdp did not complete VNC connection; see {xrdp_log}")
+            negotiated = "unknown"
+            log_text = xrdp_log.read_text(errors="replace")
+            # The private xrdp instance can log an initial capability probe before
+            # the real FreeRDP connection.  Use the last encoder-start message so
+            # a per-profile GFX fallback is reported accurately.
+            gfx_pos = log_text.rfind("starting gfx")
+            rfx_pos = log_text.rfind("starting rfx codec session")
+            policy_pos = max(
+                log_text.rfind(
+                    "Disabling GFX for the selected VNC backend before capability negotiation"
+                ),
+                log_text.rfind("Disabling GFX as 'drdynvc' isn't available"),
             )
-        if args.disable_gfx_for_vnc and negotiated == "GFX":
-            raise RuntimeError("GFX remained active after the Console policy")
-        print(f"{name}#{repetition}: requested={args.pipeline.upper()} negotiated={negotiated}")
+            # An RFX encoder start after the VNC connection is the stronger
+            # observation: it proves that GFX was not selected.  Keep the policy
+            # message as a fallback for builds which suppress both encoder
+            # diagnostics and GFX at low colour depth.
+            latest_encoder_pos = max(gfx_pos, rfx_pos)
+            if policy_pos > latest_encoder_pos or (
+                    args.max_bpp < 32 and latest_encoder_pos < 0):
+                negotiated = "GFX_DISABLED"
+            elif latest_encoder_pos >= 0:
+                negotiated = "GFX" if gfx_pos > rfx_pos else "RFX"
+            else:
+                raise RuntimeError(
+                    "xrdp did not report a negotiated graphics encoder"
+                )
+            if args.disable_gfx_for_vnc and negotiated == "GFX":
+                raise RuntimeError("GFX remained active after the Console policy")
+        requested_path = "CLASSIC_BITMAP" if direct_backend else args.pipeline.upper()
+        print(f"{name}#{repetition}: backend={args.backend} "
+              f"requested={requested_path} negotiated={negotiated}")
         window = find_window(client_display, "xrdp-gpu-bench", time.monotonic() + 10)
         measured_processes = [proc for proc in
                               (xvfb, chansrv, proxy, vnc, xrdp, client)
@@ -2305,6 +2477,8 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
     finally:
         for proc in (probe, stimulus, client, xrdp, proxy, vnc, chansrv, xvfb):
             kill_process(proc, privileged=(proc is client and network.enabled))
+        if module_link is not None:
+            module_link.unlink(missing_ok=True)
         network.cleanup()
 
 
@@ -2322,6 +2496,10 @@ def main() -> int:
         "--transport", choices=("rdp", "rfb", "vnc-viewer"), default="rdp",
         help=("client transport: complete private RDP path, direct RAW-RFB "
               "wire baseline, or a real VNC viewer (default: rdp)"))
+    parser.add_argument(
+        "--backend", choices=("vnc", "direct-x11"), default="vnc",
+        help=("RDP server backend: x11vnc/libvnc.so or the first-party "
+              "XCB/XDamage/XShm module (default: vnc)"))
     parser.add_argument("--input-hz", type=float, default=5.0,
                         help="key pulses per second in input-roundtrip mode")
     parser.add_argument("--input-churn-fps", type=float,
@@ -2364,6 +2542,9 @@ def main() -> int:
                         help="x11vnc binary used by the isolated backend")
     parser.add_argument("--console-lib", default="libvnc.so",
                         help="VNC module filename for the private xrdp instance")
+    parser.add_argument(
+        "--direct-module", type=Path, default=DIRECT_MODULE,
+        help="first-party module used by --backend direct-x11")
     parser.add_argument("--bitmap-compression", choices=("on", "off"),
                         help="override classic RDP bitmap compression in the private instance")
     parser.add_argument("--bulk-compression", choices=("on", "off"),
@@ -2411,6 +2592,15 @@ def main() -> int:
                              else args.bulk_compression == "on")
     XRDP = Path(args.xrdp)
     X11VNC = Path(args.x11vnc)
+    if args.backend == "direct-x11":
+        if args.transport != "rdp":
+            parser.error("--backend direct-x11 requires --transport rdp")
+        if args.mode != "graphics":
+            parser.error("--backend direct-x11 currently supports graphics mode only")
+        if args.max_bpp != 32:
+            parser.error("--backend direct-x11 requires --max-bpp 32")
+        if args.only is not None:
+            parser.error("--only is only valid for the VNC backend")
     if (args.width <= 0 or args.height <= 0 or
             args.client_width <= 0 or args.client_height <= 0 or
             args.duration <= 0 or args.fps <= 0 or args.repetitions <= 0 or
@@ -2464,12 +2654,20 @@ def main() -> int:
             return 2
         finally:
             network.cleanup()
-    required_executables = [X11VNC, GPU_STIMULUS]
+    required_executables = [GPU_STIMULUS]
+    if args.backend == "vnc":
+        required_executables.append(X11VNC)
     if args.transport == "rdp":
         required_executables += [
-            PIXEL_PROBE, V6_V4_PROXY, FREERDP, XRDP,
+            PIXEL_PROBE, FREERDP, XRDP,
             Path("/usr/bin/Xvfb"), Path("/usr/bin/xwininfo"),
         ]
+        if args.backend == "vnc":
+            required_executables.append(V6_V4_PROXY)
+        else:
+            required_executables += [
+                Path("/usr/bin/xdpyinfo"), args.direct_module,
+            ]
     elif args.transport == "vnc-viewer":
         required_executables += [
             PIXEL_PROBE, VNC_VIEWER, Path("/usr/bin/Xvfb"),
@@ -2484,20 +2682,42 @@ def main() -> int:
             parser.error(f"required executable is missing: {required}")
     try:
         auth = discover_auth(args.auth)
+        if args.backend == "direct-x11":
+            source_width, source_height = display_geometry(args.display, auth)
+            if (args.client_width, args.client_height) != (source_width, source_height):
+                print(
+                    f"direct-x11: forcing client geometry to physical "
+                    f"{source_width}x{source_height}"
+                )
+            args.client_width = source_width
+            args.client_height = source_height
         ISOLATED.mkdir(parents=True, exist_ok=True)
         runtime = Path(tempfile.mkdtemp(prefix="xrdp-vnc-gpu-", dir=ISOLATED))
-        print("xrdp -> x11vnc end-to-end GPU/compositor benchmark")
+        benchmark_backend = (
+            "xrdp-console direct-X11" if args.backend == "direct-x11"
+            else "xrdp -> x11vnc end-to-end")
+        effective_pipeline = (
+            "CLASSIC_BITMAP" if args.backend == "direct-x11"
+            else args.pipeline.upper())
+        effective_gfx = (
+            "disabled" if args.backend == "direct-x11" or
+            args.disable_gfx_for_vnc else "requested")
+        effective_resizing = (
+            "disabled" if args.backend == "direct-x11" or
+            args.disable_dynamic_resizing else "enabled")
+        print(f"{benchmark_backend} GPU/compositor benchmark")
         print("Private test services are started; production ports 5900/3389 are untouched.")
         print(f"source={args.display} client=:{args.client_display} "
                   f"client_size={args.client_width}x{args.client_height} "
                   f"workload={args.width}x{args.height} "
                   f"duration={args.duration:.1f}s fps={args.fps:.1f} "
                   f"mode={args.mode} transport={args.transport} "
-                  f"rdp_pipeline={args.pipeline.upper()} "
+                  f"backend={args.backend} "
+                  f"rdp_pipeline={effective_pipeline} "
                   f"max_bpp={args.max_bpp} "
-                  f"disable_gfx_for_vnc={args.disable_gfx_for_vnc} "
+                  f"gfx={effective_gfx} "
                   f"enable_gfx_for_vnc={args.enable_gfx_for_vnc} "
-                  f"disable_dynamic_resizing={args.disable_dynamic_resizing} "
+                  f"dynamic_resizing={effective_resizing} "
                   f"scrollcopyrect={args.scrollcopyrect} "
                   f"network_mode={args.network_mode} "
                   f"network_delay_ms={args.network_delay_ms:g} "
@@ -2505,8 +2725,10 @@ def main() -> int:
                   f"network_loss_percent={args.network_loss_percent:g} "
                   f"network_rate_mbps={('unlimited' if args.network_rate_mbps is None else f'{args.network_rate_mbps:g}')} "
                   f"xrdp_env={args.xrdp_env or '{}'} "
-                  f"repetitions={args.repetitions} x11vnc={X11VNC}")
-        cases = [("baseline", "baseline"), ("lan", "lan")]
+                  f"repetitions={args.repetitions} "
+                  f"x11vnc={X11VNC if args.backend == 'vnc' else 'disabled'}")
+        cases = ([("direct-x11", "direct-x11")] if args.backend == "direct-x11"
+                 else [("baseline", "baseline"), ("lan", "lan")])
         if args.only:
             cases = [(args.only, args.only)]
         for index, (name, use_lan) in enumerate(cases):
