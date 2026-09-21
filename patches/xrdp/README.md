@@ -25,10 +25,13 @@ historical fork's commit history:
    state-machine recovery and propagates resize/update failures safely.
 2. `0002-xrdp-fixed-console-vnc-path.patch` keeps fixed-console geometry,
    direct bitmap transport, and error propagation for the VNC backend.
-3. `0003-xrdp-input-first-transport-check.patch` keeps the transport check
-   before backend work so disconnected clients do not consume the input path.
+The former `0003-xrdp-input-first-transport-check.patch` remains outside the
+canonical series. It changes the global xrdp process-loop order and is still
+an experiment until an apples-to-apples input/graphics benchmark earns it a
+production role.
 
-Do not add benchmark instrumentation or first-party runtime code here. The
+Do not add benchmark instrumentation or first-party runtime code here. These
+two patches are production compatibility changes, not benchmark knobs. The
 old checked-in fork contained profiling, parser-quantum, request-ahead,
 progressive-flush, and experimental GFX changes; those are deliberately
 classified as tooling or deleted experiments rather than preserved as

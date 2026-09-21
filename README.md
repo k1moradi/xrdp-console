@@ -1,9 +1,9 @@
 # xrdp-console
 
 `xrdp-console` is the first-party GPLv3 shared-console project. The current
-migration slice contains the measured VNC bridge and its developer tooling;
-the direct-X11 runtime is intentionally reserved under `src/` for the next
-implementation step.
+migration slice contains the measured VNC bridge, its developer tooling, and
+the first C++ xrdp-module ABI/lifecycle target; direct-X11 capture is the next
+runtime step.
 
 The current measured path is:
 
@@ -15,9 +15,9 @@ It measures the path that matters for a workstation where an RDP connection
 must show the same LXQt session as the physical monitor. The benchmark uses
 the versions installed by the host distribution and keeps all benchmark
 services on private ports. The workspace also carries a reproducible,
-host-native xrdp candidate with the measured VNC optimizations and the
-upstream resize-state fix. It is built and activated explicitly; a normal
-CMake install never replaces the system daemon.
+host-native xrdp candidate with fixed-console geometry, direct-bitmap/error
+propagation, and resize-state recovery. It is built and activated explicitly;
+a normal CMake install never replaces the system daemon.
 
 The end-to-end benchmark is a developer tool, `xrdp_console_bench.py`. It supports
 graphics latency, input round trips, controlled compositor churn, classic RFX
@@ -220,7 +220,8 @@ sudo scripts/use-matched-xrdp-console-daemon.sh
 
 The script backs up the systemd drop-in and restores it automatically if the
 new daemon fails to stay active. It preserves the existing x11vnc profile,
-clipboard channel, and VNC scheduling/encoding optimizations.
+clipboard channel, fixed-console geometry, direct-bitmap transport, and
+resize/error-recovery behavior.
 
 If this checkout should replace the distribution `xrdp` package for this
 machine, run the explicit privileged deployment from the same terminal after

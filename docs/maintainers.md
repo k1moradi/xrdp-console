@@ -12,9 +12,10 @@ cmake --install build
 cpack --config build/CPackConfig.cmake
 ```
 
-`XRDP_CONSOLE_NATIVE` defaults to `ON` for this host and enables `-O3`,
-`-march=native`, and `-mtune=native` for all first-party targets. Set it to
-`OFF` when producing binaries for another machine or for portable CI.
+`XRDP_CONSOLE_NATIVE` defaults to `ON` for this host and enables
+`-march=native` and `-mtune=native` for all first-party targets; Release
+builds additionally use `-O3`. Set it to `OFF` when producing binaries for
+another machine or for portable CI.
 
 Before publishing a change:
 

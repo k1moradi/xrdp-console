@@ -49,7 +49,8 @@ different desktop size, the old graphics state can be torn down without
 recreating the surfaces, leaving a black framebuffer with only a cursor. The
 upstream fix is tracked in [issue #3833](https://github.com/neutrinolabs/xrdp/issues/3833)
 and [PR #3755](https://github.com/neutrinolabs/xrdp/pull/3755). This workspace
-applies that state-machine fix on top of the VNC input/encoding optimizations
+applies that state-machine fix on top of the fixed-console geometry,
+direct-bitmap transport, and error-propagation changes
 in the pinned xrdp dependency generated under `build/_deps/`. The retained
 changes and their reasons are documented in
 [`docs/xrdp-dependency.md`](xrdp-dependency.md).

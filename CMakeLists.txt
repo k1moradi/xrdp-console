@@ -10,7 +10,7 @@ include(GNUInstallDirs)
 include(CTest)
 
 option(XRDP_CONSOLE_NATIVE
-    "Enable host-native optimization for all project targets (non-portable)"
+    "Enable host-native ISA tuning for all project targets (non-portable)"
     ON)
 option(XRDP_CONSOLE_ENABLE_CODEC_BENCH
     "Build the optional offline RFX/x264 codec benchmark"
@@ -38,16 +38,19 @@ set(CMAKE_INSTALL_DOCDIR
     "${CMAKE_INSTALL_DATADIR}/doc/${XRDP_CONSOLE_INSTALL_DIR}")
 
 if(XRDP_CONSOLE_NATIVE)
-    add_compile_options(-O3 -march=native -mtune=native)
+    add_compile_options(
+        -march=native
+        -mtune=native
+        "$<$<CONFIG:Release>:-O3>")
 endif()
 
 if(XRDP_CONSOLE_BUILD_XRDP)
     include(cmake/xrdp_dependency.cmake)
 endif()
 
-# The first-party runtime is intentionally empty until the direct-X11 module
-# is introduced. Keeping this subdirectory first makes the ownership boundary
-# explicit in the build graph.
+# Keep the first-party runtime before the tools so the ownership boundary is
+# explicit in the build graph. The runtime target is enabled with the pinned
+# xrdp dependency while the benchmark remains usable without it.
 add_subdirectory(src)
 
 if(XRDP_CONSOLE_BUILD_TOOLS)

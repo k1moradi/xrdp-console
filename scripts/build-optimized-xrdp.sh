@@ -9,9 +9,8 @@ set -eu
 workspace_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build_root=${XRDP_CONSOLE_BUILD_DIR:-$workspace_root/build}
 prefix=${XRDP_CONSOLE_XRDP_INSTALL_DIR:-$build_root/_deps/xrdp-install}
-source_root=${XRDP_CONSOLE_XRDP_SOURCE_DIR:-$build_root/_deps/xrdp-src}
-dependency_build_root=${XRDP_CONSOLE_XRDP_BUILD_DIR:-$build_root/_deps/xrdp-build}
-native_cflags=${XRDP_CONSOLE_XRDP_CFLAGS:--O3 -march=native}
+deps_root=${XRDP_CONSOLE_XRDP_DEPS_ROOT:-$build_root/_deps}
+native_cflags=${XRDP_CONSOLE_XRDP_CFLAGS:--O3 -march=native -mtune=native}
 
 # This host has only 3.7 GiB of RAM. Keep the build serial so a rebuild does
 # not compete with the live desktop or the benchmark client.
@@ -38,13 +37,20 @@ cmake -S "$workspace_root" -B "$build_root" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DXRDP_CONSOLE_NATIVE=ON \
     -DXRDP_CONSOLE_BUILD_XRDP=ON \
-    "-DXRDP_CONSOLE_XRDP_SOURCE_DIR=$source_root" \
-    "-DXRDP_CONSOLE_XRDP_BUILD_DIR=$dependency_build_root" \
+    "-DXRDP_CONSOLE_XRDP_DEPS_ROOT=$deps_root" \
     "-DXRDP_CONSOLE_XRDP_INSTALL_DIR=$prefix" \
     "-DXRDP_CONSOLE_XRDP_CFLAGS=$native_cflags" \
     "-DXRDP_CONSOLE_XRDP_CPPFLAGS=${XRDP_CONSOLE_XRDP_CPPFLAGS:-}" \
     "-DXRDP_CONSOLE_XRDP_LDFLAGS=${XRDP_CONSOLE_XRDP_LDFLAGS:-}" \
     "-DXRDP_CONSOLE_XRDP_PKG_CONFIG_PATH=${XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH:-}"
+
+source_root=$(sed -n \
+    's/^XRDP_CONSOLE_XRDP_SOURCE_DIR:INTERNAL=//p' \
+    "$build_root/CMakeCache.txt")
+if [ -z "$source_root" ]; then
+    echo "CMake did not publish the hash-keyed xrdp source directory" >&2
+    exit 1
+fi
 
 cmake --build "$build_root" --target xrdp_upstream --parallel "$jobs"
 
