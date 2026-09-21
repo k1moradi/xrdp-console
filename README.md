@@ -32,8 +32,8 @@ On Debian or Ubuntu, install the development dependencies first:
 ```sh
 sudo apt install \
   cmake ninja-build build-essential pkg-config python3 \
-  libx11-dev libxtst-dev libgl-dev libvulkan-dev \
-  xrdp x11vnc freerdp3-x11 tigervnc-viewer xvfb
+  libxcb1-dev libx11-dev libxtst-dev libgl-dev libvulkan-dev \
+  xauth x11-utils xrdp x11vnc freerdp3-x11 tigervnc-viewer xvfb
 ```
 
 Configure an out-of-tree Release build. For this machine, use the native

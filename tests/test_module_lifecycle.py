@@ -6,10 +6,12 @@ from __future__ import annotations
 import ctypes
 import os
 import pathlib
+import secrets
 import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -81,35 +83,56 @@ def stop_process(process: subprocess.Popen[object] | None) -> None:
         process.wait(timeout=3.0)
 
 
-def start_private_xvfb() -> tuple[subprocess.Popen[object], str]:
+def choose_display_number() -> int:
+    socket_directory = pathlib.Path("/tmp/.X11-unix")
+    for display_number in range(90, 200):
+        if (
+            not pathlib.Path(f"/tmp/.X{display_number}-lock").exists()
+            and not (socket_directory / f"X{display_number}").exists()
+        ):
+            return display_number
+    raise AssertionError("could not find a free X display number")
+
+
+def start_private_xvfb(
+    auth_file: pathlib.Path,
+) -> tuple[subprocess.Popen[object], str]:
     xvfb = shutil.which("Xvfb")
     if xvfb is None:
         raise AssertionError("module lifecycle test requires Xvfb")
+    xauth = shutil.which("xauth")
+    if xauth is None:
+        raise AssertionError("module lifecycle test requires xauth")
+
+    display_number = choose_display_number()
+    display = f":{display_number}"
+    cookie = secrets.token_hex(16)
+    subprocess.run(
+        [xauth, "-f", str(auth_file), "add", display, ".", cookie],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    auth_file.chmod(0o600)
 
     process = subprocess.Popen(
         [
             xvfb,
-            "-displayfd",
-            "1",
+            display,
+            "-auth",
+            str(auth_file),
             "-screen",
             "0",
             "1024x768x24",
             "-nolisten",
             "tcp",
         ],
-        stdout=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
         text=True,
         start_new_session=True,
     )
-    assert process.stdout is not None
-    display_number = process.stdout.readline().strip()
-    if not display_number:
-        stop_process(process)
-        diagnostics = process.stderr.read() if process.stderr is not None else ""
-        raise AssertionError(f"Xvfb did not publish a display: {diagnostics}")
-
-    display = f":{display_number}"
     xdpyinfo = shutil.which("xdpyinfo")
     if xdpyinfo is None:
         stop_process(process)
@@ -117,6 +140,21 @@ def start_private_xvfb() -> tuple[subprocess.Popen[object], str]:
 
     environment = os.environ.copy()
     environment["DISPLAY"] = display
+    environment["XAUTHORITY"] = str(auth_file)
+    unauthenticated_environment = environment.copy()
+    unauthenticated_environment["XAUTHORITY"] = str(
+        auth_file.with_name("missing-xauthority")
+    )
+    if subprocess.run(
+        [xdpyinfo],
+        env=unauthenticated_environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0:
+        stop_process(process)
+        raise AssertionError("Xvfb accepted a connection without Xauthority")
+
     deadline = time.monotonic() + 5.0
     while time.monotonic() < deadline:
         if process.poll() is not None:
@@ -144,10 +182,23 @@ def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit(f"usage: {sys.argv[0]} MODULE")
 
-    xvfb, display = start_private_xvfb()
+    auth_directory = tempfile.TemporaryDirectory(
+        prefix="xrdp-console-xauthority-"
+    )
+    auth_file = pathlib.Path(auth_directory.name) / "xauthority"
+    try:
+        xvfb, display = start_private_xvfb(auth_file)
+    except BaseException:
+        auth_directory.cleanup()
+        raise
+
     previous_display = os.environ.get("DISPLAY")
+    previous_xauthority = os.environ.get("XAUTHORITY")
     os.environ["DISPLAY"] = display
+    os.environ["XAUTHORITY"] = str(auth_file)
     handle = 0
+    saved_stdin = os.dup(0)
+    stdin_closed = False
     try:
         module_path = pathlib.Path(sys.argv[1])
         library = ctypes.CDLL(str(module_path))
@@ -158,6 +209,10 @@ def main() -> int:
         exit_module.argtypes = [ctypes.c_ssize_t]
         exit_module.restype = ctypes.c_int
 
+        # Force the first successful XCB connection to receive fd 0. The
+        # connection layer must accept it and duplicate only the wait fd.
+        os.close(0)
+        stdin_closed = True
         handle = init()
         if handle == 0:
             raise AssertionError("mod_init returned a null handle")
@@ -175,6 +230,7 @@ def main() -> int:
 
         assert module.mod_set_param(handle, b"display", display.encode()) == 0
         assert module.mod_connect(handle) == 0
+        assert os.readlink("/proc/self/fd/0").startswith("socket:")
 
         read_objs = (ctypes.c_ssize_t * 5)(11, 22, 33, 44, 0)
         write_objs = (ctypes.c_ssize_t * 3)(55, 66, 77)
@@ -247,13 +303,23 @@ def main() -> int:
         assert module.mod_check_wait_objs(handle) == 1
         assert module.mod_end(handle) == 0
     finally:
-        if handle:
-            assert exit_module(handle) == 0
-        stop_process(xvfb)
-        if previous_display is None:
-            os.environ.pop("DISPLAY", None)
-        else:
-            os.environ["DISPLAY"] = previous_display
+        try:
+            if handle:
+                assert exit_module(handle) == 0
+        finally:
+            if stdin_closed:
+                os.dup2(saved_stdin, 0)
+            os.close(saved_stdin)
+            stop_process(xvfb)
+            if previous_display is None:
+                os.environ.pop("DISPLAY", None)
+            else:
+                os.environ["DISPLAY"] = previous_display
+            if previous_xauthority is None:
+                os.environ.pop("XAUTHORITY", None)
+            else:
+                os.environ["XAUTHORITY"] = previous_xauthority
+            auth_directory.cleanup()
 
     assert exit_module(0) == 0
     return 0

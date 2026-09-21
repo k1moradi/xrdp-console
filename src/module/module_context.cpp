@@ -4,11 +4,12 @@
 
 #include <array>
 #include <climits>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <new>
-#include <string>
+#include <string_view>
 
 #include "../x11/x11_display_connection.h"
 
@@ -35,23 +36,29 @@ copy_text(char *destination, std::size_t capacity, const char *value) noexcept
     destination[copied] = '\0';
 }
 
+class LifecycleEventSink final : public X11EventSink
+{
+public:
+    void handle(const xcb_generic_event_t &event) noexcept override
+    {
+        (void)event;
+        // No event-producing extension is selected by the lifecycle
+        // milestone. Future capture code will supply a typed event sink.
+    }
+};
+
 struct ModuleState
 {
     std::array<char, 256> hostname{};
     std::array<char, 256> port{};
     std::array<char, 256> ip{};
     std::array<char, 256> display{};
-    int width{0};
-    int height{0};
-    int bpp{0};
     int keylayout{0};
-    int screenNumber{-1};
-    Window rootWindow{0};
     PixelSize sourceGeometry{};
     PixelSize presentationGeometry{};
+    std::uint32_t bitsPerPixel{};
     bool has_client_info{false};
     bool started{false};
-    bool connected{false};
 };
 
 } // namespace
@@ -126,9 +133,11 @@ ModuleContext::start(int width, int height, int bpp) noexcept
         return 1;
     }
 
-    impl_->state.width = width;
-    impl_->state.height = height;
-    impl_->state.bpp = bpp;
+    impl_->state.presentationGeometry = {
+        static_cast<std::uint32_t>(width),
+        static_cast<std::uint32_t>(height),
+    };
+    impl_->state.bitsPerPixel = static_cast<std::uint32_t>(bpp);
     impl_->state.started = true;
     return 0;
 }
@@ -141,26 +150,22 @@ ModuleContext::connect() noexcept
         return 1;
     }
 
-    if (impl_->state.connected)
+    if (impl_->x11Connection != nullptr)
     {
-        return 0;
+        return impl_->x11Connection->valid() ? 0 : 1;
     }
 
     try
     {
         auto connection = std::make_unique<X11DisplayConnection>(
-            std::string(impl_->state.display.data()));
+            std::string_view(impl_->state.display.data()));
         if (!connection->valid())
         {
             return 1;
         }
 
-        impl_->state.screenNumber = connection->screenNumber();
-        impl_->state.rootWindow = connection->rootWindow();
-        impl_->state.sourceGeometry = connection->screenGeometry();
-        impl_->state.presentationGeometry = impl_->state.sourceGeometry;
+        impl_->state.sourceGeometry = connection->sourceGeometry();
         impl_->x11Connection = std::move(connection);
-        impl_->state.connected = true;
         return 0;
     }
     catch (...)
@@ -168,11 +173,7 @@ ModuleContext::connect() noexcept
         // The C ABI must report allocation/constructor failures as a normal
         // module failure and leave no partially connected state behind.
         impl_->x11Connection.reset();
-        impl_->state.screenNumber = -1;
-        impl_->state.rootWindow = 0;
         impl_->state.sourceGeometry = {};
-        impl_->state.presentationGeometry = {};
-        impl_->state.connected = false;
         return 1;
     }
 }
@@ -184,14 +185,12 @@ ModuleContext::end() noexcept
     {
         return 1;
     }
-    // X11DisplayConnection destroys the xrdp wait object before closing the
-    // Display. Reset it before changing the lifecycle state.
+    // X11DisplayConnection destroys the xrdp wait object before disconnecting
+    // XCB. Reset it before changing the lifecycle state.
     impl_->x11Connection.reset();
-    impl_->state.screenNumber = -1;
-    impl_->state.rootWindow = 0;
     impl_->state.sourceGeometry = {};
     impl_->state.presentationGeometry = {};
-    impl_->state.connected = false;
+    impl_->state.bitsPerPixel = 0;
     impl_->state.started = false;
     return 0;
 }
@@ -269,7 +268,7 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
 
     // The xrdp caller owns the arrays and timeout. A module that is not
     // connected has nothing to append and must leave all caller state alone.
-    if (!impl_->state.connected || impl_->x11Connection == nullptr)
+    if (impl_->x11Connection == nullptr || !impl_->x11Connection->valid())
     {
         return 0;
     }
@@ -300,11 +299,15 @@ ModuleContext::check_wait_objs() noexcept
     {
         return 1;
     }
-    if (!impl_->state.connected || impl_->x11Connection == nullptr)
+    if (impl_->x11Connection == nullptr)
     {
         return 0;
     }
-    return impl_->x11Connection->drainEvents();
+    LifecycleEventSink eventSink;
+    return impl_->x11Connection->processEvents(eventSink) ==
+                   ConnectionStatus::Ok
+               ? 0
+               : 1;
 }
 
 extern "C" int

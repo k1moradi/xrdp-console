@@ -2,122 +2,168 @@
 
 #include "x11_display_connection.h"
 
-#include <cerrno>
-#include <sys/socket.h>
+#include <cstdlib>
+#include <fcntl.h>
+#include <string>
+#include <unistd.h>
 
-X11DisplayConnection *X11DisplayConnection::activeConnection_ = nullptr;
-
-X11DisplayConnection::X11DisplayConnection(std::string displayName) noexcept
+namespace
 {
+
+int
+duplicate_wait_file_descriptor(int fileDescriptor) noexcept
+{
+#ifdef F_DUPFD_CLOEXEC
+    const int duplicate = fcntl(fileDescriptor, F_DUPFD_CLOEXEC, 1);
+    if (duplicate >= 0)
+    {
+        return duplicate;
+    }
+#endif
+    return fcntl(fileDescriptor, F_DUPFD, 1);
+}
+
+} // namespace
+
+X11DisplayConnection::X11DisplayConnection(std::string_view displayName) noexcept
+{
+    std::string ownedDisplayName;
+    try
+    {
+        if (!displayName.empty())
+        {
+            ownedDisplayName.assign(displayName.data(), displayName.size());
+        }
+    }
+    catch (...)
+    {
+        failed_ = true;
+        return;
+    }
+
     const char *requestedDisplay =
-        displayName.empty() ? nullptr : displayName.c_str();
-    display_ = XOpenDisplay(requestedDisplay);
-    if (display_ == nullptr)
+        displayName.empty() ? nullptr : ownedDisplayName.c_str();
+    int requestedScreen = -1;
+    connection_ = xcb_connect(requestedDisplay, &requestedScreen);
+    if (connection_ == nullptr || xcb_connection_has_error(connection_) != 0)
     {
+        failed_ = true;
+        close();
+        return;
+    }
+    screenNumber_ = requestedScreen;
+
+    const xcb_setup_t *setup = xcb_get_setup(connection_);
+    if (setup == nullptr || screenNumber_ < 0)
+    {
+        failed_ = true;
+        close();
         return;
     }
 
-    connectionFileDescriptor_ = XConnectionNumber(display_);
-    if (connectionFileDescriptor_ <= 0)
+    xcb_screen_iterator_t screens = xcb_setup_roots_iterator(setup);
+    for (int index = 0; index < screenNumber_ && screens.rem > 0; ++index)
     {
-        XCloseDisplay(display_);
-        display_ = nullptr;
-        connectionFileDescriptor_ = -1;
+        xcb_screen_next(&screens);
+    }
+    if (screens.rem <= 0 || screens.data == nullptr)
+    {
+        failed_ = true;
+        close();
         return;
     }
 
-    screenNumber_ = DefaultScreen(display_);
-    Screen *screen = ScreenOfDisplay(display_, screenNumber_);
-    if (screen == nullptr)
+    const xcb_screen_t *screen = screens.data;
+    rootWindow_ = screen->root;
+    sourceGeometry_.widthPixels = screen->width_in_pixels;
+    sourceGeometry_.heightPixels = screen->height_in_pixels;
+    if (rootWindow_ == XCB_WINDOW_NONE || sourceGeometry_.widthPixels == 0 ||
+        sourceGeometry_.heightPixels == 0)
     {
-        XCloseDisplay(display_);
-        display_ = nullptr;
-        connectionFileDescriptor_ = -1;
-        screenNumber_ = -1;
+        failed_ = true;
+        close();
         return;
     }
 
-    const int width = WidthOfScreen(screen);
-    const int height = HeightOfScreen(screen);
-    rootWindow_ = RootWindowOfScreen(screen);
-    if (width <= 0 || height <= 0 || rootWindow_ == 0)
+    connectionFileDescriptor_ = xcb_get_file_descriptor(connection_);
+    if (connectionFileDescriptor_ < 0)
     {
-        XCloseDisplay(display_);
-        display_ = nullptr;
-        connectionFileDescriptor_ = -1;
-        screenNumber_ = -1;
-        rootWindow_ = 0;
+        failed_ = true;
+        close();
         return;
     }
-    screenGeometry_.widthPixels = static_cast<std::uint32_t>(width);
-    screenGeometry_.heightPixels = static_cast<std::uint32_t>(height);
 
-    waitObject_ = g_create_wait_obj_from_socket(connectionFileDescriptor_, 0);
+    waitFileDescriptor_ = connectionFileDescriptor_;
+    if (waitFileDescriptor_ == 0)
+    {
+        waitFileDescriptor_ =
+            duplicate_wait_file_descriptor(connectionFileDescriptor_);
+        if (waitFileDescriptor_ < 0)
+        {
+            failed_ = true;
+            close();
+            return;
+        }
+        waitObjectUsesDuplicate_ = true;
+    }
+
+    waitObject_ = g_create_wait_obj_from_socket(waitFileDescriptor_, 0);
     if (waitObject_ == NULL_WAIT_OBJ)
     {
-        XCloseDisplay(display_);
-        display_ = nullptr;
-        connectionFileDescriptor_ = -1;
-        screenNumber_ = -1;
-        rootWindow_ = 0;
-        screenGeometry_ = {};
+        failed_ = true;
+        close();
         return;
-    }
-
-    // Xlib's default I/O handler terminates the process. Returning an error
-    // from the module wait callback lets xrdp unwind the session instead.
-    // Xlib installs this handler process-wide, so restore it in the matching
-    // destructor and only claim it when this is the active connection.
-    if (activeConnection_ == nullptr)
-    {
-        previousIoErrorHandler_ =
-            XSetIOErrorHandler(&X11DisplayConnection::ioErrorHandler);
-        activeConnection_ = this;
-        ioErrorHandlerInstalled_ = true;
     }
 }
 
 X11DisplayConnection::~X11DisplayConnection() noexcept
 {
-    // On POSIX this is intentionally a no-op for the socket itself. XClose-
-    // Display remains the owner of the X connection fd. On other platforms
-    // xrdp closes the event handle associated with the socket here.
+    close();
+}
+
+void
+X11DisplayConnection::close() noexcept
+{
     if (waitObject_ != NULL_WAIT_OBJ)
     {
         g_delete_wait_obj_from_socket(waitObject_);
         waitObject_ = NULL_WAIT_OBJ;
     }
 
-    if (display_ != nullptr && !ioError_)
+    if (waitObjectUsesDuplicate_ && waitFileDescriptor_ >= 0)
     {
-        XCloseDisplay(display_);
+        ::close(waitFileDescriptor_);
     }
-    // XCloseDisplay() can re-enter Xlib's fatal I/O path after the server has
-    // disappeared. The dead connection is already unusable; leave its Xlib
-    // bookkeeping for process teardown rather than terminating xrdp while
-    // trying to report the session failure.
-    display_ = nullptr;
+    waitFileDescriptor_ = -1;
+    waitObjectUsesDuplicate_ = false;
 
-    if (ioErrorHandlerInstalled_ && activeConnection_ == this)
+    if (connection_ != nullptr)
     {
-        XSetIOErrorHandler(previousIoErrorHandler_);
-        activeConnection_ = nullptr;
+        xcb_disconnect(connection_);
+        connection_ = nullptr;
     }
+    connectionFileDescriptor_ = -1;
+    screenNumber_ = -1;
+    rootWindow_ = XCB_WINDOW_NONE;
+    sourceGeometry_ = {};
 }
 
 bool
 X11DisplayConnection::valid() const noexcept
 {
-    return display_ != nullptr && connectionFileDescriptor_ > 0 &&
+    return !failed_ && connection_ != nullptr &&
+           xcb_connection_has_error(connection_) == 0 &&
+           connectionFileDescriptor_ >= 0 &&
            waitObject_ != NULL_WAIT_OBJ && screenNumber_ >= 0 &&
-           rootWindow_ != 0 && screenGeometry_.widthPixels > 0 &&
-           screenGeometry_.heightPixels > 0;
+           rootWindow_ != XCB_WINDOW_NONE &&
+           sourceGeometry_.widthPixels > 0 &&
+           sourceGeometry_.heightPixels > 0;
 }
 
-Display *
-X11DisplayConnection::display() const noexcept
+PixelSize
+X11DisplayConnection::sourceGeometry() const noexcept
 {
-    return display_;
+    return sourceGeometry_;
 }
 
 int
@@ -126,16 +172,10 @@ X11DisplayConnection::screenNumber() const noexcept
     return screenNumber_;
 }
 
-Window
+xcb_window_t
 X11DisplayConnection::rootWindow() const noexcept
 {
     return rootWindow_;
-}
-
-PixelSize
-X11DisplayConnection::screenGeometry() const noexcept
-{
-    return screenGeometry_;
 }
 
 tbus
@@ -150,76 +190,30 @@ X11DisplayConnection::fileDescriptor() const noexcept
     return connectionFileDescriptor_;
 }
 
-int
-X11DisplayConnection::drainEvents() noexcept
+ConnectionStatus
+X11DisplayConnection::processEvents(X11EventSink &eventSink) noexcept
 {
     if (!valid())
     {
-        return 1;
+        return ConnectionStatus::Failed;
     }
 
     if (!g_is_wait_obj_set(waitObject_))
     {
-        return 0;
+        return ConnectionStatus::Ok;
     }
 
-    // g_is_wait_obj_set() also reports POLLHUP. Probe without consuming any
-    // X protocol bytes so EOF can be returned to xrdp as a normal session
-    // failure instead of allowing XPending() to invoke Xlib's fatal path.
-    char protocolByte = 0;
-    const ssize_t initialProbe =
-        recv(connectionFileDescriptor_, &protocolByte, 1,
-             MSG_PEEK | MSG_DONTWAIT);
-    if (initialProbe == 0)
+    xcb_generic_event_t *event = nullptr;
+    while ((event = xcb_poll_for_event(connection_)) != nullptr)
     {
-        ioError_ = true;
-        return 1;
-    }
-    if (initialProbe < 0 &&
-        errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
-    {
-        ioError_ = true;
-        return 1;
-    }
-    if (initialProbe < 0)
-    {
-        return 0;
+        eventSink.handle(*event);
+        std::free(event);
     }
 
-    XEvent event{};
-    while (!ioError_ && XPending(display_) > 0)
+    if (xcb_connection_has_error(connection_) != 0)
     {
-        XNextEvent(display_, &event);
+        failed_ = true;
+        return ConnectionStatus::Failed;
     }
-    if (ioError_)
-    {
-        return 1;
-    }
-
-    const ssize_t finalProbe =
-        recv(connectionFileDescriptor_, &protocolByte, 1,
-             MSG_PEEK | MSG_DONTWAIT);
-    if (finalProbe == 0)
-    {
-        ioError_ = true;
-        return 1;
-    }
-    if (finalProbe < 0 &&
-        errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)
-    {
-        ioError_ = true;
-        return 1;
-    }
-    return 0;
-}
-
-int
-X11DisplayConnection::ioErrorHandler(Display *display) noexcept
-{
-    (void)display;
-    if (activeConnection_ != nullptr)
-    {
-        activeConnection_->ioError_ = true;
-    }
-    return 0;
+    return ConnectionStatus::Ok;
 }

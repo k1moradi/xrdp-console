@@ -3,7 +3,7 @@
 if(XRDP_CONSOLE_BUILD_XRDP)
     enable_language(CXX)
     find_package(PkgConfig REQUIRED)
-    pkg_check_modules(XRDP_CONSOLE_X11 REQUIRED IMPORTED_TARGET x11)
+    pkg_check_modules(XRDP_CONSOLE_XCB REQUIRED IMPORTED_TARGET xcb)
 
     add_library(xrdp-console MODULE
         module/module_abi.c
@@ -11,7 +11,7 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         module/module_context.cpp
         module/module_context.h
         module/module_entry.cpp
-        x11/pixel_size.h
+        core/geometry.h
         x11/x11_display_connection.cpp
         x11/x11_display_connection.h)
     set_target_properties(xrdp-console PROPERTIES
@@ -34,7 +34,7 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         "${XRDP_CONSOLE_XRDP_BUILD_DIR}")
     target_compile_definitions(xrdp-console PRIVATE HAVE_CONFIG_H)
     target_link_libraries(xrdp-console PRIVATE
-        PkgConfig::XRDP_CONSOLE_X11
+        PkgConfig::XRDP_CONSOLE_XCB
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libcommon.so")
     set_target_properties(xrdp-console PROPERTIES
         BUILD_RPATH "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp"
