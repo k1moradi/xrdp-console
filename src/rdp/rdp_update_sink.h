@@ -17,6 +17,9 @@ public:
 
     [[nodiscard]] bool available() const noexcept;
     [[nodiscard]] bool beginUpdate() noexcept;
+    [[nodiscard]] bool fillAvailable() const noexcept;
+    [[nodiscard]] bool setForegroundColor(std::int32_t color) noexcept;
+    [[nodiscard]] bool fillRectangle(Rectangle destination) noexcept;
     [[nodiscard]] bool paintRectangle(Rectangle destination,
                                       FramebufferView pixels) noexcept;
     [[nodiscard]] bool endUpdate() noexcept;

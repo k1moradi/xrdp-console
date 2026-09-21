@@ -104,8 +104,9 @@ python3 -B tools/benchmark/xrdp_console_bench.py \
 
 This mode skips x11vnc, the IPv6-to-IPv4 RFB proxy, chansrv, GFX/drdynvc, and
 dynamic resizing; stages the module into the private xrdp installation; sets
-`code=0` for the direct classic-bitmap path; and forces the FreeRDP geometry to
-the physical X11 geometry. Graphics mode reports the draw-completion to
+`code=21` for the first-party complete-framebuffer and smooth-scroll
+capabilities; and initially forces the FreeRDP geometry to the physical X11
+geometry. Graphics mode reports the draw-completion to
 FreeRDP-framebuffer-visible stage. Input-roundtrip mode additionally forwards
 RDP keyboard events through XTest and measures the full marker round trip. The
 current classic pointer path uses a 32x32 cursor canvas; larger X cursors are

@@ -48,8 +48,10 @@ are reported as `NA` rather than inferred.
 
 Graphics and input-roundtrip runs support `--backend direct-x11 --transport
 rdp`. This mode does not start x11vnc or the RFB relay. It loads the first-party
-XCB/XDamage/XShm module into the private xrdp build, disables GFX/drdynvc and
-dynamic resizing, and forces the FreeRDP window to the physical X11 geometry:
+XCB/XDamage/XShm module into the private xrdp build, uses module code `21` for
+the complete-framebuffer and smooth-scroll capabilities, disables GFX/drdynvc
+and dynamic resizing, and forces the FreeRDP window to the physical X11
+geometry:
 
 ```text
 GL swap-complete -> T2   direct XCB/XDamage/XShm -> classic bitmap -> FreeRDP presentation

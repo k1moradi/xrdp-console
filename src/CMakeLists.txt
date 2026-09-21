@@ -18,6 +18,10 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         core/damage_region.h
         core/framebuffer_view.h
         core/geometry.h
+        core/presentation_scaler.cpp
+        core/presentation_scaler.h
+        core/presentation_transform.cpp
+        core/presentation_transform.h
         core/rectangle.h
         rdp/rdp_update_sink.cpp
         rdp/rdp_update_sink.h

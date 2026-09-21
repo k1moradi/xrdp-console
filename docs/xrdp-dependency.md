@@ -52,7 +52,7 @@ The series is deliberately small and applies in this order:
 | patch | purpose | reason retained |
 | --- | --- | --- |
 | `0001-xrdp-resize-state-and-failure-recovery.patch` | VNC resize state and error recovery | Prevents the fixed-console session from losing its graphics state after a client resize or failed update. |
-| `0002-xrdp-fixed-console-vnc-path.patch` | fixed geometry, direct bitmap path, end-to-end update error propagation | Keeps the physical X11 framebuffer authoritative and makes VNC update failures visible to the session. |
+| `0002-xrdp-fixed-console-vnc-path.patch` | fixed geometry, direct bitmap path, end-to-end update error propagation, and first-party capability code `21` | Keeps the physical X11 framebuffer authoritative, makes update failures visible to the session, and gives the direct module an explicit complete-framebuffer/smooth-scroll classification. |
 The former input-first transport check is deliberately not in the canonical
 series. It changes the global xrdp process loop and remains an experiment
 until a clean A/B benchmark demonstrates a durable benefit.

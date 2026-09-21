@@ -10,6 +10,11 @@
 
 int xrdp_console_context_start(void *context, int width, int height, int bpp);
 int xrdp_console_context_connect(void *context);
+int xrdp_console_context_resize_presentation(
+    void *context, int width, int height, int num_monitors,
+    const struct monitor_info *monitors);
+int xrdp_console_context_invalidate_presentation(void *context, int width,
+                                                  int height);
 int xrdp_console_context_event(void *context, int message, long param1,
                                long param2, long param3, long param4);
 int xrdp_console_context_end(void *context);
@@ -145,25 +150,27 @@ module_server_monitor_resize(struct xrdp_mod *abi, int width, int height,
                              int *in_progress)
 {
     void *context = context_from_abi(abi);
-    (void)width;
-    (void)height;
-    (void)num_monitors;
-    (void)monitors;
+    const int result = context == NULL
+                           ? 1
+                           : xrdp_console_context_resize_presentation(
+                                 context, width, height, num_monitors,
+                                 monitors);
     if (in_progress != NULL)
     {
         *in_progress = 0;
     }
-    /* The ABI milestone deliberately has no resize implementation yet. */
-    return context == NULL ? 1 : 0;
+    return result;
 }
 
 static int
 module_server_monitor_full_invalidate(struct xrdp_mod *abi, int width,
                                       int height)
 {
-    (void)width;
-    (void)height;
-    return context_from_abi(abi) == NULL ? 1 : 0;
+    void *context = context_from_abi(abi);
+    return context == NULL
+               ? 1
+               : xrdp_console_context_invalidate_presentation(
+                     context, width, height);
 }
 
 static int
@@ -249,10 +256,34 @@ xrdp_console_module_update_callbacks_ready(
 }
 
 int
+xrdp_console_module_fill_callbacks_ready(const xrdp_console_module *module)
+{
+    return module != NULL && module->abi.server_set_fgcolor != NULL &&
+           module->abi.server_fill_rect != NULL;
+}
+
+int
 xrdp_console_module_server_begin_update(xrdp_console_module *module)
 {
     return xrdp_console_module_update_callbacks_ready(module)
                ? module->abi.server_begin_update(&module->abi)
+               : 1;
+}
+
+int
+xrdp_console_module_server_set_fgcolor(xrdp_console_module *module, int color)
+{
+    return xrdp_console_module_fill_callbacks_ready(module)
+               ? module->abi.server_set_fgcolor(&module->abi, color)
+               : 1;
+}
+
+int
+xrdp_console_module_server_fill_rect(xrdp_console_module *module, int x, int y,
+                                      int cx, int cy)
+{
+    return xrdp_console_module_fill_callbacks_ready(module)
+               ? module->abi.server_fill_rect(&module->abi, x, y, cx, cy)
                : 1;
 }
 

@@ -28,6 +28,43 @@ RdpUpdateSink::beginUpdate() noexcept
 }
 
 bool
+RdpUpdateSink::fillAvailable() const noexcept
+{
+    return module_ != nullptr &&
+           xrdp_console_module_fill_callbacks_ready(module_) != 0;
+}
+
+bool
+RdpUpdateSink::setForegroundColor(std::int32_t color) noexcept
+{
+    return fillAvailable() &&
+           xrdp_console_module_server_set_fgcolor(module_,
+                                                  static_cast<int>(color)) == 0;
+}
+
+bool
+RdpUpdateSink::fillRectangle(Rectangle destination) noexcept
+{
+    if (!updateOpen_ || !fillAvailable() || destination.x < 0 ||
+        destination.y < 0 || destination.widthPixels == 0 ||
+        destination.heightPixels == 0 ||
+        destination.widthPixels >
+            static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+        destination.heightPixels >
+            static_cast<std::uint32_t>(std::numeric_limits<int>::max()) ||
+        destination.x > std::numeric_limits<int>::max() ||
+        destination.y > std::numeric_limits<int>::max())
+    {
+        return false;
+    }
+    return xrdp_console_module_server_fill_rect(
+               module_, static_cast<int>(destination.x),
+               static_cast<int>(destination.y),
+               static_cast<int>(destination.widthPixels),
+               static_cast<int>(destination.heightPixels)) == 0;
+}
+
+bool
 RdpUpdateSink::paintRectangle(Rectangle destination,
                               FramebufferView pixels) noexcept
 {

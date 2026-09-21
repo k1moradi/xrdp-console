@@ -20,6 +20,8 @@ constexpr std::size_t kLockCaps = 0;
 constexpr std::size_t kLockNum = 1;
 constexpr std::size_t kLockScroll = 2;
 constexpr int kMaximumButton = 9;
+constexpr std::int64_t kScrollUnitsPerClick = 120;
+constexpr std::int64_t kMaximumScrollBurst = 16;
 
 bool
 isButtonDownMessage(int message) noexcept
@@ -247,6 +249,10 @@ X11InputController::handle(int message, long param1, long param2,
             return handleKey(false, param2, param3, param4);
         case WM_KEYBRD_SYNC:
             return synchronizeLocks(param1);
+        case WM_TOUCH_VSCROLL:
+            return handleVerticalScroll(param1, param2, param3);
+        case WM_TOUCH_HSCROLL:
+            return handleHorizontalScroll(param1, param2, param3);
         case WM_MOUSEMOVE:
             return fakePointer(XCB_MOTION_NOTIFY, param1, param2);
         case WM_LBUTTONDOWN:
@@ -335,6 +341,8 @@ X11InputController::releaseAll() noexcept
     {
         fail("XTEST input release failed");
     }
+    verticalScrollRemainder_ = 0;
+    horizontalScrollRemainder_ = 0;
 }
 
 xcb_keycode_t
@@ -426,6 +434,56 @@ X11InputController::synchronizeLocks(long lockFlags) noexcept
             return false;
         }
         state ^= lockMasks_[lock];
+    }
+    return true;
+}
+
+bool
+X11InputController::handleVerticalScroll(long x, long y, long delta) noexcept
+{
+    return emitScrollClicks(x, y, delta, verticalScrollRemainder_,
+                             /*positiveButton=*/5, /*negativeButton=*/4);
+}
+
+bool
+X11InputController::handleHorizontalScroll(long x, long y,
+                                            long delta) noexcept
+{
+    return emitScrollClicks(x, y, delta, horizontalScrollRemainder_,
+                             /*positiveButton=*/6, /*negativeButton=*/7);
+}
+
+bool
+X11InputController::emitScrollClicks(long x, long y, long delta,
+                                      std::int64_t &accumulator,
+                                      int positiveButton,
+                                      int negativeButton) noexcept
+{
+    const std::int64_t boundedDelta = std::clamp<std::int64_t>(
+        static_cast<std::int64_t>(delta),
+        -kMaximumScrollBurst * kScrollUnitsPerClick,
+        kMaximumScrollBurst * kScrollUnitsPerClick);
+    accumulator = std::clamp(
+        accumulator + boundedDelta, -kMaximumScrollBurst * kScrollUnitsPerClick,
+        kMaximumScrollBurst * kScrollUnitsPerClick);
+
+    while (accumulator >= kScrollUnitsPerClick)
+    {
+        if (!fakeButton(XCB_BUTTON_PRESS, positiveButton, x, y) ||
+            !fakeButton(XCB_BUTTON_RELEASE, positiveButton, x, y))
+        {
+            return false;
+        }
+        accumulator -= kScrollUnitsPerClick;
+    }
+    while (accumulator <= -kScrollUnitsPerClick)
+    {
+        if (!fakeButton(XCB_BUTTON_PRESS, negativeButton, x, y) ||
+            !fakeButton(XCB_BUTTON_RELEASE, negativeButton, x, y))
+        {
+            return false;
+        }
+        accumulator += kScrollUnitsPerClick;
     }
     return true;
 }

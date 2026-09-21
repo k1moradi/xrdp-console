@@ -62,6 +62,19 @@ if(TARGET xrdp-console)
         ${CMAKE_SOURCE_DIR}/src)
     add_test(NAME damage-region-unit COMMAND damage-region-unit)
 
+    add_executable(presentation-transform-unit
+        test_presentation_transform.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/presentation_scaler.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/presentation_transform.cpp)
+    set_target_properties(presentation-transform-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(presentation-transform-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME presentation-transform-unit
+        COMMAND presentation-transform-unit)
+
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(XRDP_CONSOLE_TEST_XCB REQUIRED IMPORTED_TARGET xcb)
     pkg_check_modules(XRDP_CONSOLE_TEST_XCB_DAMAGE REQUIRED

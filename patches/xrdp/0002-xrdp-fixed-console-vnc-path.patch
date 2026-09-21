@@ -173,7 +173,7 @@
          v->guid = *(struct guid *)value;
 --- a/xrdp/xrdp_types.h
 +++ b/xrdp/xrdp_types.h
-@@ -44,6 +44,11 @@
+@@ -44,6 +44,17 @@
      (((mm)->code != XVNC_SESSION_CODE) && \
       ((mm)->code != XVNC_UDS_SESSION_CODE))
  
@@ -181,6 +181,12 @@
 +#define XRDP_MM_IS_VNC(mm) \
 +    (((mm)->code == XVNC_SESSION_CODE) || \
 +     ((mm)->code == XVNC_UDS_SESSION_CODE))
++
++/* The first-party physical-console module also supplies complete pixels. */
++#define XRDP_CONSOLE_SESSION_CODE 21
++#define XRDP_MM_IS_COMPLETE_FRAMEBUFFER(mm) \
++    (XRDP_MM_IS_VNC(mm) || \
++     (mm)->code == XRDP_CONSOLE_SESSION_CODE)
 +
  struct source_info;
  struct list16;
@@ -252,7 +258,7 @@
  
 +    /* VNC sessions receive complete pixels rather than drawing orders. */
 +    use_direct_bitmap_output = wm->mm != 0 && wm->mm->mod != 0 &&
-+                               XRDP_MM_IS_VNC(wm->mm);
++                               XRDP_MM_IS_COMPLETE_FRAMEBUFFER(wm->mm);
 +
      if (self->session->client_info->no_orders_supported ||
 +            use_direct_bitmap_output ||

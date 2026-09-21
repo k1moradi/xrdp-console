@@ -15,6 +15,7 @@ extern "C" {
 #endif
 
 class X11DisplayConnection;
+struct monitor_info;
 
 /**
  * C++ ownership and lifecycle state behind the xrdp module ABI.
@@ -40,6 +41,9 @@ public:
 
     int start(int width, int height, int bpp) noexcept;
     int connect() noexcept;
+    int resize_presentation(int width, int height, int num_monitors,
+                            const struct monitor_info *monitors) noexcept;
+    int invalidate_presentation(int width, int height) noexcept;
     int event(int message, long param1, long param2, long param3,
               long param4) noexcept;
     int end() noexcept;

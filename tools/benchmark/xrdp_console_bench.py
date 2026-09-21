@@ -899,7 +899,8 @@ xrdpvr=false
 [Console]
 name=direct-x11
 lib={module_name}
-code=0
+; 21 selects the first-party complete-framebuffer and smooth-scroll path.
+code=21
 display={display}
 username=na
 password=na

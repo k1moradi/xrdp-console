@@ -177,6 +177,75 @@ wait_for_input_events(xcb_connection_t *connection, xcb_window_t window,
     return false;
 }
 
+struct ScrollEvents
+{
+    int upPresses{};
+    int downPresses{};
+    int leftPresses{};
+    int rightPresses{};
+};
+
+bool
+wait_for_scroll_events(xcb_connection_t *connection, xcb_window_t window,
+                       ScrollEvents &observed) noexcept
+{
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(3);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        xcb_generic_event_t *event = nullptr;
+        while ((event = xcb_poll_for_event(connection)) != nullptr)
+        {
+            const std::uint8_t type = event->response_type & 0x7f;
+            if (type == XCB_BUTTON_PRESS)
+            {
+                const auto *button = reinterpret_cast<
+                    const xcb_button_press_event_t *>(event);
+                if (button->event == window)
+                {
+                    switch (button->detail)
+                    {
+                        case 4:
+                            ++observed.upPresses;
+                            break;
+                        case 5:
+                            ++observed.downPresses;
+                            break;
+                        case 6:
+                            ++observed.leftPresses;
+                            break;
+                        case 7:
+                            ++observed.rightPresses;
+                            break;
+                        default:
+                            break;
+                    }
+                }
+            }
+            std::free(event);
+        }
+
+        if (observed.upPresses > 0 && observed.downPresses > 0 &&
+            observed.leftPresses > 0 && observed.rightPresses > 0)
+        {
+            return true;
+        }
+        if (xcb_connection_has_error(connection) != 0)
+        {
+            return false;
+        }
+
+        pollfd descriptor{};
+        descriptor.fd = xcb_get_file_descriptor(connection);
+        descriptor.events = POLLIN | POLLERR | POLLHUP;
+        if (descriptor.fd < 0 || poll(&descriptor, 1, 100) < 0)
+        {
+            return false;
+        }
+    }
+    return false;
+}
+
 bool
 wait_for_teardown_releases(xcb_connection_t *connection,
                             xcb_window_t window) noexcept
@@ -360,6 +429,40 @@ run() noexcept
                      observed.buttonPress, observed.buttonRelease);
     }
 
+    bool scrollReceived = false;
+    if (received)
+    {
+        scrollReceived = true;
+        for (int index = 0; index < 12; ++index)
+        {
+            scrollReceived =
+                scrollReceived &&
+                controller->handle(WM_TOUCH_VSCROLL, pointerX, pointerY, 10,
+                                   0);
+        }
+        scrollReceived =
+            scrollReceived &&
+            controller->handle(WM_TOUCH_VSCROLL, pointerX, pointerY, -120, 0) &&
+            controller->handle(WM_TOUCH_HSCROLL, pointerX, pointerY, 120, 0) &&
+            controller->handle(WM_TOUCH_HSCROLL, pointerX, pointerY, -120, 0);
+        ScrollEvents scrollEvents;
+        scrollReceived =
+            scrollReceived &&
+            wait_for_scroll_events(connection, window, scrollEvents);
+        scrollReceived = scrollReceived && scrollEvents.upPresses == 1 &&
+                         scrollEvents.downPresses == 1 &&
+                         scrollEvents.leftPresses == 1 &&
+                         scrollEvents.rightPresses == 1;
+        if (!scrollReceived)
+        {
+            std::fprintf(stderr,
+                         "unexpected accumulated scroll events "
+                         "(up=%d down=%d left=%d right=%d)\n",
+                         scrollEvents.upPresses, scrollEvents.downPresses,
+                         scrollEvents.leftPresses, scrollEvents.rightPresses);
+        }
+    }
+
     bool teardownReleased = false;
     if (received)
     {
@@ -403,8 +506,10 @@ run() noexcept
     const bool flushed = xcb_flush(connection) > 0;
     const bool healthy = xcb_connection_has_error(connection) == 0;
     xcb_disconnect(connection);
-    return received && teardownReleased && destroyed && flushed && healthy ? 0
-                                                                          : 1;
+    return received && scrollReceived && teardownReleased && destroyed &&
+                   flushed && healthy
+               ? 0
+               : 1;
 }
 
 } // namespace

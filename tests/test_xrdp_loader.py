@@ -310,8 +310,8 @@ xrdpvr=false
 [console]
 name=console
 lib={module_name}
-# Temporary benchmark selection: code=0 selects xrdp's complete-pixel path.
-code=0
+# First-party physical-console capability: complete pixels plus smooth scroll.
+code=21
 display={os.environ["DISPLAY"]}
 username=smoke
 password=smoke

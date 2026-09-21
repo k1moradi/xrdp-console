@@ -16,7 +16,13 @@ int xrdp_console_module_destroy(xrdp_console_module *module);
 
 int xrdp_console_module_update_callbacks_ready(
     const xrdp_console_module *module);
+int xrdp_console_module_fill_callbacks_ready(
+    const xrdp_console_module *module);
 int xrdp_console_module_server_begin_update(xrdp_console_module *module);
+int xrdp_console_module_server_set_fgcolor(xrdp_console_module *module,
+                                           int color);
+int xrdp_console_module_server_fill_rect(xrdp_console_module *module,
+                                         int x, int y, int cx, int cy);
 int xrdp_console_module_server_paint_rect(xrdp_console_module *module,
                                           int x, int y, int cx, int cy,
                                           char *data, int width, int height,

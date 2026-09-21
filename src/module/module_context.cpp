@@ -12,12 +12,16 @@
 #include <new>
 #include <span>
 #include <string_view>
+#include <utility>
 
 extern "C" {
 #include <log.h>
+#include <xrdp_constants.h>
 }
 
 #include "../core/damage_region.h"
+#include "../core/presentation_scaler.h"
+#include "../core/presentation_transform.h"
 #include "../rdp/rdp_update_sink.h"
 #include "../x11/x11_damage_tracker.h"
 #include "../x11/x11_cursor_tracker.h"
@@ -235,6 +239,24 @@ private:
     X11CursorTracker &cursorTracker_;
 };
 
+bool
+is_pointer_message(int message) noexcept
+{
+    return message == WM_MOUSEMOVE || message == WM_TOUCH_VSCROLL ||
+           message == WM_TOUCH_HSCROLL ||
+           (message >= WM_LBUTTONUP && message <= WM_BUTTON9DOWN);
+}
+
+bool
+is_pointer_release_message(int message) noexcept
+{
+    return message == WM_LBUTTONUP || message == WM_RBUTTONUP ||
+           message == WM_BUTTON3UP || message == WM_BUTTON4UP ||
+           message == WM_BUTTON5UP || message == WM_BUTTON6UP ||
+           message == WM_BUTTON7UP || message == WM_BUTTON8UP ||
+           message == WM_BUTTON9UP;
+}
+
 struct ModuleState
 {
     std::array<char, 256> hostname{};
@@ -260,9 +282,12 @@ struct ModuleContext::Impl
     std::unique_ptr<X11CursorTracker> cursorTracker{};
     std::unique_ptr<X11SharedMemoryCapture> sharedMemoryCapture{};
     std::unique_ptr<X11InputController> inputController{};
+    PresentationTransform presentationTransform{};
+    PresentationScaler presentationScaler{};
     DamageRegion damageRegion{};
     RuntimeProfile profile{};
     RdpUpdateSink rdpUpdateSink{nullptr};
+    bool fullPresentationInvalidation{false};
 };
 
 ModuleContext::ModuleContext() noexcept : impl_(new (std::nothrow) Impl{})
@@ -383,15 +408,27 @@ ModuleContext::connect() noexcept
         }
 
         const PixelSize sourceGeometry = connection->sourceGeometry();
-        if (sourceGeometry != impl_->state.presentationGeometry)
+        PresentationTransform presentationTransform;
+        if (!presentationTransform.configure(
+                sourceGeometry, impl_->state.presentationGeometry))
         {
             log_message(
                 LOG_LEVEL_ERROR,
-                "xrdp-console: source geometry %ux%u does not match "
-                "presentation geometry %ux%u",
+                "xrdp-console: cannot configure aspect-fit presentation "
+                "from source %ux%u to presentation %ux%u",
                 sourceGeometry.widthPixels, sourceGeometry.heightPixels,
                 impl_->state.presentationGeometry.widthPixels,
                 impl_->state.presentationGeometry.heightPixels);
+            return 1;
+        }
+        PresentationScaler presentationScaler;
+        if (!presentationScaler.configure(impl_->state.presentationGeometry))
+        {
+            log_message(LOG_LEVEL_ERROR,
+                        "xrdp-console: presentation framebuffer allocation "
+                        "failed for %ux%u",
+                        impl_->state.presentationGeometry.widthPixels,
+                        impl_->state.presentationGeometry.heightPixels);
             return 1;
         }
 
@@ -447,12 +484,15 @@ ModuleContext::connect() noexcept
         }
 
         impl_->state.sourceGeometry = sourceGeometry;
+        impl_->presentationTransform = presentationTransform;
+        impl_->presentationScaler = std::move(presentationScaler);
         impl_->damageRegion.clear();
         // XDamage reports changes, not the initial contents. Seed a complete
         // frame so a newly connected RDP client receives a usable desktop.
         impl_->damageRegion.add(
             {0, 0, sourceGeometry.widthPixels, sourceGeometry.heightPixels},
             sourceGeometry);
+        impl_->fullPresentationInvalidation = true;
         impl_->x11Connection = std::move(connection);
         impl_->damageTracker = std::move(damageTracker);
         impl_->cursorTracker = std::move(cursorTracker);
@@ -471,8 +511,83 @@ ModuleContext::connect() noexcept
         impl_->x11Connection.reset();
         impl_->damageRegion.clear();
         impl_->state.sourceGeometry = {};
+        impl_->presentationTransform = {};
+        impl_->presentationScaler = {};
+        impl_->fullPresentationInvalidation = false;
         return 1;
     }
+}
+
+int
+ModuleContext::resize_presentation(int width, int height, int num_monitors,
+                                   const struct monitor_info *monitors) noexcept
+{
+    (void)num_monitors;
+    (void)monitors;
+    if (!valid() || width <= 0 || height <= 0)
+    {
+        return 1;
+    }
+
+    const PixelSize presentationGeometry{
+        static_cast<std::uint32_t>(width),
+        static_cast<std::uint32_t>(height),
+    };
+    if (impl_->state.sourceGeometry.widthPixels == 0 ||
+        impl_->state.sourceGeometry.heightPixels == 0)
+    {
+        impl_->state.presentationGeometry = presentationGeometry;
+        return 0;
+    }
+
+    PresentationTransform transform;
+    if (!transform.configure(impl_->state.sourceGeometry,
+                             presentationGeometry))
+    {
+        return 1;
+    }
+    PresentationScaler scaler;
+    if (!scaler.configure(presentationGeometry))
+    {
+        return 1;
+    }
+
+    impl_->state.presentationGeometry = presentationGeometry;
+    impl_->presentationTransform = transform;
+    impl_->presentationScaler = std::move(scaler);
+    impl_->damageRegion.clear();
+    impl_->damageRegion.add(
+        {0, 0, impl_->state.sourceGeometry.widthPixels,
+         impl_->state.sourceGeometry.heightPixels},
+        impl_->state.sourceGeometry);
+    impl_->fullPresentationInvalidation = true;
+    log_message(LOG_LEVEL_INFO,
+                "xrdp-console: presentation resized to %ux%u; source remains "
+                "%ux%u",
+                presentationGeometry.widthPixels,
+                presentationGeometry.heightPixels,
+                impl_->state.sourceGeometry.widthPixels,
+                impl_->state.sourceGeometry.heightPixels);
+    return 0;
+}
+
+int
+ModuleContext::invalidate_presentation(int width, int height) noexcept
+{
+    (void)width;
+    (void)height;
+    if (!valid() || impl_->state.sourceGeometry.widthPixels == 0 ||
+        impl_->state.sourceGeometry.heightPixels == 0)
+    {
+        return 1;
+    }
+    impl_->damageRegion.clear();
+    impl_->damageRegion.add(
+        {0, 0, impl_->state.sourceGeometry.widthPixels,
+         impl_->state.sourceGeometry.heightPixels},
+        impl_->state.sourceGeometry);
+    impl_->fullPresentationInvalidation = true;
+    return 0;
 }
 
 int
@@ -483,6 +598,31 @@ ModuleContext::event(int message, long param1, long param2, long param3,
         !impl_->inputController->valid())
     {
         return 1;
+    }
+    if (is_pointer_message(message))
+    {
+        PresentationPoint sourcePoint{};
+        if (impl_->presentationTransform.mapPresentationPoint(
+                static_cast<std::int32_t>(param1),
+                static_cast<std::int32_t>(param2), sourcePoint))
+        {
+            param1 = sourcePoint.x;
+            param2 = sourcePoint.y;
+        }
+        else if (is_pointer_release_message(message))
+        {
+            // A release in the letterbox still has to release any physical
+            // button state held by the module. The coordinates are irrelevant
+            // to XTest for a release.
+            param1 = 0;
+            param2 = 0;
+        }
+        else
+        {
+            // Do not turn a click or motion in an aspect-fit margin into an
+            // edge click on the physical console.
+            return 0;
+        }
     }
     return impl_->inputController->handle(message, param1, param2, param3,
                                           param4)
@@ -506,6 +646,9 @@ ModuleContext::end() noexcept
     impl_->inputController.reset();
     impl_->x11Connection.reset();
     impl_->damageRegion.clear();
+    impl_->presentationTransform = {};
+    impl_->presentationScaler = {};
+    impl_->fullPresentationInvalidation = false;
     impl_->state.sourceGeometry = {};
     impl_->state.presentationGeometry = {};
     impl_->state.bitsPerPixel = 0;
@@ -684,7 +827,8 @@ ModuleContext::check_wait_objs() noexcept
     // ownership before xrdp installs its server callback table. Keep that
     // ABI-only mode valid; a real xrdp session always has the sink available.
     if (!impl_->rdpUpdateSink.available() ||
-        impl_->damageRegion.rectangles().empty())
+        (impl_->damageRegion.rectangles().empty() &&
+         !impl_->fullPresentationInvalidation))
     {
         impl_->profile.maybeLog();
         return 0;
@@ -696,8 +840,25 @@ ModuleContext::check_wait_objs() noexcept
     }
 
     bool success = true;
+    if (impl_->fullPresentationInvalidation &&
+        impl_->rdpUpdateSink.fillAvailable())
+    {
+        success = impl_->rdpUpdateSink.setForegroundColor(0) &&
+                  impl_->rdpUpdateSink.fillRectangle({
+                      0,
+                      0,
+                      impl_->state.presentationGeometry.widthPixels,
+                      impl_->state.presentationGeometry.heightPixels,
+                  });
+    }
     for (const Rectangle rectangle : impl_->damageRegion.rectangles())
     {
+        Rectangle presentationRectangle{};
+        if (!impl_->presentationTransform.mapSourceRectangle(
+                rectangle, presentationRectangle))
+        {
+            continue;
+        }
         const FramebufferView pixels =
             impl_->sharedMemoryCapture->capture(rectangle);
         if (!pixels.valid())
@@ -706,9 +867,17 @@ ModuleContext::check_wait_objs() noexcept
             break;
         }
         impl_->profile.noteCapture(rectangle);
+        const FramebufferView scaledPixels =
+            impl_->presentationScaler.scale(pixels, presentationRectangle);
+        if (!scaledPixels.valid())
+        {
+            success = false;
+            break;
+        }
         const bool painted = impl_->rdpUpdateSink.paintRectangle(
-            rectangle, pixels);
-        impl_->profile.notePaint(rectangle, pixels.pixels.size_bytes(), painted);
+            presentationRectangle, scaledPixels);
+        impl_->profile.notePaint(presentationRectangle,
+                                 scaledPixels.pixels.size_bytes(), painted);
         if (!painted)
         {
             success = false;
@@ -723,6 +892,7 @@ ModuleContext::check_wait_objs() noexcept
     if (success)
     {
         impl_->damageRegion.clear();
+        impl_->fullPresentationInvalidation = false;
     }
     impl_->profile.maybeLog();
     return success ? 0 : 1;
@@ -741,6 +911,28 @@ xrdp_console_context_connect(void *context)
 {
     auto *module_context = static_cast<ModuleContext *>(context);
     return module_context == nullptr ? 1 : module_context->connect();
+}
+
+extern "C" int
+xrdp_console_context_resize_presentation(
+    void *context, int width, int height, int num_monitors,
+    const struct monitor_info *monitors)
+{
+    auto *module_context = static_cast<ModuleContext *>(context);
+    return module_context == nullptr
+               ? 1
+               : module_context->resize_presentation(width, height,
+                                                     num_monitors, monitors);
+}
+
+extern "C" int
+xrdp_console_context_invalidate_presentation(void *context, int width,
+                                              int height)
+{
+    auto *module_context = static_cast<ModuleContext *>(context);
+    return module_context == nullptr
+               ? 1
+               : module_context->invalidate_presentation(width, height);
 }
 
 extern "C" int

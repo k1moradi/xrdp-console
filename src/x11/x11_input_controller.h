@@ -39,6 +39,15 @@ private:
     [[nodiscard]] bool handleKey(bool pressed, long keysym, long scanCode,
                                  long deviceFlags) noexcept;
     [[nodiscard]] bool synchronizeLocks(long lockFlags) noexcept;
+    [[nodiscard]] bool handleVerticalScroll(long x, long y,
+                                            long delta) noexcept;
+    [[nodiscard]] bool handleHorizontalScroll(long x, long y,
+                                              long delta) noexcept;
+    [[nodiscard]] bool emitScrollClicks(long x, long y,
+                                        long delta,
+                                        std::int64_t &accumulator,
+                                        int positiveButton,
+                                        int negativeButton) noexcept;
     [[nodiscard]] bool fakeKey(xcb_keycode_t keycode, bool pressed) noexcept;
     [[nodiscard]] bool fakePointer(std::uint8_t type, long x, long y) noexcept;
     [[nodiscard]] bool fakeButton(std::uint8_t type, int button, long x,
@@ -58,5 +67,7 @@ private:
     std::array<bool, 10> pressedButtons_{};
     std::array<xcb_keycode_t, 3> lockKeycodes_{};
     std::array<std::uint16_t, 3> lockMasks_{};
+    std::int64_t verticalScrollRemainder_{};
+    std::int64_t horizontalScrollRemainder_{};
     const char *failureReason_{"not initialized"};
 };
