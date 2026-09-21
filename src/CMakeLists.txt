@@ -2,13 +2,18 @@
 
 if(XRDP_CONSOLE_BUILD_XRDP)
     enable_language(CXX)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(XRDP_CONSOLE_X11 REQUIRED IMPORTED_TARGET x11)
 
     add_library(xrdp-console MODULE
         module/module_abi.c
         module/module_abi.h
         module/module_context.cpp
         module/module_context.h
-        module/module_entry.cpp)
+        module/module_entry.cpp
+        x11/pixel_size.h
+        x11/x11_display_connection.cpp
+        x11/x11_display_connection.h)
     set_target_properties(xrdp-console PROPERTIES
         OUTPUT_NAME xrdp_console
         CXX_STANDARD 23
@@ -28,6 +33,12 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         "${XRDP_CONSOLE_XRDP_SOURCE_DIR}/third_party/tomlc99"
         "${XRDP_CONSOLE_XRDP_BUILD_DIR}")
     target_compile_definitions(xrdp-console PRIVATE HAVE_CONFIG_H)
+    target_link_libraries(xrdp-console PRIVATE
+        PkgConfig::XRDP_CONSOLE_X11
+        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libcommon.so")
+    set_target_properties(xrdp-console PROPERTIES
+        BUILD_RPATH "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp"
+        INSTALL_RPATH "$ORIGIN/../xrdp")
     add_dependencies(xrdp-console xrdp_upstream)
 
     # Keep the first-party module in the normal project install tree until the

@@ -4,6 +4,18 @@
 
 #include "module_abi.h"
 
+#include <config_ac.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+#include "os_calls.h"
+#ifdef __cplusplus
+}
+#endif
+
+class X11DisplayConnection;
+
 /**
  * C++ ownership and lifecycle state behind the xrdp module ABI.
  *
@@ -30,6 +42,10 @@ public:
     int connect() noexcept;
     int end() noexcept;
     int set_parameter(const char *name, const char *value) noexcept;
+    int get_wait_objs(tbus *read_objects, int *read_count,
+                      tbus *write_objects, int *write_count,
+                      int *timeout) noexcept;
+    int check_wait_objs() noexcept;
 
 private:
     struct Impl;

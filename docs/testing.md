@@ -13,8 +13,8 @@ Xauthority, x11vnc, and client binaries.
 | `proxy-backpressure-unit` | bounded relay buffering, selector write readiness, and peer cleanup |
 | `python-syntax` | source compilation for the installed Python helpers |
 | `systemd-unit` | clean SIGINT shutdown contract, no exit-status masking, and compatibility drop-in parity |
-| `module-lifecycle` | C++23 module construction, parameter handling, teardown, and wait-state preservation |
-| `xrdp-loader-smoke` | generated xrdp loading the module through FreeRDP and completing module connect |
+| `module-lifecycle` | C++23 module construction, X11 connect/reconnect, geometry setup, dead-server failure, teardown, and wait-state preservation |
+| `xrdp-loader-smoke` | generated xrdp loading the module through FreeRDP with xrdp and the client sharing a display |
 
 The marker correlation contract is:
 

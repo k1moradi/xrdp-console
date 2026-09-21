@@ -93,11 +93,59 @@ def wait_for_log(process: subprocess.Popen[object], log: Path, marker: str,
     )
 
 
+def display_is_usable() -> bool:
+    display = os.environ.get("DISPLAY")
+    if not display:
+        return False
+    xdpyinfo = shutil.which("xdpyinfo")
+    if xdpyinfo is None:
+        return True
+    try:
+        return (
+            subprocess.run(
+                [xdpyinfo],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                timeout=3.0,
+            ).returncode
+            == 0
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def ensure_test_display() -> None:
+    if display_is_usable():
+        return
+
+    xvfb_run = shutil.which("xvfb-run")
+    if xvfb_run is None:
+        raise AssertionError("xrdp loader smoke test needs DISPLAY or xvfb-run")
+
+    environment = os.environ.copy()
+    os.execvpe(
+        xvfb_run,
+        [
+            xvfb_run,
+            "-a",
+            "-s",
+            "-screen 0 1024x768x24",
+            sys.executable,
+            "-B",
+            *sys.argv,
+        ],
+        environment,
+    )
+
+
 def main() -> int:
     if len(sys.argv) != 5:
         raise SystemExit(
             f"usage: {sys.argv[0]} MODULE XRDP INSTALL_ROOT FREERDP"
         )
+
+    ensure_test_display()
 
     module_path = Path(sys.argv[1]).resolve()
     xrdp_path = Path(sys.argv[2]).resolve()
@@ -106,10 +154,6 @@ def main() -> int:
     for required in (module_path, xrdp_path, freerdp_path):
         if not required.is_file():
             raise AssertionError(f"missing smoke-test executable or module: {required}")
-
-    xvfb_run = shutil.which("xvfb-run")
-    if not os.environ.get("DISPLAY") and xvfb_run is None:
-        raise AssertionError("FreeRDP smoke test needs DISPLAY or xvfb-run")
 
     with tempfile.TemporaryDirectory(prefix="xrdp-console-loader-") as temp:
         root = Path(temp)
@@ -140,6 +184,7 @@ bulk_compression=false
 allow_channels=false
 max_bpp=32
 autorun=console
+display={os.environ["DISPLAY"]}
 
 [Logging]
 LogFile={log_path}
@@ -196,15 +241,6 @@ password=smoke
                     "/log-level:WARN",
                     "-clipboard",
                 ]
-                if not os.environ.get("DISPLAY"):
-                    assert xvfb_run is not None
-                    client_command = [
-                        xvfb_run,
-                        "-a",
-                        "-s",
-                        "-screen 0 1024x768x24",
-                        *client_command,
-                    ]
                 with client_log_path.open("w", encoding="utf-8") as client_log:
                     client = subprocess.Popen(
                         client_command,

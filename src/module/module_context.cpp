@@ -6,7 +6,11 @@
 #include <climits>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <new>
+#include <string>
+
+#include "../x11/x11_display_connection.h"
 
 namespace
 {
@@ -36,12 +40,18 @@ struct ModuleState
     std::array<char, 256> hostname{};
     std::array<char, 256> port{};
     std::array<char, 256> ip{};
+    std::array<char, 256> display{};
     int width{0};
     int height{0};
     int bpp{0};
     int keylayout{0};
+    int screenNumber{-1};
+    Window rootWindow{0};
+    PixelSize sourceGeometry{};
+    PixelSize presentationGeometry{};
     bool has_client_info{false};
     bool started{false};
+    bool connected{false};
 };
 
 } // namespace
@@ -50,6 +60,7 @@ struct ModuleContext::Impl
 {
     xrdp_console_module *module{nullptr};
     ModuleState state{};
+    std::unique_ptr<X11DisplayConnection> x11Connection{};
 };
 
 ModuleContext::ModuleContext() noexcept : impl_(new (std::nothrow) Impl{})
@@ -125,7 +136,45 @@ ModuleContext::start(int width, int height, int bpp) noexcept
 int
 ModuleContext::connect() noexcept
 {
-    return !valid() || !impl_->state.started ? 1 : 0;
+    if (!valid() || !impl_->state.started)
+    {
+        return 1;
+    }
+
+    if (impl_->state.connected)
+    {
+        return 0;
+    }
+
+    try
+    {
+        auto connection = std::make_unique<X11DisplayConnection>(
+            std::string(impl_->state.display.data()));
+        if (!connection->valid())
+        {
+            return 1;
+        }
+
+        impl_->state.screenNumber = connection->screenNumber();
+        impl_->state.rootWindow = connection->rootWindow();
+        impl_->state.sourceGeometry = connection->screenGeometry();
+        impl_->state.presentationGeometry = impl_->state.sourceGeometry;
+        impl_->x11Connection = std::move(connection);
+        impl_->state.connected = true;
+        return 0;
+    }
+    catch (...)
+    {
+        // The C ABI must report allocation/constructor failures as a normal
+        // module failure and leave no partially connected state behind.
+        impl_->x11Connection.reset();
+        impl_->state.screenNumber = -1;
+        impl_->state.rootWindow = 0;
+        impl_->state.sourceGeometry = {};
+        impl_->state.presentationGeometry = {};
+        impl_->state.connected = false;
+        return 1;
+    }
 }
 
 int
@@ -135,6 +184,14 @@ ModuleContext::end() noexcept
     {
         return 1;
     }
+    // X11DisplayConnection destroys the xrdp wait object before closing the
+    // Display. Reset it before changing the lifecycle state.
+    impl_->x11Connection.reset();
+    impl_->state.screenNumber = -1;
+    impl_->state.rootWindow = 0;
+    impl_->state.sourceGeometry = {};
+    impl_->state.presentationGeometry = {};
+    impl_->state.connected = false;
     impl_->state.started = false;
     return 0;
 }
@@ -175,6 +232,11 @@ ModuleContext::set_parameter(const char *name, const char *value) noexcept
     {
         copy_text(impl_->state.ip.data(), impl_->state.ip.size(), value);
     }
+    else if (std::strcmp(name, "display") == 0)
+    {
+        copy_text(impl_->state.display.data(), impl_->state.display.size(),
+                  value);
+    }
     else if (std::strcmp(name, "keylayout") == 0)
     {
         char *end = nullptr;
@@ -189,6 +251,60 @@ ModuleContext::set_parameter(const char *name, const char *value) noexcept
     // Accept other upstream parameters for ABI compatibility. The runtime
     // will validate and consume them as its corresponding subsystem arrives.
     return 0;
+}
+
+int
+ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
+                             tbus *write_objects, int *write_count,
+                             int *timeout) noexcept
+{
+    (void)write_objects;
+    (void)write_count;
+    (void)timeout;
+
+    if (!valid())
+    {
+        return 1;
+    }
+
+    // The xrdp caller owns the arrays and timeout. A module that is not
+    // connected has nothing to append and must leave all caller state alone.
+    if (!impl_->state.connected || impl_->x11Connection == nullptr)
+    {
+        return 0;
+    }
+
+    if (read_objects == nullptr || read_count == nullptr || *read_count < 0)
+    {
+        return 1;
+    }
+
+    const tbus waitObject = impl_->x11Connection->waitObject();
+    for (int index = 0; index < *read_count; ++index)
+    {
+        if (read_objects[index] == waitObject)
+        {
+            return 0;
+        }
+    }
+
+    read_objects[*read_count] = waitObject;
+    ++(*read_count);
+    return 0;
+}
+
+int
+ModuleContext::check_wait_objs() noexcept
+{
+    if (!valid())
+    {
+        return 1;
+    }
+    if (!impl_->state.connected || impl_->x11Connection == nullptr)
+    {
+        return 0;
+    }
+    return impl_->x11Connection->drainEvents();
 }
 
 extern "C" int
@@ -220,4 +336,22 @@ xrdp_console_context_set_parameter(void *context, const char *name,
     auto *module_context = static_cast<ModuleContext *>(context);
     return module_context == nullptr ? 1
                                      : module_context->set_parameter(name, value);
+}
+
+extern "C" int
+xrdp_console_context_get_wait_objs(void *context, tbus *read_objects,
+                                    int *read_count, tbus *write_objects,
+                                    int *write_count, int *timeout)
+{
+    auto *module_context = static_cast<ModuleContext *>(context);
+    return module_context == nullptr ? 1 :
+           module_context->get_wait_objs(read_objects, read_count, write_objects,
+                                         write_count, timeout);
+}
+
+extern "C" int
+xrdp_console_context_check_wait_objs(void *context)
+{
+    auto *module_context = static_cast<ModuleContext *>(context);
+    return module_context == nullptr ? 1 : module_context->check_wait_objs();
 }

@@ -13,6 +13,10 @@ int xrdp_console_context_connect(void *context);
 int xrdp_console_context_end(void *context);
 int xrdp_console_context_set_parameter(void *context, const char *name,
                                        const char *value);
+int xrdp_console_context_get_wait_objs(void *context, tbus *read_objects,
+                                       int *read_count, tbus *write_objects,
+                                       int *write_count, int *timeout);
+int xrdp_console_context_check_wait_objs(void *context);
 
 struct xrdp_console_module
 {
@@ -100,21 +104,17 @@ static int
 module_get_wait_objs(struct xrdp_mod *abi, tbus *read_objs, int *read_count,
                      tbus *write_objs, int *write_count, int *timeout)
 {
-    (void)read_objs;
-    (void)read_count;
-    (void)write_objs;
-    (void)write_count;
-    (void)timeout;
-
-    /* The caller owns the existing wait-object arrays and timeout. Future
-     * backends append their objects here; the lifecycle milestone has none. */
-    return context_from_abi(abi) == NULL ? 1 : 0;
+    void *context = context_from_abi(abi);
+    return context == NULL ? 1 :
+           xrdp_console_context_get_wait_objs(context, read_objs, read_count,
+                                              write_objs, write_count, timeout);
 }
 
 static int
 module_check_wait_objs(struct xrdp_mod *abi)
 {
-    return context_from_abi(abi) == NULL ? 1 : 0;
+    void *context = context_from_abi(abi);
+    return context == NULL ? 1 : xrdp_console_context_check_wait_objs(context);
 }
 
 static int
