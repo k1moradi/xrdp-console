@@ -237,3 +237,40 @@ xrdp_console_module_destroy(xrdp_console_module *module)
     free(module);
     return 0;
 }
+
+int
+xrdp_console_module_update_callbacks_ready(
+    const xrdp_console_module *module)
+{
+    return module != NULL && module->abi.server_begin_update != NULL &&
+           module->abi.server_paint_rect != NULL &&
+           module->abi.server_end_update != NULL;
+}
+
+int
+xrdp_console_module_server_begin_update(xrdp_console_module *module)
+{
+    return xrdp_console_module_update_callbacks_ready(module)
+               ? module->abi.server_begin_update(&module->abi)
+               : 1;
+}
+
+int
+xrdp_console_module_server_paint_rect(xrdp_console_module *module, int x,
+                                       int y, int cx, int cy, char *data,
+                                       int width, int height, int srcx,
+                                       int srcy)
+{
+    return xrdp_console_module_update_callbacks_ready(module)
+               ? module->abi.server_paint_rect(&module->abi, x, y, cx, cy,
+                                               data, width, height, srcx, srcy)
+               : 1;
+}
+
+int
+xrdp_console_module_server_end_update(xrdp_console_module *module)
+{
+    return xrdp_console_module_update_callbacks_ready(module)
+               ? module->abi.server_end_update(&module->abi)
+               : 1;
+}

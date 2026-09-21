@@ -64,10 +64,13 @@ if(TARGET xrdp-console)
     pkg_check_modules(XRDP_CONSOLE_TEST_XCB REQUIRED IMPORTED_TARGET xcb)
     pkg_check_modules(XRDP_CONSOLE_TEST_XCB_DAMAGE REQUIRED
         IMPORTED_TARGET xcb-damage)
+    pkg_check_modules(XRDP_CONSOLE_TEST_XCB_SHM REQUIRED
+        IMPORTED_TARGET xcb-shm)
     add_executable(x11-damage-integration
         test_x11_damage.cpp
         ${CMAKE_SOURCE_DIR}/src/core/damage_region.cpp
-        ${CMAKE_SOURCE_DIR}/src/x11/x11_damage_tracker.cpp)
+        ${CMAKE_SOURCE_DIR}/src/x11/x11_damage_tracker.cpp
+        ${CMAKE_SOURCE_DIR}/src/x11/x11_shared_memory_capture.cpp)
     set_target_properties(x11-damage-integration PROPERTIES
         CXX_STANDARD 23
         CXX_STANDARD_REQUIRED ON
@@ -76,7 +79,8 @@ if(TARGET xrdp-console)
         ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(x11-damage-integration PRIVATE
         PkgConfig::XRDP_CONSOLE_TEST_XCB
-        PkgConfig::XRDP_CONSOLE_TEST_XCB_DAMAGE)
+        PkgConfig::XRDP_CONSOLE_TEST_XCB_DAMAGE
+        PkgConfig::XRDP_CONSOLE_TEST_XCB_SHM)
     add_test(NAME x11-damage-integration
         COMMAND ${Python3_EXECUTABLE} -B
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_damage.py

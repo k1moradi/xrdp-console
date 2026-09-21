@@ -60,6 +60,8 @@ public:
     [[nodiscard]] PixelSize sourceGeometry() const noexcept;
     [[nodiscard]] int screenNumber() const noexcept;
     [[nodiscard]] xcb_window_t rootWindow() const noexcept;
+    [[nodiscard]] xcb_visualid_t rootVisual() const noexcept;
+    [[nodiscard]] std::uint8_t rootDepth() const noexcept;
     [[nodiscard]] tbus waitObject() const noexcept;
     [[nodiscard]] int fileDescriptor() const noexcept;
 
@@ -75,6 +77,8 @@ private:
     tbus waitObject_{NULL_WAIT_OBJ};
     int screenNumber_{-1};
     xcb_window_t rootWindow_{XCB_WINDOW_NONE};
+    xcb_visualid_t rootVisual_{XCB_NONE};
+    std::uint8_t rootDepth_{0};
     PixelSize sourceGeometry_{};
     bool waitObjectUsesDuplicate_{false};
     bool failed_{false};

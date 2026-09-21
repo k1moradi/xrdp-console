@@ -80,7 +80,7 @@ def wait_for_listener(process: subprocess.Popen[object], port: int,
 
 
 def wait_for_log(process: subprocess.Popen[object], log: Path, marker: str,
-                 timeout: float) -> None:
+                 timeout: float, diagnostics: Path | None = None) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if marker in read_text(log):
@@ -88,9 +88,10 @@ def wait_for_log(process: subprocess.Popen[object], log: Path, marker: str,
         if process.poll() is not None:
             break
         time.sleep(0.05)
-    raise AssertionError(
-        f"xrdp did not report {marker!r}:\n{read_text(log)}"
-    )
+    details = read_text(log)
+    if diagnostics is not None:
+        details += f"\n[xrdp stdout]\n{read_text(diagnostics)}"
+    raise AssertionError(f"xrdp did not report {marker!r}:\n{details}")
 
 
 def display_is_usable() -> bool:
@@ -101,15 +102,20 @@ def display_is_usable() -> bool:
     if xdpyinfo is None:
         return True
     try:
-        return (
-            subprocess.run(
-                [xdpyinfo],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-                timeout=3.0,
-            ).returncode
-            == 0
+        result = subprocess.run(
+            [xdpyinfo],
+            capture_output=True,
+            check=False,
+            timeout=3.0,
+            text=True,
+        )
+        if result.returncode != 0:
+            return False
+        return any(
+            line.strip().startswith("dimensions:") and
+            line.split()[1] == "1024x768"
+            for line in result.stdout.splitlines()
+            if len(line.split()) > 1
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
@@ -203,6 +209,8 @@ xrdpvr=false
 [console]
 name=console
 lib={module_name}
+# Temporary benchmark selection: code=0 selects xrdp's complete-pixel path.
+code=0
 username=smoke
 password=smoke
 """,
@@ -256,6 +264,7 @@ password=smoke
                         log_path,
                         "status from xrdp_mm_connect() : 0",
                         4.0,
+                        stdout_path,
                     )
                     time.sleep(0.25)
         finally:

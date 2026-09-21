@@ -24,7 +24,8 @@ historical fork's commit history:
 1. `0001-xrdp-resize-state-and-failure-recovery.patch` keeps the VNC resize
    state-machine recovery and propagates resize/update failures safely.
 2. `0002-xrdp-fixed-console-vnc-path.patch` keeps fixed-console geometry,
-   direct bitmap transport, and error propagation for the VNC backend.
+   direct bitmap transport, and end-to-end update error propagation for the
+   VNC backend.
 The former `0003-xrdp-input-first-transport-check.patch` remains outside the
 canonical series. It changes the global xrdp process-loop order and is still
 an experiment until an apples-to-apples input/graphics benchmark earns it a

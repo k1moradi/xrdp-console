@@ -184,7 +184,31 @@
 +
  struct source_info;
  struct list16;
+
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -4119,6 +4119,7 @@
+ server_end_update(struct xrdp_mod *mod)
+ {
+     struct xrdp_painter *p;
++    int rv;
  
+     p = (struct xrdp_painter *)(mod->painter);
+ 
+@@ -4127,10 +4128,10 @@
+         return 0;
+     }
+ 
+-    xrdp_painter_end_update(p);
++    rv = xrdp_painter_end_update(p);
+     xrdp_painter_delete(p);
+     mod->painter = 0;
+-    return 0;
++    return rv;
+ }
+
+ /*****************************************************************************/
+
 --- a/xrdp/xrdp_painter.c
 +++ b/xrdp/xrdp_painter.c
 @@ -79,6 +79,7 @@

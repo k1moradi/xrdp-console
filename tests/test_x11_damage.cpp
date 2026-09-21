@@ -2,10 +2,12 @@
 
 #include "core/damage_region.h"
 #include "x11/x11_damage_tracker.h"
+#include "x11/x11_shared_memory_capture.h"
 
 #include <xcb/xcb.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -144,11 +146,28 @@ run() noexcept
             return 1;
         }
 
+        X11SharedMemoryCapture capture(
+            *connection, window, screen->root_visual, screen->root_depth,
+            bounds);
+        if (!capture.valid())
+        {
+            std::fprintf(stderr, "XShm setup failed: %s\n",
+                         capture.failureReason() != nullptr
+                             ? capture.failureReason()
+                             : "unknown error");
+            xcb_destroy_window(connection, window);
+            xcb_flush(connection);
+            xcb_disconnect(connection);
+            return 1;
+        }
+
         const xcb_gcontext_t graphicsContext = xcb_generate_id(connection);
-        if (!check_request(connection,
-                           xcb_create_gc_checked(connection, graphicsContext,
-                                                 window, 0, nullptr),
-                           "create graphics context"))
+        const std::uint32_t foreground[] = {screen->white_pixel};
+        if (!check_request(
+                connection,
+                xcb_create_gc_checked(connection, graphicsContext, window,
+                                      XCB_GC_FOREGROUND, foreground),
+                "create graphics context"))
         {
             xcb_destroy_window(connection, window);
             xcb_flush(connection);
@@ -164,6 +183,21 @@ run() noexcept
             !wait_for_damage(connection, tracker, region) ||
             !tracker.acknowledge())
         {
+            xcb_free_gc(connection, graphicsContext);
+            xcb_destroy_window(connection, window);
+            xcb_flush(connection);
+            xcb_disconnect(connection);
+            return 1;
+        }
+
+        const FramebufferView pixels = capture.capture({2, 3, 20, 15});
+        if (!pixels.valid() || pixels.pixels.size() < 4 ||
+            std::to_integer<unsigned int>(pixels.pixels[0]) != 0xffU ||
+            std::to_integer<unsigned int>(pixels.pixels[1]) != 0xffU ||
+            std::to_integer<unsigned int>(pixels.pixels[2]) != 0xffU ||
+            std::to_integer<unsigned int>(pixels.pixels[3]) != 0x00U)
+        {
+            std::fprintf(stderr, "XShm capture did not return the drawn pixel\n");
             xcb_free_gc(connection, graphicsContext);
             xcb_destroy_window(connection, window);
             xcb_flush(connection);

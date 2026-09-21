@@ -153,16 +153,10 @@ X11DamageTracker::acknowledge() noexcept
         return true;
     }
 
-    const xcb_void_cookie_t subtractCookie =
-        xcb_damage_subtract_checked(connection_, damage_, XCB_NONE, XCB_NONE);
-    xcb_generic_error_t *subtractError =
-        xcb_request_check(connection_, subtractCookie);
-    if (subtractError != nullptr)
-    {
-        std::free(subtractError);
-        fail("XDamage subtract failed");
-        return false;
-    }
+    // Subtract is steady-state work. Keep it asynchronous so acknowledging a
+    // batch does not force a round trip to the X server. Queued protocol
+    // errors are handled by X11DisplayConnection::processEvents().
+    xcb_damage_subtract(connection_, damage_, XCB_NONE, XCB_NONE);
     if (xcb_connection_has_error(connection_) != 0 || xcb_flush(connection_) <= 0)
     {
         fail("XDamage subtract lost the X connection");

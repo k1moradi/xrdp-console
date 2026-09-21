@@ -2,8 +2,8 @@
 
 `xrdp-console` is the first-party GPLv3 shared-console project. The current
 migration slice contains the measured VNC bridge, its developer tooling, and
-the first C++ xrdp-module ABI/lifecycle target; direct-X11 capture is the next
-runtime step.
+the first direct-X11 C++ runtime vertical slice: XCB/XDamage/XShm capture into
+xrdp's classic bitmap callbacks.
 
 The current measured path is:
 

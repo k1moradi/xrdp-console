@@ -281,7 +281,7 @@ def main() -> int:
 
         # A second complete start/connect/end cycle must reuse no stale X11
         # state or wait object.
-        assert module.mod_start(handle, 800, 600, 32) == 0
+        assert module.mod_start(handle, 1024, 768, 32) == 0
         assert module.mod_connect(handle) == 0
         second_read_objs = (ctypes.c_ssize_t * 1)(0)
         second_read_count = ctypes.c_int(0)
@@ -302,7 +302,7 @@ def main() -> int:
 
         # The module must report a dead X connection to xrdp rather than
         # leaving the main loop permanently readable or hanging.
-        assert module.mod_start(handle, 800, 600, 32) == 0
+        assert module.mod_start(handle, 1024, 768, 32) == 0
         assert module.mod_connect(handle) == 0
         stop_process(xvfb)
         assert module.mod_check_wait_objs(handle) == 1

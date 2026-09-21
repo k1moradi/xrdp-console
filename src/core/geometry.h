@@ -8,4 +8,6 @@ struct PixelSize
 {
     std::uint32_t widthPixels{};
     std::uint32_t heightPixels{};
+
+    friend bool operator==(const PixelSize &, const PixelSize &) = default;
 };

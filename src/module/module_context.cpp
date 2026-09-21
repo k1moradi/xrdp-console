@@ -11,9 +11,15 @@
 #include <new>
 #include <string_view>
 
+extern "C" {
+#include <log.h>
+}
+
 #include "../core/damage_region.h"
+#include "../rdp/rdp_update_sink.h"
 #include "../x11/x11_damage_tracker.h"
 #include "../x11/x11_display_connection.h"
+#include "../x11/x11_shared_memory_capture.h"
 
 namespace
 {
@@ -79,7 +85,9 @@ struct ModuleContext::Impl
     ModuleState state{};
     std::unique_ptr<X11DisplayConnection> x11Connection{};
     std::unique_ptr<X11DamageTracker> damageTracker{};
+    std::unique_ptr<X11SharedMemoryCapture> sharedMemoryCapture{};
     DamageRegion damageRegion{};
+    RdpUpdateSink rdpUpdateSink{nullptr};
 };
 
 ModuleContext::ModuleContext() noexcept : impl_(new (std::nothrow) Impl{})
@@ -87,6 +95,7 @@ ModuleContext::ModuleContext() noexcept : impl_(new (std::nothrow) Impl{})
     if (impl_ != nullptr)
     {
         impl_->module = xrdp_console_module_create(this);
+        impl_->rdpUpdateSink = RdpUpdateSink(impl_->module);
     }
 }
 
@@ -162,12 +171,15 @@ ModuleContext::connect() noexcept
         return 1;
     }
 
-    if (impl_->x11Connection != nullptr || impl_->damageTracker != nullptr)
+    if (impl_->x11Connection != nullptr || impl_->damageTracker != nullptr ||
+        impl_->sharedMemoryCapture != nullptr)
     {
         return impl_->x11Connection != nullptr &&
                        impl_->damageTracker != nullptr &&
+                       impl_->sharedMemoryCapture != nullptr &&
                        impl_->x11Connection->valid() &&
-                       impl_->damageTracker->valid()
+                       impl_->damageTracker->valid() &&
+                       impl_->sharedMemoryCapture->valid()
                    ? 0
                    : 1;
     }
@@ -181,28 +193,71 @@ ModuleContext::connect() noexcept
             return 1;
         }
 
+        if (impl_->state.bitsPerPixel != 32)
+        {
+            log_message(LOG_LEVEL_ERROR,
+                        "xrdp-console: only 32-bpp RDP output is supported; "
+                        "client requested %u bpp",
+                        impl_->state.bitsPerPixel);
+            return 1;
+        }
+
+        const PixelSize sourceGeometry = connection->sourceGeometry();
+        if (sourceGeometry != impl_->state.presentationGeometry)
+        {
+            log_message(
+                LOG_LEVEL_ERROR,
+                "xrdp-console: source geometry %ux%u does not match "
+                "presentation geometry %ux%u",
+                sourceGeometry.widthPixels, sourceGeometry.heightPixels,
+                impl_->state.presentationGeometry.widthPixels,
+                impl_->state.presentationGeometry.heightPixels);
+            return 1;
+        }
+
         auto damageTracker = std::make_unique<X11DamageTracker>(
             *connection->nativeConnection(), connection->rootWindow(),
             connection->sourceGeometry());
         if (!damageTracker->valid())
         {
-            g_writeln("xrdp-console: XDamage setup failed: %s",
-                      damageTracker->failureReason() != nullptr
-                          ? damageTracker->failureReason()
-                          : "unknown error");
+            log_message(
+                LOG_LEVEL_ERROR, "xrdp-console: XDamage setup failed: %s",
+                damageTracker->failureReason() != nullptr
+                    ? damageTracker->failureReason()
+                    : "unknown error");
             return 1;
         }
 
-        impl_->state.sourceGeometry = connection->sourceGeometry();
+        auto sharedMemoryCapture = std::make_unique<X11SharedMemoryCapture>(
+            *connection->nativeConnection(), connection->rootWindow(),
+            connection->rootVisual(), connection->rootDepth(), sourceGeometry);
+        if (!sharedMemoryCapture->valid())
+        {
+            log_message(
+                LOG_LEVEL_ERROR, "xrdp-console: XShm capture setup failed: %s",
+                sharedMemoryCapture->failureReason() != nullptr
+                    ? sharedMemoryCapture->failureReason()
+                    : "unknown error");
+            return 1;
+        }
+
+        impl_->state.sourceGeometry = sourceGeometry;
         impl_->damageRegion.clear();
+        // XDamage reports changes, not the initial contents. Seed a complete
+        // frame so a newly connected RDP client receives a usable desktop.
+        impl_->damageRegion.add(
+            {0, 0, sourceGeometry.widthPixels, sourceGeometry.heightPixels},
+            sourceGeometry);
         impl_->x11Connection = std::move(connection);
         impl_->damageTracker = std::move(damageTracker);
+        impl_->sharedMemoryCapture = std::move(sharedMemoryCapture);
         return 0;
     }
     catch (...)
     {
         // The C ABI must report allocation/constructor failures as a normal
         // module failure and leave no partially connected state behind.
+        impl_->sharedMemoryCapture.reset();
         impl_->damageTracker.reset();
         impl_->x11Connection.reset();
         impl_->damageRegion.clear();
@@ -220,6 +275,7 @@ ModuleContext::end() noexcept
     }
     // X11DisplayConnection destroys the xrdp wait object before disconnecting
     // XCB. Reset it before changing the lifecycle state.
+    impl_->sharedMemoryCapture.reset();
     impl_->damageTracker.reset();
     impl_->x11Connection.reset();
     impl_->damageRegion.clear();
@@ -335,12 +391,15 @@ ModuleContext::check_wait_objs() noexcept
     {
         return 1;
     }
-    if (impl_->x11Connection == nullptr && impl_->damageTracker == nullptr)
+    if (impl_->x11Connection == nullptr && impl_->damageTracker == nullptr &&
+        impl_->sharedMemoryCapture == nullptr)
     {
         return 0;
     }
     if (impl_->x11Connection == nullptr || impl_->damageTracker == nullptr ||
-        !impl_->x11Connection->valid() || !impl_->damageTracker->valid())
+        impl_->sharedMemoryCapture == nullptr ||
+        !impl_->x11Connection->valid() || !impl_->damageTracker->valid() ||
+        !impl_->sharedMemoryCapture->valid())
     {
         return 1;
     }
@@ -351,7 +410,47 @@ ModuleContext::check_wait_objs() noexcept
     {
         return 1;
     }
-    return impl_->damageTracker->acknowledge() ? 0 : 1;
+    if (!impl_->damageTracker->acknowledge())
+    {
+        return 1;
+    }
+
+    // The standalone lifecycle test exercises the transport and Damage
+    // ownership before xrdp installs its server callback table. Keep that
+    // ABI-only mode valid; a real xrdp session always has the sink available.
+    if (!impl_->rdpUpdateSink.available() ||
+        impl_->damageRegion.rectangles().empty())
+    {
+        return 0;
+    }
+
+    if (!impl_->rdpUpdateSink.beginUpdate())
+    {
+        return 1;
+    }
+
+    bool success = true;
+    for (const Rectangle rectangle : impl_->damageRegion.rectangles())
+    {
+        const FramebufferView pixels =
+            impl_->sharedMemoryCapture->capture(rectangle);
+        if (!pixels.valid() ||
+            !impl_->rdpUpdateSink.paintRectangle(rectangle, pixels))
+        {
+            success = false;
+            break;
+        }
+    }
+
+    if (!impl_->rdpUpdateSink.endUpdate())
+    {
+        success = false;
+    }
+    if (success)
+    {
+        impl_->damageRegion.clear();
+    }
+    return success ? 0 : 1;
 }
 
 extern "C" int

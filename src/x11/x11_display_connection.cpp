@@ -113,9 +113,12 @@ X11DisplayConnection::X11DisplayConnection(std::string_view displayName) noexcep
 
     const xcb_screen_t *screen = screens.data;
     rootWindow_ = screen->root;
+    rootVisual_ = screen->root_visual;
+    rootDepth_ = screen->root_depth;
     sourceGeometry_.widthPixels = screen->width_in_pixels;
     sourceGeometry_.heightPixels = screen->height_in_pixels;
-    if (rootWindow_ == XCB_WINDOW_NONE || sourceGeometry_.widthPixels == 0 ||
+    if (rootWindow_ == XCB_WINDOW_NONE || rootVisual_ == XCB_NONE ||
+        rootDepth_ == 0 || sourceGeometry_.widthPixels == 0 ||
         sourceGeometry_.heightPixels == 0)
     {
         failed_ = true;
@@ -190,6 +193,8 @@ X11DisplayConnection::close() noexcept
     connectionFileDescriptor_ = -1;
     screenNumber_ = -1;
     rootWindow_ = XCB_WINDOW_NONE;
+    rootVisual_ = XCB_NONE;
+    rootDepth_ = 0;
     sourceGeometry_ = {};
 }
 
@@ -201,6 +206,7 @@ X11DisplayConnection::valid() const noexcept
            connectionFileDescriptor_ >= 0 &&
            waitObject_ != NULL_WAIT_OBJ && screenNumber_ >= 0 &&
            rootWindow_ != XCB_WINDOW_NONE &&
+           rootVisual_ != XCB_NONE && rootDepth_ != 0 &&
            sourceGeometry_.widthPixels > 0 &&
            sourceGeometry_.heightPixels > 0;
 }
@@ -227,6 +233,18 @@ xcb_window_t
 X11DisplayConnection::rootWindow() const noexcept
 {
     return rootWindow_;
+}
+
+xcb_visualid_t
+X11DisplayConnection::rootVisual() const noexcept
+{
+    return rootVisual_;
+}
+
+std::uint8_t
+X11DisplayConnection::rootDepth() const noexcept
+{
+    return rootDepth_;
 }
 
 tbus
