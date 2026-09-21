@@ -22,6 +22,11 @@ int xrdp_console_module_server_paint_rect(xrdp_console_module *module,
                                           char *data, int width, int height,
                                           int srcx, int srcy);
 int xrdp_console_module_server_end_update(xrdp_console_module *module);
+int xrdp_console_module_pointer_callback_ready(
+    const xrdp_console_module *module);
+int xrdp_console_module_server_set_pointer_large(
+    xrdp_console_module *module, int x, int y, char *data, char *mask,
+    int bpp, int width, int height);
 
 #ifdef __cplusplus
 }

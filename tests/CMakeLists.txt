@@ -11,7 +11,9 @@ set(PYTHON_SOURCES
 if(TARGET xrdp-console)
     list(APPEND PYTHON_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/test_module_lifecycle.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_cursor.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_damage.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_input.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py)
 endif()
 
@@ -66,6 +68,10 @@ if(TARGET xrdp-console)
         IMPORTED_TARGET xcb-damage)
     pkg_check_modules(XRDP_CONSOLE_TEST_XCB_SHM REQUIRED
         IMPORTED_TARGET xcb-shm)
+    pkg_check_modules(XRDP_CONSOLE_TEST_XCB_XFIXES REQUIRED
+        IMPORTED_TARGET xcb-xfixes)
+    pkg_check_modules(XRDP_CONSOLE_TEST_XCB_XTEST REQUIRED
+        IMPORTED_TARGET xcb-xtest)
     add_executable(x11-damage-integration
         test_x11_damage.cpp
         ${CMAKE_SOURCE_DIR}/src/core/damage_region.cpp
@@ -86,6 +92,51 @@ if(TARGET xrdp-console)
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_damage.py
         $<TARGET_FILE:x11-damage-integration>)
     set_tests_properties(x11-damage-integration PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+        TIMEOUT 30)
+
+    add_executable(x11-cursor-integration
+        test_x11_cursor.cpp
+        ${CMAKE_SOURCE_DIR}/src/x11/x11_cursor_tracker.cpp)
+    set_target_properties(x11-cursor-integration PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(x11-cursor-integration PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(x11-cursor-integration PRIVATE
+        PkgConfig::XRDP_CONSOLE_TEST_XCB
+        PkgConfig::XRDP_CONSOLE_TEST_XCB_XFIXES)
+    add_test(NAME x11-cursor-integration
+        COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_cursor.py
+        $<TARGET_FILE:x11-cursor-integration>)
+    set_tests_properties(x11-cursor-integration PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+        TIMEOUT 30)
+
+    add_executable(x11-input-integration
+        test_x11_input.cpp
+        ${CMAKE_SOURCE_DIR}/src/x11/x11_input_controller.cpp)
+    set_target_properties(x11-input-integration PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(x11-input-integration PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${XRDP_CONSOLE_XRDP_SOURCE_DIR}
+        ${XRDP_CONSOLE_XRDP_SOURCE_DIR}/common
+        ${XRDP_CONSOLE_XRDP_SOURCE_DIR}/xrdp
+        ${XRDP_CONSOLE_XRDP_BUILD_DIR})
+    target_compile_definitions(x11-input-integration PRIVATE HAVE_CONFIG_H)
+    target_link_libraries(x11-input-integration PRIVATE
+        PkgConfig::XRDP_CONSOLE_TEST_XCB
+        PkgConfig::XRDP_CONSOLE_TEST_XCB_XTEST)
+    add_test(NAME x11-input-integration
+        COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_input.py
+        $<TARGET_FILE:x11-input-integration>)
+    set_tests_properties(x11-input-integration PROPERTIES
         ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
         TIMEOUT 30)
 

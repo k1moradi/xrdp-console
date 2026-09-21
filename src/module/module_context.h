@@ -40,6 +40,8 @@ public:
 
     int start(int width, int height, int bpp) noexcept;
     int connect() noexcept;
+    int event(int message, long param1, long param2, long param3,
+              long param4) noexcept;
     int end() noexcept;
     int set_parameter(const char *name, const char *value) noexcept;
     int get_wait_objs(tbus *read_objects, int *read_count,

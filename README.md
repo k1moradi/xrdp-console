@@ -2,8 +2,8 @@
 
 `xrdp-console` is the first-party GPLv3 shared-console project. The current
 migration slice contains the measured VNC bridge, its developer tooling, and
-the first direct-X11 C++ runtime vertical slice: XCB/XDamage/XShm capture into
-xrdp's classic bitmap callbacks.
+the first direct-X11 C++ runtime vertical slice: XCB/XDamage/XShm capture,
+XFixes cursor forwarding, and XTest input into xrdp's classic bitmap callbacks.
 
 The current measured paths are:
 
@@ -35,7 +35,7 @@ On Debian or Ubuntu, install the development dependencies first:
 ```sh
 sudo apt install \
   cmake ninja-build build-essential pkg-config python3 \
-  libxcb1-dev libxcb-damage0-dev libxcb-xfixes0-dev \
+  libxcb1-dev libxcb-damage0-dev libxcb-xfixes0-dev libxcb-xtest0-dev \
   libx11-dev libxtst-dev libgl-dev libvulkan-dev \
   xauth x11-utils xrdp x11vnc freerdp3-x11 tigervnc-viewer xvfb
 ```
@@ -102,13 +102,12 @@ python3 -B tools/benchmark/xrdp_console_bench.py \
   --network-mode localhost
 ```
 
-This mode is intentionally graphics-only while XTest input is not implemented.
-It skips x11vnc, the IPv6-to-IPv4 RFB proxy, chansrv, GFX/drdynvc, and dynamic
-resizing; stages the module into the private xrdp installation; sets `code=0`
-for the direct classic-bitmap path; and forces the FreeRDP geometry to the
-physical X11 geometry. The reported marker latency is therefore the
-draw-completion to FreeRDP-framebuffer-visible stage needed for the first
-direct-backend comparison.
+This mode skips x11vnc, the IPv6-to-IPv4 RFB proxy, chansrv, GFX/drdynvc, and
+dynamic resizing; stages the module into the private xrdp installation; sets
+`code=0` for the direct classic-bitmap path; and forces the FreeRDP geometry to
+the physical X11 geometry. Graphics mode reports the draw-completion to
+FreeRDP-framebuffer-visible stage. Input-roundtrip mode additionally forwards
+RDP keyboard events through XTest and measures the full marker round trip.
 
 The namespace transport needs a cached sudo ticket for short-lived network
 setup and cleanup commands. The benchmark itself remains a normal-user

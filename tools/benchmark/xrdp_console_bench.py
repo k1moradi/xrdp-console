@@ -10,9 +10,10 @@ The benchmark starts only user-owned, loopback services:
     An OpenGL workload toggles a solid red/blue marker on the physical display.
     ``--backend vnc`` is the default and timestamps the completed GL swap and
     polls the corresponding pixel in the FreeRDP window.  ``--backend
-    direct-x11`` selects the first-party module and the same graphics-only
-    client-visible pixel measurement; it uses fixed source/presentation
-    geometry and classic bitmap output.  ``--transport rfb`` instead
+    direct-x11`` selects the first-party module and the same client-visible
+    graphics measurement; it uses fixed source/presentation geometry and
+    classic bitmap output.  Its input-roundtrip mode sends the same RDP key
+    stimulus through the module's XTest controller.  ``--transport rfb`` instead
     starts a private no-password x11vnc and timestamps the same marker in RAW
     RFB bytes on the loopback socket.  ``--transport vnc-viewer`` puts an
     actual TigerVNC viewer between that private server and a private Xvfb
@@ -918,6 +919,7 @@ def rewrite_xrdp_config(source: Path, target: Path, port: int,
                         bitmap_compression: bool | None = None,
                         bulk_compression: bool | None = None,
                         disable_dynamic_resizing: bool = False,
+                        allow_channels: bool = True,
                         bind_host: str = "127.0.0.1") -> None:
     """Copy the installed xrdp profile into a private test configuration."""
     if disable_gfx_for_vnc and enable_gfx_for_vnc:
@@ -926,13 +928,24 @@ def rewrite_xrdp_config(source: Path, target: Path, port: int,
     section = ""
     output: list[str] = []
     seen: set[tuple[str, str]] = set()
+    bitmap = True if bitmap_compression is None else bitmap_compression
+    bulk = True if bulk_compression is None else bulk_compression
     replacements = {
         ("Globals", "port"): f"port=tcp://{bind_host}:{port}",
         ("Globals", "fork"): "fork=true",
         ("Globals", "certificate"): f"certificate={cert}",
         ("Globals", "key_file"): f"key_file={key}",
         ("Globals", "autorun"): "autorun=Console",
-        ("Globals", "allow_channels"): "allow_channels=true",
+        ("Globals", "allow_channels"): (
+            f"allow_channels={'true' if allow_channels else 'false'}"
+        ),
+        ("Globals", "bitmap_cache"): "bitmap_cache=true",
+        ("Globals", "bitmap_compression"): (
+            f"bitmap_compression={'true' if bitmap else 'false'}"
+        ),
+        ("Globals", "bulk_compression"): (
+            f"bulk_compression={'true' if bulk else 'false'}"
+        ),
         ("Globals", "max_bpp"): f"max_bpp={max_bpp}",
         ("Logging", "LogFile"): f"LogFile={log_path}",
         ("Logging", "EnableSyslog"): "EnableSyslog=false",
@@ -955,12 +968,9 @@ def rewrite_xrdp_config(source: Path, target: Path, port: int,
             else "channel.drdynvc=true"
         ),
     }
-    if bitmap_compression is not None:
-        replacements[("Globals", "bitmap_compression")] = (
-            f"bitmap_compression={'true' if bitmap_compression else 'false'}")
-    if bulk_compression is not None:
-        replacements[("Globals", "bulk_compression")] = (
-            f"bulk_compression={'true' if bulk_compression else 'false'}")
+    if not allow_channels:
+        for key_name in ("rdpdr", "rdpsnd", "cliprdr", "rail", "xrdpvr"):
+            replacements[("Channels", key_name)] = f"{key_name}=false"
     for line in lines:
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
@@ -1012,13 +1022,17 @@ def rewrite_xrdp_config(source: Path, target: Path, port: int,
              if output[index].strip().startswith("[") and
              output[index].strip().endswith("]")), len(output),
         )
-        has_dynamic_resize = any(
-            line.split("=", 1)[0].strip().lower() == "enable_dynamic_resizing"
-            for line in output[console_start + 1:console_end]
-            if "=" in line and not line.lstrip().startswith((";", "#"))
+        dynamic_resize_index = next(
+            (index for index in range(console_start + 1, console_end)
+             if "=" in output[index] and
+             not output[index].lstrip().startswith((";", "#")) and
+             output[index].split("=", 1)[0].strip().lower() ==
+             "enable_dynamic_resizing"), None,
         )
-        if not has_dynamic_resize:
+        if dynamic_resize_index is None:
             output.insert(console_end, "enable_dynamic_resizing=false")
+        else:
+            output[dynamic_resize_index] = "enable_dynamic_resizing=false"
     target.write_text("\n".join(output) + "\n")
     target.chmod(0o600)
 
@@ -2212,6 +2226,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                 args.disable_gfx_for_vnc, args.enable_gfx_for_vnc, args.console_lib,
                 args.bitmap_compression, args.bulk_compression,
                 args.disable_dynamic_resizing,
+                not args.no_chansrv,
                 network.host_ip,
             )
         if args.no_chansrv or direct_backend:
@@ -2595,8 +2610,6 @@ def main() -> int:
     if args.backend == "direct-x11":
         if args.transport != "rdp":
             parser.error("--backend direct-x11 requires --transport rdp")
-        if args.mode != "graphics":
-            parser.error("--backend direct-x11 currently supports graphics mode only")
         if args.max_bpp != 32:
             parser.error("--backend direct-x11 requires --max-bpp 32")
         if args.only is not None:

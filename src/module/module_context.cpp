@@ -3,12 +3,14 @@
 #include "module_context.h"
 
 #include <array>
+#include <chrono>
 #include <climits>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <new>
+#include <span>
 #include <string_view>
 
 extern "C" {
@@ -18,7 +20,9 @@ extern "C" {
 #include "../core/damage_region.h"
 #include "../rdp/rdp_update_sink.h"
 #include "../x11/x11_damage_tracker.h"
+#include "../x11/x11_cursor_tracker.h"
 #include "../x11/x11_display_connection.h"
+#include "../x11/x11_input_controller.h"
 #include "../x11/x11_shared_memory_capture.h"
 
 namespace
@@ -44,23 +48,191 @@ copy_text(char *destination, std::size_t capacity, const char *value) noexcept
     destination[copied] = '\0';
 }
 
+class RuntimeProfile final
+{
+public:
+    RuntimeProfile() noexcept
+        : enabled_(profileEnabled()), lastLog_(Clock::now())
+    {
+    }
+
+    RuntimeProfile(const RuntimeProfile &) = delete;
+    RuntimeProfile &operator=(const RuntimeProfile &) = delete;
+
+    [[nodiscard]] bool enabled() const noexcept
+    {
+        return enabled_;
+    }
+
+    void reset() noexcept
+    {
+        counters_ = {};
+        lastLog_ = Clock::now();
+    }
+
+    void noteDamage(std::uint64_t notifications,
+                    std::uint64_t damagedPixels) noexcept
+    {
+        if (!enabled_)
+        {
+            return;
+        }
+        counters_.damageNotifications += notifications;
+        counters_.damagedPixels += damagedPixels;
+    }
+
+    void noteCapture(Rectangle rectangle) noexcept
+    {
+        if (!enabled_)
+        {
+            return;
+        }
+        counters_.capturedPixels += area(rectangle);
+    }
+
+    void notePaint(Rectangle rectangle, std::size_t bytes,
+                   bool succeeded) noexcept
+    {
+        if (!enabled_)
+        {
+            return;
+        }
+        ++counters_.paintCalls;
+        counters_.uncompressedBytes += bytes;
+        if (succeeded)
+        {
+            ++counters_.coalescedRectangles;
+            counters_.coalescedPixels += area(rectangle);
+        }
+    }
+
+    void maybeLog() noexcept
+    {
+        if (!enabled_)
+        {
+            return;
+        }
+
+        const auto now = Clock::now();
+        const auto window = std::chrono::duration_cast<Microseconds>(
+            now - lastLog_);
+        if (window.count() >= 1'000'000)
+        {
+            emit(window);
+            lastLog_ = now;
+        }
+    }
+
+    void flush() noexcept
+    {
+        if (!enabled_ || !hasCounters())
+        {
+            return;
+        }
+        const auto now = Clock::now();
+        const auto window = std::chrono::duration_cast<Microseconds>(
+            now - lastLog_);
+        emit(window.count() > 0 ? window : Microseconds{1});
+        lastLog_ = now;
+    }
+
+private:
+    using Clock = std::chrono::steady_clock;
+    using Microseconds = std::chrono::microseconds;
+
+    struct Counters
+    {
+        std::uint64_t damageNotifications{};
+        std::uint64_t damagedPixels{};
+        std::uint64_t coalescedRectangles{};
+        std::uint64_t coalescedPixels{};
+        std::uint64_t capturedPixels{};
+        std::uint64_t paintCalls{};
+        std::uint64_t uncompressedBytes{};
+    };
+
+    static bool profileEnabled() noexcept
+    {
+        const char *value = std::getenv("XRDP_CONSOLE_PROFILE");
+        return value != nullptr && value[0] != '\0' &&
+               std::strcmp(value, "0") != 0;
+    }
+
+    static std::uint64_t area(Rectangle rectangle) noexcept
+    {
+        return static_cast<std::uint64_t>(rectangle.widthPixels) *
+               rectangle.heightPixels;
+    }
+
+    [[nodiscard]] bool hasCounters() const noexcept
+    {
+        return counters_.damageNotifications != 0 ||
+               counters_.damagedPixels != 0 ||
+               counters_.coalescedRectangles != 0 ||
+               counters_.coalescedPixels != 0 ||
+               counters_.capturedPixels != 0 || counters_.paintCalls != 0 ||
+               counters_.uncompressedBytes != 0;
+    }
+
+    static double perSecond(std::uint64_t value,
+                            Microseconds window) noexcept
+    {
+        return static_cast<double>(value) * 1'000'000.0 /
+               static_cast<double>(window.count());
+    }
+
+    void emit(Microseconds window) noexcept
+    {
+        log_message(
+            LOG_LEVEL_INFO,
+            "XRDP_CONSOLE_PROFILE window_us=%llu "
+            "damage_notifications=%llu damaged_pixels=%llu "
+            "coalesced_rectangles=%llu coalesced_pixels=%llu "
+            "captured_pixels=%llu paint_calls=%llu "
+            "uncompressed_bytes=%llu "
+            "damage_pixels_per_s=%.0f captured_pixels_per_s=%.0f "
+            "paint_calls_per_s=%.0f uncompressed_bytes_per_s=%.0f",
+            static_cast<unsigned long long>(window.count()),
+            static_cast<unsigned long long>(counters_.damageNotifications),
+            static_cast<unsigned long long>(counters_.damagedPixels),
+            static_cast<unsigned long long>(counters_.coalescedRectangles),
+            static_cast<unsigned long long>(counters_.coalescedPixels),
+            static_cast<unsigned long long>(counters_.capturedPixels),
+            static_cast<unsigned long long>(counters_.paintCalls),
+            static_cast<unsigned long long>(counters_.uncompressedBytes),
+            perSecond(counters_.damagedPixels, window),
+            perSecond(counters_.capturedPixels, window),
+            perSecond(counters_.paintCalls, window),
+            perSecond(counters_.uncompressedBytes, window));
+        counters_ = {};
+    }
+
+    bool enabled_{false};
+    Clock::time_point lastLog_{};
+    Counters counters_{};
+};
+
 class ModuleEventSink final : public X11EventSink
 {
 public:
     ModuleEventSink(X11DamageTracker &damageTracker,
-                    DamageRegion &damageRegion) noexcept
-        : damageTracker_(damageTracker), damageRegion_(damageRegion)
+                    DamageRegion &damageRegion,
+                    X11CursorTracker &cursorTracker) noexcept
+        : damageTracker_(damageTracker), damageRegion_(damageRegion),
+          cursorTracker_(cursorTracker)
     {
     }
 
     void handle(const xcb_generic_event_t &event) noexcept override
     {
         damageTracker_.handle(event, damageRegion_);
+        cursorTracker_.handle(event);
     }
 
 private:
     X11DamageTracker &damageTracker_;
     DamageRegion &damageRegion_;
+    X11CursorTracker &cursorTracker_;
 };
 
 struct ModuleState
@@ -85,8 +257,11 @@ struct ModuleContext::Impl
     ModuleState state{};
     std::unique_ptr<X11DisplayConnection> x11Connection{};
     std::unique_ptr<X11DamageTracker> damageTracker{};
+    std::unique_ptr<X11CursorTracker> cursorTracker{};
     std::unique_ptr<X11SharedMemoryCapture> sharedMemoryCapture{};
+    std::unique_ptr<X11InputController> inputController{};
     DamageRegion damageRegion{};
+    RuntimeProfile profile{};
     RdpUpdateSink rdpUpdateSink{nullptr};
 };
 
@@ -172,14 +347,19 @@ ModuleContext::connect() noexcept
     }
 
     if (impl_->x11Connection != nullptr || impl_->damageTracker != nullptr ||
-        impl_->sharedMemoryCapture != nullptr)
+        impl_->cursorTracker != nullptr || impl_->sharedMemoryCapture != nullptr ||
+        impl_->inputController != nullptr)
     {
         return impl_->x11Connection != nullptr &&
                        impl_->damageTracker != nullptr &&
+                       impl_->cursorTracker != nullptr &&
                        impl_->sharedMemoryCapture != nullptr &&
+                       impl_->inputController != nullptr &&
                        impl_->x11Connection->valid() &&
                        impl_->damageTracker->valid() &&
-                       impl_->sharedMemoryCapture->valid()
+                       impl_->cursorTracker->valid() &&
+                       impl_->sharedMemoryCapture->valid() &&
+                       impl_->inputController->valid()
                    ? 0
                    : 1;
     }
@@ -241,6 +421,31 @@ ModuleContext::connect() noexcept
             return 1;
         }
 
+        auto cursorTracker = std::make_unique<X11CursorTracker>(
+            *connection->nativeConnection(), connection->rootWindow());
+        if (!cursorTracker->valid())
+        {
+            log_message(
+                LOG_LEVEL_ERROR, "xrdp-console: XFixes cursor setup failed: %s",
+                cursorTracker->failureReason() != nullptr
+                    ? cursorTracker->failureReason()
+                    : "unknown error");
+            return 1;
+        }
+
+        auto inputController = std::make_unique<X11InputController>(
+            *connection->nativeConnection(), connection->rootWindow(),
+            sourceGeometry);
+        if (!inputController->valid())
+        {
+            log_message(
+                LOG_LEVEL_ERROR, "xrdp-console: XTest input setup failed: %s",
+                inputController->failureReason() != nullptr
+                    ? inputController->failureReason()
+                    : "unknown error");
+            return 1;
+        }
+
         impl_->state.sourceGeometry = sourceGeometry;
         impl_->damageRegion.clear();
         // XDamage reports changes, not the initial contents. Seed a complete
@@ -250,7 +455,9 @@ ModuleContext::connect() noexcept
             sourceGeometry);
         impl_->x11Connection = std::move(connection);
         impl_->damageTracker = std::move(damageTracker);
+        impl_->cursorTracker = std::move(cursorTracker);
         impl_->sharedMemoryCapture = std::move(sharedMemoryCapture);
+        impl_->inputController = std::move(inputController);
         return 0;
     }
     catch (...)
@@ -258,12 +465,29 @@ ModuleContext::connect() noexcept
         // The C ABI must report allocation/constructor failures as a normal
         // module failure and leave no partially connected state behind.
         impl_->sharedMemoryCapture.reset();
+        impl_->cursorTracker.reset();
         impl_->damageTracker.reset();
+        impl_->inputController.reset();
         impl_->x11Connection.reset();
         impl_->damageRegion.clear();
         impl_->state.sourceGeometry = {};
         return 1;
     }
+}
+
+int
+ModuleContext::event(int message, long param1, long param2, long param3,
+                     long param4) noexcept
+{
+    if (!valid() || impl_->inputController == nullptr ||
+        !impl_->inputController->valid())
+    {
+        return 1;
+    }
+    return impl_->inputController->handle(message, param1, param2, param3,
+                                          param4)
+               ? 0
+               : 1;
 }
 
 int
@@ -273,16 +497,20 @@ ModuleContext::end() noexcept
     {
         return 1;
     }
+    impl_->profile.flush();
     // X11DisplayConnection destroys the xrdp wait object before disconnecting
     // XCB. Reset it before changing the lifecycle state.
     impl_->sharedMemoryCapture.reset();
+    impl_->cursorTracker.reset();
     impl_->damageTracker.reset();
+    impl_->inputController.reset();
     impl_->x11Connection.reset();
     impl_->damageRegion.clear();
     impl_->state.sourceGeometry = {};
     impl_->state.presentationGeometry = {};
     impl_->state.bitsPerPixel = 0;
     impl_->state.started = false;
+    impl_->profile.reset();
     return 0;
 }
 
@@ -392,27 +620,53 @@ ModuleContext::check_wait_objs() noexcept
         return 1;
     }
     if (impl_->x11Connection == nullptr && impl_->damageTracker == nullptr &&
-        impl_->sharedMemoryCapture == nullptr)
+        impl_->cursorTracker == nullptr && impl_->sharedMemoryCapture == nullptr)
     {
         return 0;
     }
     if (impl_->x11Connection == nullptr || impl_->damageTracker == nullptr ||
+        impl_->cursorTracker == nullptr ||
         impl_->sharedMemoryCapture == nullptr ||
         !impl_->x11Connection->valid() || !impl_->damageTracker->valid() ||
+        !impl_->cursorTracker->valid() ||
         !impl_->sharedMemoryCapture->valid())
     {
         return 1;
     }
 
-    ModuleEventSink eventSink(*impl_->damageTracker, impl_->damageRegion);
+    const std::uint64_t previousNotifications =
+        impl_->damageTracker->notificationCount();
+    const std::uint64_t previousDamagedPixels =
+        impl_->damageTracker->damagedPixelCount();
+    ModuleEventSink eventSink(*impl_->damageTracker, impl_->damageRegion,
+                              *impl_->cursorTracker);
     if (impl_->x11Connection->processEvents(eventSink) !=
         ConnectionStatus::Ok)
     {
         return 1;
     }
+    impl_->profile.noteDamage(
+        impl_->damageTracker->notificationCount() - previousNotifications,
+        impl_->damageTracker->damagedPixelCount() - previousDamagedPixels);
     if (!impl_->damageTracker->acknowledge())
     {
         return 1;
+    }
+
+    if (impl_->cursorTracker->pending() &&
+        impl_->rdpUpdateSink.pointerAvailable())
+    {
+        if (!impl_->cursorTracker->refresh() ||
+            !impl_->rdpUpdateSink.setPointer(
+                impl_->cursorTracker->hotspotX(),
+                impl_->cursorTracker->hotspotY(),
+                impl_->cursorTracker->widthPixels(),
+                impl_->cursorTracker->heightPixels(),
+                impl_->cursorTracker->pixels(), impl_->cursorTracker->mask()))
+        {
+            return 1;
+        }
+        impl_->cursorTracker->acknowledge();
     }
 
     // The standalone lifecycle test exercises the transport and Damage
@@ -421,6 +675,7 @@ ModuleContext::check_wait_objs() noexcept
     if (!impl_->rdpUpdateSink.available() ||
         impl_->damageRegion.rectangles().empty())
     {
+        impl_->profile.maybeLog();
         return 0;
     }
 
@@ -434,8 +689,16 @@ ModuleContext::check_wait_objs() noexcept
     {
         const FramebufferView pixels =
             impl_->sharedMemoryCapture->capture(rectangle);
-        if (!pixels.valid() ||
-            !impl_->rdpUpdateSink.paintRectangle(rectangle, pixels))
+        if (!pixels.valid())
+        {
+            success = false;
+            break;
+        }
+        impl_->profile.noteCapture(rectangle);
+        const bool painted = impl_->rdpUpdateSink.paintRectangle(
+            rectangle, pixels);
+        impl_->profile.notePaint(rectangle, pixels.pixels.size_bytes(), painted);
+        if (!painted)
         {
             success = false;
             break;
@@ -450,6 +713,7 @@ ModuleContext::check_wait_objs() noexcept
     {
         impl_->damageRegion.clear();
     }
+    impl_->profile.maybeLog();
     return success ? 0 : 1;
 }
 
@@ -466,6 +730,17 @@ xrdp_console_context_connect(void *context)
 {
     auto *module_context = static_cast<ModuleContext *>(context);
     return module_context == nullptr ? 1 : module_context->connect();
+}
+
+extern "C" int
+xrdp_console_context_event(void *context, int message, long param1,
+                            long param2, long param3, long param4)
+{
+    auto *module_context = static_cast<ModuleContext *>(context);
+    return module_context == nullptr
+               ? 1
+               : module_context->event(message, param1, param2, param3,
+                                       param4);
 }
 
 extern "C" int

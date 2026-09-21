@@ -100,6 +100,18 @@ X11DamageTracker::failureReason() const noexcept
     return failureReason_;
 }
 
+std::uint64_t
+X11DamageTracker::notificationCount() const noexcept
+{
+    return notificationCount_;
+}
+
+std::uint64_t
+X11DamageTracker::damagedPixelCount() const noexcept
+{
+    return damagedPixelCount_;
+}
+
 bool
 X11DamageTracker::handles(const xcb_generic_event_t &event) const noexcept
 {
@@ -138,6 +150,10 @@ X11DamageTracker::handle(const xcb_generic_event_t &event,
             notification.area.height,
         },
         bounds_);
+    ++notificationCount_;
+    damagedPixelCount_ +=
+        static_cast<std::uint64_t>(notification.area.width) *
+        notification.area.height;
     pendingAcknowledgement_ = true;
 }
 

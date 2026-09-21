@@ -46,8 +46,8 @@ p99, maximum, misses, GL render time, process CPU/RSS, and best-effort TCP
 wire bytes/sec, retransmissions, send queue, and RTT. `ss`-unavailable fields
 are reported as `NA` rather than inferred.
 
-Graphics runs also support `--backend direct-x11 --transport rdp`. This mode
-does not start x11vnc or the RFB relay. It loads the first-party
+Graphics and input-roundtrip runs support `--backend direct-x11 --transport
+rdp`. This mode does not start x11vnc or the RFB relay. It loads the first-party
 XCB/XDamage/XShm module into the private xrdp build, disables GFX/drdynvc and
 dynamic resizing, and forces the FreeRDP window to the physical X11 geometry:
 
@@ -55,11 +55,19 @@ dynamic resizing, and forces the FreeRDP window to the physical X11 geometry:
 GL swap-complete -> T2   direct XCB/XDamage/XShm -> classic bitmap -> FreeRDP presentation
 ```
 
-The direct backend is graphics-only until XTest input support is implemented.
 It uses the same marker stimulus and FreeRDP pixel probe as the VNC backend, so
-`T1_draw -> T2` is the controlled comparison for the capture/output path. The
-loader smoke test separately verifies the same vertical path with one known
-red/blue marker assertion.
+`T1_draw -> T2` is the controlled comparison for the capture/output path. In
+input-roundtrip mode, the module forwards the RDP keyboard event to XTest and
+the same physical X11 marker measures `T0 -> T1_event -> T1_draw -> T2`.
+The loader smoke test separately verifies the graphics vertical path with one
+known red/blue marker assertion.
+
+For opt-in direct-module pipeline attribution, pass
+`--xrdp-env XRDP_CONSOLE_PROFILE=1`. The private xrdp log then emits one
+`XRDP_CONSOLE_PROFILE` record per approximately one-second window and a final
+partial window. Its counters distinguish raw XDamage area from captured and
+successfully painted area, and report `server_paint_rect()` calls plus the
+uncompressed bytes handed to xrdp. Profiling is disabled by default.
 
 Input-roundtrip also supports `--transport rfb --mode input-roundtrip`. The
 benchmark sends the same F9 RFB KeyEvent pulse as the RDP input path to the

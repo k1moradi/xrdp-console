@@ -2,7 +2,6 @@
 
 #include "rdp_update_sink.h"
 
-#include <cstdint>
 #include <limits>
 
 RdpUpdateSink::RdpUpdateSink(xrdp_console_module *module) noexcept
@@ -74,4 +73,46 @@ RdpUpdateSink::endUpdate() noexcept
     }
     updateOpen_ = false;
     return xrdp_console_module_server_end_update(module_) == 0;
+}
+
+bool
+RdpUpdateSink::pointerAvailable() const noexcept
+{
+    return xrdp_console_module_pointer_callback_ready(module_) != 0;
+}
+
+bool
+RdpUpdateSink::setPointer(std::int32_t hotspotX, std::int32_t hotspotY,
+                          std::uint32_t widthPixels,
+                          std::uint32_t heightPixels,
+                          std::span<const std::byte> pixels,
+                          std::span<const std::byte> mask) noexcept
+{
+    constexpr std::uint32_t kBytesPerPixel = 4;
+    constexpr std::uint32_t kMaximumCursorDimension = 96;
+    if (!pointerAvailable() || hotspotX < 0 || hotspotY < 0 ||
+        widthPixels == 0 || heightPixels == 0 ||
+        widthPixels > kMaximumCursorDimension ||
+        heightPixels > kMaximumCursorDimension || hotspotX >=
+            static_cast<std::int32_t>(widthPixels) || hotspotY >=
+            static_cast<std::int32_t>(heightPixels) ||
+        widthPixels > std::numeric_limits<std::uint32_t>::max() /
+                           kBytesPerPixel ||
+        pixels.size() < static_cast<std::size_t>(widthPixels) *
+                             heightPixels * kBytesPerPixel ||
+        (static_cast<std::uint64_t>(widthPixels) * heightPixels) % 8U != 0 ||
+        mask.size() < (static_cast<std::size_t>(widthPixels) * heightPixels) /
+                          8U)
+    {
+        return false;
+    }
+
+    auto *pixelData = const_cast<char *>(
+        reinterpret_cast<const char *>(pixels.data()));
+    auto *maskData = const_cast<char *>(
+        reinterpret_cast<const char *>(mask.data()));
+    return xrdp_console_module_server_set_pointer_large(
+               module_, hotspotX, hotspotY, pixelData, maskData, 32,
+               static_cast<int>(widthPixels), static_cast<int>(heightPixels)) ==
+           0;
 }

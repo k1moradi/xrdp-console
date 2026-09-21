@@ -21,6 +21,9 @@ public:
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] const char *failureReason() const noexcept;
 
+    [[nodiscard]] std::uint64_t notificationCount() const noexcept;
+    [[nodiscard]] std::uint64_t damagedPixelCount() const noexcept;
+
     [[nodiscard]] bool handles(const xcb_generic_event_t &event) const noexcept;
 
     void handle(const xcb_generic_event_t &event,
@@ -37,5 +40,7 @@ private:
     PixelSize bounds_{};
     std::uint8_t firstEvent_{0};
     bool pendingAcknowledgement_{false};
+    std::uint64_t notificationCount_{0};
+    std::uint64_t damagedPixelCount_{0};
     const char *failureReason_{"not initialized"};
 };

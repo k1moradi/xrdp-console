@@ -10,6 +10,8 @@
 
 int xrdp_console_context_start(void *context, int width, int height, int bpp);
 int xrdp_console_context_connect(void *context);
+int xrdp_console_context_event(void *context, int message, long param1,
+                               long param2, long param3, long param4);
 int xrdp_console_context_end(void *context);
 int xrdp_console_context_set_parameter(void *context, const char *name,
                                        const char *value);
@@ -63,12 +65,11 @@ static int
 module_event(struct xrdp_mod *abi, int msg, long param1, long param2,
              long param3, long param4)
 {
-    (void)msg;
-    (void)param1;
-    (void)param2;
-    (void)param3;
-    (void)param4;
-    return context_from_abi(abi) == NULL ? 1 : 0;
+    void *context = context_from_abi(abi);
+    return context == NULL
+               ? 1
+               : xrdp_console_context_event(context, msg, param1, param2,
+                                            param3, param4);
 }
 
 static int
@@ -272,5 +273,23 @@ xrdp_console_module_server_end_update(xrdp_console_module *module)
 {
     return xrdp_console_module_update_callbacks_ready(module)
                ? module->abi.server_end_update(&module->abi)
+               : 1;
+}
+
+int
+xrdp_console_module_pointer_callback_ready(
+    const xrdp_console_module *module)
+{
+    return module != NULL && module->abi.server_set_pointer_large != NULL;
+}
+
+int
+xrdp_console_module_server_set_pointer_large(
+    xrdp_console_module *module, int x, int y, char *data, char *mask,
+    int bpp, int width, int height)
+{
+    return xrdp_console_module_pointer_callback_ready(module)
+               ? module->abi.server_set_pointer_large(
+                     &module->abi, x, y, data, mask, bpp, width, height)
                : 1;
 }

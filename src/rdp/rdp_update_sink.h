@@ -2,6 +2,10 @@
 
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+#include <span>
+
 #include "../core/framebuffer_view.h"
 #include "../core/rectangle.h"
 #include "../module/module_abi.h"
@@ -16,6 +20,13 @@ public:
     [[nodiscard]] bool paintRectangle(Rectangle destination,
                                       FramebufferView pixels) noexcept;
     [[nodiscard]] bool endUpdate() noexcept;
+
+    [[nodiscard]] bool pointerAvailable() const noexcept;
+    [[nodiscard]] bool setPointer(
+        std::int32_t hotspotX, std::int32_t hotspotY,
+        std::uint32_t widthPixels, std::uint32_t heightPixels,
+        std::span<const std::byte> pixels,
+        std::span<const std::byte> mask) noexcept;
 
 private:
     xrdp_console_module *module_{nullptr};
