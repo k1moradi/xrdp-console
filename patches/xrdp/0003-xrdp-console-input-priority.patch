@@ -1,0 +1,33 @@
+--- a/xrdp/xrdp_process.c
++++ b/xrdp/xrdp_process.c
+@@ -284,12 +284,30 @@
+                 break;
+             }
+ 
++            /*
++             * The direct physical-console module can perform synchronous
++             * XShm capture and bitmap output.  Service the RDP transport
++             * first for that module so queued input and disconnects are not
++             * forced to wait behind one graphics transaction.  Keep the
++             * legacy VNC/Xorg service order unchanged.
++             */
++            const int console_backend =
++                self->wm != 0 && self->wm->mm != 0 &&
++                self->wm->mm->code == XRDP_CONSOLE_SESSION_CODE;
++            if (console_backend &&
++                trans_check_wait_objs(self->server_trans) != 0)
++            {
++                break;
++            }
++
+             if (xrdp_wm_check_wait_objs(self->wm) != 0)
+             {
+                 break;
+             }
+ 
++            /* Catch input or a disconnect which arrived during backend work
++             * before the next wait. */
+             if (trans_check_wait_objs(self->server_trans) != 0)
+             {
+                 break;
+             }

@@ -15,6 +15,8 @@ int xrdp_console_context_resize_presentation(
     const struct monitor_info *monitors);
 int xrdp_console_context_invalidate_presentation(void *context, int width,
                                                   int height);
+int xrdp_console_context_suppress_output(void *context, int suppress, int left,
+                                          int top, int right, int bottom);
 int xrdp_console_context_event(void *context, int message, long param1,
                                long param2, long param3, long param4);
 int xrdp_console_context_end(void *context);
@@ -135,12 +137,11 @@ static int
 module_suppress_output(struct xrdp_mod *abi, int suppress, int left, int top,
                         int right, int bottom)
 {
-    (void)suppress;
-    (void)left;
-    (void)top;
-    (void)right;
-    (void)bottom;
-    return context_from_abi(abi) == NULL ? 1 : 0;
+    void *context = context_from_abi(abi);
+    return context == NULL
+               ? 1
+               : xrdp_console_context_suppress_output(
+                     context, suppress, left, top, right, bottom);
 }
 
 static int

@@ -2,6 +2,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string_view>
 
@@ -65,8 +66,14 @@ public:
     [[nodiscard]] tbus waitObject() const noexcept;
     [[nodiscard]] int fileDescriptor() const noexcept;
 
-    /** Dispatch queued XCB events and report transport failure explicitly. */
-    [[nodiscard]] ConnectionStatus processEvents(X11EventSink &eventSink) noexcept;
+    /**
+     * Dispatch at most eventBudget events and report transport failure
+     * explicitly. budgetExhausted tells callers to arrange another
+     * non-blocking service iteration for events already buffered by XCB.
+     */
+    [[nodiscard]] ConnectionStatus processEvents(
+        X11EventSink &eventSink, std::size_t eventBudget = 128,
+        bool *budgetExhausted = nullptr) noexcept;
 
 private:
     void close() noexcept;

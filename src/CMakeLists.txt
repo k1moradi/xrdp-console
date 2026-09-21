@@ -29,6 +29,8 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         x11/x11_damage_tracker.h
         x11/x11_cursor_tracker.cpp
         x11/x11_cursor_tracker.h
+        x11/cursor_image_conversion.cpp
+        x11/cursor_image_conversion.h
         x11/x11_display_connection.cpp
         x11/x11_display_connection.h
         x11/x11_input_controller.cpp

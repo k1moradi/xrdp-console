@@ -92,13 +92,38 @@ test_fragmentation_fallback() noexcept
     return region.rectangles().empty() && !region.fullScreenRequired() ? 0 : 1;
 }
 
+int
+test_bounded_consumption() noexcept
+{
+    constexpr PixelSize bounds{100, 80};
+    DamageRegion region;
+    region.add({1, 2, 3, 4}, bounds);
+    region.add({20, 30, 5, 6}, bounds);
+
+    Rectangle first{};
+    if (!region.front(first) || first != Rectangle{1, 2, 3, 4})
+    {
+        return 1;
+    }
+    region.remove_front();
+    if (region.rectangles().size() != 1 ||
+        !region.front(first) || first != Rectangle{20, 30, 5, 6})
+    {
+        return 1;
+    }
+    region.remove_front();
+    region.remove_front();
+    return region.rectangles().empty() ? 0 : 1;
+}
+
 } // namespace
 
 int
 main()
 {
     return test_clipping_and_merging() == 0 &&
-                   test_fragmentation_fallback() == 0
+                   test_fragmentation_fallback() == 0 &&
+                   test_bounded_consumption() == 0
                ? EXIT_SUCCESS
                : EXIT_FAILURE;
 }

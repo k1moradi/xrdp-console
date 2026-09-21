@@ -467,25 +467,30 @@ X11InputController::emitScrollClicks(long x, long y, long delta,
         accumulator + boundedDelta, -kMaximumScrollBurst * kScrollUnitsPerClick,
         kMaximumScrollBurst * kScrollUnitsPerClick);
 
+    bool emitted = false;
     while (accumulator >= kScrollUnitsPerClick)
     {
-        if (!fakeButton(XCB_BUTTON_PRESS, positiveButton, x, y) ||
-            !fakeButton(XCB_BUTTON_RELEASE, positiveButton, x, y))
+        if (!fakeButton(XCB_BUTTON_PRESS, positiveButton, x, y, false) ||
+            !fakeButton(XCB_BUTTON_RELEASE, positiveButton, x, y, false))
         {
+            (void)flushInput();
             return false;
         }
         accumulator -= kScrollUnitsPerClick;
+        emitted = true;
     }
     while (accumulator <= -kScrollUnitsPerClick)
     {
-        if (!fakeButton(XCB_BUTTON_PRESS, negativeButton, x, y) ||
-            !fakeButton(XCB_BUTTON_RELEASE, negativeButton, x, y))
+        if (!fakeButton(XCB_BUTTON_PRESS, negativeButton, x, y, false) ||
+            !fakeButton(XCB_BUTTON_RELEASE, negativeButton, x, y, false))
         {
+            (void)flushInput();
             return false;
         }
         accumulator += kScrollUnitsPerClick;
+        emitted = true;
     }
-    return true;
+    return !emitted || flushInput();
 }
 
 bool
@@ -503,7 +508,7 @@ X11InputController::fakePointer(std::uint8_t type, long x, long y) noexcept
 
 bool
 X11InputController::fakeButton(std::uint8_t type, int button, long x,
-                                long y) noexcept
+                                long y, bool flush) noexcept
 {
     if (button <= 0 || button > std::numeric_limits<std::uint8_t>::max())
     {
@@ -511,12 +516,13 @@ X11InputController::fakeButton(std::uint8_t type, int button, long x,
     }
     return fakeInput(type, static_cast<std::uint8_t>(button),
                      coordinate(x, bounds_.widthPixels),
-                     coordinate(y, bounds_.heightPixels));
+                     coordinate(y, bounds_.heightPixels), flush);
 }
 
 bool
 X11InputController::fakeInput(std::uint8_t type, std::uint8_t detail,
-                               std::int16_t x, std::int16_t y) noexcept
+                               std::int16_t x, std::int16_t y,
+                               bool flush) noexcept
 {
     if (!valid())
     {
@@ -524,10 +530,20 @@ X11InputController::fakeInput(std::uint8_t type, std::uint8_t detail,
     }
     xcb_test_fake_input(connection_, type, detail, XCB_CURRENT_TIME,
                         rootWindow_, x, y, 0);
-    if (xcb_connection_has_error(connection_) != 0 ||
-        xcb_flush(connection_) <= 0)
+    if (xcb_connection_has_error(connection_) != 0)
     {
         fail("XTEST input request failed");
+        return false;
+    }
+    return !flush || flushInput();
+}
+
+bool
+X11InputController::flushInput() noexcept
+{
+    if (!valid() || xcb_flush(connection_) <= 0)
+    {
+        fail("XTEST input flush failed");
         return false;
     }
     return true;

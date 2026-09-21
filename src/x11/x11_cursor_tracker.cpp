@@ -2,6 +2,8 @@
 
 #include "x11_cursor_tracker.h"
 
+#include "cursor_image_conversion.h"
+
 #include <cstdlib>
 #include <limits>
 #include <utility>
@@ -10,7 +12,6 @@ namespace
 {
 
 constexpr std::uint32_t kMaximumCursorDimension = 96;
-constexpr std::uint32_t kOutputCursorDimension = 32;
 constexpr std::uint32_t kBytesPerPixel = 4;
 
 } // namespace
@@ -150,7 +151,8 @@ X11CursorTracker::refresh() noexcept
     const std::uint32_t xhot = cursor->xhot;
     const std::uint32_t yhot = cursor->yhot;
     if (width > kMaximumCursorDimension || height > kMaximumCursorDimension ||
-        width > kOutputCursorDimension || height > kOutputCursorDimension)
+        width > xrdp_console::kCursorOutputDimension ||
+        height > xrdp_console::kCursorOutputDimension)
     {
         std::free(cursorError);
         std::free(cursor);
@@ -176,45 +178,22 @@ X11CursorTracker::refresh() noexcept
     try
     {
         const std::size_t outputArea =
-            static_cast<std::size_t>(kOutputCursorDimension) *
-            kOutputCursorDimension;
+            static_cast<std::size_t>(xrdp_console::kCursorOutputDimension) *
+            xrdp_console::kCursorOutputDimension;
         std::vector<std::byte> pixels(outputArea * kBytesPerPixel,
                                       std::byte{0});
         std::vector<std::byte> mask(outputArea / 8U, std::byte{0});
         const std::uint32_t *argb =
             xcb_xfixes_get_cursor_image_cursor_image(cursor);
-        for (std::uint32_t y = 0; y < height; ++y)
+        if (!xrdp_console::convert_cursor_image(
+                std::span<const std::uint32_t>(
+                    argb, static_cast<std::size_t>(sourceArea)),
+                width, height, pixels, mask))
         {
-            for (std::uint32_t x = 0; x < width; ++x)
-            {
-                const std::uint64_t sourceIndex =
-                    static_cast<std::uint64_t>(y) * width + x;
-                const std::uint32_t pixel = argb[sourceIndex];
-                const std::uint64_t outputIndex =
-                    static_cast<std::uint64_t>(y) * kOutputCursorDimension + x;
-                const std::size_t maskOffset =
-                    static_cast<std::size_t>(outputIndex) / 8U;
-                const unsigned bit =
-                    7U - static_cast<unsigned>(outputIndex % 8U);
-                const std::size_t offset =
-                    static_cast<std::size_t>(outputIndex) * kBytesPerPixel;
-                // XFixes returns ARGB32. xrdp's 32-bpp pointer path consumes
-                // little-endian BGRX words, so preserve RGB and discard alpha
-                // in the data plane while carrying transparency in the AND
-                // mask. The classic pointer path expects a 32x32 mask, so
-                // smaller X cursors are padded with transparent pixels.
-                pixels[offset] =
-                    static_cast<std::byte>(pixel & 0xffU);
-                pixels[offset + 1] =
-                    static_cast<std::byte>((pixel >> 8) & 0xffU);
-                pixels[offset + 2] =
-                    static_cast<std::byte>((pixel >> 16) & 0xffU);
-                pixels[offset + 3] = std::byte{0};
-                if ((pixel >> 24) == 0)
-                {
-                    mask[maskOffset] |= static_cast<std::byte>(1U << bit);
-                }
-            }
+            std::free(cursorError);
+            std::free(cursor);
+            fail("XFixes cursor image conversion failed");
+            return false;
         }
         pixels_.swap(pixels);
         mask_.swap(mask);
@@ -227,8 +206,8 @@ X11CursorTracker::refresh() noexcept
         return false;
     }
 
-    widthPixels_ = kOutputCursorDimension;
-    heightPixels_ = kOutputCursorDimension;
+    widthPixels_ = xrdp_console::kCursorOutputDimension;
+    heightPixels_ = xrdp_console::kCursorOutputDimension;
     hotspotX_ = static_cast<std::int32_t>(xhot);
     hotspotY_ = static_cast<std::int32_t>(yhot);
     unsupportedCursor_ = false;

@@ -51,9 +51,11 @@ private:
     [[nodiscard]] bool fakeKey(xcb_keycode_t keycode, bool pressed) noexcept;
     [[nodiscard]] bool fakePointer(std::uint8_t type, long x, long y) noexcept;
     [[nodiscard]] bool fakeButton(std::uint8_t type, int button, long x,
-                                  long y) noexcept;
+                                  long y, bool flush = true) noexcept;
     [[nodiscard]] bool fakeInput(std::uint8_t type, std::uint8_t detail,
-                                 std::int16_t x, std::int16_t y) noexcept;
+                                 std::int16_t x, std::int16_t y,
+                                 bool flush = true) noexcept;
+    [[nodiscard]] bool flushInput() noexcept;
     [[nodiscard]] std::int16_t coordinate(long value,
                                           std::uint32_t bound) const noexcept;
     [[nodiscard]] std::size_t keySlot(long scanCode,

@@ -110,6 +110,7 @@ if(TARGET xrdp-console)
 
     add_executable(x11-cursor-integration
         test_x11_cursor.cpp
+        ${CMAKE_SOURCE_DIR}/src/x11/cursor_image_conversion.cpp
         ${CMAKE_SOURCE_DIR}/src/x11/x11_cursor_tracker.cpp)
     set_target_properties(x11-cursor-integration PROPERTIES
         CXX_STANDARD 23
@@ -127,6 +128,18 @@ if(TARGET xrdp-console)
     set_tests_properties(x11-cursor-integration PROPERTIES
         ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
         TIMEOUT 30)
+
+    add_executable(cursor-image-conversion-unit
+        test_cursor_image_conversion.cpp
+        ${CMAKE_SOURCE_DIR}/src/x11/cursor_image_conversion.cpp)
+    set_target_properties(cursor-image-conversion-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(cursor-image-conversion-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME cursor-image-conversion-unit
+        COMMAND cursor-image-conversion-unit)
 
     add_executable(x11-input-integration
         test_x11_input.cpp

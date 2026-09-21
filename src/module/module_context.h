@@ -44,6 +44,8 @@ public:
     int resize_presentation(int width, int height, int num_monitors,
                             const struct monitor_info *monitors) noexcept;
     int invalidate_presentation(int width, int height) noexcept;
+    int suppress_output(bool suppress, int left, int top, int right,
+                        int bottom) noexcept;
     int event(int message, long param1, long param2, long param3,
               long param4) noexcept;
     int end() noexcept;

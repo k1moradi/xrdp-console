@@ -2,6 +2,7 @@
 
 #include "module_context.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <climits>
@@ -257,6 +258,10 @@ is_pointer_release_message(int message) noexcept
            message == WM_BUTTON9UP;
 }
 
+constexpr std::size_t kMaximumX11EventsPerService = 128;
+constexpr std::size_t kMaximumPaintRectanglesPerService = 4;
+constexpr std::uint64_t kMaximumPaintPixelsPerService = 2U * 1024U * 1024U;
+
 struct ModuleState
 {
     std::array<char, 256> hostname{};
@@ -288,6 +293,8 @@ struct ModuleContext::Impl
     RuntimeProfile profile{};
     RdpUpdateSink rdpUpdateSink{nullptr};
     bool fullPresentationInvalidation{false};
+    bool outputSuppressed{false};
+    bool x11EventBudgetPending{false};
 };
 
 ModuleContext::ModuleContext() noexcept : impl_(new (std::nothrow) Impl{})
@@ -422,7 +429,8 @@ ModuleContext::connect() noexcept
             return 1;
         }
         PresentationScaler presentationScaler;
-        if (!presentationScaler.configure(impl_->state.presentationGeometry))
+        if (!presentationScaler.configure(sourceGeometry,
+                                          impl_->state.presentationGeometry))
         {
             log_message(LOG_LEVEL_ERROR,
                         "xrdp-console: presentation framebuffer allocation "
@@ -514,6 +522,8 @@ ModuleContext::connect() noexcept
         impl_->presentationTransform = {};
         impl_->presentationScaler = {};
         impl_->fullPresentationInvalidation = false;
+        impl_->outputSuppressed = false;
+        impl_->x11EventBudgetPending = false;
         return 1;
     }
 }
@@ -547,7 +557,8 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
         return 1;
     }
     PresentationScaler scaler;
-    if (!scaler.configure(presentationGeometry))
+    if (!scaler.configure(impl_->state.sourceGeometry,
+                          presentationGeometry))
     {
         return 1;
     }
@@ -587,6 +598,36 @@ ModuleContext::invalidate_presentation(int width, int height) noexcept
          impl_->state.sourceGeometry.heightPixels},
         impl_->state.sourceGeometry);
     impl_->fullPresentationInvalidation = true;
+    return 0;
+}
+
+int
+ModuleContext::suppress_output(bool suppress, int left, int top, int right,
+                               int bottom) noexcept
+{
+    (void)left;
+    (void)top;
+    (void)right;
+    (void)bottom;
+    if (!valid())
+    {
+        return 1;
+    }
+
+    impl_->outputSuppressed = suppress;
+    if (impl_->state.sourceGeometry.widthPixels != 0 &&
+        impl_->state.sourceGeometry.heightPixels != 0)
+    {
+        // Intermediate damage is not useful while the client is hidden.
+        // Collapse it to one complete redraw for the next resume instead of
+        // allowing a stale rectangle queue to consume the service loop.
+        impl_->damageRegion.clear();
+        impl_->damageRegion.add(
+            {0, 0, impl_->state.sourceGeometry.widthPixels,
+             impl_->state.sourceGeometry.heightPixels},
+            impl_->state.sourceGeometry);
+        impl_->fullPresentationInvalidation = true;
+    }
     return 0;
 }
 
@@ -653,6 +694,8 @@ ModuleContext::end() noexcept
     impl_->state.presentationGeometry = {};
     impl_->state.bitsPerPixel = 0;
     impl_->state.started = false;
+    impl_->outputSuppressed = false;
+    impl_->x11EventBudgetPending = false;
     impl_->profile.reset();
     return 0;
 }
@@ -721,7 +764,6 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
 {
     (void)write_objects;
     (void)write_count;
-    (void)timeout;
 
     if (!valid())
     {
@@ -752,6 +794,19 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
 
     read_objects[*read_count] = waitObject;
     ++(*read_count);
+
+    if (timeout != nullptr && !impl_->outputSuppressed &&
+        (impl_->x11EventBudgetPending ||
+         (impl_->rdpUpdateSink.available() &&
+          (!impl_->damageRegion.rectangles().empty() ||
+           impl_->fullPresentationInvalidation))))
+    {
+        // XCB may own more events in its private queue after the socket is no
+        // longer readable.  A zero timeout keeps bounded work progressing and
+        // also lets a pending local damage batch yield back to xrdp's RDP
+        // transport between iterations.
+        *timeout = 0;
+    }
     return 0;
 }
 
@@ -783,8 +838,9 @@ ModuleContext::check_wait_objs() noexcept
         impl_->damageTracker->damagedPixelCount();
     ModuleEventSink eventSink(*impl_->damageTracker, impl_->damageRegion,
                               *impl_->cursorTracker);
-    if (impl_->x11Connection->processEvents(eventSink) !=
-        ConnectionStatus::Ok)
+    if (impl_->x11Connection->processEvents(
+            eventSink, kMaximumX11EventsPerService,
+            &impl_->x11EventBudgetPending) != ConnectionStatus::Ok)
     {
         return 1;
     }
@@ -794,6 +850,12 @@ ModuleContext::check_wait_objs() noexcept
     if (!impl_->damageTracker->acknowledge())
     {
         return 1;
+    }
+
+    if (impl_->outputSuppressed)
+    {
+        impl_->profile.maybeLog();
+        return 0;
     }
 
     if (impl_->cursorTracker->pending() &&
@@ -851,13 +913,30 @@ ModuleContext::check_wait_objs() noexcept
                       impl_->state.presentationGeometry.heightPixels,
                   });
     }
-    for (const Rectangle rectangle : impl_->damageRegion.rectangles())
+    const std::span<const Rectangle> pendingRectangles =
+        impl_->damageRegion.rectangles();
+    const std::size_t rectangleLimit = std::min(
+        pendingRectangles.size(), kMaximumPaintRectanglesPerService);
+    std::size_t paintedRectangleCount = 0;
+    std::uint64_t paintedPixels = 0;
+    for (std::size_t index = 0;
+         success && index < rectangleLimit; ++index)
     {
+        const Rectangle rectangle = pendingRectangles[index];
+        const std::uint64_t rectanglePixels =
+            static_cast<std::uint64_t>(rectangle.widthPixels) *
+            rectangle.heightPixels;
+        if (paintedRectangleCount != 0 &&
+            paintedPixels + rectanglePixels > kMaximumPaintPixelsPerService)
+        {
+            break;
+        }
         Rectangle presentationRectangle{};
         if (!impl_->presentationTransform.mapSourceRectangle(
                 rectangle, presentationRectangle))
         {
-            continue;
+            success = false;
+            break;
         }
         const FramebufferView pixels =
             impl_->sharedMemoryCapture->capture(rectangle);
@@ -883,6 +962,8 @@ ModuleContext::check_wait_objs() noexcept
             success = false;
             break;
         }
+        ++paintedRectangleCount;
+        paintedPixels += rectanglePixels;
     }
 
     if (!impl_->rdpUpdateSink.endUpdate())
@@ -891,8 +972,15 @@ ModuleContext::check_wait_objs() noexcept
     }
     if (success)
     {
-        impl_->damageRegion.clear();
-        impl_->fullPresentationInvalidation = false;
+        for (std::size_t index = 0; index < paintedRectangleCount; ++index)
+        {
+            impl_->damageRegion.remove_front();
+        }
+        if (impl_->damageRegion.rectangles().empty())
+        {
+            impl_->damageRegion.clear();
+            impl_->fullPresentationInvalidation = false;
+        }
     }
     impl_->profile.maybeLog();
     return success ? 0 : 1;
@@ -933,6 +1021,17 @@ xrdp_console_context_invalidate_presentation(void *context, int width,
     return module_context == nullptr
                ? 1
                : module_context->invalidate_presentation(width, height);
+}
+
+extern "C" int
+xrdp_console_context_suppress_output(void *context, int suppress, int left,
+                                      int top, int right, int bottom)
+{
+    auto *module_context = static_cast<ModuleContext *>(context);
+    return module_context == nullptr
+               ? 1
+               : module_context->suppress_output(suppress != 0, left, top,
+                                                  right, bottom);
 }
 
 extern "C" int

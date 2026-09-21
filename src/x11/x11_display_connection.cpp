@@ -40,12 +40,14 @@ constexpr int kMaxXrdpWaitFileDescriptor = 0xffff;
 
 ConnectionStatus
 dispatch_events(xcb_connection_t *connection, X11EventSink &eventSink,
-                bool readFromSocket, bool &failed) noexcept
+                bool readFromSocket, std::size_t eventBudget,
+                std::size_t &eventsDispatched, bool &failed) noexcept
 {
     xcb_generic_event_t *event = nullptr;
-    while ((event = readFromSocket ? xcb_poll_for_event(connection)
+    while (eventsDispatched < eventBudget &&
+           (event = readFromSocket ? xcb_poll_for_event(connection)
                                    : xcb_poll_for_queued_event(connection)) !=
-           nullptr)
+               nullptr)
     {
         if (event->response_type == 0)
         {
@@ -57,6 +59,7 @@ dispatch_events(xcb_connection_t *connection, X11EventSink &eventSink,
         }
         eventSink.handle(*event);
         std::free(event);
+        ++eventsDispatched;
     }
     return ConnectionStatus::Ok;
 }
@@ -260,21 +263,35 @@ X11DisplayConnection::fileDescriptor() const noexcept
 }
 
 ConnectionStatus
-X11DisplayConnection::processEvents(X11EventSink &eventSink) noexcept
+X11DisplayConnection::processEvents(X11EventSink &eventSink,
+                                    std::size_t eventBudget,
+                                    bool *budgetExhausted) noexcept
 {
+    if (budgetExhausted != nullptr)
+    {
+        *budgetExhausted = false;
+    }
     if (!valid())
     {
         return ConnectionStatus::Failed;
     }
 
-    if (dispatch_events(connection_, eventSink, false, failed_) ==
+    if (eventBudget == 0)
+    {
+        eventBudget = 1;
+    }
+
+    std::size_t eventsDispatched = 0;
+    if (dispatch_events(connection_, eventSink, false, eventBudget,
+                        eventsDispatched, failed_) ==
         ConnectionStatus::Failed)
     {
         return ConnectionStatus::Failed;
     }
 
-    if (g_is_wait_obj_set(waitObject_) &&
-        dispatch_events(connection_, eventSink, true, failed_) ==
+    if (eventsDispatched < eventBudget && g_is_wait_obj_set(waitObject_) &&
+        dispatch_events(connection_, eventSink, true, eventBudget,
+                        eventsDispatched, failed_) ==
             ConnectionStatus::Failed)
     {
         return ConnectionStatus::Failed;
@@ -284,6 +301,10 @@ X11DisplayConnection::processEvents(X11EventSink &eventSink) noexcept
     {
         failed_ = true;
         return ConnectionStatus::Failed;
+    }
+    if (budgetExhausted != nullptr)
+    {
+        *budgetExhausted = eventsDispatched >= eventBudget;
     }
     return ConnectionStatus::Ok;
 }

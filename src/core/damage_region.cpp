@@ -148,6 +148,31 @@ DamageRegion::rectangles() const noexcept
 }
 
 bool
+DamageRegion::front(Rectangle &rectangle) const noexcept
+{
+    if (count_ == 0)
+    {
+        return false;
+    }
+    rectangle = rectangles_[0];
+    return true;
+}
+
+void
+DamageRegion::remove_front() noexcept
+{
+    if (count_ == 0)
+    {
+        return;
+    }
+    for (std::size_t index = 1; index < count_; ++index)
+    {
+        rectangles_[index - 1] = rectangles_[index];
+    }
+    --count_;
+}
+
+bool
 DamageRegion::fullScreenRequired() const noexcept
 {
     return fullScreenRequired_;

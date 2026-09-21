@@ -18,6 +18,9 @@ public:
 
     [[nodiscard]] std::span<const Rectangle> rectangles() const noexcept;
 
+    [[nodiscard]] bool front(Rectangle &rectangle) const noexcept;
+    void remove_front() noexcept;
+
     [[nodiscard]] bool fullScreenRequired() const noexcept;
 
     void clear() noexcept;

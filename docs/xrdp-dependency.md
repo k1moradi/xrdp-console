@@ -53,11 +53,9 @@ The series is deliberately small and applies in this order:
 | --- | --- | --- |
 | `0001-xrdp-resize-state-and-failure-recovery.patch` | VNC resize state and error recovery | Prevents the fixed-console session from losing its graphics state after a client resize or failed update. |
 | `0002-xrdp-fixed-console-vnc-path.patch` | fixed geometry, direct bitmap path, end-to-end update error propagation, and first-party capability code `21` | Keeps the physical X11 framebuffer authoritative, makes update failures visible to the session, and gives the direct module an explicit complete-framebuffer/smooth-scroll classification. |
-The former input-first transport check is deliberately not in the canonical
-series. It changes the global xrdp process loop and remains an experiment
-until a clean A/B benchmark demonstrates a durable benefit.
+| `0003-xrdp-console-input-priority.patch` | console-only transport priority | Services queued RDP input and disconnects before and after direct-X11 backend work while preserving the legacy service order for other module codes. |
 
-These two patches are production compatibility changes, not benchmark knobs.
+These three patches are production compatibility changes, not benchmark knobs.
 The old
 fork's profiling records, incremental parser, request-ahead scheduling,
 progressive flush, variable RAW quantum, first-frame/cache experiments, and
@@ -65,8 +63,8 @@ experimental GFX flow-control code are intentionally not in the series.
 
 ## Classification of the old fork
 
-* **KEEP:** the two patches listed above; they are required by the measured
-  fixed-console VNC product path.
+* **KEEP:** the three patches listed above; they are required by the measured
+  fixed-console/direct-console product path.
 * **TOOLING:** profiling and benchmark-only changes; these belong in the
   benchmark or diagnostic tools and remain opt-in.
 * **DELETE:** parser, request-ahead, progressive-flush, cache, and GFX

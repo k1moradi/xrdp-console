@@ -26,13 +26,13 @@ historical fork's commit history:
 2. `0002-xrdp-fixed-console-vnc-path.patch` keeps fixed-console geometry,
    direct bitmap transport, and end-to-end update error propagation, and
    reserves module code `21` for the first-party physical-console capability.
-The former `0003-xrdp-input-first-transport-check.patch` remains outside the
-canonical series. It changes the global xrdp process-loop order and is still
-an experiment until an apples-to-apples input/graphics benchmark earns it a
-production role.
+3. `0003-xrdp-console-input-priority.patch` checks the RDP transport before
+   and after backend work only for module code `21`. This keeps queued input
+   and disconnects ahead of synchronous direct-X11 graphics work without
+   changing legacy VNC/Xorg scheduling.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-two patches are production compatibility changes, not benchmark knobs. Code
+three patches are production compatibility changes, not benchmark knobs. Code
 `21` is deliberately used only by the direct module's profile; legacy VNC
 profiles continue using code `0`/`1`. The
 old checked-in fork contained profiling, parser-quantum, request-ahead,

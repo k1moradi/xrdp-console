@@ -85,7 +85,8 @@ bool
 scaler_tests()
 {
     PresentationScaler scaler;
-    if (!check(scaler.configure({4, 4}), "scaler configuration failed"))
+    if (!check(scaler.configure({2, 2}, {4, 4}),
+               "scaler configuration failed"))
     {
         return false;
     }
@@ -127,6 +128,28 @@ scaler_tests()
         {
             return false;
         }
+    }
+    PresentationScaler identity;
+    if (!check(identity.configure({2, 2}, {2, 2}),
+               "identity scaler configuration failed"))
+    {
+        return false;
+    }
+    const FramebufferView identityOutput =
+        identity.scale(source, {17, 23, 2, 2});
+    if (!check(identityOutput.valid() &&
+                   identityOutput.pixels.data() == source.pixels.data() &&
+                   identityOutput.strideBytes == source.strideBytes,
+               "identity scaler did not return the source view"))
+    {
+        return false;
+    }
+
+    PresentationScaler oversized;
+    if (!check(!oversized.configure({1366, 768}, {8192, 8192}),
+               "oversized presentation allocation was not rejected"))
+    {
+        return false;
     }
     return true;
 }
