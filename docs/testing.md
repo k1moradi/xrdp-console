@@ -13,6 +13,8 @@ Xauthority, x11vnc, and client binaries.
 | `proxy-backpressure-unit` | bounded relay buffering, selector write readiness, and peer cleanup |
 | `python-syntax` | source compilation for the installed Python helpers |
 | `systemd-unit` | clean SIGINT shutdown contract, no exit-status masking, and compatibility drop-in parity |
+| `damage-region-unit` | clipping, overlap/adjacency coalescing, empty input, and bounded full-screen fallback |
+| `x11-damage-integration` | authenticated-Xvfb XDamage resource setup, raw rectangle delivery, acknowledge/re-arm, and teardown |
 | `module-lifecycle` | C++23 XCB module construction, authenticated-Xvfb connect/reconnect, fd-0 handling, geometry setup, dead-server failure, teardown, and wait-state preservation |
 | `xrdp-loader-smoke` | generated xrdp loading the module through FreeRDP with xrdp and the client sharing a display |
 

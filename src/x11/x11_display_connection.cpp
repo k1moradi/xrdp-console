@@ -20,7 +20,45 @@ duplicate_wait_file_descriptor(int fileDescriptor) noexcept
         return duplicate;
     }
 #endif
-    return fcntl(fileDescriptor, F_DUPFD, 1);
+    const int fallbackDuplicate = fcntl(fileDescriptor, F_DUPFD, 1);
+    if (fallbackDuplicate < 0)
+    {
+        return -1;
+    }
+
+    const int descriptorFlags = fcntl(fallbackDuplicate, F_GETFD);
+    if (descriptorFlags < 0 ||
+        fcntl(fallbackDuplicate, F_SETFD, descriptorFlags | FD_CLOEXEC) < 0)
+    {
+        ::close(fallbackDuplicate);
+        return -1;
+    }
+    return fallbackDuplicate;
+}
+
+constexpr int kMaxXrdpWaitFileDescriptor = 0xffff;
+
+ConnectionStatus
+dispatch_events(xcb_connection_t *connection, X11EventSink &eventSink,
+                bool readFromSocket, bool &failed) noexcept
+{
+    xcb_generic_event_t *event = nullptr;
+    while ((event = readFromSocket ? xcb_poll_for_event(connection)
+                                   : xcb_poll_for_queued_event(connection)) !=
+           nullptr)
+    {
+        if (event->response_type == 0)
+        {
+            // A queued protocol error is not a typed event. Treat it as a
+            // transport failure rather than passing it to a subsystem sink.
+            std::free(event);
+            failed = true;
+            return ConnectionStatus::Failed;
+        }
+        eventSink.handle(*event);
+        std::free(event);
+    }
+    return ConnectionStatus::Ok;
 }
 
 } // namespace
@@ -107,6 +145,13 @@ X11DisplayConnection::X11DisplayConnection(std::string_view displayName) noexcep
         waitObjectUsesDuplicate_ = true;
     }
 
+    if (waitFileDescriptor_ > kMaxXrdpWaitFileDescriptor)
+    {
+        failed_ = true;
+        close();
+        return;
+    }
+
     waitObject_ = g_create_wait_obj_from_socket(waitFileDescriptor_, 0);
     if (waitObject_ == NULL_WAIT_OBJ)
     {
@@ -160,6 +205,12 @@ X11DisplayConnection::valid() const noexcept
            sourceGeometry_.heightPixels > 0;
 }
 
+xcb_connection_t *
+X11DisplayConnection::nativeConnection() const noexcept
+{
+    return connection_;
+}
+
 PixelSize
 X11DisplayConnection::sourceGeometry() const noexcept
 {
@@ -198,16 +249,17 @@ X11DisplayConnection::processEvents(X11EventSink &eventSink) noexcept
         return ConnectionStatus::Failed;
     }
 
-    if (!g_is_wait_obj_set(waitObject_))
+    if (dispatch_events(connection_, eventSink, false, failed_) ==
+        ConnectionStatus::Failed)
     {
-        return ConnectionStatus::Ok;
+        return ConnectionStatus::Failed;
     }
 
-    xcb_generic_event_t *event = nullptr;
-    while ((event = xcb_poll_for_event(connection_)) != nullptr)
+    if (g_is_wait_obj_set(waitObject_) &&
+        dispatch_events(connection_, eventSink, true, failed_) ==
+            ConnectionStatus::Failed)
     {
-        eventSink.handle(*event);
-        std::free(event);
+        return ConnectionStatus::Failed;
     }
 
     if (xcb_connection_has_error(connection_) != 0)

@@ -56,6 +56,7 @@ public:
     X11DisplayConnection &operator=(const X11DisplayConnection &) = delete;
 
     [[nodiscard]] bool valid() const noexcept;
+    [[nodiscard]] xcb_connection_t *nativeConnection() const noexcept;
     [[nodiscard]] PixelSize sourceGeometry() const noexcept;
     [[nodiscard]] int screenNumber() const noexcept;
     [[nodiscard]] xcb_window_t rootWindow() const noexcept;

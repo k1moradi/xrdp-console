@@ -141,21 +141,8 @@ def start_private_xvfb(
     environment = os.environ.copy()
     environment["DISPLAY"] = display
     environment["XAUTHORITY"] = str(auth_file)
-    unauthenticated_environment = environment.copy()
-    unauthenticated_environment["XAUTHORITY"] = str(
-        auth_file.with_name("missing-xauthority")
-    )
-    if subprocess.run(
-        [xdpyinfo],
-        env=unauthenticated_environment,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    ).returncode == 0:
-        stop_process(process)
-        raise AssertionError("Xvfb accepted a connection without Xauthority")
-
     deadline = time.monotonic() + 5.0
+    authenticated = False
     while time.monotonic() < deadline:
         if process.poll() is not None:
             diagnostics = (
@@ -171,11 +158,29 @@ def start_private_xvfb(
             stderr=subprocess.DEVNULL,
             check=False,
         ).returncode == 0:
-            return process, display
+            authenticated = True
+            break
         time.sleep(0.05)
 
-    stop_process(process)
-    raise AssertionError(f"Xvfb did not become ready on {display}")
+    if not authenticated:
+        stop_process(process)
+        raise AssertionError(f"Xvfb did not become ready on {display}")
+
+    unauthenticated_environment = environment.copy()
+    unauthenticated_environment["XAUTHORITY"] = str(
+        auth_file.with_name("missing-xauthority")
+    )
+    if subprocess.run(
+        [xdpyinfo],
+        env=unauthenticated_environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    ).returncode == 0:
+        stop_process(process)
+        raise AssertionError("Xvfb accepted a connection without Xauthority")
+
+    return process, display
 
 
 def main() -> int:

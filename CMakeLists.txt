@@ -45,6 +45,7 @@ if(XRDP_CONSOLE_NATIVE)
 endif()
 
 if(XRDP_CONSOLE_BUILD_XRDP)
+    enable_language(CXX)
     include(cmake/xrdp_dependency.cmake)
 endif()
 

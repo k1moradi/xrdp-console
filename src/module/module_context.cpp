@@ -11,6 +11,8 @@
 #include <new>
 #include <string_view>
 
+#include "../core/damage_region.h"
+#include "../x11/x11_damage_tracker.h"
 #include "../x11/x11_display_connection.h"
 
 namespace
@@ -36,15 +38,23 @@ copy_text(char *destination, std::size_t capacity, const char *value) noexcept
     destination[copied] = '\0';
 }
 
-class LifecycleEventSink final : public X11EventSink
+class ModuleEventSink final : public X11EventSink
 {
 public:
+    ModuleEventSink(X11DamageTracker &damageTracker,
+                    DamageRegion &damageRegion) noexcept
+        : damageTracker_(damageTracker), damageRegion_(damageRegion)
+    {
+    }
+
     void handle(const xcb_generic_event_t &event) noexcept override
     {
-        (void)event;
-        // No event-producing extension is selected by the lifecycle
-        // milestone. Future capture code will supply a typed event sink.
+        damageTracker_.handle(event, damageRegion_);
     }
+
+private:
+    X11DamageTracker &damageTracker_;
+    DamageRegion &damageRegion_;
 };
 
 struct ModuleState
@@ -68,6 +78,8 @@ struct ModuleContext::Impl
     xrdp_console_module *module{nullptr};
     ModuleState state{};
     std::unique_ptr<X11DisplayConnection> x11Connection{};
+    std::unique_ptr<X11DamageTracker> damageTracker{};
+    DamageRegion damageRegion{};
 };
 
 ModuleContext::ModuleContext() noexcept : impl_(new (std::nothrow) Impl{})
@@ -150,9 +162,14 @@ ModuleContext::connect() noexcept
         return 1;
     }
 
-    if (impl_->x11Connection != nullptr)
+    if (impl_->x11Connection != nullptr || impl_->damageTracker != nullptr)
     {
-        return impl_->x11Connection->valid() ? 0 : 1;
+        return impl_->x11Connection != nullptr &&
+                       impl_->damageTracker != nullptr &&
+                       impl_->x11Connection->valid() &&
+                       impl_->damageTracker->valid()
+                   ? 0
+                   : 1;
     }
 
     try
@@ -164,15 +181,31 @@ ModuleContext::connect() noexcept
             return 1;
         }
 
+        auto damageTracker = std::make_unique<X11DamageTracker>(
+            *connection->nativeConnection(), connection->rootWindow(),
+            connection->sourceGeometry());
+        if (!damageTracker->valid())
+        {
+            g_writeln("xrdp-console: XDamage setup failed: %s",
+                      damageTracker->failureReason() != nullptr
+                          ? damageTracker->failureReason()
+                          : "unknown error");
+            return 1;
+        }
+
         impl_->state.sourceGeometry = connection->sourceGeometry();
+        impl_->damageRegion.clear();
         impl_->x11Connection = std::move(connection);
+        impl_->damageTracker = std::move(damageTracker);
         return 0;
     }
     catch (...)
     {
         // The C ABI must report allocation/constructor failures as a normal
         // module failure and leave no partially connected state behind.
+        impl_->damageTracker.reset();
         impl_->x11Connection.reset();
+        impl_->damageRegion.clear();
         impl_->state.sourceGeometry = {};
         return 1;
     }
@@ -187,7 +220,9 @@ ModuleContext::end() noexcept
     }
     // X11DisplayConnection destroys the xrdp wait object before disconnecting
     // XCB. Reset it before changing the lifecycle state.
+    impl_->damageTracker.reset();
     impl_->x11Connection.reset();
+    impl_->damageRegion.clear();
     impl_->state.sourceGeometry = {};
     impl_->state.presentationGeometry = {};
     impl_->state.bitsPerPixel = 0;
@@ -268,7 +303,8 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
 
     // The xrdp caller owns the arrays and timeout. A module that is not
     // connected has nothing to append and must leave all caller state alone.
-    if (impl_->x11Connection == nullptr || !impl_->x11Connection->valid())
+    if (impl_->x11Connection == nullptr || impl_->damageTracker == nullptr ||
+        !impl_->x11Connection->valid() || !impl_->damageTracker->valid())
     {
         return 0;
     }
@@ -299,15 +335,23 @@ ModuleContext::check_wait_objs() noexcept
     {
         return 1;
     }
-    if (impl_->x11Connection == nullptr)
+    if (impl_->x11Connection == nullptr && impl_->damageTracker == nullptr)
     {
         return 0;
     }
-    LifecycleEventSink eventSink;
-    return impl_->x11Connection->processEvents(eventSink) ==
-                   ConnectionStatus::Ok
-               ? 0
-               : 1;
+    if (impl_->x11Connection == nullptr || impl_->damageTracker == nullptr ||
+        !impl_->x11Connection->valid() || !impl_->damageTracker->valid())
+    {
+        return 1;
+    }
+
+    ModuleEventSink eventSink(*impl_->damageTracker, impl_->damageRegion);
+    if (impl_->x11Connection->processEvents(eventSink) !=
+        ConnectionStatus::Ok)
+    {
+        return 1;
+    }
+    return impl_->damageTracker->acknowledge() ? 0 : 1;
 }
 
 extern "C" int

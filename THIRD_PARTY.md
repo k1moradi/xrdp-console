@@ -14,7 +14,8 @@ checked in.
 
 The following interfaces are used:
 
-- XCB for the first-party X11 module transport;
+- XCB and the XCB Damage/XFixes extensions for the first-party X11 module
+  transport and damage tracking;
 - Xlib and XTest for controlled input and pixel probes;
 - GLX for the compositor workload and OpenGL probe;
 - Vulkan loader for device reporting;

@@ -11,6 +11,7 @@ set(PYTHON_SOURCES
 if(TARGET xrdp-console)
     list(APPEND PYTHON_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/test_module_lifecycle.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_damage.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py)
 endif()
 
@@ -48,6 +49,42 @@ set_tests_properties(systemd-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
 if(TARGET xrdp-console)
+    add_executable(damage-region-unit
+        test_damage_region.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/damage_region.cpp)
+    set_target_properties(damage-region-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(damage-region-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME damage-region-unit COMMAND damage-region-unit)
+
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(XRDP_CONSOLE_TEST_XCB REQUIRED IMPORTED_TARGET xcb)
+    pkg_check_modules(XRDP_CONSOLE_TEST_XCB_DAMAGE REQUIRED
+        IMPORTED_TARGET xcb-damage)
+    add_executable(x11-damage-integration
+        test_x11_damage.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/damage_region.cpp
+        ${CMAKE_SOURCE_DIR}/src/x11/x11_damage_tracker.cpp)
+    set_target_properties(x11-damage-integration PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(x11-damage-integration PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(x11-damage-integration PRIVATE
+        PkgConfig::XRDP_CONSOLE_TEST_XCB
+        PkgConfig::XRDP_CONSOLE_TEST_XCB_DAMAGE)
+    add_test(NAME x11-damage-integration
+        COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_damage.py
+        $<TARGET_FILE:x11-damage-integration>)
+    set_tests_properties(x11-damage-integration PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+        TIMEOUT 30)
+
     add_test(NAME module-lifecycle
         COMMAND ${Python3_EXECUTABLE} -B
         ${CMAKE_CURRENT_SOURCE_DIR}/test_module_lifecycle.py

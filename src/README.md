@@ -9,9 +9,10 @@ boundary. With `XRDP_CONSOLE_BUILD_XRDP=ON`, CMake builds
 It validates basic geometry and module parameters, connects to the configured
 X11 display through XCB, records the root window and separate
 source/presentation geometry, and integrates the XCB socket with xrdp's
-wait-object loop. It dispatches readable XCB events through an explicit sink
-but does not yet capture pixels or implement Damage, SHM, graphics, input,
-clipboard, resize, threads, or performance policy.
+wait-object loop. It tracks raw XDamage rectangles into a bounded,
+coalesced region through an explicit event sink, but does not yet capture
+pixels or implement SHM, graphics, input, clipboard, resize, threads, or
+performance policy.
 
 The current checkout still uses the experimental x11vnc bridge for live
 measurements. Its benchmark and diagnostic programs live under `tools/`; the
