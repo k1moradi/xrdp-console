@@ -13,6 +13,8 @@ Xauthority, x11vnc, and client binaries.
 | `proxy-backpressure-unit` | bounded relay buffering, selector write readiness, and peer cleanup |
 | `python-syntax` | source compilation for the installed Python helpers |
 | `systemd-unit` | clean SIGINT shutdown contract, no exit-status masking, and compatibility drop-in parity |
+| `module-lifecycle` | C++23 module construction, parameter handling, teardown, and wait-state preservation |
+| `xrdp-loader-smoke` | generated xrdp loading the module through FreeRDP and completing module connect |
 
 The marker correlation contract is:
 
@@ -24,7 +26,9 @@ The marker correlation contract is:
 4. Failed, malformed, stale, and wrong-state records are ignored rather than
    paired opportunistically.
 
-The graphical smoke runs are documented in
+The graphical benchmark smoke runs are documented in
 [`docs/measurement-model.md`](measurement-model.md). They validate process
-startup/cleanup and the complete private path, but are not part of CTest
-because they depend on host display state.
+startup/cleanup and the complete private path, but are not part of CTest because
+they depend on the physical display stack. The `xrdp-loader-smoke` test is a
+smaller private-server ABI check; it uses the generated xrdp install and
+FreeRDP, with `xvfb-run` when no display is available.

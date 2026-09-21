@@ -101,24 +101,14 @@ module_get_wait_objs(struct xrdp_mod *abi, tbus *read_objs, int *read_count,
                      tbus *write_objs, int *write_count, int *timeout)
 {
     (void)read_objs;
+    (void)read_count;
     (void)write_objs;
-    if (context_from_abi(abi) == NULL)
-    {
-        return 1;
-    }
-    if (read_count != NULL)
-    {
-        *read_count = 0;
-    }
-    if (write_count != NULL)
-    {
-        *write_count = 0;
-    }
-    if (timeout != NULL)
-    {
-        *timeout = -1;
-    }
-    return 0;
+    (void)write_count;
+    (void)timeout;
+
+    /* The caller owns the existing wait-object arrays and timeout. Future
+     * backends append their objects here; the lifecycle milestone has none. */
+    return context_from_abi(abi) == NULL ? 1 : 0;
 }
 
 static int
