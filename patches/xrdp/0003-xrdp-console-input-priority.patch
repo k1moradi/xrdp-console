@@ -1,21 +1,61 @@
 --- a/xrdp/xrdp_process.c
 +++ b/xrdp/xrdp_process.c
+@@ -101,3 +101,39 @@
++/*****************************************************************************/
++static int
++xrdp_process_console_transport_burst(struct xrdp_process *self)
++{
++    int count;
++
++    if (self == 0 || self->server_trans == 0)
++    {
++        return 1;
++    }
++
++    /*
++     * trans_check_wait_objs() may only assemble a header or one complete
++     * PDU per call.  A single call therefore does not guarantee that a
++     * queued key event has reached xrdp_process_data_in().  Drain a small
++     * number of immediately available transport steps before allowing
++     * synchronous direct-X11 work to run, without making a client able to
++     * monopolize the process thread indefinitely.
++     */
++    for (count = 0; count < 8; ++count)
++    {
++        if (trans_check_wait_objs(self->server_trans) != 0)
++        {
++            return 1;
++        }
++
++        if (self->server_trans->trans_can_recv == 0 ||
++            self->server_trans->trans_can_recv(
++                self->server_trans, self->server_trans->sck, 0) == 0)
++        {
++            break;
++        }
++    }
++
++    return 0;
++}
+ /*****************************************************************************/
+ static int
+ xrdp_process_mod_end(struct xrdp_process *self)
 @@ -284,12 +284,30 @@
                  break;
              }
  
 +            /*
-+             * The direct physical-console module can perform synchronous
-+             * XShm capture and bitmap output.  Service the RDP transport
-+             * first for that module so queued input and disconnects are not
-+             * forced to wait behind one graphics transaction.  Keep the
-+             * legacy VNC/Xorg service order unchanged.
++             * Service a bounded burst of RDP client transport work before
++             * direct-X11 backend/window-manager work.  One transport call can
++             * only assemble a header or one PDU, so a single call does not
++             * guarantee that a queued key event has reached the module.
++             * Legacy VNC/Xorg service order remains unchanged.
 +             */
 +            const int console_backend =
 +                self->wm != 0 && self->wm->mm != 0 &&
 +                self->wm->mm->code == XRDP_CONSOLE_SESSION_CODE;
 +            if (console_backend &&
-+                trans_check_wait_objs(self->server_trans) != 0)
++                xrdp_process_console_transport_burst(self) != 0)
 +            {
 +                break;
 +            }

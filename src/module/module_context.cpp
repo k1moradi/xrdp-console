@@ -288,7 +288,9 @@ is_pointer_release_message(int message) noexcept
 
 constexpr std::size_t kMaximumX11EventsPerService = 128;
 constexpr std::size_t kMaximumPaintRectanglesPerService = 4;
-constexpr std::uint64_t kMaximumPaintPixelsPerService = 2U * 1024U * 1024U;
+// Keep one synchronous graphics transaction below a 1366x768 frame. This
+// lets xrdp service queued input between stripes of a full-screen repaint.
+constexpr std::uint64_t kMaximumPaintPixelsPerService = 512U * 1024U;
 constexpr auto kMinimumPresentationInterval = std::chrono::milliseconds{16};
 
 struct ModuleState
