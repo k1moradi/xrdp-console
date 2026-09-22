@@ -21,6 +21,7 @@ extern "C" {
 }
 
 #include "../core/damage_region.h"
+#include "../core/paint_quantum.h"
 #include "../core/presentation_scaler.h"
 #include "../core/presentation_transform.h"
 #include "../rdp/rdp_update_sink.h"
@@ -1064,16 +1065,23 @@ ModuleContext::check_wait_objs() noexcept
         Rectangle captureRectangle = rectangle;
         if (rectanglePixels > kMaximumPaintPixelsPerService - paintedPixels)
         {
-            const std::uint64_t stripeHeight =
-                (kMaximumPaintPixelsPerService - paintedPixels) /
-                rectangle.widthPixels;
-            if (stripeHeight == 0)
+            const std::uint64_t remainingPixelBudget =
+                kMaximumPaintPixelsPerService - paintedPixels;
+            const PaintStripeDecision stripe = choosePaintStripe(
+                rectangle.widthPixels, rectangle.heightPixels,
+                remainingPixelBudget, paintedRectangleCount != 0);
+            if (stripe.yield)
+            {
+                // This batch already made progress. End it successfully and
+                // retain the unpainted tail for the next quantum.
+                break;
+            }
+            if (stripe.heightPixels == 0)
             {
                 success = false;
                 break;
             }
-            captureRectangle.heightPixels = static_cast<std::uint32_t>(
-                std::min<std::uint64_t>(rectangle.heightPixels, stripeHeight));
+            captureRectangle.heightPixels = stripe.heightPixels;
         }
         Rectangle presentationRectangle{};
         if (!impl_->presentationTransform.mapSourceRectangle(

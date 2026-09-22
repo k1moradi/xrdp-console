@@ -62,6 +62,17 @@ if(TARGET xrdp-console)
         ${CMAKE_SOURCE_DIR}/src)
     add_test(NAME damage-region-unit COMMAND damage-region-unit)
 
+    add_executable(paint-quantum-unit
+        test_paint_quantum.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/damage_region.cpp)
+    set_target_properties(paint-quantum-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(paint-quantum-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME paint-quantum-unit COMMAND paint-quantum-unit)
+
     add_executable(presentation-transform-unit
         test_presentation_transform.cpp
         ${CMAKE_SOURCE_DIR}/src/core/presentation_scaler.cpp
