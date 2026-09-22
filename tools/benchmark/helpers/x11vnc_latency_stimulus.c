@@ -47,6 +47,13 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: %s [DISPLAY] [--key [X Y]]\n", argv[0]);
         return 2;
     }
+    if (!key_mode && argc != 1 && argc != 2 &&
+        (argc != 4 || !parse_coordinate(argv[2], &x) ||
+         !parse_coordinate(argv[3], &y)))
+    {
+        fprintf(stderr, "usage: %s [DISPLAY] [X Y]\n", argv[0]);
+        return 2;
+    }
     Display *display = XOpenDisplay(display_name);
     if (!display) {
         fputs("XOpenDisplay failed\n", stderr);
@@ -108,6 +115,9 @@ int main(int argc, char **argv)
             }
         }
     }
+
+    printf("READY %u %u\n", width, height);
+    fflush(stdout);
 
     char line[32];
     while (fgets(line, sizeof(line), stdin) != NULL) {

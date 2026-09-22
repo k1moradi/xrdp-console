@@ -8,6 +8,7 @@ import argparse
 import importlib.util
 import os
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -75,14 +76,61 @@ class SyntheticNetworkTests(unittest.TestCase):
                          (10, 25, 1))
         self.assertEqual(module.parse_physical_marker(b"10 1\n"),
                          (10, 10, 1))
-        self.assertEqual(module.parse_graphics_frame(b"10 25 30\n"),
-                         (10, 25, 30))
+        self.assertEqual(module.parse_graphics_frame(b"10 1 30\n"),
+                         (10, 1, 30))
         with self.assertRaises(RuntimeError):
             module.parse_graphics_frame(b"10 25\n")
         with self.assertRaises(RuntimeError):
             module.parse_graphics_frame(b"10 bad 30\n")
+        with self.assertRaises(RuntimeError):
+            module.parse_graphics_frame(b"0 0 0\n")
+        with self.assertRaises(RuntimeError):
+            module.parse_graphics_frame(b"10 2 0\n")
+        with self.assertRaises(RuntimeError):
+            module.parse_graphics_frame(b"10 1 -1\n")
+        with self.assertRaises(RuntimeError):
+            module.parse_graphics_frame(b"10 1 0 extra\n")
         self.assertEqual(module.percentile([1.0, 2.0, 3.0, 4.0], 0.95), 4.0)
         self.assertEqual(module.percentile([1.0, 2.0, 3.0, 4.0], 0.50), 2.0)
+
+    def test_achieved_fps_handles_short_and_regular_sequences(self):
+        self.assertEqual(module.calculate_achieved_fps([]), 0.0)
+        self.assertEqual(module.calculate_achieved_fps([100]), 0.0)
+        self.assertAlmostEqual(
+            module.calculate_achieved_fps(
+                [1_000_000_000, 1_100_000_000, 1_200_000_000]),
+            10.0,
+        )
+
+    def test_gpu_churn_driver_propagates_protocol_failure(self):
+        class FakeStdin:
+            def write(self, data):
+                del data
+
+            def flush(self):
+                return None
+
+        class FakeProcess:
+            stdin = FakeStdin()
+
+            def poll(self):
+                return None
+
+        class EndOfFileReader:
+            def __init__(self):
+                self.called = threading.Event()
+
+            def readline(self, timeout):
+                del timeout
+                self.called.set()
+                return b""
+
+        reader = EndOfFileReader()
+        driver = module.GpuChurnDriver(FakeProcess(), reader, 5.0)
+        driver.start()
+        self.assertTrue(reader.called.wait(1.0))
+        with self.assertRaises(RuntimeError):
+            driver.stop()
 
     def test_direct_graphics_transport_requests_are_explicit(self):
         self.assertEqual(

@@ -172,6 +172,10 @@ MARKER_HIGH_CHANNEL_THRESHOLD = 200
 MARKER_LOW_CHANNEL_THRESHOLD = 80
 MAX_REPORTED_GRAPHICS_MISSES = 3
 RFX_DECODER_FAILURE_MARKER = "Failed to process RemoteFX message"
+MARKER_WIDTH_PIXELS = 160
+MARKER_HEIGHT_PIXELS = 100
+GRAPHICS_LATENCY_MARKER_HZ = 5.0
+MINIMUM_CHURN_RATE_FRACTION = 0.95
 
 
 @dataclass(frozen=True)
@@ -474,6 +478,172 @@ class LineReader:
             if not chunk:
                 return bytes(self._buffer)
             self._buffer.extend(chunk)
+
+
+def calculate_achieved_fps(frame_timestamps_ns: list[int]) -> float:
+    if len(frame_timestamps_ns) < 2:
+        return 0.0
+
+    elapsed_ns = frame_timestamps_ns[-1] - frame_timestamps_ns[0]
+    if elapsed_ns <= 0:
+        return 0.0
+
+    return (len(frame_timestamps_ns) - 1) * 1e9 / elapsed_ns
+
+
+@dataclass(frozen=True)
+class ChurnStatistics:
+    requested_fps: float
+    generated_frames: int
+    first_frame_ns: int | None
+    last_frame_ns: int | None
+    missed_deadlines: int
+    maximum_lateness_ms: float
+
+    @property
+    def achieved_fps(self) -> float:
+        if (self.generated_frames < 2 or
+                self.first_frame_ns is None or
+                self.last_frame_ns is None or
+                self.last_frame_ns <= self.first_frame_ns):
+            return 0.0
+
+        elapsed_ns = self.last_frame_ns - self.first_frame_ns
+        return (self.generated_frames - 1) * 1e9 / elapsed_ns
+
+
+class GpuChurnDriver:
+    """Generate independent GPU frames at a requested cadence."""
+
+    def __init__(self, process: subprocess.Popen[bytes], reader: LineReader,
+                 target_fps: float) -> None:
+        if target_fps <= 0.0:
+            raise ValueError("GPU churn target FPS must be positive")
+
+        self._process = process
+        self._reader = reader
+        self._target_fps = target_fps
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+        self._started = False
+        self._generated_frames = 0
+        self._first_frame_ns: int | None = None
+        self._last_frame_ns: int | None = None
+        self._missed_deadlines = 0
+        self._maximum_lateness_seconds = 0.0
+        self._failure: Exception | None = None
+
+    def start(self) -> None:
+        if self._started:
+            raise RuntimeError("GPU churn driver was already started")
+        if self._process.poll() is not None:
+            raise RuntimeError("GPU churn stimulus is not running")
+
+        self._started = True
+        self._thread = threading.Thread(
+            target=self._run, name="xrdp-bench-churn", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        if self._process.stdin is None:
+            with self._lock:
+                self._failure = RuntimeError(
+                    "GPU churn stimulus has no input pipe")
+            return
+
+        period_seconds = 1.0 / self._target_fps
+        next_deadline = time.monotonic()
+
+        try:
+            while not self._stop.is_set():
+                next_deadline += period_seconds
+                self._process.stdin.write(b"frame\n")
+                self._process.stdin.flush()
+
+                line = self._reader.readline(2.0)
+                if not line:
+                    raise RuntimeError(
+                        "GPU churn stimulus stopped responding")
+
+                visible_ns, _, _ = parse_graphics_frame(line)
+                now = time.monotonic()
+                lateness = max(0.0, now - next_deadline)
+                with self._lock:
+                    if self._first_frame_ns is None:
+                        self._first_frame_ns = visible_ns
+                    self._last_frame_ns = visible_ns
+                    self._generated_frames += 1
+                    if lateness > 0.0:
+                        self._missed_deadlines += 1
+                        self._maximum_lateness_seconds = max(
+                            self._maximum_lateness_seconds, lateness)
+
+                self._stop.wait(
+                    max(0.0, next_deadline - time.monotonic()))
+        except Exception as error:
+            with self._lock:
+                self._failure = error
+
+    def stop(self) -> ChurnStatistics:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+            if self._thread.is_alive():
+                raise RuntimeError("GPU churn thread did not stop")
+
+        with self._lock:
+            if self._failure is not None:
+                raise RuntimeError("GPU churn driver failed") from self._failure
+            return ChurnStatistics(
+                requested_fps=self._target_fps,
+                generated_frames=self._generated_frames,
+                first_frame_ns=self._first_frame_ns,
+                last_frame_ns=self._last_frame_ns,
+                missed_deadlines=self._missed_deadlines,
+                maximum_lateness_ms=self._maximum_lateness_seconds * 1000.0,
+            )
+
+
+def start_gpu_stimulus(args: argparse.Namespace,
+                       env_source: dict[str, str],
+                       name: str) -> tuple[subprocess.Popen[bytes], LineReader]:
+    process = subprocess.Popen(
+        [str(GPU_STIMULUS), args.display, str(args.width), str(args.height)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=env_source, bufsize=0, start_new_session=True,
+    )
+    if process.stdin is None or process.stdout is None:
+        kill_process(process)
+        raise RuntimeError("GPU stimulus pipes were not created")
+
+    reader = LineReader(process.stdout)
+    first = reader.readline(5)
+    if first.startswith(b"SWAP_CONTROL "):
+        print(f"{name}: {first.decode(errors='replace').strip()}")
+        first = reader.readline(5)
+    if not first.startswith(b"READY "):
+        kill_process(process)
+        raise RuntimeError(f"GPU stimulus did not become ready: {first!r}")
+
+    fields = first.split()
+    if (len(fields) < 2 or
+            fields[1] != f"{args.width}x{args.height}".encode()):
+        kill_process(process)
+        raise RuntimeError(
+            f"GPU stimulus dimensions differ from request: {first!r}")
+
+    return process, reader
+
+
+def print_churn_statistics(statistics: ChurnStatistics) -> None:
+    print(
+        f"graphics load requested_fps={statistics.requested_fps:.2f} "
+        f"achieved_fps={statistics.achieved_fps:.2f} "
+        f"frames={statistics.generated_frames} "
+        f"missed_deadlines={statistics.missed_deadlines} "
+        f"max_lateness_ms={statistics.maximum_lateness_ms:.1f}"
+    )
 
 
 def process_cpu_seconds(proc: subprocess.Popen[bytes]) -> float:
@@ -1411,6 +1581,16 @@ def parse_graphics_frame(line: bytes) -> tuple[int, int, int]:
         raise RuntimeError(
             f"non-numeric graphics stimulus response: {line!r}") from error
 
+    if visible_ns <= 0:
+        raise RuntimeError(
+            f"graphics stimulus timestamp must be positive: {line!r}")
+    if state not in (0, 1):
+        raise RuntimeError(
+            f"graphics stimulus state must be 0 or 1: {line!r}")
+    if render_ns < 0:
+        raise RuntimeError(
+            f"graphics stimulus render duration must be nonnegative: {line!r}")
+
     return visible_ns, state, render_ns
 
 
@@ -1812,8 +1992,7 @@ def run_direct_rfb_input_case(args: argparse.Namespace, name: str,
     vnc: subprocess.Popen[bytes] | None = None
     key_stimulus: subprocess.Popen[bytes] | None = None
     churn: subprocess.Popen[bytes] | None = None
-    churn_thread: threading.Thread | None = None
-    churn_stop = threading.Event()
+    churn_driver: GpuChurnDriver | None = None
     client: RfbClient | None = None
     try:
         assert_tcp_port_available("127.0.0.1", vnc_port, check_ipv6=True)
@@ -1838,38 +2017,9 @@ def run_direct_rfb_input_case(args: argparse.Namespace, name: str,
         if churn_fps is None:
             churn_fps = args.fps
         if churn_fps > 0:
-            churn = subprocess.Popen(
-                [str(GPU_STIMULUS), args.display, str(args.width), str(args.height)],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, env=env_source, bufsize=0,
-                start_new_session=True,
-            )
-            if churn.stdin is None or churn.stdout is None:
-                raise RuntimeError("churn stimulus pipes were not created")
-            churn_reader = LineReader(churn.stdout)
-            first = churn_reader.readline(5)
-            if first.startswith(b"SWAP_CONTROL "):
-                print(f"{name}: {first.decode(errors='replace').strip()}")
-                first = churn_reader.readline(5)
-            if not first.startswith(b"READY "):
-                raise RuntimeError(f"churn stimulus did not become ready: {first!r}")
-
-            def churn_frames() -> None:
-                next_tick = time.monotonic()
-                while not churn_stop.is_set():
-                    next_tick += 1.0 / churn_fps
-                    try:
-                        churn.stdin.write(b"frame\n")
-                        churn.stdin.flush()
-                        if not churn_reader.readline(2):
-                            break
-                    except (BrokenPipeError, OSError):
-                        break
-                    churn_stop.wait(max(0.0, next_tick - time.monotonic()))
-
-            churn_thread = threading.Thread(
-                target=churn_frames, name="xrdp-bench-churn", daemon=True)
-            churn_thread.start()
+            churn, churn_reader = start_gpu_stimulus(args, env_source, name)
+            churn_driver = GpuChurnDriver(churn, churn_reader, churn_fps)
+            churn_driver.start()
 
         key_stimulus = subprocess.Popen(
             [str(KEY_STIMULUS), args.display, "--key",
@@ -1960,13 +2110,14 @@ def run_direct_rfb_input_case(args: argparse.Namespace, name: str,
                 f"rss={rss_start.get(proc.pid, 0) / 1048576:.1f}->"
                 f"{process_rss_tree(proc) / 1048576:.1f}MiB")
         print(f"{'':18} " + "; ".join(metrics))
+        if churn_driver is not None:
+            print_churn_statistics(churn_driver.stop())
         transport_end = tcp_snapshot(vnc_port)
         print_transport_summary("rfb-direct-input-wire", transport_start,
                                 transport_end, elapsed)
     finally:
-        churn_stop.set()
-        if churn_thread is not None:
-            churn_thread.join(timeout=2)
+        if churn_driver is not None:
+            churn_driver.stop()
         if client is not None:
             client.sock.close()
         for proc in (key_stimulus, churn, vnc):
@@ -1985,8 +2136,7 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
     key_injector: subprocess.Popen[bytes] | None = None
     probe: subprocess.Popen[bytes] | None = None
     churn: subprocess.Popen[bytes] | None = None
-    churn_thread: threading.Thread | None = None
-    churn_stop = threading.Event()
+    churn_driver: GpuChurnDriver | None = None
     input_x = args.input_x
     input_y = args.input_y
     churn_fps = args.input_churn_fps
@@ -1995,37 +2145,9 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
 
     try:
         if churn_fps > 0:
-            churn = subprocess.Popen(
-                [str(GPU_STIMULUS), args.display, str(args.width), str(args.height)],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                env=env_source, bufsize=0, start_new_session=True,
-            )
-            if churn.stdin is None or churn.stdout is None:
-                raise RuntimeError("churn stimulus pipes were not created")
-            churn_reader = LineReader(churn.stdout)
-            first = churn_reader.readline(5)
-            if first.startswith(b"SWAP_CONTROL "):
-                print(f"{name}: {first.decode(errors='replace').strip()}")
-                first = churn_reader.readline(5)
-            if not first.startswith(b"READY "):
-                raise RuntimeError(f"churn stimulus did not become ready: {first!r}")
-
-            def churn_frames() -> None:
-                next_tick = time.monotonic()
-                while not churn_stop.is_set():
-                    next_tick += 1.0 / churn_fps
-                    try:
-                        churn.stdin.write(b"frame\n")
-                        churn.stdin.flush()
-                        if not churn_reader.readline(2):
-                            break
-                    except (BrokenPipeError, OSError):
-                        break
-                    churn_stop.wait(max(0.0, next_tick - time.monotonic()))
-
-            churn_thread = threading.Thread(target=churn_frames,
-                                            name="xrdp-bench-churn", daemon=True)
-            churn_thread.start()
+            churn, churn_reader = start_gpu_stimulus(args, env_source, name)
+            churn_driver = GpuChurnDriver(churn, churn_reader, churn_fps)
+            churn_driver.start()
 
         # Map and focus the key target after the churn window so background
         # drawing cannot take keyboard focus away from the physical :0 target.
@@ -2157,6 +2279,8 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
                 f"rss={rss_start.get(proc.pid, 0) / 1048576:.1f}->"
                 f"{process_rss_tree(proc) / 1048576:.1f}MiB")
         print(f"{'':18} " + "; ".join(metrics))
+        if churn_driver is not None:
+            print_churn_statistics(churn_driver.stop())
         transport_end = tcp_snapshot(xrdp_port)
         print_transport_summary(transport_label, transport_start,
                                 transport_end, elapsed)
@@ -2165,10 +2289,187 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
                 xrdp_log, f"{name}#{repetition} fps={churn_fps:.1f}",
                 point_draw_ns, point_visible_ns, point_expected_states)
     finally:
-        churn_stop.set()
-        if churn_thread is not None:
-            churn_thread.join(timeout=2)
+        if churn_driver is not None:
+            churn_driver.stop()
         for proc in (probe, key_injector, key_stimulus, churn):
+            kill_process(proc)
+
+
+def run_graphics_under_churn(
+        args: argparse.Namespace, name: str, repetition: int,
+        window: str, client_display: str, env_source: dict[str, str],
+        env_client: dict[str, str], case_dir: Path, xrdp_port: int,
+        processes: list[subprocess.Popen[bytes]],
+        xrdp_log: Path | None, auth: str, direct_backend: bool) -> None:
+    """Measure a small X11 marker while an independent GPU load runs."""
+    source_width, source_height = display_geometry(args.display, auth)
+    marker_window_x = args.input_x
+    marker_window_y = args.input_y
+    if (marker_window_x < 0 or marker_window_y < 0 or
+            marker_window_x + MARKER_WIDTH_PIXELS > source_width or
+            marker_window_y + MARKER_HEIGHT_PIXELS > source_height):
+        raise RuntimeError(
+            "graphics latency marker does not fit inside the physical source "
+            "geometry")
+
+    physical_probe_x = marker_window_x + MARKER_WIDTH_PIXELS // 2
+    physical_probe_y = marker_window_y + MARKER_HEIGHT_PIXELS // 2
+    probe_x, probe_y = physical_probe_x, physical_probe_y
+    if direct_backend:
+        probe_x, probe_y = aspect_fit_point(
+            source_width, source_height,
+            args.client_width, args.client_height,
+            physical_probe_x, physical_probe_y,
+        )
+    if (probe_x < 0 or probe_y < 0 or
+            probe_x >= args.client_width or probe_y >= args.client_height):
+        raise RuntimeError("graphics latency marker probe is outside the client")
+
+    marker: subprocess.Popen[bytes] | None = None
+    probe: subprocess.Popen[bytes] | None = None
+    churn: subprocess.Popen[bytes] | None = None
+    churn_driver: GpuChurnDriver | None = None
+    try:
+        marker = subprocess.Popen(
+            [str(KEY_STIMULUS), args.display,
+             str(marker_window_x), str(marker_window_y)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=env_source, bufsize=0,
+            start_new_session=True,
+        )
+        if marker.stdin is None or marker.stdout is None:
+            raise RuntimeError("graphics marker pipes were not created")
+        marker_reader = LineReader(marker.stdout)
+        ready = marker_reader.readline(5)
+        ready_fields = ready.split()
+        if (len(ready_fields) != 3 or ready_fields[0] != b"READY" or
+                ready_fields[1] != str(MARKER_WIDTH_PIXELS).encode() or
+                ready_fields[2] != str(MARKER_HEIGHT_PIXELS).encode()):
+            raise RuntimeError(
+                f"graphics marker did not become ready: {ready!r}")
+
+        probe = subprocess.Popen(
+            [str(PIXEL_PROBE), client_display, window,
+             str(probe_x), str(probe_y)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, env=env_client, bufsize=0,
+            start_new_session=True,
+        )
+        if probe.stdin is None or probe.stdout is None:
+            raise RuntimeError("graphics marker probe pipes were not created")
+        probe_reader = LineReader(probe.stdout)
+        if not probe_reader.readline(5).startswith(b"READY "):
+            raise RuntimeError("graphics marker probe did not become ready")
+
+        churn, churn_reader = start_gpu_stimulus(args, env_source, name)
+        churn_driver = GpuChurnDriver(churn, churn_reader, args.fps)
+        churn_driver.start()
+
+        marker.stdin.write(b"frame\n")
+        marker.stdin.flush()
+        warmup = marker_reader.readline(5)
+        if not warmup:
+            raise RuntimeError("graphics marker produced no warm-up frame")
+        _, warmup_draw_done_ns, warmup_state = parse_physical_marker(warmup)
+        warmup_diagnostics = MarkerWaitDiagnostics()
+        if wait_marker(
+                probe_reader, probe.stdin, 1 - warmup_state,
+                warmup_draw_done_ns, args.timeout,
+                args.poll_ms / 1000.0,
+                diagnostic=True, wait_diagnostics=warmup_diagnostics) is None:
+            raise RuntimeError(
+                "graphics marker did not arrive during sustained-load warm-up")
+
+        samples = max(1, int(args.duration * GRAPHICS_LATENCY_MARKER_HZ))
+        latencies: list[float] = []
+        render_ns: list[int] = []
+        point_draw_ns: list[int] = []
+        point_visible_ns: list[int] = []
+        point_expected_states: list[int] = []
+        misses = 0
+        reported_misses = 0
+        measured_processes = list(processes)
+        measured_processes.extend(
+            process for process in (marker, churn) if process is not None)
+        cpu_start = {proc.pid: process_cpu_tree(proc)
+                     for proc in measured_processes}
+        rss_start = {proc.pid: process_rss_tree(proc)
+                     for proc in measured_processes}
+        transport_start = tcp_snapshot(xrdp_port)
+        wall_start = time.monotonic()
+        next_marker = wall_start
+
+        for sample_index in range(samples):
+            next_marker += 1.0 / GRAPHICS_LATENCY_MARKER_HZ
+            marker.stdin.write(b"frame\n")
+            marker.stdin.flush()
+            line = marker_reader.readline(5)
+            event_ns, draw_done_ns, physical_state = parse_physical_marker(line)
+            expected_state = 1 - physical_state
+            render_ns.append(max(0, draw_done_ns - event_ns))
+            diagnostics = MarkerWaitDiagnostics()
+            observed_ns: list[int] = []
+            latency = wait_marker(
+                probe_reader, probe.stdin, expected_state, draw_done_ns,
+                args.timeout, args.poll_ms / 1000.0,
+                observed_ns_out=observed_ns,
+                wait_diagnostics=diagnostics,
+            )
+            if latency is None:
+                misses += 1
+                if reported_misses < MAX_REPORTED_GRAPHICS_MISSES:
+                    observation = diagnostics.last_observation
+                    remote_pixel = (
+                        "none" if observation is None else
+                        f"{observation.red},{observation.green},"
+                        f"{observation.blue}"
+                    )
+                    print(
+                        "graphics-under-churn miss "
+                        f"sample={sample_index + 1} "
+                        f"expected_state={expected_state} "
+                        f"remote_rgb={remote_pixel} "
+                        f"probe_samples={diagnostics.sample_count} "
+                        "malformed_samples="
+                        f"{diagnostics.malformed_sample_count}"
+                    )
+                    reported_misses += 1
+            else:
+                latencies.append(latency)
+                point_draw_ns.append(draw_done_ns)
+                point_visible_ns.append(observed_ns[0])
+                point_expected_states.append(expected_state)
+
+            delay = next_marker - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+
+        churn_statistics = churn_driver.stop()
+        print_churn_statistics(churn_statistics)
+        if (churn_statistics.achieved_fps <
+                churn_statistics.requested_fps * MINIMUM_CHURN_RATE_FRACTION):
+            raise RuntimeError(
+                "GPU stimulus could not sustain the requested load: "
+                f"requested={churn_statistics.requested_fps:.2f} "
+                f"achieved={churn_statistics.achieved_fps:.2f}")
+
+        transport_end = tcp_snapshot(xrdp_port)
+        summarize(
+            f"{name}#{repetition}", latencies, misses, samples, render_ns,
+            measured_processes, cpu_start, wall_start, rss_start,
+            transport_label="rdp-private-wire",
+            transport_start=transport_start, transport_end=transport_end,
+        )
+        if xrdp_log is not None:
+            summarize_xrdp_profile(
+                xrdp_log, f"{name}#{repetition} churn={args.fps:.1f}fps",
+                point_draw_ns, point_visible_ns, point_expected_states)
+        if direct_backend and args.direct_graphics_transport == "rfx":
+            require_no_rfx_decoder_failure(case_dir / "xfreerdp.log")
+    finally:
+        if churn_driver is not None:
+            churn_driver.stop()
+        for proc in (probe, marker, churn):
             kill_process(proc)
 
 
@@ -2565,6 +2866,12 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                 args, name, repetition, window, client_display, env_source,
                 env_client, case_dir, xrdp_port, measured_processes, xrdp_log)
             return
+        if args.mode == "graphics-under-churn":
+            run_graphics_under_churn(
+                args, name, repetition, window, client_display,
+                env_source, env_client, case_dir, xrdp_port,
+                measured_processes, xrdp_log, auth, direct_backend)
+            return
         marker_x = x + args.width // 2
         marker_y = y + args.height // 2
         probe_x, probe_y = marker_x, marker_y
@@ -2632,6 +2939,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         samples = max(1, int(args.duration * args.fps))
         latencies: list[float] = []
         render_ns: list[int] = []
+        source_visible_ns: list[int] = []
         point_draw_ns: list[int] = []
         point_visible_ns: list[int] = []
         point_expected_states: list[int] = []
@@ -2649,6 +2957,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             stimulus.stdin.flush()
             line = stimulus_reader.readline(5)
             visible_ns, state, render_duration_ns = parse_graphics_frame(line)
+            source_visible_ns.append(visible_ns)
             render_ns.append(render_duration_ns)
             observed_ns: list[int] = []
             wait_diagnostics = MarkerWaitDiagnostics()
@@ -2689,6 +2998,11 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                   process_list, cpu_start, wall_start, rss_start,
                   transport_label="rdp-private-wire",
                   transport_start=transport_start, transport_end=transport_end)
+        print(
+            f"serial graphics requested_fps={args.fps:.2f} "
+            f"achieved_fps={calculate_achieved_fps(source_visible_ns):.2f} "
+            f"frames={len(source_visible_ns)}"
+        )
         summarize_xrdp_profile(
             xrdp_log, f"{name}#{repetition} fps={args.fps:.1f}",
             point_draw_ns, point_visible_ns, point_expected_states)
@@ -2710,9 +3024,11 @@ def main() -> int:
     parser.add_argument("--auth")
     parser.add_argument("--duration", type=float, default=20.0)
     parser.add_argument("--fps", type=float, default=15.0)
-    parser.add_argument("--mode", choices=("graphics", "input-roundtrip"),
-                        default="graphics",
-                        help="measure graphics latency or full input round-trip")
+    parser.add_argument(
+        "--mode", choices=("graphics", "graphics-under-churn", "input-roundtrip"),
+        default="graphics",
+        help=("measure serial graphics latency, graphics latency under "
+              "independent churn, or full input round-trip"))
     parser.add_argument(
         "--transport", choices=("rdp", "rfb", "vnc-viewer"), default="rdp",
         help=("client transport: complete private RDP path, direct RAW-RFB "
@@ -2833,6 +3149,8 @@ def main() -> int:
             "--direct-graphics-transport requires --backend direct-x11")
     elif args.direct_dynamic_resizing:
         parser.error("--direct-dynamic-resizing requires --backend direct-x11")
+    if args.mode == "graphics-under-churn" and args.transport != "rdp":
+        parser.error("--mode graphics-under-churn requires --transport rdp")
     if (args.width <= 0 or args.height <= 0 or
             args.client_width <= 0 or args.client_height <= 0 or
             args.duration <= 0 or args.fps <= 0 or args.repetitions <= 0 or
@@ -2909,6 +3227,8 @@ def main() -> int:
         required_executables.append(KEY_STIMULUS)
         if args.transport in {"rdp", "vnc-viewer"}:
             required_executables.append(KEY_INJECTOR)
+    elif args.mode == "graphics-under-churn":
+        required_executables.append(KEY_STIMULUS)
     for required in required_executables:
         if not required.is_file() and not shutil.which(str(required)):
             parser.error(f"required executable is missing: {required}")

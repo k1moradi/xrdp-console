@@ -146,6 +146,10 @@ def assert_client_pixel(display: str, window_title: str, pixel_probe: Path,
         if (stimulus.stdin is None or stimulus.stdout is None or
                 probe.stdin is None or probe.stdout is None):
             raise AssertionError("pixel assertion pipes were not created")
+        stimulus_ready = read_line(stimulus.stdout, 5.0)
+        if stimulus_ready != b"READY 160 100\n":
+            raise AssertionError(
+                f"source stimulus did not become ready: {stimulus_ready!r}")
         if not read_line(probe.stdout, 5.0).startswith(b"READY "):
             raise AssertionError("pixel probe did not become ready")
 
