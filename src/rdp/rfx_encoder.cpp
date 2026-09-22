@@ -145,9 +145,9 @@ RfxEncoder::encode(FramebufferView pixels, std::size_t firstTile,
     }
 
     return {
-        std::span<const std::byte>(output_.data(),
-                                   kSurfacePrefixBytes +
-                                       static_cast<std::size_t>(outputBytes)),
+        std::span<std::byte>(output_.data(),
+                             kSurfacePrefixBytes +
+                                 static_cast<std::size_t>(outputBytes)),
         static_cast<std::size_t>(outputBytes),
         static_cast<std::size_t>(tilesWritten),
     };

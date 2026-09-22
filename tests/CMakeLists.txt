@@ -176,6 +176,28 @@ if(TARGET xrdp-console)
     add_test(NAME presentation-transform-unit
         COMMAND presentation-transform-unit)
 
+    add_executable(letterbox-regions-unit
+        test_letterbox_regions.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/letterbox_regions.cpp)
+    set_target_properties(letterbox-regions-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(letterbox-regions-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME letterbox-regions-unit COMMAND letterbox-regions-unit)
+
+    add_executable(remote-fx-scheduler-unit
+        test_remote_fx_scheduler.cpp)
+    set_target_properties(remote-fx-scheduler-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(remote-fx-scheduler-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME remote-fx-scheduler-unit
+        COMMAND remote-fx-scheduler-unit)
+
     add_executable(x11-capture-arena-unit
         test_x11_capture_arena.cpp)
     set_target_properties(x11-capture-arena-unit PROPERTIES

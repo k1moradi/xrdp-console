@@ -211,6 +211,35 @@ encoder_handles_partial_high_entropy_progress()
                  "partial continuation did not encode every tile");
 }
 
+bool
+encoder_accepts_maximum_cache_local_tile_plan()
+{
+    RfxEncoder encoder;
+    if (!check(encoder.configure(
+                   {8192, 8192}, RfxEncoder::kMaximumPayloadBytes),
+               "maximum geometry configure failed"))
+    {
+        return false;
+    }
+
+    std::vector<std::uint32_t> horizontalPixels(8192U * 8U);
+    const FramebufferView horizontal =
+        view_of(horizontalPixels, 8192, 8);
+    if (!check(encoder.tileCount(horizontal) ==
+                   RfxEncoder::kMaximumTilesPerChunk,
+               "8192x8 chunk did not produce the maximum tile plan"))
+    {
+        return false;
+    }
+
+    std::vector<std::uint32_t> verticalPixels(8192U);
+    const FramebufferView vertical =
+        view_of(verticalPixels, 1, 8192);
+    return check(encoder.tileCount(vertical) ==
+                     RfxEncoder::kMaximumTilesPerChunk,
+                 "1x8192 chunk did not produce the maximum tile plan");
+}
+
 } // namespace
 
 int
@@ -226,6 +255,10 @@ main()
         success = false;
     }
     if (!encoder_handles_partial_high_entropy_progress())
+    {
+        success = false;
+    }
+    if (!encoder_accepts_maximum_cache_local_tile_plan())
     {
         success = false;
     }

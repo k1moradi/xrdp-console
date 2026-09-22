@@ -21,7 +21,9 @@ extern "C" {
 
 struct RfxEncodedBatch
 {
-    std::span<const std::byte> storage{};
+    // The transport owns the reserved prefix and writes its protocol headers
+    // into it immediately before sending the encoded payload.
+    std::span<std::byte> storage{};
     std::size_t payloadBytes{};
     std::size_t tilesEncoded{};
 

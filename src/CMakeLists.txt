@@ -21,6 +21,8 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         core/damage_region.cpp
         core/damage_region.h
         core/framebuffer_view.h
+        core/letterbox_regions.cpp
+        core/letterbox_regions.h
         core/geometry.h
         core/presentation_scaler.cpp
         core/presentation_scaler.h
@@ -33,6 +35,7 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         rdp/rfx_capability_policy.h
         rdp/rfx_encoder.cpp
         rdp/rfx_encoder.h
+        rdp/remote_fx_scheduler.h
         rdp/rfx_surface_sink.cpp
         rdp/rfx_surface_sink.h
         rdp/rdp_update_sink.cpp

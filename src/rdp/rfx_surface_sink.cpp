@@ -31,8 +31,7 @@ RfxSurfaceSink::send(Rectangle destination,
                module_, destination.x, destination.y,
                static_cast<int>(destination.widthPixels),
                static_cast<int>(destination.heightPixels),
-               const_cast<char *>(reinterpret_cast<const char *>(
-                   batch.storage.data())),
+               reinterpret_cast<char *>(batch.storage.data()),
                static_cast<int>(RfxEncoder::kSurfacePrefixBytes),
                static_cast<int>(batch.payloadBytes)) == 0;
 }

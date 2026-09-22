@@ -909,6 +909,7 @@ bitmap_compression={bitmap}
 bulk_compression={bulk}
 allow_channels={allow_channels}
 max_bpp=32
+use_fastpath=both
 autorun=Console
 
 [Logging]
@@ -2370,7 +2371,13 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             wait_process_log(
                 xrdp, xrdp_log, "status from xrdp_mm_connect() : 0", 20.0,
                 case_dir / "xrdp-stderr.log")
-            negotiated = "CLASSIC_BITMAP"
+            log_text = xrdp_log.read_text(errors="replace")
+            if "xrdp-console: graphics transport RemoteFX" in log_text:
+                negotiated = "RFX"
+            elif "xrdp-console: graphics transport classic bitmap" in log_text:
+                negotiated = "CLASSIC_BITMAP"
+            else:
+                negotiated = "UNKNOWN"
         else:
             complete_deadline = time.monotonic() + 20
             while time.monotonic() < complete_deadline:
@@ -2415,7 +2422,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                 )
             if args.disable_gfx_for_vnc and negotiated == "GFX":
                 raise RuntimeError("GFX remained active after the Console policy")
-        requested_path = "CLASSIC_BITMAP" if direct_backend else args.pipeline.upper()
+        requested_path = "RFX" if direct_backend else args.pipeline.upper()
         print(f"{name}#{repetition}: backend={args.backend} "
               f"requested={requested_path} negotiated={negotiated}")
         window = find_window(client_display, "xrdp-gpu-bench", time.monotonic() + 10)
@@ -2759,7 +2766,7 @@ def main() -> int:
             "xrdp-console direct-X11" if args.backend == "direct-x11"
             else "xrdp -> x11vnc end-to-end")
         effective_pipeline = (
-            "CLASSIC_BITMAP" if args.backend == "direct-x11"
+            "RFX" if args.backend == "direct-x11"
             else args.pipeline.upper())
         effective_gfx = (
             "disabled" if args.backend == "direct-x11" or

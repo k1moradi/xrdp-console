@@ -20,12 +20,14 @@ extern "C" {
 }
 
 #include "../core/damage_region.h"
+#include "../core/letterbox_regions.h"
 #include "../core/paint_quantum.h"
 #include "../core/presentation_scaler.h"
 #include "../core/presentation_transform.h"
 #include "../clipboard/clipboard_controller.h"
 #include "../rdp/rdp_update_sink.h"
 #include "../rdp/rfx_encoder.h"
+#include "../rdp/remote_fx_scheduler.h"
 #include "../rdp/rfx_surface_sink.h"
 #include "../x11/x11_damage_tracker.h"
 #include "../x11/x11_cursor_tracker.h"
@@ -405,6 +407,25 @@ struct PendingRfxChunk
     }
 };
 
+struct PendingRfxFill final
+{
+    LetterboxRegions regions{};
+    std::size_t regionIndex{};
+    std::uint32_t nextRow{};
+
+    [[nodiscard]] bool active() const noexcept
+    {
+        return regions.active() && regionIndex < regions.count;
+    }
+
+    void clear() noexcept
+    {
+        regions = {};
+        regionIndex = 0;
+        nextRow = 0;
+    }
+};
+
 } // namespace
 
 struct ModuleContext::Impl
@@ -430,12 +451,12 @@ struct ModuleContext::Impl
     // zero-filled RFX background arena. Neither owner may be replaced or
     // overwritten while this codec chunk is active.
     PendingRfxChunk pendingRfx{};
+    PendingRfxFill rfxLetterboxFill{};
     std::unique_ptr<RfxEncoder> rfxEncoder{};
     RfxSurfaceSink rfxSurfaceSink{nullptr};
     GraphicsTransport graphicsTransport{GraphicsTransport::ClassicBitmap};
     std::array<std::uint32_t, PresentationScaler::kScratchPixelCapacity>
         rfxFillPixels{};
-    std::uint32_t rfxFillNextRow{};
     RuntimeProfile profile{};
     RdpUpdateSink rdpUpdateSink{nullptr};
     bool fullPresentationInvalidation{false};
@@ -459,6 +480,27 @@ struct ModuleContext::Impl
     void disarmPresentation() noexcept
     {
         presentationDeadlineArmed = false;
+    }
+
+    [[nodiscard]] bool preparePresentationInvalidation() noexcept
+    {
+        rfxLetterboxFill.clear();
+        if (graphicsTransport == GraphicsTransport::ClassicBitmap)
+        {
+            fullPresentationInvalidation = true;
+            return true;
+        }
+
+        rfxLetterboxFill.regions = computeLetterboxRegions(
+            state.presentationGeometry, presentationTransform.viewport());
+        if (!rfxLetterboxFill.regions.valid)
+        {
+            fullPresentationInvalidation = false;
+            return false;
+        }
+
+        fullPresentationInvalidation = rfxLetterboxFill.active();
+        return true;
     }
 };
 
@@ -606,6 +648,15 @@ ModuleContext::connect() noexcept
                         impl_->state.presentationGeometry.heightPixels);
             return 1;
         }
+        const LetterboxRegions letterboxRegions = computeLetterboxRegions(
+            impl_->state.presentationGeometry,
+            presentationTransform.viewport());
+        if (!letterboxRegions.valid)
+        {
+            log_message(LOG_LEVEL_ERROR,
+                        "xrdp-console: invalid aspect-fit letterbox plan");
+            return 1;
+        }
 
         auto rfxEncoder = std::make_unique<RfxEncoder>();
         GraphicsTransport graphicsTransport = GraphicsTransport::ClassicBitmap;
@@ -695,7 +746,7 @@ ModuleContext::connect() noexcept
 
         impl_->pendingPresentation.clear();
         impl_->pendingRfx.clear();
-        impl_->rfxFillNextRow = 0;
+        impl_->rfxLetterboxFill.clear();
         impl_->state.sourceGeometry = sourceGeometry;
         impl_->presentationTransform = presentationTransform;
         impl_->presentationScaler = std::move(presentationScaler);
@@ -705,7 +756,6 @@ ModuleContext::connect() noexcept
         impl_->damageRegion.add(
             {0, 0, sourceGeometry.widthPixels, sourceGeometry.heightPixels},
             sourceGeometry);
-        impl_->fullPresentationInvalidation = true;
         impl_->armPresentationImmediately();
         impl_->x11Connection = std::move(connection);
         impl_->damageTracker = std::move(damageTracker);
@@ -715,6 +765,13 @@ ModuleContext::connect() noexcept
         impl_->clipboard = std::move(clipboard);
         impl_->rfxEncoder = std::move(rfxEncoder);
         impl_->graphicsTransport = graphicsTransport;
+        if (graphicsTransport == GraphicsTransport::RemoteFx)
+        {
+            impl_->rfxLetterboxFill.regions = letterboxRegions;
+        }
+        impl_->fullPresentationInvalidation =
+            graphicsTransport == GraphicsTransport::ClassicBitmap ||
+            impl_->rfxLetterboxFill.active();
         log_message(LOG_LEVEL_INFO, "xrdp-console: graphics transport %s",
                     graphicsTransport == GraphicsTransport::RemoteFx
                         ? "RemoteFX"
@@ -729,7 +786,7 @@ ModuleContext::connect() noexcept
         impl_->pendingRfx.clear();
         impl_->rfxEncoder.reset();
         impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
-        impl_->rfxFillNextRow = 0;
+        impl_->rfxLetterboxFill.clear();
         impl_->sharedMemoryCapture.reset();
         impl_->cursorTracker.reset();
         impl_->damageTracker.reset();
@@ -782,6 +839,12 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     {
         return 1;
     }
+    const LetterboxRegions letterboxRegions =
+        computeLetterboxRegions(presentationGeometry, transform.viewport());
+    if (!letterboxRegions.valid)
+    {
+        return 1;
+    }
 
     auto rfxEncoder = std::make_unique<RfxEncoder>();
     GraphicsTransport graphicsTransport = GraphicsTransport::ClassicBitmap;
@@ -801,18 +864,24 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
 
     impl_->pendingPresentation.clear();
     impl_->pendingRfx.clear();
-    impl_->rfxFillNextRow = 0;
+    impl_->rfxLetterboxFill.clear();
     impl_->state.presentationGeometry = presentationGeometry;
     impl_->presentationTransform = transform;
     impl_->presentationScaler = std::move(scaler);
     impl_->rfxEncoder = std::move(rfxEncoder);
     impl_->graphicsTransport = graphicsTransport;
+    if (graphicsTransport == GraphicsTransport::RemoteFx)
+    {
+        impl_->rfxLetterboxFill.regions = letterboxRegions;
+    }
     impl_->damageRegion.clear();
     impl_->damageRegion.add(
         {0, 0, impl_->state.sourceGeometry.widthPixels,
          impl_->state.sourceGeometry.heightPixels},
         impl_->state.sourceGeometry);
-    impl_->fullPresentationInvalidation = true;
+    impl_->fullPresentationInvalidation =
+        graphicsTransport == GraphicsTransport::ClassicBitmap ||
+        impl_->rfxLetterboxFill.active();
     impl_->armPresentationImmediately();
     log_message(LOG_LEVEL_INFO,
                 "xrdp-console: presentation resized to %ux%u; source remains "
@@ -836,13 +905,16 @@ ModuleContext::invalidate_presentation(int width, int height) noexcept
     }
     impl_->pendingPresentation.clear();
     impl_->pendingRfx.clear();
-    impl_->rfxFillNextRow = 0;
+    impl_->rfxLetterboxFill.clear();
+    if (!impl_->preparePresentationInvalidation())
+    {
+        return 1;
+    }
     impl_->damageRegion.clear();
     impl_->damageRegion.add(
         {0, 0, impl_->state.sourceGeometry.widthPixels,
          impl_->state.sourceGeometry.heightPixels},
         impl_->state.sourceGeometry);
-    impl_->fullPresentationInvalidation = true;
     impl_->armPresentationImmediately();
     return 0;
 }
@@ -863,7 +935,7 @@ ModuleContext::suppress_output(bool suppress, int left, int top, int right,
     impl_->outputSuppressed = suppress;
     impl_->pendingPresentation.clear();
     impl_->pendingRfx.clear();
-    impl_->rfxFillNextRow = 0;
+    impl_->rfxLetterboxFill.clear();
     if (impl_->state.sourceGeometry.widthPixels != 0 &&
         impl_->state.sourceGeometry.heightPixels != 0)
     {
@@ -875,7 +947,10 @@ ModuleContext::suppress_output(bool suppress, int left, int top, int right,
             {0, 0, impl_->state.sourceGeometry.widthPixels,
              impl_->state.sourceGeometry.heightPixels},
             impl_->state.sourceGeometry);
-        impl_->fullPresentationInvalidation = true;
+        if (!impl_->preparePresentationInvalidation())
+        {
+            return 1;
+        }
         impl_->armPresentationImmediately();
     }
     return 0;
@@ -954,9 +1029,9 @@ ModuleContext::end() noexcept
     // XCB. Reset it before changing the lifecycle state.
     impl_->pendingPresentation.clear();
     impl_->pendingRfx.clear();
+    impl_->rfxLetterboxFill.clear();
     impl_->rfxEncoder.reset();
     impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
-    impl_->rfxFillNextRow = 0;
     impl_->sharedMemoryCapture.reset();
     impl_->cursorTracker.reset();
     impl_->damageTracker.reset();
@@ -1084,7 +1159,13 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
 
     if (timeout != nullptr && !impl_->outputSuppressed)
     {
-        if (impl_->x11EventBudgetPending || impl_->pendingRfx.active())
+        const bool remoteFxContinuation =
+            remoteFxAvailable &&
+            (impl_->pendingRfx.active() ||
+             impl_->pendingPresentation.active() ||
+             impl_->rfxLetterboxFill.active() ||
+             !impl_->damageRegion.rectangles().empty());
+        if (impl_->x11EventBudgetPending || remoteFxContinuation)
         {
             // XCB may own more events in its private queue after the socket is
             // no longer readable. Keep draining those in bounded slices. A
@@ -1145,6 +1226,7 @@ ModuleContext::check_remote_fx() noexcept
         const bool workPending =
             impl_->pendingRfx.active() ||
             impl_->pendingPresentation.active() ||
+            impl_->rfxLetterboxFill.active() ||
             impl_->fullPresentationInvalidation ||
             !impl_->damageRegion.rectangles().empty() ||
             impl_->damageTracker->hasPendingDamage();
@@ -1155,8 +1237,9 @@ ModuleContext::check_remote_fx() noexcept
         }
         else if (immediateContinuation)
         {
-            // A pending codec chunk or captured source rectangle must resume
-            // without waiting for the presentation cadence. No new capture is
+            // A pending codec chunk, captured source rectangle, letterbox
+            // chunk, or already-snapshotted DamageRegion must resume without
+            // waiting for the presentation cadence. No new capture is
             // performed until the current borrowed view is fully sent.
             impl_->armPresentationImmediately();
         }
@@ -1167,6 +1250,26 @@ ModuleContext::check_remote_fx() noexcept
         impl_->profile.maybeLog();
         return 0;
     };
+
+    const RemoteFxWorkClass workClass = classifyRemoteFxWork(
+        impl_->pendingRfx.active(), impl_->pendingPresentation.active(),
+        impl_->rfxLetterboxFill.active(),
+        !impl_->damageRegion.rectangles().empty(),
+        impl_->damageTracker->hasPendingDamage());
+    if (workClass == RemoteFxWorkClass::NewDamage ||
+        workClass == RemoteFxWorkClass::Idle)
+    {
+        if (!impl_->presentationDeadlineArmed)
+        {
+            impl_->armPresentationImmediately();
+        }
+
+        if (Impl::Clock::now() < impl_->presentationDeadline)
+        {
+            impl_->profile.maybeLog();
+            return 0;
+        }
+    }
 
     if (!impl_->pendingRfx.active() &&
         !impl_->pendingPresentation.active() &&
@@ -1189,13 +1292,19 @@ ModuleContext::check_remote_fx() noexcept
 
     if (!impl_->pendingRfx.active())
     {
-        if (impl_->fullPresentationInvalidation)
+        if (impl_->rfxLetterboxFill.active())
         {
-            const std::uint32_t widthPixels =
-                impl_->state.presentationGeometry.widthPixels;
+            PendingRfxFill &fill = impl_->rfxLetterboxFill;
+            const Rectangle fillRectangle =
+                fill.regions.rectangles[fill.regionIndex];
+            if (fill.nextRow >= fillRectangle.heightPixels)
+            {
+                return 1;
+            }
+
+            const std::uint32_t widthPixels = fillRectangle.widthPixels;
             const std::uint32_t remainingRows =
-                impl_->state.presentationGeometry.heightPixels -
-                impl_->rfxFillNextRow;
+                fillRectangle.heightPixels - fill.nextRow;
             const std::uint32_t scratchRows =
                 widthPixels == 0
                     ? 0
@@ -1233,7 +1342,8 @@ ModuleContext::check_remote_fx() noexcept
                 return 1;
             }
             impl_->pendingRfx = {
-                {0, static_cast<std::int32_t>(impl_->rfxFillNextRow),
+                {fillRectangle.x,
+                 fillRectangle.y + static_cast<std::int32_t>(fill.nextRow),
                  widthPixels, rows},
                 fillPixels,
                 0,
@@ -1378,12 +1488,18 @@ ModuleContext::check_remote_fx() noexcept
 
     if (fillsPresentation)
     {
-        impl_->rfxFillNextRow += completedDestination.heightPixels;
-        if (impl_->rfxFillNextRow ==
-            impl_->state.presentationGeometry.heightPixels)
+        PendingRfxFill &fill = impl_->rfxLetterboxFill;
+        const Rectangle fillRectangle =
+            fill.regions.rectangles[fill.regionIndex];
+        fill.nextRow += completedDestination.heightPixels;
+        if (fill.nextRow == fillRectangle.heightPixels)
         {
-            impl_->fullPresentationInvalidation = false;
-            impl_->rfxFillNextRow = 0;
+            ++fill.regionIndex;
+            fill.nextRow = 0;
+            if (!fill.active())
+            {
+                impl_->fullPresentationInvalidation = false;
+            }
         }
     }
     else
@@ -1404,7 +1520,9 @@ ModuleContext::check_remote_fx() noexcept
     }
 
     return finish(impl_->pendingRfx.active() ||
-                  impl_->pendingPresentation.active());
+                  impl_->pendingPresentation.active() ||
+                  impl_->rfxLetterboxFill.active() ||
+                  !impl_->damageRegion.rectangles().empty());
 }
 
 int
