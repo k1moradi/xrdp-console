@@ -57,19 +57,18 @@ endif()
 if(XRDP_CONSOLE_ENABLE_CODEC_BENCH)
     find_path(RFXCODEC_INCLUDE_DIR rfxcodec_encode.h)
     find_library(RFXCODEC_LIBRARY NAMES rfxencode)
-    find_path(X264_INCLUDE_DIR x264.h)
-    find_library(X264_LIBRARY NAMES x264)
-    if(RFXCODEC_INCLUDE_DIR AND RFXCODEC_LIBRARY AND
-       X264_INCLUDE_DIR AND X264_LIBRARY)
-        add_executable(xrdp-codec-bench helpers/xrdp_codec_bench.c)
+    if(RFXCODEC_INCLUDE_DIR AND RFXCODEC_LIBRARY)
+        add_executable(xrdp-codec-bench
+            helpers/rfx_batch_plan.c
+            helpers/xrdp_codec_bench.c)
         target_include_directories(xrdp-codec-bench PRIVATE
-            ${RFXCODEC_INCLUDE_DIR} ${X264_INCLUDE_DIR})
+            ${RFXCODEC_INCLUDE_DIR})
         target_link_libraries(xrdp-codec-bench PRIVATE
-            ${RFXCODEC_LIBRARY} ${X264_LIBRARY})
+            ${RFXCODEC_LIBRARY})
         list(APPEND BENCHMARK_BINARIES xrdp-codec-bench)
     else()
         message(STATUS
-            "Skipping xrdp-codec-bench: rfxcodec and/or x264 development files were not found")
+            "Skipping xrdp-codec-bench: rfxcodec development files were not found")
     endif()
 endif()
 

@@ -51,6 +51,22 @@ add_test(NAME systemd-unit
 set_tests_properties(systemd-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+if(TARGET xrdp-codec-bench)
+    get_target_property(XRDP_CONSOLE_RFXCODEC_INCLUDE_DIRS
+        xrdp-codec-bench INCLUDE_DIRECTORIES)
+    add_executable(rfx-batch-plan-unit
+        test_rfx_batch_plan.c
+        ${CMAKE_SOURCE_DIR}/tools/benchmark/helpers/rfx_batch_plan.c)
+    set_target_properties(rfx-batch-plan-unit PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS OFF)
+    target_include_directories(rfx-batch-plan-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/tools/benchmark/helpers
+        ${XRDP_CONSOLE_RFXCODEC_INCLUDE_DIRS})
+    add_test(NAME rfx-batch-plan-unit COMMAND rfx-batch-plan-unit)
+endif()
+
 if(TARGET xrdp-console)
     add_executable(damage-region-unit
         test_damage_region.cpp
