@@ -46,10 +46,53 @@ MOD_GET_WAIT_OBJS = ctypes.CFUNCTYPE(
     ctypes.POINTER(ctypes.c_int),
 )
 MOD_CHECK_WAIT_OBJS = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
+MOD_FRAME_ACK = ctypes.CFUNCTYPE(
+    ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int
+)
+MOD_SUPPRESS_OUTPUT = ctypes.CFUNCTYPE(
+    ctypes.c_int,
+    ctypes.c_void_p,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+)
+
+
+class MonitorInfo(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_int),
+        ("top", ctypes.c_int),
+        ("right", ctypes.c_int),
+        ("bottom", ctypes.c_int),
+        ("flags", ctypes.c_int),
+        ("physical_width", ctypes.c_uint),
+        ("physical_height", ctypes.c_uint),
+        ("orientation", ctypes.c_uint),
+        ("desktop_scale_factor", ctypes.c_uint),
+        ("device_scale_factor", ctypes.c_uint),
+        ("is_primary", ctypes.c_uint),
+    ]
+
+
+MOD_SERVER_MONITOR_RESIZE = ctypes.CFUNCTYPE(
+    ctypes.c_int,
+    ctypes.c_void_p,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.c_int,
+    ctypes.POINTER(MonitorInfo),
+    ctypes.POINTER(ctypes.c_int),
+)
+MOD_SERVER_MONITOR_FULL_INVALIDATE = ctypes.CFUNCTYPE(
+    ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int
+)
+MOD_SERVER_VERSION_MESSAGE = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p)
 
 
 class ModulePrefix(ctypes.Structure):
-    """The stable callback prefix through mod_check_wait_objs."""
+    """The module callback prefix needed by the lifecycle test."""
 
     _fields_ = [
         ("size", ctypes.c_int),
@@ -63,7 +106,78 @@ class ModulePrefix(ctypes.Structure):
         ("mod_session_change", MOD_SESSION_CHANGE),
         ("mod_get_wait_objs", MOD_GET_WAIT_OBJS),
         ("mod_check_wait_objs", MOD_CHECK_WAIT_OBJS),
+        ("mod_frame_ack", MOD_FRAME_ACK),
+        ("mod_suppress_output", MOD_SUPPRESS_OUTPUT),
+        ("mod_server_monitor_resize", MOD_SERVER_MONITOR_RESIZE),
+        ("mod_server_monitor_full_invalidate",
+         MOD_SERVER_MONITOR_FULL_INVALIDATE),
+        ("mod_server_version_message", MOD_SERVER_VERSION_MESSAGE),
     ]
+
+
+def open_x11_pointer_query(display: str):
+    """Return an Xlib-backed root-pointer query for the private Xvfb."""
+    x11 = ctypes.CDLL("libX11.so.6")
+    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x11.XOpenDisplay.restype = ctypes.c_void_p
+    x11.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+    x11.XDefaultRootWindow.restype = ctypes.c_ulong
+    x11.XQueryPointer.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_ulong,
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.c_ulong),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_uint),
+    ]
+    x11.XQueryPointer.restype = ctypes.c_int
+    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+    x11.XCloseDisplay.restype = ctypes.c_int
+
+    connection = x11.XOpenDisplay(display.encode())
+    if not connection:
+        raise AssertionError(f"could not open X display {display}")
+    root = x11.XDefaultRootWindow(connection)
+
+    def query() -> tuple[int, int]:
+        root_return = ctypes.c_ulong()
+        child_return = ctypes.c_ulong()
+        root_x = ctypes.c_int()
+        root_y = ctypes.c_int()
+        window_x = ctypes.c_int()
+        window_y = ctypes.c_int()
+        mask = ctypes.c_uint()
+        if not x11.XQueryPointer(
+            connection,
+            root,
+            ctypes.byref(root_return),
+            ctypes.byref(child_return),
+            ctypes.byref(root_x),
+            ctypes.byref(root_y),
+            ctypes.byref(window_x),
+            ctypes.byref(window_y),
+            ctypes.byref(mask),
+        ):
+            raise AssertionError("XQueryPointer failed")
+        return root_x.value, root_y.value
+
+    return x11, connection, query
+
+
+def assert_pointer_event(module, handle, display: str, x: int, y: int,
+                         expected: tuple[int, int]) -> None:
+    # WM_MOUSEMOVE in xrdp_constants.h.  The module must inverse-map the RDP
+    # presentation coordinate before sending XTest input to the physical root.
+    assert module.mod_event(handle, 100, x, y, 0, 0) == 0
+    time.sleep(0.05)
+    x11, connection, query = open_x11_pointer_query(display)
+    try:
+        assert query() == expected
+    finally:
+        x11.XCloseDisplay(connection)
 
 
 def stop_process(process: subprocess.Popen[object] | None) -> None:
@@ -236,6 +350,76 @@ def main() -> int:
         assert module.mod_set_param(handle, b"display", display.encode()) == 0
         assert module.mod_connect(handle) == 0
         assert os.readlink("/proc/self/fd/0").startswith("socket:")
+
+        monitor = MonitorInfo(
+            0, 0, 1511, 948, 0, 0, 0, 0, 100, 100, 1
+        )
+        in_progress = ctypes.c_int(99)
+        assert (
+            module.mod_server_monitor_resize(
+                handle, 1512, 949, 1, ctypes.byref(monitor),
+                ctypes.byref(in_progress),
+            )
+            == 0
+        )
+        assert in_progress.value == 0
+
+        # The 1024x768 source fits into a 1512x949 presentation with a
+        # centered 1265x949 viewport.  Verify that pointer input is mapped
+        # through that viewport and never changes the physical X11 geometry.
+        assert_pointer_event(handle=handle, module=module, display=display,
+                             x=223, y=100, expected=(80, 80))
+        assert module.mod_event(handle, 100, 0, 0, 0, 0) == 0
+        time.sleep(0.05)
+        x11, connection, query = open_x11_pointer_query(display)
+        try:
+            assert query() == (80, 80)
+        finally:
+            x11.XCloseDisplay(connection)
+
+        assert (
+            module.mod_server_monitor_full_invalidate(handle, 1512, 949)
+            == 0
+        )
+
+        # An over-budget presentation is rejected without disturbing the
+        # last valid transform/scaler configuration.
+        in_progress.value = 99
+        assert (
+            module.mod_server_monitor_resize(
+                handle, 8192, 8192, 1, ctypes.byref(monitor),
+                ctypes.byref(in_progress),
+            )
+            == 1
+        )
+        assert in_progress.value == 0
+        assert_pointer_event(handle=handle, module=module, display=display,
+                             x=223, y=100, expected=(80, 80))
+
+        # Resize storms are presentation-only changes.  They must not tear
+        # down or reconnect the physical X11 transport, and every valid
+        # layout must stay inside the scaler's bounded allocation policy.
+        resize_sequence = ((1364, 768), (1728, 1117), (1512, 949),
+                           (1366, 768))
+        for _ in range(16):
+            for width, height in resize_sequence:
+                monitor.left = 0
+                monitor.top = 0
+                monitor.right = width - 1
+                monitor.bottom = height - 1
+                in_progress.value = 99
+                assert (
+                    module.mod_server_monitor_resize(
+                        handle, width, height, 1, ctypes.byref(monitor),
+                        ctypes.byref(in_progress),
+                    )
+                    == 0
+                )
+                assert in_progress.value == 0
+
+        # The callback can be serviced without an RDP output callback table
+        # installed; this exercises the full-invalidation state transition.
+        assert module.mod_check_wait_objs(handle) == 0
 
         read_objs = (ctypes.c_ssize_t * 5)(11, 22, 33, 44, 0)
         write_objs = (ctypes.c_ssize_t * 3)(55, 66, 77)

@@ -835,6 +835,29 @@ def display_geometry(display: str, auth: str) -> tuple[int, int]:
     return width, height
 
 
+def aspect_fit_point(source_width: int, source_height: int,
+                     presentation_width: int, presentation_height: int,
+                     source_x: int, source_y: int) -> tuple[int, int]:
+    """Map a source pixel to the top-left pixel of its aspect-fit viewport."""
+    if (presentation_width * source_height <=
+            presentation_height * source_width):
+        viewport_width = presentation_width
+        viewport_height = max(
+            1, (presentation_width * source_height) // source_width
+        )
+    else:
+        viewport_height = presentation_height
+        viewport_width = max(
+            1, (presentation_height * source_width) // source_height
+        )
+    viewport_x = (presentation_width - viewport_width) // 2
+    viewport_y = (presentation_height - viewport_height) // 2
+    return (
+        viewport_x + (source_x * viewport_width) // source_width,
+        viewport_y + (source_y * viewport_height) // source_height,
+    )
+
+
 def stage_direct_module(module_path: Path, xrdp_path: Path,
                         case_dir: Path) -> tuple[Path, str]:
     """Stage the first-party module into a private xrdp installation."""
@@ -862,10 +885,14 @@ def write_direct_xrdp_config(target: Path, port: int, log_path: Path,
                              cert: Path, key: Path, module_name: str,
                              display: str, bind_host: str,
                              bitmap_compression: bool | None,
-                             bulk_compression: bool | None) -> None:
-    """Write the minimal fixed-geometry direct-X11 benchmark profile."""
+                             bulk_compression: bool | None,
+                             dynamic_resizing: bool = False) -> None:
+    """Write the direct-X11 benchmark profile."""
     bitmap = "true" if bitmap_compression is not False else "false"
     bulk = "true" if bulk_compression is not False else "false"
+    allow_channels = "true" if dynamic_resizing else "false"
+    drdynvc = "true" if dynamic_resizing else "false"
+    enable_dynamic_resizing = "true" if dynamic_resizing else "false"
     target.write_text(
         f"""[Globals]
 ini_version=1
@@ -878,7 +905,7 @@ key_file={key}
 bitmap_cache=true
 bitmap_compression={bitmap}
 bulk_compression={bulk}
-allow_channels=false
+allow_channels={allow_channels}
 max_bpp=32
 autorun=Console
 
@@ -891,7 +918,7 @@ EnableConsole=false
 [Channels]
 rdpdr=false
 rdpsnd=false
-drdynvc=false
+drdynvc={drdynvc}
 cliprdr=false
 rail=false
 xrdpvr=false
@@ -904,7 +931,7 @@ code=21
 display={display}
 username=na
 password=na
-enable_dynamic_resizing=false
+enable_dynamic_resizing={enable_dynamic_resizing}
 """,
         encoding="utf-8",
     )
@@ -2219,7 +2246,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             write_direct_xrdp_config(
                 config, xrdp_port, xrdp_log, cert, key, module_name,
                 args.display, network.host_ip, args.bitmap_compression,
-                args.bulk_compression)
+                args.bulk_compression, args.direct_dynamic_resizing)
         else:
             rewrite_xrdp_config(
                 Path("/etc/xrdp/xrdp.ini"), config, xrdp_port, vnc_port,
@@ -2322,11 +2349,15 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                                    time.monotonic() + 8)
         xrdp_probe.close()
         pipeline_option = "/rfx" if direct_backend else f"/{args.pipeline}"
+        dynamic_resolution_option = (
+            ["+dynamic-resolution"]
+            if direct_backend and args.direct_dynamic_resizing else []
+        )
         client_command = network.wrap_client_command(
             [str(FREERDP), f"/v:{network.host_ip}:{xrdp_port}", "/u:na", "/p:na",
              "/cert:ignore",
              f"/size:{args.client_width}x{args.client_height}",
-             pipeline_option, "/network:lan",
+             pipeline_option, *dynamic_resolution_option, "/network:lan",
              "/t:xrdp-gpu-bench", "-decorations", "/window-position:0x0",
              "/log-level:WARN"], env_client,
         )
@@ -2397,6 +2428,14 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             return
         marker_x = x + args.width // 2
         marker_y = y + args.height // 2
+        probe_x, probe_y = marker_x, marker_y
+        if direct_backend:
+            source_width, source_height = display_geometry(args.display, auth)
+            probe_x, probe_y = aspect_fit_point(
+                source_width, source_height,
+                args.client_width, args.client_height,
+                marker_x, marker_y,
+            )
         stimulus = subprocess.Popen(
             [str(GPU_STIMULUS), args.display, str(args.width), str(args.height)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -2415,7 +2454,8 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         if len(fields) < 2 or fields[1] != f"{args.width}x{args.height}".encode():
             raise RuntimeError(f"stimulus dimensions differ from request: {first!r}")
         probe = subprocess.Popen(
-            [str(PIXEL_PROBE), client_display, window, str(marker_x), str(marker_y)],
+            [str(PIXEL_PROBE), client_display, window, str(probe_x),
+             str(probe_y)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             env=env_client, bufsize=0, start_new_session=True,
         )
@@ -2542,6 +2582,9 @@ def main() -> int:
     parser.add_argument("--disable-dynamic-resizing", action="store_true",
                         help=("disable the private Console profile's dynamic "
                               "RDP monitor resize requests"))
+    parser.add_argument("--direct-dynamic-resizing", action="store_true",
+                        help=("enable dynamic monitor resizing for the direct-X11 "
+                              "profile; use with explicit client dimensions"))
     parser.add_argument("--client-display", type=int, default=99)
     parser.add_argument("--client-width", type=int, default=1366,
                         help="isolated RDP client width (default: 1366)")
@@ -2615,6 +2658,8 @@ def main() -> int:
             parser.error("--backend direct-x11 requires --max-bpp 32")
         if args.only is not None:
             parser.error("--only is only valid for the VNC backend")
+    elif args.direct_dynamic_resizing:
+        parser.error("--direct-dynamic-resizing requires --backend direct-x11")
     if (args.width <= 0 or args.height <= 0 or
             args.client_width <= 0 or args.client_height <= 0 or
             args.duration <= 0 or args.fps <= 0 or args.repetitions <= 0 or
@@ -2698,13 +2743,15 @@ def main() -> int:
         auth = discover_auth(args.auth)
         if args.backend == "direct-x11":
             source_width, source_height = display_geometry(args.display, auth)
-            if (args.client_width, args.client_height) != (source_width, source_height):
+            if (not args.direct_dynamic_resizing and
+                    (args.client_width, args.client_height) !=
+                    (source_width, source_height)):
                 print(
                     f"direct-x11: forcing client geometry to physical "
                     f"{source_width}x{source_height}"
                 )
-            args.client_width = source_width
-            args.client_height = source_height
+                args.client_width = source_width
+                args.client_height = source_height
         ISOLATED.mkdir(parents=True, exist_ok=True)
         runtime = Path(tempfile.mkdtemp(prefix="xrdp-vnc-gpu-", dir=ISOLATED))
         benchmark_backend = (
@@ -2717,8 +2764,10 @@ def main() -> int:
             "disabled" if args.backend == "direct-x11" or
             args.disable_gfx_for_vnc else "requested")
         effective_resizing = (
-            "disabled" if args.backend == "direct-x11" or
-            args.disable_dynamic_resizing else "enabled")
+            "enabled" if args.backend == "direct-x11" and
+            args.direct_dynamic_resizing else
+            ("disabled" if args.backend == "direct-x11" or
+             args.disable_dynamic_resizing else "enabled"))
         print(f"{benchmark_backend} GPU/compositor benchmark")
         print("Private test services are started; production ports 5900/3389 are untouched.")
         print(f"source={args.display} client=:{args.client_display} "
