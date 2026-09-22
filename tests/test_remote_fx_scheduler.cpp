@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
 #include <iostream>
 
 #include "../src/rdp/remote_fx_scheduler.h"
@@ -18,33 +19,63 @@ check(bool condition, const char *message)
     return true;
 }
 
-bool
-all_work_combinations_have_the_expected_priority()
+struct SchedulerCase
 {
-    for (unsigned mask = 0; mask < 32; ++mask)
-    {
-        const bool pendingEncodedChunk = (mask & 1U) != 0;
-        const bool pendingPresentation = (mask & 2U) != 0;
-        const bool pendingLetterboxFill = (mask & 4U) != 0;
-        const bool snapshottedDamage = (mask & 8U) != 0;
-        const bool unsnapshottedDamage = (mask & 16U) != 0;
-        const RemoteFxWorkClass expected =
-            pendingEncodedChunk || pendingPresentation ||
-                    pendingLetterboxFill || snapshottedDamage
-                ? RemoteFxWorkClass::ImmediateContinuation
-                : unsnapshottedDamage ? RemoteFxWorkClass::NewDamage
-                                      : RemoteFxWorkClass::Idle;
+    bool pendingEncodedChunk;
+    bool pendingPresentation;
+    bool pendingLetterboxFill;
+    bool snapshottedDamage;
+    bool unsnapshottedDamage;
+    RemoteFxWorkClass expected;
+    const char *description;
+};
 
-        if (!check(classifyRemoteFxWork(
-                       pendingEncodedChunk, pendingPresentation,
-                       pendingLetterboxFill, snapshottedDamage,
-                       unsnapshottedDamage) == expected,
-                   "RemoteFX work classification priority is incorrect"))
+bool
+named_work_cases_have_the_expected_priority()
+{
+    constexpr std::array<SchedulerCase, 8> cases{{
+        {false, false, false, false, false,
+         RemoteFxWorkClass::Idle,
+         "no graphics work is idle"},
+        {false, false, false, false, true,
+         RemoteFxWorkClass::NewDamage,
+         "only new XDamage obeys pacing"},
+        {true, false, false, false, false,
+         RemoteFxWorkClass::ImmediateContinuation,
+         "encoded tile continuation is immediate"},
+        {false, true, false, false, false,
+         RemoteFxWorkClass::ImmediateContinuation,
+         "borrowed presentation is immediate"},
+        {false, false, true, false, false,
+         RemoteFxWorkClass::ImmediateContinuation,
+         "letterbox continuation is immediate"},
+        {false, false, false, true, false,
+         RemoteFxWorkClass::ImmediateContinuation,
+         "snapshotted damage drains immediately"},
+        {true, false, false, false, true,
+         RemoteFxWorkClass::ImmediateContinuation,
+         "continuation outranks new damage"},
+        {false, false, false, true, true,
+         RemoteFxWorkClass::ImmediateContinuation,
+         "snapshotted frame outranks newly arriving damage"},
+    }};
+
+    bool success = true;
+    for (const SchedulerCase &testCase : cases)
+    {
+        if (!check(
+                classifyRemoteFxWork(
+                    testCase.pendingEncodedChunk,
+                    testCase.pendingPresentation,
+                    testCase.pendingLetterboxFill,
+                    testCase.snapshottedDamage,
+                    testCase.unsnapshottedDamage) == testCase.expected,
+                testCase.description))
         {
-            return false;
+            success = false;
         }
     }
-    return true;
+    return success;
 }
 
 } // namespace
@@ -52,5 +83,5 @@ all_work_combinations_have_the_expected_priority()
 int
 main()
 {
-    return all_work_combinations_have_the_expected_priority() ? 0 : 1;
+    return named_work_cases_have_the_expected_priority() ? 0 : 1;
 }

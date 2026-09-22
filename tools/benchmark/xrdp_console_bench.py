@@ -1308,6 +1308,30 @@ def parse_physical_marker(line: bytes) -> tuple[int, int, int]:
     raise RuntimeError(f"invalid physical marker line: {line!r}")
 
 
+def parse_graphics_frame(line: bytes) -> tuple[int, int, int]:
+    """Decode one strict graphics stimulus frame record.
+
+    The RDP graphics benchmark needs all three fields: the time the marker
+    became visible locally, the marker state, and the local draw duration.
+    A malformed helper response is a benchmark setup/protocol failure, not a
+    client delivery miss.
+    """
+    fields = line.split()
+    if len(fields) != 3:
+        raise RuntimeError(
+            f"invalid graphics stimulus response: {line!r}")
+
+    try:
+        visible_ns = int(fields[0])
+        state = int(fields[1])
+        render_ns = int(fields[2])
+    except ValueError as error:
+        raise RuntimeError(
+            f"non-numeric graphics stimulus response: {line!r}") from error
+
+    return visible_ns, state, render_ns
+
+
 def print_transport_summary(label: str, start: TcpSnapshot | None,
                             end: TcpSnapshot | None, elapsed: float) -> None:
     wire_bytes = None
@@ -2350,7 +2374,17 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         xrdp_probe = wait_tcp_port(network.host_ip, xrdp_port,
                                    time.monotonic() + 8)
         xrdp_probe.close()
-        pipeline_option = "/rfx" if direct_backend else f"/{args.pipeline}"
+        if direct_backend:
+            pipeline_options = [
+                "+rfx",
+                "-gfx",
+                "/network:lan",
+            ]
+        else:
+            pipeline_options = [
+                f"/{args.pipeline}",
+                "/network:lan",
+            ]
         dynamic_resolution_option = (
             ["+dynamic-resolution"]
             if direct_backend and args.direct_dynamic_resizing else []
@@ -2359,7 +2393,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             [str(FREERDP), f"/v:{network.host_ip}:{xrdp_port}", "/u:na", "/p:na",
              "/cert:ignore",
              f"/size:{args.client_width}x{args.client_height}",
-             pipeline_option, *dynamic_resolution_option, "/network:lan",
+             *pipeline_options, *dynamic_resolution_option,
              "/t:xrdp-gpu-bench", "-decorations", "/window-position:0x0",
              "/log-level:WARN"], env_client,
         )
@@ -2425,6 +2459,10 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         requested_path = "RFX" if direct_backend else args.pipeline.upper()
         print(f"{name}#{repetition}: backend={args.backend} "
               f"requested={requested_path} negotiated={negotiated}")
+        if direct_backend and negotiated != "RFX":
+            raise RuntimeError(
+                "direct-X11 graphics benchmark requested RemoteFX "
+                f"but negotiated {negotiated}")
         window = find_window(client_display, "xrdp-gpu-bench", time.monotonic() + 10)
         measured_processes = [proc for proc in
                               (xvfb, chansrv, proxy, vnc, xrdp, client)
@@ -2478,17 +2516,23 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         stimulus.stdin.flush()
         warmup = stimulus_reader.readline(5)
         if not warmup:
-            raise RuntimeError("stimulus warm-up failed")
-        warmup_fields = warmup.split()
+            raise RuntimeError("graphics stimulus produced no warm-up frame")
+        warmup_visible_ns, warmup_state, _ = parse_graphics_frame(warmup)
         warmup_latency = wait_marker(
-            probe_reader, probe.stdin, int(warmup_fields[1]), int(warmup_fields[0]),
+            probe_reader, probe.stdin, warmup_state, warmup_visible_ns,
             args.timeout, args.poll_ms / 1000.0, diagnostic=True,
         )
         if warmup_latency is None:
+            diagnostic_points = [
+                (0, 0),
+                (probe_x, probe_y),
+                (max(0, probe_x - 2), probe_y),
+                (min(args.client_width - 1, probe_x + 2), probe_y),
+                (probe_x, max(0, probe_y - 2)),
+                (probe_x, min(args.client_height - 1, probe_y + 2)),
+            ]
             print("remote diagnostic: " + "; ".join(sample_remote_pixels(
-                client_display, window,
-                [(0, 0), (marker_x, marker_y), (args.width // 2, args.height // 2)],
-                env_client)))
+                client_display, window, diagnostic_points, env_client)))
             raise RuntimeError("remote marker did not arrive during warm-up")
         samples = max(1, int(args.duration * args.fps))
         latencies: list[float] = []
@@ -2508,25 +2552,20 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             stimulus.stdin.write(b"frame\n")
             stimulus.stdin.flush()
             line = stimulus_reader.readline(5)
-            fields = line.split()
-            if len(fields) < 3:
+            visible_ns, state, render_duration_ns = parse_graphics_frame(line)
+            render_ns.append(render_duration_ns)
+            observed_ns: list[int] = []
+            latency = wait_marker(
+                probe_reader, probe.stdin, state, visible_ns, args.timeout,
+                args.poll_ms / 1000.0, observed_ns_out=observed_ns,
+            )
+            if latency is None:
                 misses += 1
             else:
-                visible_ns = int(fields[0])
-                state = int(fields[1])
-                render_ns.append(int(fields[2]))
-                observed_ns: list[int] = []
-                latency = wait_marker(
-                    probe_reader, probe.stdin, state, visible_ns, args.timeout,
-                    args.poll_ms / 1000.0, observed_ns_out=observed_ns,
-                )
-                if latency is None:
-                    misses += 1
-                else:
-                    latencies.append(latency)
-                    point_draw_ns.append(visible_ns)
-                    point_visible_ns.append(observed_ns[0])
-                    point_expected_states.append(state)
+                latencies.append(latency)
+                point_draw_ns.append(visible_ns)
+                point_visible_ns.append(observed_ns[0])
+                point_expected_states.append(state)
             delay = next_tick - time.monotonic()
             if delay > 0:
                 time.sleep(delay)

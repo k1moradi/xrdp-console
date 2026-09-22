@@ -73,6 +73,12 @@ class SyntheticNetworkTests(unittest.TestCase):
                          (10, 25, 1))
         self.assertEqual(module.parse_physical_marker(b"10 1\n"),
                          (10, 10, 1))
+        self.assertEqual(module.parse_graphics_frame(b"10 25 30\n"),
+                         (10, 25, 30))
+        with self.assertRaises(RuntimeError):
+            module.parse_graphics_frame(b"10 25\n")
+        with self.assertRaises(RuntimeError):
+            module.parse_graphics_frame(b"10 bad 30\n")
         self.assertEqual(module.percentile([1.0, 2.0, 3.0, 4.0], 0.95), 4.0)
         self.assertEqual(module.percentile([1.0, 2.0, 3.0, 4.0], 0.50), 2.0)
 
