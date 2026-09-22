@@ -3,6 +3,7 @@
 #include "clipboard_controller.h"
 
 #include <algorithm>
+#include <climits>
 #include <cstdlib>
 #include <cstring>
 #include <limits>
@@ -18,6 +19,7 @@ constexpr std::uint32_t kMaximumClipboardBytes = 8U * 1024U * 1024U;
 constexpr int kChannelFlagFirst = 0x0001;
 constexpr int kChannelFlagLast = 0x0002;
 constexpr int kChannelFlagShowProtocol = 0x0010;
+constexpr auto kSelectionRequestTimeout = std::chrono::seconds{2};
 
 std::uint32_t read32(const std::uint8_t *data) noexcept
 {
@@ -236,6 +238,18 @@ void ClipboardController::startChannel() noexcept
     }
 }
 
+void ClipboardController::checkTimeout() noexcept
+{
+    if (!pendingSelection_ ||
+        std::chrono::steady_clock::now() < selectionDeadline_)
+    {
+        return;
+    }
+    pendingSelection_ = false;
+    selectionDeadline_ = {};
+    finishLocalSelectionRequest();
+}
+
 void ClipboardController::sendPdu(std::uint16_t type, std::uint16_t flags,
                                   std::span<const std::uint8_t> payload) noexcept
 {
@@ -379,6 +393,15 @@ void ClipboardController::handleChannelData(int channelId, const char *data,
         {
             if (pdu.payload.empty())
             {
+                hasText_ = false;
+                text_.clear();
+                if (ownsSelection_)
+                {
+                    xcb_set_selection_owner(connection_, XCB_WINDOW_NONE,
+                                             clipboardAtom_, XCB_CURRENT_TIME);
+                    ownsSelection_ = false;
+                    xcb_flush(connection_);
+                }
                 sendPdu(kFormatListResponse, kResponseOk, {});
                 return;
             }
@@ -508,6 +531,8 @@ void ClipboardController::requestCurrentSelection(xcb_window_t owner) noexcept
         return;
     }
     pendingSelection_ = true;
+    selectionDeadline_ = std::chrono::steady_clock::now() +
+                         kSelectionRequestTimeout;
     pendingTarget_ = SelectionTarget::Utf8;
     requestSelectionTarget(pendingTarget_);
 }
@@ -554,6 +579,7 @@ void ClipboardController::handleSelectionNotify(
         else
         {
             pendingSelection_ = false;
+            selectionDeadline_ = {};
             finishLocalSelectionRequest();
         }
         return;
@@ -567,6 +593,7 @@ void ClipboardController::handleSelectionNotify(
         xcb_get_property_reply(connection_, cookie, &error);
     std::free(error);
     pendingSelection_ = false;
+    selectionDeadline_ = {};
     if (reply == nullptr || reply->format != 8 ||
         xcb_get_property_value_length(reply) >
             static_cast<int>(kMaximumClipboardBytes))
@@ -665,6 +692,8 @@ void ClipboardController::handleSelectionOwnerChange(
     ownsSelection_ = false;
     if (event.owner == XCB_WINDOW_NONE)
     {
+        pendingSelection_ = false;
+        selectionDeadline_ = {};
         hasText_ = false;
         text_.clear();
         sendFormatList();
@@ -817,4 +846,26 @@ bool ClipboardController::hasText() const noexcept
 std::string_view ClipboardController::text() const noexcept
 {
     return text_;
+}
+
+bool ClipboardController::hasPendingSelection() const noexcept
+{
+    return pendingSelection_;
+}
+
+int ClipboardController::selectionTimeoutMilliseconds() const noexcept
+{
+    if (!pendingSelection_)
+    {
+        return -1;
+    }
+    const auto remaining =
+        selectionDeadline_ - std::chrono::steady_clock::now();
+    if (remaining <= std::chrono::steady_clock::duration::zero())
+    {
+        return 0;
+    }
+    const auto milliseconds =
+        std::chrono::ceil<std::chrono::milliseconds>(remaining).count();
+    return static_cast<int>(std::min<std::int64_t>(INT_MAX, milliseconds));
 }

@@ -920,16 +920,21 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
     }
 
     const tbus waitObject = impl_->x11Connection->waitObject();
+    bool waitObjectPresent = false;
     for (int index = 0; index < *read_count; ++index)
     {
         if (read_objects[index] == waitObject)
         {
-            return 0;
+            waitObjectPresent = true;
+            break;
         }
     }
 
-    read_objects[*read_count] = waitObject;
-    ++(*read_count);
+    if (!waitObjectPresent)
+    {
+        read_objects[*read_count] = waitObject;
+        ++(*read_count);
+    }
 
     if (timeout != nullptr && !impl_->outputSuppressed)
     {
@@ -963,6 +968,16 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
             {
                 *timeout = requestedTimeout;
             }
+        }
+    }
+    if (timeout != nullptr && impl_->clipboard != nullptr &&
+        impl_->clipboard->hasPendingSelection())
+    {
+        const int requestedTimeout =
+            impl_->clipboard->selectionTimeoutMilliseconds();
+        if (*timeout < 0 || requestedTimeout < *timeout)
+        {
+            *timeout = requestedTimeout;
         }
     }
     return 0;
@@ -1005,6 +1020,10 @@ ModuleContext::check_wait_objs() noexcept
             &impl_->x11EventBudgetPending) != ConnectionStatus::Ok)
     {
         return 1;
+    }
+    if (impl_->clipboard != nullptr)
+    {
+        impl_->clipboard->checkTimeout();
     }
     impl_->profile.noteDamage(
         impl_->damageTracker->notificationCount() - previousNotifications,

@@ -4,6 +4,7 @@
 
 #include "clipboard_protocol.h"
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -44,12 +45,15 @@ public:
     [[nodiscard]] bool channelEnabled() const noexcept;
 
     void startChannel() noexcept;
+    void checkTimeout() noexcept;
     void handleX11Event(const xcb_generic_event_t &event) noexcept;
     void handleChannelData(int channelId, const char *data, int dataLength,
                            int totalDataLength, int flags) noexcept;
 
     [[nodiscard]] bool hasText() const noexcept;
     [[nodiscard]] std::string_view text() const noexcept;
+    [[nodiscard]] bool hasPendingSelection() const noexcept;
+    [[nodiscard]] int selectionTimeoutMilliseconds() const noexcept;
 
 private:
     enum class SelectionTarget
@@ -108,4 +112,5 @@ private:
     bool failed_{false};
     std::string text_{};
     xrdp_console::clipboard::ChunkReassembler reassembler_{};
+    std::chrono::steady_clock::time_point selectionDeadline_{};
 };

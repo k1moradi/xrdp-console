@@ -257,6 +257,48 @@ int main()
            "remote \xF0\x9F\x8C\x8D");
     std::free(propertyReply);
 
+    // A remote clipboard clear removes the cached value. A new RDP paste then
+    // has to ask the current X11 owner for data; a silent owner must not leave
+    // that request pending forever.
+    assert(xrdp_console::clipboard::encodePdu(
+        xrdp_console::clipboard::kFormatList, 0, {}, pdu));
+    feed_pdu(controller, pdu);
+    xcb_set_selection_owner(connection, externalOwner, clipboard,
+                             XCB_CURRENT_TIME);
+    xcb_flush(connection);
+    assert(pump(connection, controller, clipboard, utf8, {}, false,
+                std::chrono::milliseconds(100)));
+    std::vector<std::uint8_t> dataRequestFromRdp;
+    std::vector<std::uint8_t> requestPayload{13, 0, 0, 0};
+    assert(xrdp_console::clipboard::encodePdu(
+        xrdp_console::clipboard::kFormatDataRequest, 0, requestPayload, pdu));
+    feed_pdu(controller, pdu);
+    assert(controller.hasPendingSelection());
+    const int timeoutMilliseconds = controller.selectionTimeoutMilliseconds();
+    assert(timeoutMilliseconds > 0);
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(timeoutMilliseconds + 50));
+    controller.checkTimeout();
+    assert(!controller.hasPendingSelection());
+    assert(last_pdu_of_type(fake,
+                            xrdp_console::clipboard::kFormatDataResponse,
+                            dataRequestFromRdp));
+    xrdp_console::clipboard::PduView failedResponse;
+    assert(xrdp_console::clipboard::decodePdu(dataRequestFromRdp,
+                                              failedResponse));
+    assert(failedResponse.flags == xrdp_console::clipboard::kResponseFail);
+
+    // The timeout is recoverable: a later owner can still populate the local
+    // clipboard and notify the RDP side.
+    const std::string recoveredText = "recovered";
+    xcb_set_selection_owner(connection, externalOwner, clipboard,
+                             XCB_CURRENT_TIME);
+    xcb_flush(connection);
+    assert(pump(connection, controller, clipboard, utf8, recoveredText, true,
+                std::chrono::milliseconds(500)));
+    assert(controller.hasText());
+    assert(controller.text() == recoveredText);
+
     xcb_destroy_window(connection, externalOwner);
     xcb_flush(connection);
     xcb_disconnect(connection);
