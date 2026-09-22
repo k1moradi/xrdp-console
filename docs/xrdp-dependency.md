@@ -53,7 +53,7 @@ The series is deliberately small and applies in this order:
 | --- | --- | --- |
 | `0001-xrdp-resize-state-and-failure-recovery.patch` | VNC resize state and error recovery | Prevents the fixed-console session from losing its graphics state after a client resize or failed update. |
 | `0002-xrdp-fixed-console-vnc-path.patch` | fixed geometry, direct bitmap path, end-to-end update error propagation, and first-party capability code `21` | Keeps the physical X11 framebuffer authoritative, makes update failures visible to the session, and gives the direct module an explicit complete-framebuffer/smooth-scroll classification. |
-| `0003-xrdp-console-input-priority.patch` | console-only transport priority | Drains a bounded burst of queued RDP input and disconnects before and after direct-X11 backend work while preserving the legacy service order for other module codes. |
+| `0003-xrdp-console-input-priority.patch` | console-only transport priority | Drains a bounded burst of queued RDP input and disconnects before direct-X11 backend work, then performs one transport check afterward, while preserving the legacy service order for other module codes. |
 
 These three patches are production compatibility changes, not benchmark knobs.
 The old

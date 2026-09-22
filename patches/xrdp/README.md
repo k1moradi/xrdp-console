@@ -27,9 +27,10 @@ historical fork's commit history:
    direct bitmap transport, and end-to-end update error propagation, and
    reserves module code `21` for the first-party physical-console capability.
 3. `0003-xrdp-console-input-priority.patch` drains a bounded burst of RDP
-   transport work before and after backend work only for module code `21`.
-   This keeps queued input and disconnects ahead of synchronous direct-X11
-   graphics work without changing legacy VNC/Xorg scheduling.
+   transport work before backend work, followed by one transport check after
+   it, only for module code `21`. This keeps queued input and disconnects
+   ahead of synchronous direct-X11 graphics work without changing legacy
+   VNC/Xorg scheduling.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
 three patches are production compatibility changes, not benchmark knobs. Code
