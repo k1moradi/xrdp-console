@@ -890,7 +890,9 @@ def write_direct_xrdp_config(target: Path, port: int, log_path: Path,
     """Write the direct-X11 benchmark profile."""
     bitmap = "true" if bitmap_compression is not False else "false"
     bulk = "true" if bulk_compression is not False else "false"
-    allow_channels = "true" if dynamic_resizing else "false"
+    # The first-party module owns the text-only cliprdr channel directly;
+    # chansrv remains absent from this private profile.
+    allow_channels = "true"
     drdynvc = "true" if dynamic_resizing else "false"
     enable_dynamic_resizing = "true" if dynamic_resizing else "false"
     target.write_text(
@@ -919,7 +921,7 @@ EnableConsole=false
 rdpdr=false
 rdpsnd=false
 drdynvc={drdynvc}
-cliprdr=false
+cliprdr=true
 rail=false
 xrdpvr=false
 
@@ -1068,10 +1070,9 @@ def rewrite_xrdp_config(source: Path, target: Path, port: int,
 def remove_chansrv_from_config(path: Path) -> None:
     """Disable chansrv in a private benchmark config.
 
-    The pixel-path benchmark does not exercise clipboard or drive channels.
-    Removing the explicit Console socket avoids attaching a synthetic test
-    client to the production chansrv daemon when the standalone helper is not
-    available.
+    The direct module handles text clipboard traffic itself. Removing the
+    explicit Console socket avoids attaching a synthetic test client to the
+    production chansrv daemon while leaving the direct cliprdr channel enabled.
     """
     lines = path.read_text().splitlines()
     section = ""

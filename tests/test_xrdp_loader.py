@@ -296,7 +296,7 @@ key_file={install_root / "etc" / "xrdp" / "key.pem"}
 bitmap_cache=false
 bitmap_compression=false
 bulk_compression=false
-allow_channels=false
+allow_channels=true
 max_bpp=32
 autorun=console
 
@@ -310,7 +310,7 @@ EnableConsole=false
 rdpdr=false
 rdpsnd=false
 drdynvc=false
-cliprdr=false
+cliprdr=true
 rail=false
 xrdpvr=false
 

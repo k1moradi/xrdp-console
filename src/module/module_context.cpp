@@ -24,6 +24,7 @@ extern "C" {
 #include "../core/paint_quantum.h"
 #include "../core/presentation_scaler.h"
 #include "../core/presentation_transform.h"
+#include "../clipboard/clipboard_controller.h"
 #include "../rdp/rdp_update_sink.h"
 #include "../x11/x11_damage_tracker.h"
 #include "../x11/x11_cursor_tracker.h"
@@ -253,13 +254,19 @@ class ModuleEventSink final : public X11EventSink
 {
 public:
     ModuleEventSink(X11DamageTracker &damageTracker,
-                    X11CursorTracker &cursorTracker) noexcept
-        : damageTracker_(damageTracker), cursorTracker_(cursorTracker)
+                    X11CursorTracker &cursorTracker,
+                    ClipboardController *clipboard) noexcept
+        : damageTracker_(damageTracker), cursorTracker_(cursorTracker),
+          clipboard_(clipboard)
     {
     }
 
     void handle(const xcb_generic_event_t &event) noexcept override
     {
+        if (clipboard_ != nullptr)
+        {
+            clipboard_->handleX11Event(event);
+        }
         damageTracker_.handle(event);
         cursorTracker_.handle(event);
     }
@@ -267,7 +274,35 @@ public:
 private:
     X11DamageTracker &damageTracker_;
     X11CursorTracker &cursorTracker_;
+    ClipboardController *clipboard_;
 };
+
+int clipboard_callbacks_ready(void *context) noexcept
+{
+    return xrdp_console_module_clipboard_callbacks_ready(
+        static_cast<const xrdp_console_module *>(context));
+}
+
+int clipboard_channel_id(void *context, const char *name) noexcept
+{
+    return xrdp_console_module_clipboard_channel_id(
+        static_cast<xrdp_console_module *>(context), name);
+}
+
+int clipboard_send_to_channel(void *context, int channelId, char *data,
+                              int dataLength, int totalDataLength,
+                              int flags) noexcept
+{
+    return xrdp_console_module_clipboard_send_to_channel(
+        static_cast<xrdp_console_module *>(context), channelId, data,
+        dataLength, totalDataLength, flags);
+}
+
+int clipboard_chansrv_in_use(void *context) noexcept
+{
+    return xrdp_console_module_clipboard_chansrv_in_use(
+        static_cast<const xrdp_console_module *>(context));
+}
 
 bool
 is_pointer_message(int message) noexcept
@@ -321,6 +356,7 @@ struct ModuleContext::Impl
     std::unique_ptr<X11CursorTracker> cursorTracker{};
     std::unique_ptr<X11SharedMemoryCapture> sharedMemoryCapture{};
     std::unique_ptr<X11InputController> inputController{};
+    std::unique_ptr<ClipboardController> clipboard{};
     PresentationTransform presentationTransform{};
     PresentationScaler presentationScaler{};
     DamageRegion damageRegion{};
@@ -544,6 +580,23 @@ ModuleContext::connect() noexcept
             return 1;
         }
 
+        ClipboardChannelCallbacks clipboardCallbacks{};
+        clipboardCallbacks.context = impl_->module;
+        clipboardCallbacks.callbacksReady = clipboard_callbacks_ready;
+        clipboardCallbacks.getChannelId = clipboard_channel_id;
+        clipboardCallbacks.sendToChannel = clipboard_send_to_channel;
+        clipboardCallbacks.chansrvInUse = clipboard_chansrv_in_use;
+        auto clipboard = std::make_unique<ClipboardController>(
+            connection->nativeConnection(), connection->rootWindow(),
+            clipboardCallbacks);
+        if (!clipboard->valid())
+        {
+            log_message(LOG_LEVEL_WARNING,
+                        "xrdp-console: X11 clipboard unavailable; "
+                        "continuing without CLIPBOARD integration");
+            clipboard.reset();
+        }
+
         impl_->state.sourceGeometry = sourceGeometry;
         impl_->presentationTransform = presentationTransform;
         impl_->presentationScaler = std::move(presentationScaler);
@@ -560,6 +613,7 @@ ModuleContext::connect() noexcept
         impl_->cursorTracker = std::move(cursorTracker);
         impl_->sharedMemoryCapture = std::move(sharedMemoryCapture);
         impl_->inputController = std::move(inputController);
+        impl_->clipboard = std::move(clipboard);
         return 0;
     }
     catch (...)
@@ -570,6 +624,7 @@ ModuleContext::connect() noexcept
         impl_->cursorTracker.reset();
         impl_->damageTracker.reset();
         impl_->inputController.reset();
+        impl_->clipboard.reset();
         impl_->x11Connection.reset();
         impl_->damageRegion.clear();
         impl_->state.sourceGeometry = {};
@@ -693,6 +748,27 @@ int
 ModuleContext::event(int message, long param1, long param2, long param3,
                      long param4) noexcept
 {
+    if (!valid())
+    {
+        return 1;
+    }
+    if (message == WM_CHANNEL_DATA)
+    {
+        if (impl_->clipboard != nullptr)
+        {
+            impl_->clipboard->startChannel();
+            const auto packed = static_cast<unsigned long>(param1);
+            impl_->clipboard->handleChannelData(
+                static_cast<int>(packed & 0xffffUL),
+                reinterpret_cast<const char *>(param3),
+                static_cast<int>(param2),
+                static_cast<int>(param4),
+                static_cast<int>((packed >> 16U) & 0xffffUL));
+        }
+        // Clipboard packets are optional and malformed packets must not
+        // terminate the desktop session.
+        return 0;
+    }
     if (!valid() || impl_->inputController == nullptr ||
         !impl_->inputController->valid())
     {
@@ -743,6 +819,7 @@ ModuleContext::end() noexcept
     impl_->cursorTracker.reset();
     impl_->damageTracker.reset();
     impl_->inputController.reset();
+    impl_->clipboard.reset();
     impl_->x11Connection.reset();
     impl_->damageRegion.clear();
     impl_->presentationTransform = {};
@@ -917,7 +994,12 @@ ModuleContext::check_wait_objs() noexcept
         impl_->damageTracker->notificationCount();
     const std::uint64_t previousDamagedPixels =
         impl_->damageTracker->damagedPixelCount();
-    ModuleEventSink eventSink(*impl_->damageTracker, *impl_->cursorTracker);
+    if (impl_->clipboard != nullptr)
+    {
+        impl_->clipboard->startChannel();
+    }
+    ModuleEventSink eventSink(*impl_->damageTracker, *impl_->cursorTracker,
+                              impl_->clipboard.get());
     if (impl_->x11Connection->processEvents(
             eventSink, kMaximumX11EventsPerService,
             &impl_->x11EventBudgetPending) != ConnectionStatus::Ok)

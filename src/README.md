@@ -12,8 +12,12 @@ source/presentation geometry, and integrates the XCB socket with xrdp's
 wait-object loop. It tracks raw XDamage rectangles into a bounded,
 coalesced region through an explicit event sink, captures the supported 24-bit
 X11/32-bit-storage layout through one persistent MIT-SHM arena, and sends
-one classic bitmap update transaction through xrdp. Scaling, input,
-clipboard, resize, threads, and performance policy remain future work.
+one classic bitmap update transaction through xrdp. It also provides a narrow,
+bounded text-only CLIPBOARD bridge using the direct `cliprdr` channel and XCB
+selection ownership. PRIMARY, files, images, INCR transfers, and richer
+clipboard formats remain future work; the existing presentation scaling,
+resize, and XTest input paths remain intentionally bounded and classic-bitmap
+focused.
 
 The current checkout still uses the experimental x11vnc bridge for live
 measurements. Its benchmark and diagnostic programs live under `tools/`; the

@@ -34,6 +34,16 @@ int xrdp_console_module_server_set_pointer_large(
     xrdp_console_module *module, int x, int y, char *data, char *mask,
     int bpp, int width, int height);
 
+int xrdp_console_module_clipboard_callbacks_ready(
+    const xrdp_console_module *module);
+int xrdp_console_module_clipboard_channel_id(
+    xrdp_console_module *module, const char *name);
+int xrdp_console_module_clipboard_send_to_channel(
+    xrdp_console_module *module, int channel_id, char *data, int data_length,
+    int total_data_length, int flags);
+int xrdp_console_module_clipboard_chansrv_in_use(
+    const xrdp_console_module *module);
+
 #ifdef __cplusplus
 }
 #endif

@@ -325,3 +325,44 @@ xrdp_console_module_server_set_pointer_large(
                      &module->abi, x, y, data, mask, bpp, width, height)
                : 1;
 }
+
+int
+xrdp_console_module_clipboard_callbacks_ready(
+    const xrdp_console_module *module)
+{
+    return module != NULL && module->abi.server_get_channel_id != NULL &&
+           module->abi.server_send_to_channel != NULL &&
+           module->abi.server_chansrv_in_use != NULL;
+}
+
+int
+xrdp_console_module_clipboard_channel_id(xrdp_console_module *module,
+                                          const char *name)
+{
+    return xrdp_console_module_clipboard_callbacks_ready(module) && name != NULL
+               ? module->abi.server_get_channel_id(&module->abi, name)
+               : -1;
+}
+
+int
+xrdp_console_module_clipboard_send_to_channel(
+    xrdp_console_module *module, int channel_id, char *data, int data_length,
+    int total_data_length, int flags)
+{
+    return xrdp_console_module_clipboard_callbacks_ready(module) &&
+                   data != NULL && data_length >= 0 && total_data_length >= 0
+               ? module->abi.server_send_to_channel(
+                     &module->abi, channel_id, data, data_length,
+                     total_data_length, flags)
+               : 1;
+}
+
+int
+xrdp_console_module_clipboard_chansrv_in_use(
+    const xrdp_console_module *module)
+{
+    return xrdp_console_module_clipboard_callbacks_ready(module)
+               ? module->abi.server_chansrv_in_use(
+                     (struct xrdp_mod *)&module->abi)
+               : 1;
+}

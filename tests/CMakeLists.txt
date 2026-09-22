@@ -11,6 +11,7 @@ set(PYTHON_SOURCES
 if(TARGET xrdp-console)
     list(APPEND PYTHON_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/test_module_lifecycle.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_clipboard.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_cursor.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_damage.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_input.py
@@ -72,6 +73,38 @@ if(TARGET xrdp-console)
     target_include_directories(paint-quantum-unit PRIVATE
         ${CMAKE_SOURCE_DIR}/src)
     add_test(NAME paint-quantum-unit COMMAND paint-quantum-unit)
+
+    add_executable(clipboard-protocol-unit
+        test_clipboard_protocol.cpp
+        ${CMAKE_SOURCE_DIR}/src/clipboard/clipboard_protocol.cpp)
+    set_target_properties(clipboard-protocol-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(clipboard-protocol-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME clipboard-protocol-unit COMMAND clipboard-protocol-unit)
+
+    add_executable(x11-clipboard-integration
+        test_x11_clipboard.cpp
+        ${CMAKE_SOURCE_DIR}/src/clipboard/clipboard_controller.cpp
+        ${CMAKE_SOURCE_DIR}/src/clipboard/clipboard_protocol.cpp)
+    set_target_properties(x11-clipboard-integration PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(x11-clipboard-integration PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(x11-clipboard-integration PRIVATE
+        PkgConfig::XRDP_CONSOLE_TEST_XCB
+        PkgConfig::XRDP_CONSOLE_TEST_XCB_XFIXES)
+    add_test(NAME x11-clipboard-integration
+        COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_clipboard.py
+        $<TARGET_FILE:x11-clipboard-integration>)
+    set_tests_properties(x11-clipboard-integration PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+        TIMEOUT 30)
 
     add_executable(presentation-transform-unit
         test_presentation_transform.cpp

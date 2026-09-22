@@ -14,6 +14,10 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         module/module_context.cpp
         module/module_context.h
         module/module_entry.cpp
+        clipboard/clipboard_controller.cpp
+        clipboard/clipboard_controller.h
+        clipboard/clipboard_protocol.cpp
+        clipboard/clipboard_protocol.h
         core/damage_region.cpp
         core/damage_region.h
         core/framebuffer_view.h
