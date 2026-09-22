@@ -149,7 +149,7 @@ run() noexcept
 
         X11SharedMemoryCapture capture(
             *connection, window, screen->root_visual, screen->root_depth,
-            bounds);
+            bounds, 128U * 1024U);
         if (!capture.valid())
         {
             std::fprintf(stderr, "XShm setup failed: %s\n",
@@ -212,6 +212,36 @@ run() noexcept
             std::to_integer<unsigned int>(pixels.pixels[3]) != 0x00U)
         {
             std::fprintf(stderr, "XShm capture did not return the drawn pixel\n");
+            xcb_free_gc(connection, graphicsContext);
+            xcb_destroy_window(connection, window);
+            xcb_flush(connection);
+            xcb_disconnect(connection);
+            return 1;
+        }
+
+        X11SharedMemoryCapture boundedCapture(
+            *connection, window, screen->root_visual, screen->root_depth,
+            {120, 120}, 120U * 20U);
+        if (!boundedCapture.valid())
+        {
+            std::fprintf(stderr, "bounded XShm setup failed: %s\n",
+                         boundedCapture.failureReason() != nullptr
+                             ? boundedCapture.failureReason()
+                             : "unknown error");
+            xcb_free_gc(connection, graphicsContext);
+            xcb_destroy_window(connection, window);
+            xcb_flush(connection);
+            xcb_disconnect(connection);
+            return 1;
+        }
+        const FramebufferView maximumCapture =
+            boundedCapture.capture({0, 0, 120, 20});
+        const FramebufferView oversizedCapture =
+            boundedCapture.capture({0, 0, 120, 21});
+        if (!maximumCapture.valid() || oversizedCapture.valid())
+        {
+            std::fprintf(stderr,
+                         "bounded XShm arena accepted an oversized capture\n");
             xcb_free_gc(connection, graphicsContext);
             xcb_destroy_window(connection, window);
             xcb_flush(connection);

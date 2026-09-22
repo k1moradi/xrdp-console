@@ -147,6 +147,16 @@ if(TARGET xrdp-console)
     add_test(NAME presentation-transform-unit
         COMMAND presentation-transform-unit)
 
+    add_executable(x11-capture-arena-unit
+        test_x11_capture_arena.cpp)
+    set_target_properties(x11-capture-arena-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(x11-capture-arena-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME x11-capture-arena-unit COMMAND x11-capture-arena-unit)
+
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(XRDP_CONSOLE_TEST_XCB REQUIRED IMPORTED_TARGET xcb)
     pkg_check_modules(XRDP_CONSOLE_TEST_XCB_DAMAGE REQUIRED

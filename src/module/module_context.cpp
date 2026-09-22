@@ -578,7 +578,8 @@ ModuleContext::connect() noexcept
 
         auto sharedMemoryCapture = std::make_unique<X11SharedMemoryCapture>(
             *connection->nativeConnection(), connection->rootWindow(),
-            connection->rootVisual(), connection->rootDepth(), sourceGeometry);
+            connection->rootVisual(), connection->rootDepth(), sourceGeometry,
+            kMaximumPaintPixelsPerService);
         if (!sharedMemoryCapture->valid())
         {
             log_message(
@@ -1191,12 +1192,12 @@ ModuleContext::check_wait_objs() noexcept
         filledPresentationBackground = success;
     }
     std::size_t paintCallCount = 0;
-    std::uint64_t capturedSourcePixels = 0;
+    std::uint64_t processedSourcePixels = 0;
     std::uint64_t presentedPixels = 0;
     while (success && paintCallCount < kMaximumPaintRectanglesPerService &&
            presentedPixels < kMaximumPresentationPixelsPerService &&
            (impl_->pendingPresentation.active() ||
-            capturedSourcePixels < kMaximumPaintPixelsPerService))
+            processedSourcePixels < kMaximumPaintPixelsPerService))
     {
         if (!impl_->pendingPresentation.active())
         {
@@ -1211,8 +1212,8 @@ ModuleContext::check_wait_objs() noexcept
                 sourceRectangle.heightPixels;
             Rectangle captureRectangle = sourceRectangle;
             const std::uint64_t remainingSourceBudget =
-                capturedSourcePixels < kMaximumPaintPixelsPerService
-                    ? kMaximumPaintPixelsPerService - capturedSourcePixels
+                processedSourcePixels < kMaximumPaintPixelsPerService
+                    ? kMaximumPaintPixelsPerService - processedSourcePixels
                     : 0;
             if (rectanglePixels > remainingSourceBudget)
             {
@@ -1254,7 +1255,7 @@ ModuleContext::check_wait_objs() noexcept
                     success = false;
                     break;
                 }
-                capturedSourcePixels +=
+                processedSourcePixels +=
                     static_cast<std::uint64_t>(captureRectangle.widthPixels) *
                     captureRectangle.heightPixels;
                 continue;
@@ -1268,7 +1269,7 @@ ModuleContext::check_wait_objs() noexcept
                 break;
             }
             impl_->profile.noteCapture(captureRectangle);
-            capturedSourcePixels +=
+            processedSourcePixels +=
                 static_cast<std::uint64_t>(captureRectangle.widthPixels) *
                 captureRectangle.heightPixels;
             impl_->pendingPresentation.sourceRectangle = captureRectangle;

@@ -58,6 +58,30 @@ append_rows(std::vector<std::uint32_t> &output, FramebufferView rows)
     return true;
 }
 
+std::vector<std::uint32_t>
+pixels_of(FramebufferView view)
+{
+    std::vector<std::uint32_t> pixels;
+    if (!view.valid() ||
+        view.strideBytes <
+            static_cast<std::size_t>(view.widthPixels) *
+                sizeof(std::uint32_t))
+    {
+        return pixels;
+    }
+
+    pixels.reserve(static_cast<std::size_t>(view.widthPixels) *
+                   view.heightPixels);
+    for (std::uint32_t row = 0; row < view.heightPixels; ++row)
+    {
+        const auto *source = reinterpret_cast<const std::uint32_t *>(
+            view.pixels.data() + static_cast<std::size_t>(row) *
+                                     view.strideBytes);
+        pixels.insert(pixels.end(), source, source + view.widthPixels);
+    }
+    return pixels;
+}
+
 bool
 copy_rows_to_canvas(std::vector<std::uint32_t> &canvas,
                     std::uint32_t canvasWidth,
@@ -450,6 +474,42 @@ scaler_tests()
 }
 
 bool
+explicit_horizontal_partition_test()
+{
+    PresentationScaler scaler;
+    if (!check(scaler.configure({5, 1}, {7, 1}, {0, 0, 7, 1}),
+               "5-to-7 scaler configuration failed"))
+    {
+        return false;
+    }
+
+    const std::vector<std::uint32_t> sourcePixels{
+        10U, 20U, 30U, 40U, 50U,
+    };
+    const FramebufferView source = view_of(sourcePixels, 5, 1);
+    const FramebufferView output = scaler.scaleRows(
+        source, {0, 0, 5, 1}, {0, 0, 7, 1}, 0, 1);
+    const std::vector<std::uint32_t> expected{
+        10U, 10U, 20U, 30U, 30U, 40U, 50U,
+    };
+    if (!check(pixels_of(output) == expected,
+               "5-to-7 global nearest-neighbour mapping is incorrect"))
+    {
+        return false;
+    }
+
+    const std::vector<std::uint32_t> partialSourcePixels{
+        20U, 30U, 40U,
+    };
+    const FramebufferView partialOutput = scaler.scaleRows(
+        view_of(partialSourcePixels, 3, 1), {1, 0, 3, 1}, {2, 0, 4, 1},
+        0, 1);
+    return check(pixels_of(partialOutput) ==
+                     std::vector<std::uint32_t>{20U, 30U, 30U, 40U},
+                 "partial horizontal damage mapping is incorrect");
+}
+
+bool
 chunked_scaler_tests()
 {
     PresentationScaler small;
@@ -746,6 +806,10 @@ main()
         success = false;
     }
     if (!chunked_scaler_tests())
+    {
+        success = false;
+    }
+    if (!explicit_horizontal_partition_test())
     {
         success = false;
     }

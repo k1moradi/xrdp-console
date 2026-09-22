@@ -72,7 +72,8 @@ has_expected_pixmap_format(const xcb_setup_t *setup,
 
 X11SharedMemoryCapture::X11SharedMemoryCapture(
     xcb_connection_t &connection, xcb_drawable_t drawable,
-    xcb_visualid_t visual, std::uint8_t depth, PixelSize bounds) noexcept
+    xcb_visualid_t visual, std::uint8_t depth, PixelSize bounds,
+    std::uint64_t maximumCapturePixels) noexcept
     : connection_(&connection), drawable_(drawable), visual_(visual),
       depth_(depth), bounds_(bounds)
 {
@@ -143,15 +144,17 @@ X11SharedMemoryCapture::X11SharedMemoryCapture(
     }
     std::free(version);
 
-    const std::size_t pixelCount =
-        static_cast<std::size_t>(bounds_.widthPixels) * bounds_.heightPixels;
-    if (pixelCount > std::numeric_limits<std::size_t>::max() /
-                         kBytesPerPixel)
+    const std::uint64_t arenaPixels =
+        captureArenaPixels(bounds_, maximumCapturePixels);
+    if (arenaPixels == 0 ||
+        arenaPixels >
+            std::numeric_limits<std::size_t>::max() / kBytesPerPixel)
     {
-        fail("XShm framebuffer size overflows size_t");
+        fail("XShm capture arena size is invalid");
         return;
     }
-    sharedMemoryBytes_ = pixelCount * kBytesPerPixel;
+    sharedMemoryBytes_ = static_cast<std::size_t>(arenaPixels) *
+                          kBytesPerPixel;
     sharedMemoryId_ =
         shmget(IPC_PRIVATE, sharedMemoryBytes_, IPC_CREAT | 0600);
     if (sharedMemoryId_ < 0)
