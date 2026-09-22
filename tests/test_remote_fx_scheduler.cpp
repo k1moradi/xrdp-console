@@ -78,10 +78,46 @@ named_work_cases_have_the_expected_priority()
     return success;
 }
 
+bool
+snapshot_eligibility_has_the_expected_priority()
+{
+    bool success = true;
+    if (!check(
+            shouldSnapshotRemoteFxDamage(RemoteFxWorkClass::NewDamage),
+            "new damage should create a local snapshot"))
+    {
+        success = false;
+    }
+    if (!check(
+            !shouldSnapshotRemoteFxDamage(RemoteFxWorkClass::Idle),
+            "idle work should not snapshot damage"))
+    {
+        success = false;
+    }
+    if (!check(
+            !shouldSnapshotRemoteFxDamage(
+                RemoteFxWorkClass::ImmediateContinuation),
+            "an existing local frame must drain before fresh XDamage is "
+            "snapshotted"))
+    {
+        success = false;
+    }
+    return success;
+}
+
 } // namespace
 
 int
 main()
 {
-    return named_work_cases_have_the_expected_priority() ? 0 : 1;
+    bool success = true;
+    if (!named_work_cases_have_the_expected_priority())
+    {
+        success = false;
+    }
+    if (!snapshot_eligibility_has_the_expected_priority())
+    {
+        success = false;
+    }
+    return success ? 0 : 1;
 }

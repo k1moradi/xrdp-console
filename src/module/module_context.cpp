@@ -1271,9 +1271,17 @@ ModuleContext::check_remote_fx() noexcept
         }
     }
 
-    if (!impl_->pendingRfx.active() &&
-        !impl_->pendingPresentation.active() &&
-        impl_->damageTracker->hasPendingDamage())
+    /*
+     * Freeze one local damage snapshot until it has been completely
+     * presented. XDamage may continue accumulating server-side while the
+     * bounded local queue drains.
+     *
+     * Snapshotting into a partially consumed DamageRegion would allow new
+     * overlapping damage to coalesce with its front rectangle and reintroduce
+     * rows already transmitted, preventing bounded forward progress under
+     * continuous churn.
+     */
+    if (shouldSnapshotRemoteFxDamage(workClass))
     {
         const std::uint64_t previousSnapshotRectangles =
             impl_->damageTracker->snapshotRectangleCount();

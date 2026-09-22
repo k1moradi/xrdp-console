@@ -154,15 +154,62 @@ test_stripe_consumption() noexcept
                : 1;
 }
 
+int
+test_overlapping_damage_can_reexpand_consumed_front() noexcept
+{
+    constexpr PixelSize bounds{1366, 768};
+    DamageRegion region;
+
+    region.add({20, 20, 1024, 640}, bounds);
+    if (!region.consume_front({20, 20, 1024, 128}))
+    {
+        return 1;
+    }
+
+    Rectangle remaining{};
+    if (!region.front(remaining) ||
+        remaining != Rectangle{20, 148, 1024, 512})
+    {
+        return 1;
+    }
+
+    /*
+     * This is legal DamageRegion behavior. The RemoteFX scheduler must not
+     * perform it while a previous local frame is still being drained.
+     */
+    region.add({20, 20, 1024, 640}, bounds);
+
+    return region.front(remaining) &&
+                   remaining == Rectangle{20, 20, 1024, 640}
+               ? 0
+               : 1;
+}
+
 } // namespace
 
 int
 main()
 {
-    return test_clipping_and_merging() == 0 &&
-                   test_fragmentation_stays_bounded() == 0 &&
-                   test_bounded_consumption() == 0 &&
-                   test_stripe_consumption() == 0
-               ? EXIT_SUCCESS
-               : EXIT_FAILURE;
+    bool success = true;
+    if (test_clipping_and_merging() != 0)
+    {
+        success = false;
+    }
+    if (test_fragmentation_stays_bounded() != 0)
+    {
+        success = false;
+    }
+    if (test_bounded_consumption() != 0)
+    {
+        success = false;
+    }
+    if (test_stripe_consumption() != 0)
+    {
+        success = false;
+    }
+    if (test_overlapping_damage_can_reexpand_consumed_front() != 0)
+    {
+        success = false;
+    }
+    return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

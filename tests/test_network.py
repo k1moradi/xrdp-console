@@ -132,6 +132,31 @@ class SyntheticNetworkTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             driver.stop()
 
+    def test_gpu_churn_driver_has_single_stop_ownership(self):
+        class FakeStdin:
+            def write(self, data):
+                del data
+
+            def flush(self):
+                return None
+
+        class FakeProcess:
+            stdin = FakeStdin()
+
+            def poll(self):
+                return None
+
+        class ValidReader:
+            def readline(self, timeout):
+                del timeout
+                return b"1000000000 1 1000000001\n"
+
+        driver = module.GpuChurnDriver(FakeProcess(), ValidReader(), 5.0)
+        driver.start()
+        driver.stop()
+        with self.assertRaises(RuntimeError):
+            driver.stop()
+
     def test_direct_graphics_transport_requests_are_explicit(self):
         self.assertEqual(
             module.direct_graphics_request("rfx"),

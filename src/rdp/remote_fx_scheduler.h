@@ -27,3 +27,9 @@ enum class RemoteFxWorkClass
 
     return RemoteFxWorkClass::Idle;
 }
+
+[[nodiscard]] constexpr bool
+shouldSnapshotRemoteFxDamage(RemoteFxWorkClass workClass) noexcept
+{
+    return workClass == RemoteFxWorkClass::NewDamage;
+}

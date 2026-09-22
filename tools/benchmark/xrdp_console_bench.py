@@ -527,6 +527,7 @@ class GpuChurnDriver:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._started = False
+        self._stopped = False
         self._generated_frames = 0
         self._first_frame_ns: int | None = None
         self._last_frame_ns: int | None = None
@@ -586,6 +587,12 @@ class GpuChurnDriver:
                 self._failure = error
 
     def stop(self) -> ChurnStatistics:
+        if not self._started:
+            raise RuntimeError("GPU churn driver was not started")
+        if self._stopped:
+            raise RuntimeError("GPU churn driver was already stopped")
+
+        self._stopped = True
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
@@ -2111,7 +2118,9 @@ def run_direct_rfb_input_case(args: argparse.Namespace, name: str,
                 f"{process_rss_tree(proc) / 1048576:.1f}MiB")
         print(f"{'':18} " + "; ".join(metrics))
         if churn_driver is not None:
-            print_churn_statistics(churn_driver.stop())
+            driver = churn_driver
+            churn_driver = None
+            print_churn_statistics(driver.stop())
         transport_end = tcp_snapshot(vnc_port)
         print_transport_summary("rfb-direct-input-wire", transport_start,
                                 transport_end, elapsed)
@@ -2280,7 +2289,9 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
                 f"{process_rss_tree(proc) / 1048576:.1f}MiB")
         print(f"{'':18} " + "; ".join(metrics))
         if churn_driver is not None:
-            print_churn_statistics(churn_driver.stop())
+            driver = churn_driver
+            churn_driver = None
+            print_churn_statistics(driver.stop())
         transport_end = tcp_snapshot(xrdp_port)
         print_transport_summary(transport_label, transport_start,
                                 transport_end, elapsed)
@@ -2444,7 +2455,9 @@ def run_graphics_under_churn(
             if delay > 0:
                 time.sleep(delay)
 
-        churn_statistics = churn_driver.stop()
+        driver = churn_driver
+        churn_driver = None
+        churn_statistics = driver.stop()
         print_churn_statistics(churn_statistics)
         if (churn_statistics.achieved_fps <
                 churn_statistics.requested_fps * MINIMUM_CHURN_RATE_FRACTION):
