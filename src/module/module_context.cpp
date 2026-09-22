@@ -25,6 +25,8 @@ extern "C" {
 #include "../core/presentation_transform.h"
 #include "../clipboard/clipboard_controller.h"
 #include "../rdp/rdp_update_sink.h"
+#include "../rdp/rfx_encoder.h"
+#include "../rdp/rfx_surface_sink.h"
 #include "../x11/x11_damage_tracker.h"
 #include "../x11/x11_cursor_tracker.h"
 #include "../x11/x11_display_connection.h"
@@ -372,6 +374,37 @@ struct PendingPresentation
     }
 };
 
+enum class GraphicsTransport
+{
+    ClassicBitmap,
+    RemoteFx,
+};
+
+struct PendingRfxChunk
+{
+    Rectangle destinationRectangle{};
+    FramebufferView pixels{};
+    std::size_t nextTile{};
+    std::size_t tileCount{};
+    bool fillsPresentation{};
+
+    [[nodiscard]] bool active() const noexcept
+    {
+        return destinationRectangle.widthPixels != 0 &&
+               destinationRectangle.heightPixels != 0 && pixels.valid() &&
+               tileCount != 0;
+    }
+
+    void clear() noexcept
+    {
+        destinationRectangle = {};
+        pixels = {};
+        nextTile = 0;
+        tileCount = 0;
+        fillsPresentation = false;
+    }
+};
+
 } // namespace
 
 struct ModuleContext::Impl
@@ -393,6 +426,16 @@ struct ModuleContext::Impl
     // persistent XShm arena. While this item is active, no subsequent
     // capture() call may overwrite that arena.
     PendingPresentation pendingPresentation{};
+    // pixels is a non-owning view into presentationScaler scratch or the
+    // zero-filled RFX background arena. Neither owner may be replaced or
+    // overwritten while this codec chunk is active.
+    PendingRfxChunk pendingRfx{};
+    std::unique_ptr<RfxEncoder> rfxEncoder{};
+    RfxSurfaceSink rfxSurfaceSink{nullptr};
+    GraphicsTransport graphicsTransport{GraphicsTransport::ClassicBitmap};
+    std::array<std::uint32_t, PresentationScaler::kScratchPixelCapacity>
+        rfxFillPixels{};
+    std::uint32_t rfxFillNextRow{};
     RuntimeProfile profile{};
     RdpUpdateSink rdpUpdateSink{nullptr};
     bool fullPresentationInvalidation{false};
@@ -425,6 +468,7 @@ ModuleContext::ModuleContext() noexcept : impl_(new (std::nothrow) Impl{})
     {
         impl_->module = xrdp_console_module_create(this);
         impl_->rdpUpdateSink = RdpUpdateSink(impl_->module);
+        impl_->rfxSurfaceSink = RfxSurfaceSink(impl_->module);
     }
 }
 
@@ -563,6 +607,19 @@ ModuleContext::connect() noexcept
             return 1;
         }
 
+        auto rfxEncoder = std::make_unique<RfxEncoder>();
+        GraphicsTransport graphicsTransport = GraphicsTransport::ClassicBitmap;
+        if (xrdp_console_module_get_rfx_capabilities(
+                impl_->module, nullptr) == 0 &&
+            rfxEncoder->configure(impl_->state.presentationGeometry))
+        {
+            graphicsTransport = GraphicsTransport::RemoteFx;
+        }
+        else
+        {
+            rfxEncoder.reset();
+        }
+
         auto damageTracker = std::make_unique<X11DamageTracker>(
             *connection->nativeConnection(), connection->rootWindow(),
             connection->sourceGeometry());
@@ -633,6 +690,8 @@ ModuleContext::connect() noexcept
         }
 
         impl_->pendingPresentation.clear();
+        impl_->pendingRfx.clear();
+        impl_->rfxFillNextRow = 0;
         impl_->state.sourceGeometry = sourceGeometry;
         impl_->presentationTransform = presentationTransform;
         impl_->presentationScaler = std::move(presentationScaler);
@@ -650,6 +709,12 @@ ModuleContext::connect() noexcept
         impl_->sharedMemoryCapture = std::move(sharedMemoryCapture);
         impl_->inputController = std::move(inputController);
         impl_->clipboard = std::move(clipboard);
+        impl_->rfxEncoder = std::move(rfxEncoder);
+        impl_->graphicsTransport = graphicsTransport;
+        log_message(LOG_LEVEL_INFO, "xrdp-console: graphics transport %s",
+                    graphicsTransport == GraphicsTransport::RemoteFx
+                        ? "RemoteFX"
+                        : "classic bitmap");
         return 0;
     }
     catch (...)
@@ -657,6 +722,10 @@ ModuleContext::connect() noexcept
         // The C ABI must report allocation/constructor failures as a normal
         // module failure and leave no partially connected state behind.
         impl_->pendingPresentation.clear();
+        impl_->pendingRfx.clear();
+        impl_->rfxEncoder.reset();
+        impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
+        impl_->rfxFillNextRow = 0;
         impl_->sharedMemoryCapture.reset();
         impl_->cursorTracker.reset();
         impl_->damageTracker.reset();
@@ -710,10 +779,26 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
         return 1;
     }
 
+    auto rfxEncoder = std::make_unique<RfxEncoder>();
+    GraphicsTransport graphicsTransport = GraphicsTransport::ClassicBitmap;
+    if (xrdp_console_module_get_rfx_capabilities(impl_->module, nullptr) == 0 &&
+        rfxEncoder->configure(presentationGeometry))
+    {
+        graphicsTransport = GraphicsTransport::RemoteFx;
+    }
+    else
+    {
+        rfxEncoder.reset();
+    }
+
     impl_->pendingPresentation.clear();
+    impl_->pendingRfx.clear();
+    impl_->rfxFillNextRow = 0;
     impl_->state.presentationGeometry = presentationGeometry;
     impl_->presentationTransform = transform;
     impl_->presentationScaler = std::move(scaler);
+    impl_->rfxEncoder = std::move(rfxEncoder);
+    impl_->graphicsTransport = graphicsTransport;
     impl_->damageRegion.clear();
     impl_->damageRegion.add(
         {0, 0, impl_->state.sourceGeometry.widthPixels,
@@ -742,6 +827,8 @@ ModuleContext::invalidate_presentation(int width, int height) noexcept
         return 1;
     }
     impl_->pendingPresentation.clear();
+    impl_->pendingRfx.clear();
+    impl_->rfxFillNextRow = 0;
     impl_->damageRegion.clear();
     impl_->damageRegion.add(
         {0, 0, impl_->state.sourceGeometry.widthPixels,
@@ -767,6 +854,8 @@ ModuleContext::suppress_output(bool suppress, int left, int top, int right,
 
     impl_->outputSuppressed = suppress;
     impl_->pendingPresentation.clear();
+    impl_->pendingRfx.clear();
+    impl_->rfxFillNextRow = 0;
     if (impl_->state.sourceGeometry.widthPixels != 0 &&
         impl_->state.sourceGeometry.heightPixels != 0)
     {
@@ -856,6 +945,10 @@ ModuleContext::end() noexcept
     // X11DisplayConnection destroys the xrdp wait object before disconnecting
     // XCB. Reset it before changing the lifecycle state.
     impl_->pendingPresentation.clear();
+    impl_->pendingRfx.clear();
+    impl_->rfxEncoder.reset();
+    impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
+    impl_->rfxFillNextRow = 0;
     impl_->sharedMemoryCapture.reset();
     impl_->cursorTracker.reset();
     impl_->damageTracker.reset();
@@ -977,18 +1070,25 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
         ++(*read_count);
     }
 
+    const bool remoteFxAvailable =
+        impl_->graphicsTransport == GraphicsTransport::RemoteFx &&
+        impl_->rfxEncoder != nullptr && impl_->rfxSurfaceSink.available();
+
     if (timeout != nullptr && !impl_->outputSuppressed)
     {
-        if (impl_->x11EventBudgetPending)
+        if (impl_->x11EventBudgetPending || impl_->pendingRfx.active())
         {
             // XCB may own more events in its private queue after the socket is
-            // no longer readable. Keep draining those in bounded slices.
+            // no longer readable. Keep draining those in bounded slices. A
+            // pending RemoteFX chunk also continues immediately: one codec
+            // invocation is intentionally the largest synchronous unit.
             *timeout = 0;
         }
-        else if (impl_->rdpUpdateSink.available() &&
+        else if ((remoteFxAvailable || impl_->rdpUpdateSink.available()) &&
                  (impl_->damageTracker->hasPendingDamage() ||
                   !impl_->damageRegion.rectangles().empty() ||
-                  impl_->fullPresentationInvalidation))
+                  impl_->fullPresentationInvalidation ||
+                  impl_->pendingPresentation.active()))
         {
             if (!impl_->presentationDeadlineArmed)
             {
@@ -1022,6 +1122,281 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
         }
     }
     return 0;
+}
+
+int
+ModuleContext::check_remote_fx() noexcept
+{
+    if (!valid() || impl_->rfxEncoder == nullptr ||
+        !impl_->rfxEncoder->valid() || !impl_->rfxSurfaceSink.available())
+    {
+        return 1;
+    }
+
+    const auto finish = [this](bool immediateContinuation) noexcept {
+        const bool workPending =
+            impl_->pendingRfx.active() ||
+            impl_->pendingPresentation.active() ||
+            impl_->fullPresentationInvalidation ||
+            !impl_->damageRegion.rectangles().empty() ||
+            impl_->damageTracker->hasPendingDamage();
+
+        if (!workPending)
+        {
+            impl_->disarmPresentation();
+        }
+        else if (immediateContinuation)
+        {
+            // A pending codec chunk or captured source rectangle must resume
+            // without waiting for the presentation cadence. No new capture is
+            // performed until the current borrowed view is fully sent.
+            impl_->armPresentationImmediately();
+        }
+        else
+        {
+            impl_->armNextPresentation(Impl::Clock::now());
+        }
+        impl_->profile.maybeLog();
+        return 0;
+    };
+
+    if (!impl_->pendingRfx.active() &&
+        !impl_->pendingPresentation.active() &&
+        impl_->damageTracker->hasPendingDamage())
+    {
+        const std::uint64_t previousSnapshotRectangles =
+            impl_->damageTracker->snapshotRectangleCount();
+        const std::uint64_t previousSnapshotPixels =
+            impl_->damageTracker->snapshotPixelCount();
+        if (!impl_->damageTracker->snapshot(impl_->damageRegion))
+        {
+            return 1;
+        }
+        impl_->profile.noteSnapshot(
+            impl_->damageTracker->snapshotRectangleCount() -
+                previousSnapshotRectangles,
+            impl_->damageTracker->snapshotPixelCount() -
+                previousSnapshotPixels);
+    }
+
+    if (!impl_->pendingRfx.active())
+    {
+        if (impl_->fullPresentationInvalidation)
+        {
+            const std::uint32_t widthPixels =
+                impl_->state.presentationGeometry.widthPixels;
+            const std::uint32_t remainingRows =
+                impl_->state.presentationGeometry.heightPixels -
+                impl_->rfxFillNextRow;
+            const std::uint32_t scratchRows =
+                widthPixels == 0
+                    ? 0
+                    : static_cast<std::uint32_t>(
+                          PresentationScaler::kScratchPixelCapacity /
+                          widthPixels);
+            const std::uint32_t budgetRows =
+                widthPixels == 0
+                    ? 0
+                    : static_cast<std::uint32_t>(
+                          kMaximumPresentationPixelsPerService /
+                          widthPixels);
+            const std::uint32_t rows = std::min(
+                {scratchRows, budgetRows, remainingRows});
+            if (rows == 0)
+            {
+                return 1;
+            }
+
+            const std::size_t bytes =
+                static_cast<std::size_t>(widthPixels) * rows * 4U;
+            const FramebufferView fillPixels{
+                std::span<const std::byte>(
+                    reinterpret_cast<const std::byte *>(
+                        impl_->rfxFillPixels.data()),
+                    bytes),
+                widthPixels,
+                rows,
+                static_cast<std::size_t>(widthPixels) * 4U,
+            };
+            const std::size_t tileCount =
+                impl_->rfxEncoder->tileCount(fillPixels);
+            if (tileCount == 0)
+            {
+                return 1;
+            }
+            impl_->pendingRfx = {
+                {0, static_cast<std::int32_t>(impl_->rfxFillNextRow),
+                 widthPixels, rows},
+                fillPixels,
+                0,
+                tileCount,
+                true,
+            };
+        }
+        else if (!impl_->pendingPresentation.active())
+        {
+            Rectangle sourceRectangle{};
+            if (!impl_->damageRegion.front(sourceRectangle))
+            {
+                return finish(false);
+            }
+
+            const PaintStripeDecision stripe = choosePaintStripe(
+                sourceRectangle.widthPixels, sourceRectangle.heightPixels,
+                kMaximumPaintPixelsPerService, false);
+            if (stripe.heightPixels == 0)
+            {
+                return 1;
+            }
+
+            Rectangle captureRectangle = sourceRectangle;
+            if (stripe.heightPixels < captureRectangle.heightPixels)
+            {
+                captureRectangle.heightPixels = stripe.heightPixels;
+            }
+
+            Rectangle presentationRectangle{};
+            const RectangleMapResult mapping =
+                impl_->presentationTransform.mapSourceRectangle(
+                    captureRectangle, presentationRectangle);
+            if (mapping == RectangleMapResult::Invalid)
+            {
+                return 1;
+            }
+            if (mapping == RectangleMapResult::Empty)
+            {
+                if (!impl_->damageRegion.consume_front(captureRectangle))
+                {
+                    return 1;
+                }
+                return finish(true);
+            }
+
+            const FramebufferView sourcePixels =
+                impl_->sharedMemoryCapture->capture(captureRectangle);
+            if (!sourcePixels.valid())
+            {
+                return 1;
+            }
+            impl_->profile.noteCapture(captureRectangle);
+            impl_->pendingPresentation.sourceRectangle = captureRectangle;
+            impl_->pendingPresentation.presentationRectangle =
+                presentationRectangle;
+            impl_->pendingPresentation.sourcePixels = sourcePixels;
+            impl_->pendingPresentation.nextPresentationRow = 0;
+        }
+
+        if (!impl_->pendingRfx.active())
+        {
+            if (!impl_->pendingPresentation.active())
+            {
+                return finish(true);
+            }
+
+            PendingPresentation &pending = impl_->pendingPresentation;
+            const std::uint32_t maximumScratchRows =
+                impl_->presentationScaler.maximumRowsForWidth(
+                    pending.presentationRectangle.widthPixels);
+            const std::uint64_t remainingBudget =
+                kMaximumPresentationPixelsPerService;
+            const std::uint32_t rowsFromBudget =
+                pending.presentationRectangle.widthPixels == 0
+                    ? 0
+                    : static_cast<std::uint32_t>(
+                          remainingBudget /
+                          pending.presentationRectangle.widthPixels);
+            const std::uint32_t remainingRows =
+                pending.presentationRectangle.heightPixels -
+                pending.nextPresentationRow;
+            const std::uint32_t rows = std::min(
+                {maximumScratchRows, rowsFromBudget, remainingRows});
+            if (rows == 0)
+            {
+                return 1;
+            }
+
+            const FramebufferView outputPixels =
+                impl_->presentationScaler.scaleRows(
+                    pending.sourcePixels, pending.sourceRectangle,
+                    pending.presentationRectangle,
+                    pending.nextPresentationRow, rows);
+            if (!outputPixels.valid())
+            {
+                return 1;
+            }
+
+            const Rectangle destination{
+                pending.presentationRectangle.x,
+                pending.presentationRectangle.y +
+                    static_cast<std::int32_t>(pending.nextPresentationRow),
+                pending.presentationRectangle.widthPixels,
+                rows,
+            };
+            const std::size_t tileCount =
+                impl_->rfxEncoder->tileCount(outputPixels);
+            if (tileCount == 0)
+            {
+                return 1;
+            }
+            impl_->pendingRfx = {
+                destination,
+                outputPixels,
+                0,
+                tileCount,
+                false,
+            };
+        }
+    }
+
+    PendingRfxChunk &pending = impl_->pendingRfx;
+    const RfxEncodedBatch batch = impl_->rfxEncoder->encode(
+        pending.pixels, pending.nextTile,
+        RfxEncoder::kMaximumTilesPerCall);
+    if (!batch.valid() ||
+        !impl_->rfxSurfaceSink.send(pending.destinationRectangle, batch))
+    {
+        return 1;
+    }
+
+    pending.nextTile += batch.tilesEncoded;
+    if (pending.nextTile < pending.tileCount)
+    {
+        return finish(true);
+    }
+
+    const bool fillsPresentation = pending.fillsPresentation;
+    const Rectangle completedDestination = pending.destinationRectangle;
+    pending.clear();
+
+    if (fillsPresentation)
+    {
+        impl_->rfxFillNextRow += completedDestination.heightPixels;
+        if (impl_->rfxFillNextRow ==
+            impl_->state.presentationGeometry.heightPixels)
+        {
+            impl_->fullPresentationInvalidation = false;
+            impl_->rfxFillNextRow = 0;
+        }
+    }
+    else
+    {
+        PendingPresentation &presentation = impl_->pendingPresentation;
+        presentation.nextPresentationRow +=
+            completedDestination.heightPixels;
+        if (presentation.nextPresentationRow ==
+            presentation.presentationRectangle.heightPixels)
+        {
+            const Rectangle completedSource = presentation.sourceRectangle;
+            presentation.clear();
+            if (!impl_->damageRegion.consume_front(completedSource))
+            {
+                return 1;
+            }
+        }
+    }
+
+    return finish(impl_->pendingRfx.active() ||
+                  impl_->pendingPresentation.active());
 }
 
 int
@@ -1116,6 +1491,11 @@ ModuleContext::check_wait_objs() noexcept
             return 1;
         }
         impl_->cursorTracker->acknowledge();
+    }
+
+    if (impl_->graphicsTransport == GraphicsTransport::RemoteFx)
+    {
+        return check_remote_fx();
     }
 
     // The standalone lifecycle test exercises the transport and Damage

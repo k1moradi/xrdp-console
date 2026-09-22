@@ -122,6 +122,7 @@ set(_xrdp_configure_args
     "--runstatedir=/run"
     "--with-socketdir=/run/xrdp/sockdir"
     "--enable-strict-locations"
+    "--enable-rfxcodec"
     "--enable-x264"
     "--enable-jpeg"
     "--enable-ipv6"
@@ -162,6 +163,9 @@ ExternalProject_Add(xrdp_upstream
     BUILD_BYPRODUCTS
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libvnc.so"
+        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libxrdp.so"
+        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libcommon.so"
+        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/librfxencode.a"
     USES_TERMINAL_CONFIGURE TRUE
     USES_TERMINAL_BUILD TRUE
     USES_TERMINAL_TEST TRUE

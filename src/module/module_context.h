@@ -56,6 +56,8 @@ public:
     int check_wait_objs() noexcept;
 
 private:
+    int check_remote_fx() noexcept;
+
     struct Impl;
     Impl *impl_;
 };

@@ -2,6 +2,7 @@
 
 #include <config_ac.h>
 
+#include <limits.h>
 #include <stdlib.h>
 
 #include "xrdp.h"
@@ -306,6 +307,84 @@ xrdp_console_module_server_end_update(xrdp_console_module *module)
     return xrdp_console_module_update_callbacks_ready(module)
                ? module->abi.server_end_update(&module->abi)
                : 1;
+}
+
+int
+xrdp_console_module_get_rfx_capabilities(
+    const xrdp_console_module *module,
+    struct xrdp_console_rfx_capabilities *capabilities)
+{
+    const struct xrdp_wm *wm;
+    int maximum_payload_bytes;
+
+    if (capabilities != NULL)
+    {
+        capabilities->codec_id = 0;
+        capabilities->maximum_payload_bytes = 0;
+    }
+
+    if (module == NULL || module->abi.wm == 0)
+    {
+        return 1;
+    }
+
+    wm = (const struct xrdp_wm *)(module->abi.wm);
+    if (wm->session == NULL || wm->client_info == NULL)
+    {
+        return 1;
+    }
+    if (wm->session->client_info == NULL ||
+        wm->client_info->rfx_codec_id == 0 || wm->client_info->gfx != 0 ||
+        (wm->client_info->use_fast_path & 1) == 0)
+    {
+        return 1;
+    }
+
+    maximum_payload_bytes = wm->client_info->max_fastpath_frag_bytes;
+    if (maximum_payload_bytes < 32 * 1024)
+    {
+        maximum_payload_bytes = 32 * 1024;
+    }
+    if (capabilities != NULL)
+    {
+        capabilities->codec_id = wm->client_info->rfx_codec_id;
+        capabilities->maximum_payload_bytes = maximum_payload_bytes;
+    }
+    return 0;
+}
+
+int
+xrdp_console_module_rfx_available(
+    const xrdp_console_module *module,
+    struct xrdp_console_rfx_capabilities *capabilities)
+{
+    return xrdp_console_module_get_rfx_capabilities(module, capabilities) == 0;
+}
+
+int
+xrdp_console_module_send_rfx_surface(
+    xrdp_console_module *module, int destination_x, int destination_y,
+    int width_pixels, int height_pixels, char *data_with_prefix,
+    int prefix_bytes, int encoded_bytes)
+{
+    const struct xrdp_wm *wm;
+
+    if (xrdp_console_module_get_rfx_capabilities(module, NULL) != 0 ||
+        destination_x < 0 || destination_y < 0 || width_pixels <= 0 ||
+        height_pixels <= 0 || data_with_prefix == NULL || prefix_bytes <= 0 ||
+        encoded_bytes <= 0 ||
+        destination_x > INT_MAX - width_pixels ||
+        destination_y > INT_MAX - height_pixels)
+    {
+        return 1;
+    }
+
+    wm = (const struct xrdp_wm *)(module->abi.wm);
+    return libxrdp_fastpath_send_surface(
+        wm->session, data_with_prefix, prefix_bytes, encoded_bytes,
+        destination_x, destination_y, destination_x + width_pixels,
+        destination_y + height_pixels, 32,
+        wm->client_info->rfx_codec_id, width_pixels, height_pixels);
 }
 
 int

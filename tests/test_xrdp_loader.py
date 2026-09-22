@@ -271,26 +271,35 @@ def ensure_test_display() -> None:
 
 
 def main() -> int:
-    if len(sys.argv) not in (7, 9):
+    arguments = list(sys.argv[1:])
+    rfx_mode = False
+    if "--rfx" in arguments:
+        if arguments[-1] != "--rfx" or arguments.count("--rfx") != 1:
+            raise SystemExit("--rfx must be the final loader-smoke option")
+        arguments.pop()
+        rfx_mode = True
+
+    if len(arguments) not in (6, 8):
         raise SystemExit(
             f"usage: {sys.argv[0]} MODULE XRDP INSTALL_ROOT FREERDP "
-            "PIXEL_PROBE STIMULUS [PRESENTATION_WIDTH PRESENTATION_HEIGHT]"
+            "PIXEL_PROBE STIMULUS [PRESENTATION_WIDTH PRESENTATION_HEIGHT] "
+            "[--rfx]"
         )
 
     ensure_test_display()
 
-    module_path = Path(sys.argv[1]).resolve()
-    xrdp_path = Path(sys.argv[2]).resolve()
-    install_root = Path(sys.argv[3]).resolve()
-    freerdp_path = Path(sys.argv[4]).resolve()
-    pixel_probe = Path(sys.argv[5]).resolve()
-    stimulus_path = Path(sys.argv[6]).resolve()
+    module_path = Path(arguments[0]).resolve()
+    xrdp_path = Path(arguments[1]).resolve()
+    install_root = Path(arguments[2]).resolve()
+    freerdp_path = Path(arguments[3]).resolve()
+    pixel_probe = Path(arguments[4]).resolve()
+    stimulus_path = Path(arguments[5]).resolve()
     presentation_width = 1024
     presentation_height = 768
-    if len(sys.argv) == 9:
+    if len(arguments) == 8:
         try:
-            presentation_width = int(sys.argv[7])
-            presentation_height = int(sys.argv[8])
+            presentation_width = int(arguments[6])
+            presentation_height = int(arguments[7])
         except ValueError as error:
             raise AssertionError("presentation geometry must be numeric") from error
         if presentation_width <= 0 or presentation_height <= 0:
@@ -315,6 +324,7 @@ def main() -> int:
         module_name = f"libxrdp_console_loader_{os.getpid()}.so"
         module_link = module_dir / module_name
         module_link.symlink_to(module_path)
+        fastpath_option = "use_fastpath=both\n" if rfx_mode else ""
 
         config_path.write_text(
             f"""[Globals]
@@ -330,7 +340,7 @@ bitmap_compression=false
 bulk_compression=false
 allow_channels=true
 max_bpp=32
-autorun=console
+{fastpath_option}autorun=console
 
 [Logging]
 LogFile={log_path}
@@ -384,13 +394,18 @@ password=smoke
                     "/cert:ignore",
                     f"/size:{presentation_width}x{presentation_height}",
                     "/t:xrdp-console-loader",
-                    "-gfx",
                     "-compression",
                     "/network:lan",
                     "/timeout:5000",
                     "/log-level:WARN",
                     "-clipboard",
                 ]
+                if rfx_mode:
+                    # RemoteFX bitmap codec with the modern graphics pipeline
+                    # disabled. The module's capability gate requires gfx=0.
+                    client_command.extend(["+rfx", "-gfx"])
+                else:
+                    client_command.append("-gfx")
                 with client_log_path.open("w", encoding="utf-8") as client_log:
                     client = subprocess.Popen(
                         client_command,
@@ -408,6 +423,14 @@ password=smoke
                         4.0,
                         stdout_path,
                     )
+                    if rfx_mode:
+                        wait_for_log(
+                            server,
+                            log_path,
+                            "xrdp-console: graphics transport RemoteFX",
+                            4.0,
+                            stdout_path,
+                        )
                     assert_client_pixel(
                         os.environ["DISPLAY"], "xrdp-console-loader",
                         pixel_probe, stimulus_path, os.environ.copy(), log_path,

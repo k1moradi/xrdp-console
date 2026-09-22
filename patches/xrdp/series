@@ -1,3 +1,4 @@
 0001-xrdp-resize-state-and-failure-recovery.patch
 0002-xrdp-fixed-console-vnc-path.patch
 0003-xrdp-console-input-priority.patch
+0004-xrdp-console-own-rfx-encoder.patch

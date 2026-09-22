@@ -8,6 +8,12 @@ extern "C" {
 
 typedef struct xrdp_console_module xrdp_console_module;
 
+struct xrdp_console_rfx_capabilities
+{
+    int codec_id;
+    int maximum_payload_bytes;
+};
+
 xrdp_console_module *xrdp_console_module_create(void *context);
 void *xrdp_console_module_abi(xrdp_console_module *module);
 void *xrdp_console_module_context(xrdp_console_module *module);
@@ -28,6 +34,16 @@ int xrdp_console_module_server_paint_rect(xrdp_console_module *module,
                                           char *data, int width, int height,
                                           int srcx, int srcy);
 int xrdp_console_module_server_end_update(xrdp_console_module *module);
+int xrdp_console_module_get_rfx_capabilities(
+    const xrdp_console_module *module,
+    struct xrdp_console_rfx_capabilities *capabilities);
+int xrdp_console_module_rfx_available(
+    const xrdp_console_module *module,
+    struct xrdp_console_rfx_capabilities *capabilities);
+int xrdp_console_module_send_rfx_surface(
+    xrdp_console_module *module, int destination_x, int destination_y,
+    int width_pixels, int height_pixels, char *data_with_prefix,
+    int prefix_bytes, int encoded_bytes);
 int xrdp_console_module_pointer_callback_ready(
     const xrdp_console_module *module);
 int xrdp_console_module_server_set_pointer_large(

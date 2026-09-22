@@ -1,0 +1,35 @@
+diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -1461 +1461,4 @@
+-        self->encoder = xrdp_encoder_create(self);
++        if (self->code != XRDP_CONSOLE_SESSION_CODE)
++        {
++            self->encoder = xrdp_encoder_create(self);
++        }
+@@ -1482 +1485,4 @@
+-        self->encoder = xrdp_encoder_create(self);
++        if (self->code != XRDP_CONSOLE_SESSION_CODE)
++        {
++            self->encoder = xrdp_encoder_create(self);
++        }
+@@ -1796 +1802,2 @@
+-    if (mm->encoder == NULL && !mm->egfx_up)
++    if (mm->encoder == NULL && !mm->egfx_up &&
++            mm->code != XRDP_CONSOLE_SESSION_CODE)
+@@ -1998 +2005,4 @@
+-            mm->encoder = xrdp_encoder_create(mm);
++            if (mm->code != XRDP_CONSOLE_SESSION_CODE)
++            {
++                mm->encoder = xrdp_encoder_create(mm);
++            }
+@@ -3251,0 +3262,9 @@
++    /* The first-party console owns its synchronous RemoteFX encoder. The
++     * generic xrdp encoder was created before the module code was parsed. */
++    if (self->code == XRDP_CONSOLE_SESSION_CODE && self->encoder != NULL)
++    {
++        LOG(LOG_LEVEL_INFO,
++            "xrdp-console: disabling xrdp generic encoder thread");
++        xrdp_encoder_delete(self->encoder);
++        self->encoder = NULL;
++    }

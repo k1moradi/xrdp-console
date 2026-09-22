@@ -61,13 +61,13 @@ if(TARGET xrdp-codec-bench)
         xrdp-codec-bench INCLUDE_DIRECTORIES)
     add_executable(rfx-batch-plan-unit
         test_rfx_batch_plan.c
-        ${CMAKE_SOURCE_DIR}/tools/benchmark/helpers/rfx_batch_plan.c)
+        ${CMAKE_SOURCE_DIR}/src/rdp/rfx_batch_plan.c)
     set_target_properties(rfx-batch-plan-unit PROPERTIES
         C_STANDARD 11
         C_STANDARD_REQUIRED ON
         C_EXTENSIONS OFF)
     target_include_directories(rfx-batch-plan-unit PRIVATE
-        ${CMAKE_SOURCE_DIR}/tools/benchmark/helpers
+        ${CMAKE_SOURCE_DIR}/src/rdp
         ${XRDP_CONSOLE_RFXCODEC_INCLUDE_DIRS})
     add_test(NAME rfx-batch-plan-unit COMMAND rfx-batch-plan-unit)
     add_test(NAME rfx-codec-bench-cli
@@ -80,6 +80,23 @@ if(TARGET xrdp-codec-bench)
 endif()
 
 if(TARGET xrdp-console)
+    get_target_property(XRDP_CONSOLE_RFXCODEC_INCLUDE_DIRS
+        xrdp-console INCLUDE_DIRECTORIES)
+    add_executable(rfx-encoder-unit
+        test_rfx_encoder.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/rfx_encoder.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/rfx_batch_plan.c)
+    set_target_properties(rfx-encoder-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(rfx-encoder-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${XRDP_CONSOLE_RFXCODEC_INCLUDE_DIRS})
+    target_link_libraries(rfx-encoder-unit PRIVATE
+        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/librfxencode.a")
+    add_test(NAME rfx-encoder-unit COMMAND rfx-encoder-unit)
+
     add_executable(damage-region-unit
         test_damage_region.cpp
         ${CMAKE_SOURCE_DIR}/src/core/damage_region.cpp)
@@ -296,6 +313,45 @@ if(TARGET xrdp-console)
             $<TARGET_FILE:x11vnc-latency-stimulus>
             800 600)
         set_tests_properties(xrdp-loader-downscaled-smoke PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 30)
+        add_test(NAME xrdp-loader-rfx-smoke
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11vnc-latency-stimulus>
+            --rfx)
+        set_tests_properties(xrdp-loader-rfx-smoke PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 30)
+        add_test(NAME xrdp-loader-rfx-scaled-smoke
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11vnc-latency-stimulus>
+            1512 949 --rfx)
+        set_tests_properties(xrdp-loader-rfx-scaled-smoke PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 30)
+        add_test(NAME xrdp-loader-rfx-downscaled-smoke
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11vnc-latency-stimulus>
+            800 600 --rfx)
+        set_tests_properties(xrdp-loader-rfx-downscaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 30)
     else()

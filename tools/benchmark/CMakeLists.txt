@@ -55,14 +55,22 @@ else()
 endif()
 
 if(XRDP_CONSOLE_ENABLE_CODEC_BENCH)
-    find_path(RFXCODEC_INCLUDE_DIR rfxcodec_encode.h)
-    find_library(RFXCODEC_LIBRARY NAMES rfxencode)
+    if(XRDP_CONSOLE_BUILD_XRDP)
+        set(RFXCODEC_INCLUDE_DIR
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/include")
+        set(RFXCODEC_LIBRARY
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/librfxencode.a")
+    else()
+        find_path(RFXCODEC_INCLUDE_DIR rfxcodec_encode.h)
+        find_library(RFXCODEC_LIBRARY NAMES rfxencode)
+    endif()
     if(RFXCODEC_INCLUDE_DIR AND RFXCODEC_LIBRARY)
         add_executable(xrdp-codec-bench
-            helpers/rfx_batch_plan.c
+            ${CMAKE_SOURCE_DIR}/src/rdp/rfx_batch_plan.c
             helpers/xrdp_codec_bench.c)
         target_include_directories(xrdp-codec-bench PRIVATE
-            ${RFXCODEC_INCLUDE_DIR})
+            ${RFXCODEC_INCLUDE_DIR}
+            ${CMAKE_SOURCE_DIR}/src/rdp)
         target_link_libraries(xrdp-codec-bench PRIVATE
             ${RFXCODEC_LIBRARY})
         list(APPEND BENCHMARK_BINARIES xrdp-codec-bench)

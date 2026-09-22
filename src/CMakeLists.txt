@@ -27,6 +27,12 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         core/presentation_transform.cpp
         core/presentation_transform.h
         core/rectangle.h
+        rdp/rfx_batch_plan.c
+        rdp/rfx_batch_plan.h
+        rdp/rfx_encoder.cpp
+        rdp/rfx_encoder.h
+        rdp/rfx_surface_sink.cpp
+        rdp/rfx_surface_sink.h
         rdp/rdp_update_sink.cpp
         rdp/rdp_update_sink.h
         x11/x11_damage_tracker.cpp
@@ -58,7 +64,8 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         "${XRDP_CONSOLE_XRDP_SOURCE_DIR}/libipm"
         "${XRDP_CONSOLE_XRDP_SOURCE_DIR}/third_party"
         "${XRDP_CONSOLE_XRDP_SOURCE_DIR}/third_party/tomlc99"
-        "${XRDP_CONSOLE_XRDP_BUILD_DIR}")
+        "${XRDP_CONSOLE_XRDP_BUILD_DIR}"
+        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/include")
     target_compile_definitions(xrdp-console PRIVATE HAVE_CONFIG_H)
     target_link_libraries(xrdp-console PRIVATE
         PkgConfig::XRDP_CONSOLE_XCB
@@ -66,9 +73,12 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         PkgConfig::XRDP_CONSOLE_XCB_SHM
         PkgConfig::XRDP_CONSOLE_XCB_XFIXES
         PkgConfig::XRDP_CONSOLE_XCB_XTEST
+        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libxrdp.so"
+        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/librfxencode.a"
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libcommon.so")
     set_target_properties(xrdp-console PROPERTIES
-        BUILD_RPATH "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp"
+        BUILD_RPATH
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp;${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib"
         INSTALL_RPATH "$ORIGIN/../xrdp")
     add_dependencies(xrdp-console xrdp_upstream)
 
