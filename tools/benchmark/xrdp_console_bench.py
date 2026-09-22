@@ -1325,6 +1325,13 @@ def format_x11_display_power_state(state: X11DisplayPowerState) -> str:
     )
 
 
+def verify_benchmark_power_state(
+    guard: X11DisplayPowerGuard,
+) -> None:
+    """Verify display power policy outside the timed repetition."""
+    guard.verify_controlled(guard.current_state())
+
+
 def display_geometry(display: str, auth: str) -> tuple[int, int]:
     """Read the physical X11 geometry used by the direct backend."""
     environment = os.environ.copy()
@@ -3615,22 +3622,26 @@ def main() -> int:
         for index, (name, use_lan) in enumerate(cases):
             for repetition in range(1, args.repetitions + 1):
                 port_offset = (index * args.repetitions + repetition - 1) * 10
-                if args.transport == "rfb":
-                    if args.mode == "input-roundtrip":
-                        run_direct_rfb_input_case(
+                verify_benchmark_power_state(display_power_guard)
+                try:
+                    if args.transport == "rfb":
+                        if args.mode == "input-roundtrip":
+                            run_direct_rfb_input_case(
+                                args, name, use_lan, auth, runtime,
+                                args.base_port + port_offset, repetition)
+                        else:
+                            run_direct_rfb_case(
+                                args, name, use_lan, auth, runtime,
+                                args.base_port + port_offset, repetition)
+                    elif args.transport == "vnc-viewer":
+                        run_vnc_viewer_case(
                             args, name, use_lan, auth, runtime,
                             args.base_port + port_offset, repetition)
                     else:
-                        run_direct_rfb_case(
-                            args, name, use_lan, auth, runtime,
-                            args.base_port + port_offset, repetition)
-                elif args.transport == "vnc-viewer":
-                    run_vnc_viewer_case(
-                        args, name, use_lan, auth, runtime,
-                        args.base_port + port_offset, repetition)
-                else:
-                    run_case(args, name, use_lan, auth, runtime,
-                             args.base_port + port_offset, repetition)
+                        run_case(args, name, use_lan, auth, runtime,
+                                 args.base_port + port_offset, repetition)
+                finally:
+                    verify_benchmark_power_state(display_power_guard)
         final_power = display_power_guard.current_state()
         display_power_guard.verify_controlled(final_power)
         print(f"runtime logs: {runtime}")
