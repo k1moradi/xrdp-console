@@ -59,9 +59,9 @@ The build installs benchmark helper binaries under
 directory. Run the benchmark directly from
 `tools/benchmark/xrdp_console_bench.py` or its installed data path. CPack produces
 a relocatable `.tar.gz` and, on Debian systems, a `.deb`. The optional offline
-codec probe is built when both `rfxcodec` and
-`x264` development files are available; its absence does not affect the
-end-to-end benchmark. Vulkan development files are optional too; without them
+RemoteFX batch benchmark is built when `rfxcodec` development files are
+available; its absence does not affect the end-to-end benchmark. Vulkan
+development files are optional too; without them
 the Vulkan capability helper is omitted while the rest of the toolkit remains
 buildable.
 

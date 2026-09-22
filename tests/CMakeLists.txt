@@ -18,6 +18,11 @@ if(TARGET xrdp-console)
         ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py)
 endif()
 
+if(TARGET xrdp-codec-bench)
+    list(APPEND PYTHON_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_rfx_codec_bench.py)
+endif()
+
 add_test(NAME python-syntax
     COMMAND ${Python3_EXECUTABLE} -B -m py_compile ${PYTHON_SOURCES})
 set_tests_properties(python-syntax PROPERTIES
@@ -65,6 +70,13 @@ if(TARGET xrdp-codec-bench)
         ${CMAKE_SOURCE_DIR}/tools/benchmark/helpers
         ${XRDP_CONSOLE_RFXCODEC_INCLUDE_DIRS})
     add_test(NAME rfx-batch-plan-unit COMMAND rfx-batch-plan-unit)
+    add_test(NAME rfx-codec-bench-cli
+        COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_rfx_codec_bench.py
+        $<TARGET_FILE:xrdp-codec-bench>)
+    set_tests_properties(rfx-codec-bench-cli PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+        TIMEOUT 30)
 endif()
 
 if(TARGET xrdp-console)

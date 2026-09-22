@@ -13,7 +13,7 @@ option(XRDP_CONSOLE_NATIVE
     "Enable host-native ISA tuning for all project targets (non-portable)"
     ON)
 option(XRDP_CONSOLE_ENABLE_CODEC_BENCH
-    "Build the optional offline RFX/x264 codec benchmark"
+    "Build the optional offline RemoteFX batch benchmark"
     ON)
 option(XRDP_CONSOLE_BUILD_TOOLS
     "Build benchmark and diagnostic tools"

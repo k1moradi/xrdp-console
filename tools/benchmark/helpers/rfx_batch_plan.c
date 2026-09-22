@@ -5,6 +5,18 @@
 #include <limits.h>
 #include <stdint.h>
 
+static int
+valid_tile(const struct rfx_tile *tile)
+{
+    const int64_t right = tile == NULL ? 0 : (int64_t)tile->x + tile->cx;
+    const int64_t bottom = tile == NULL ? 0 : (int64_t)tile->y + tile->cy;
+
+    return tile != NULL && tile->x >= 0 && tile->y >= 0 && tile->cx > 0 &&
+           tile->cy > 0 && tile->cx <= RFX_BATCH_TILE_DIMENSION_PIXELS &&
+           tile->cy <= RFX_BATCH_TILE_DIMENSION_PIXELS && right <= INT_MAX &&
+           bottom <= INT_MAX;
+}
+
 size_t
 rfx_tile_count(int width_pixels, int height_pixels)
 {
@@ -103,6 +115,14 @@ rfx_bounding_region(const struct rfx_tile *tiles, size_t tile_count)
     if (tiles == NULL || tile_count == 0)
     {
         return region;
+    }
+
+    for (index = 0; index < tile_count; ++index)
+    {
+        if (!valid_tile(&tiles[index]))
+        {
+            return region;
+        }
     }
 
     left = tiles[0].x;

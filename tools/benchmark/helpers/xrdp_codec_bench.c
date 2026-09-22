@@ -44,31 +44,33 @@ struct rfx_benchmark_result
     double cpu_seconds;
 };
 
-static double
-monotonic_seconds(void)
+static int
+monotonic_seconds(double *seconds)
 {
     struct timespec ts;
 
-    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
+    if (seconds == NULL || clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
     {
-        return 0.0;
+        return 1;
     }
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+    *seconds = (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+    return 0;
 }
 
-static double
-cpu_seconds(void)
+static int
+cpu_seconds(double *seconds)
 {
     struct rusage usage;
 
-    if (getrusage(RUSAGE_SELF, &usage) != 0)
+    if (seconds == NULL || getrusage(RUSAGE_SELF, &usage) != 0)
     {
-        return 0.0;
+        return 1;
     }
-    return (double)usage.ru_utime.tv_sec +
-           (double)usage.ru_utime.tv_usec / 1e6 +
-           (double)usage.ru_stime.tv_sec +
-           (double)usage.ru_stime.tv_usec / 1e6;
+    *seconds = (double)usage.ru_utime.tv_sec +
+               (double)usage.ru_utime.tv_usec / 1e6 +
+               (double)usage.ru_stime.tv_sec +
+               (double)usage.ru_stime.tv_usec / 1e6;
+    return 0;
 }
 
 static void
@@ -220,12 +222,18 @@ run_rfx_batch_case(uint8_t *bgra, const struct rfx_tile *tiles,
     {
         size_t encoded_bytes = 0;
         double wall_start;
+        double wall_end;
         double cpu_start;
+        double cpu_end;
 
         /* Stimulus generation is deliberately outside the timed interval. */
         fill_bgra(bgra, frame);
-        wall_start = monotonic_seconds();
-        cpu_start = cpu_seconds();
+        if (monotonic_seconds(&wall_start) != 0 ||
+            cpu_seconds(&cpu_start) != 0)
+        {
+            fputs("RemoteFX benchmark clock read failed\n", stderr);
+            goto cleanup;
+        }
         if (encode_rfx_sweep(encoder, bgra, tiles, tile_count,
                              tiles_per_call, output, (int)output_capacity,
                              &encoded_bytes) != 0)
@@ -235,8 +243,15 @@ run_rfx_batch_case(uint8_t *bgra, const struct rfx_tile *tiles,
                     frame, tiles_per_call);
             goto cleanup;
         }
-        total_wall_seconds += monotonic_seconds() - wall_start;
-        total_cpu_seconds += cpu_seconds() - cpu_start;
+        if (monotonic_seconds(&wall_end) != 0 ||
+            cpu_seconds(&cpu_end) != 0 || wall_end < wall_start ||
+            cpu_end < cpu_start)
+        {
+            fputs("RemoteFX benchmark clock read failed\n", stderr);
+            goto cleanup;
+        }
+        total_wall_seconds += wall_end - wall_start;
+        total_cpu_seconds += cpu_end - cpu_start;
 
         if (total_encoded_bytes > SIZE_MAX - encoded_bytes)
         {
