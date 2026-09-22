@@ -26,7 +26,7 @@ The benchmark starts only user-owned, loopback services:
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import errno
 import math
 import os
@@ -205,6 +205,21 @@ def direct_graphics_request(transport: str) -> DirectGraphicsRequest:
         )
 
     raise ValueError(f"unsupported direct graphics transport: {transport!r}")
+
+
+@dataclass(frozen=True)
+class X11DisplayPowerState:
+    saver_timeout_seconds: int
+    saver_cycle_seconds: int
+    prefer_blanking: bool
+    allow_exposures: bool
+
+    dpms_supported: bool
+    dpms_enabled: bool
+    dpms_standby_seconds: int | None
+    dpms_suspend_seconds: int | None
+    dpms_off_seconds: int | None
+    monitor_on: bool | None
 
 # X11 keysym for F9, the key consumed by x11vnc-latency-stimulus.
 RFB_KEY_F9 = 0xFFC6
@@ -1019,6 +1034,294 @@ def discover_auth(explicit: str | None) -> str:
     raise RuntimeError(
         "cannot find a readable Xauthority file (checked $XAUTHORITY, "
         "/run/user/<uid>/xrdp-console.xauth, and /run/sddm/xauth_*)"
+    )
+
+
+def xset_environment(display: str, auth: str) -> dict[str, str]:
+    """Return the deterministic environment used for benchmark xset calls."""
+    environment = os.environ.copy()
+    environment.update({
+        "DISPLAY": display,
+        "XAUTHORITY": auth,
+        "LC_ALL": "C",
+    })
+    return environment
+
+
+def run_xset(environment: dict[str, str], *arguments: str) -> str:
+    """Run xset and turn command failures into useful benchmark errors."""
+    try:
+        completed = subprocess.run(
+            ["xset", *arguments],
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"could not execute xset: arguments={arguments!r}"
+        ) from exc
+
+    if completed.returncode != 0:
+        raise RuntimeError(
+            "xset failed: "
+            f"arguments={arguments!r} "
+            f"stderr={completed.stderr.strip()!r}"
+        )
+
+    return completed.stdout
+
+
+def _xset_section(output: str, header: str) -> str | None:
+    pattern = (
+        rf"(?ms)^{re.escape(header)}[ \t]*\n"
+        rf"(?P<body>.*?)(?=^[^ \t]|\Z)"
+    )
+    match = re.search(pattern, output)
+    return None if match is None else match.group("body")
+
+
+def _required_xset_integer(body: str, label: str) -> int:
+    match = re.search(
+        rf"(?<!\w){re.escape(label)}[ \t]*:[ \t]*(\d+)(?=\s|$)",
+        body,
+    )
+    if match is None:
+        raise ValueError(f"xset output has malformed {label!r}")
+    return int(match.group(1))
+
+
+def _required_xset_boolean(body: str, label: str) -> bool:
+    match = re.search(
+        rf"(?<!\w){re.escape(label)}[ \t]*:[ \t]*(yes|no)(?=\s|$)",
+        body,
+    )
+    if match is None:
+        raise ValueError(f"xset output has malformed {label!r}")
+    return match.group(1) == "yes"
+
+
+def parse_xset_power_state(output: str) -> X11DisplayPowerState:
+    """Parse the relevant, C-locale fields from ``xset q`` output.
+
+    The parser deliberately rejects missing or malformed Screen Saver fields,
+    and rejects a present-but-malformed DPMS section.  A missing DPMS section
+    represents an X server without the DPMS extension and is a valid state.
+    """
+    screen_saver = _xset_section(output, "Screen Saver:")
+    if screen_saver is None:
+        raise ValueError("xset output is missing the Screen Saver section")
+
+    saver_timeout = _required_xset_integer(screen_saver, "timeout")
+    saver_cycle = _required_xset_integer(screen_saver, "cycle")
+    prefer_blanking = _required_xset_boolean(
+        screen_saver, "prefer blanking")
+    allow_exposures = _required_xset_boolean(
+        screen_saver, "allow exposures")
+
+    dpms_header = re.search(
+        r"(?m)^DPMS \([^\)\r\n]+\):[ \t]*$", output)
+    dpms = (
+        None if dpms_header is None else
+        _xset_section(output, dpms_header.group(0).rstrip())
+    )
+    if dpms is None:
+        return X11DisplayPowerState(
+            saver_timeout_seconds=saver_timeout,
+            saver_cycle_seconds=saver_cycle,
+            prefer_blanking=prefer_blanking,
+            allow_exposures=allow_exposures,
+            dpms_supported=False,
+            dpms_enabled=False,
+            dpms_standby_seconds=None,
+            dpms_suspend_seconds=None,
+            dpms_off_seconds=None,
+            monitor_on=None,
+        )
+
+    standby = _required_xset_integer(dpms, "Standby")
+    suspend = _required_xset_integer(dpms, "Suspend")
+    off = _required_xset_integer(dpms, "Off")
+    enabled_match = re.search(
+        r"(?m)^\s*DPMS is (Enabled|Disabled)\s*$", dpms)
+    if enabled_match is None:
+        raise ValueError("xset output has malformed DPMS enabled state")
+    monitor_match = re.search(
+        r"(?m)^\s*Monitor is (On|Off)\s*$", dpms)
+    if (monitor_match is None and
+            enabled_match.group(1) == "Enabled"):
+        raise ValueError("xset output has malformed DPMS monitor state")
+    if (monitor_match is None and
+            re.search(r"(?m)^\s*Monitor is\b", dpms)):
+        raise ValueError("xset output has malformed DPMS monitor state")
+
+    return X11DisplayPowerState(
+        saver_timeout_seconds=saver_timeout,
+        saver_cycle_seconds=saver_cycle,
+        prefer_blanking=prefer_blanking,
+        allow_exposures=allow_exposures,
+        dpms_supported=True,
+        dpms_enabled=enabled_match.group(1) == "Enabled",
+        dpms_standby_seconds=standby,
+        dpms_suspend_seconds=suspend,
+        dpms_off_seconds=off,
+        monitor_on=(None if monitor_match is None else
+                    monitor_match.group(1) == "On"),
+    )
+
+
+class X11DisplayPowerGuard:
+    """Keep the physical X11 display awake for one benchmark matrix."""
+
+    def __init__(self, display: str, auth: str) -> None:
+        self._environment = xset_environment(display, auth)
+        self._original: X11DisplayPowerState | None = None
+        self._active = False
+
+    def current_state(self) -> X11DisplayPowerState:
+        try:
+            return parse_xset_power_state(
+                run_xset(self._environment, "q")
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                f"could not parse xset power state: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _validate_controlled_state(
+        original: X11DisplayPowerState,
+        controlled: X11DisplayPowerState,
+    ) -> None:
+        if controlled.saver_timeout_seconds != 0:
+            raise RuntimeError("X11 screensaver could not be disabled")
+        if original.dpms_supported and not controlled.dpms_supported:
+            raise RuntimeError("X11 DPMS support disappeared during setup")
+        if controlled.dpms_supported:
+            if controlled.dpms_enabled:
+                raise RuntimeError("X11 DPMS could not be disabled")
+            if controlled.monitor_on is False:
+                raise RuntimeError(
+                    "physical X11 display could not be forced on"
+                )
+
+    def start(self) -> X11DisplayPowerState:
+        if self._active:
+            raise RuntimeError("X11 display power guard is already active")
+
+        original = self.current_state()
+        self._original = original
+        # Mark ownership before changing anything so partial setup is
+        # restorable if a later xset command or verification fails.
+        self._active = True
+
+        try:
+            run_xset(self._environment, "s", "reset")
+
+            monitor_was_forced_on = False
+            if original.dpms_supported:
+                run_xset(self._environment, "+dpms")
+                run_xset(self._environment, "dpms", "force", "on")
+                forced_on = self.current_state()
+                if forced_on.monitor_on is not True:
+                    raise RuntimeError(
+                        "physical X11 display could not be forced on"
+                    )
+                monitor_was_forced_on = True
+                run_xset(self._environment, "-dpms")
+
+            run_xset(self._environment, "s", "off")
+            controlled = self.current_state()
+            self._validate_controlled_state(original, controlled)
+            if controlled.monitor_on is None and monitor_was_forced_on:
+                controlled = replace(controlled, monitor_on=True)
+            return controlled
+        except Exception as exc:
+            try:
+                self.restore()
+            except Exception as restore_error:
+                raise RuntimeError(
+                    "X11 display power setup failed and restoration also "
+                    f"failed: {restore_error}"
+                ) from exc
+            raise
+
+    def verify_controlled(self, state: X11DisplayPowerState) -> None:
+        """Reject a benchmark if the display power policy changed mid-run."""
+        if self._original is None:
+            raise RuntimeError("X11 display power guard is not active")
+        self._validate_controlled_state(self._original, state)
+
+    def restore(self) -> None:
+        if not self._active:
+            return
+
+        original = self._original
+        if original is None:
+            self._active = False
+            return
+
+        first_error: Exception | None = None
+
+        def attempt(*arguments: str) -> None:
+            nonlocal first_error
+            try:
+                run_xset(self._environment, *arguments)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+
+        attempt(
+            "s",
+            str(original.saver_timeout_seconds),
+            str(original.saver_cycle_seconds),
+        )
+        attempt("s", "blank" if original.prefer_blanking else "noblank")
+        attempt("s", "expose" if original.allow_exposures else "noexpose")
+
+        if original.dpms_supported:
+            assert original.dpms_standby_seconds is not None
+            assert original.dpms_suspend_seconds is not None
+            assert original.dpms_off_seconds is not None
+            attempt(
+                "dpms",
+                str(original.dpms_standby_seconds),
+                str(original.dpms_suspend_seconds),
+                str(original.dpms_off_seconds),
+            )
+            attempt("+dpms" if original.dpms_enabled else "-dpms")
+
+        if first_error is not None:
+            raise RuntimeError(
+                "could not restore original X11 display power state"
+            ) from first_error
+
+        self._active = False
+        self._original = None
+
+    def __enter__(self) -> "X11DisplayPowerGuard":
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> bool:
+        del exc_type, exc_value, traceback
+        self.restore()
+        return False
+
+
+def format_x11_display_power_state(state: X11DisplayPowerState) -> str:
+    dpms = "unsupported"
+    monitor = "unknown"
+    if state.dpms_supported:
+        dpms = "enabled" if state.dpms_enabled else "disabled"
+        monitor = "on" if state.monitor_on else "off"
+    screensaver = (
+        "disabled" if state.saver_timeout_seconds == 0 else "enabled"
+    )
+    return (
+        f"screensaver={screensaver} dpms={dpms} monitor={monitor}"
     )
 
 
@@ -3217,7 +3520,7 @@ def main() -> int:
             return 2
         finally:
             network.cleanup()
-    required_executables = [GPU_STIMULUS]
+    required_executables = [GPU_STIMULUS, Path("xset")]
     if args.backend == "vnc":
         required_executables.append(X11VNC)
     if args.transport == "rdp":
@@ -3245,8 +3548,16 @@ def main() -> int:
     for required in required_executables:
         if not required.is_file() and not shutil.which(str(required)):
             parser.error(f"required executable is missing: {required}")
+    display_power_guard: X11DisplayPowerGuard | None = None
+    exit_status = 0
     try:
         auth = discover_auth(args.auth)
+        display_power_guard = X11DisplayPowerGuard(args.display, auth)
+        controlled_power = display_power_guard.start()
+        print(
+            "physical display power controlled: yes "
+            f"{format_x11_display_power_state(controlled_power)}"
+        )
         if args.backend == "direct-x11":
             source_width, source_height = display_geometry(args.display, auth)
             if (not args.direct_dynamic_resizing and
@@ -3320,15 +3631,27 @@ def main() -> int:
                 else:
                     run_case(args, name, use_lan, auth, runtime,
                              args.base_port + port_offset, repetition)
+        final_power = display_power_guard.current_state()
+        display_power_guard.verify_controlled(final_power)
         print(f"runtime logs: {runtime}")
-        return 0
     except KeyboardInterrupt:
         print("BENCHMARK interrupted; isolated child processes were cleaned up",
               file=sys.stderr)
-        return 130
+        exit_status = 130
     except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"BENCHMARK ERROR: {exc}", file=sys.stderr)
-        return 2
+        exit_status = 2
+    finally:
+        if display_power_guard is not None:
+            try:
+                display_power_guard.restore()
+            except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+                print(
+                    f"BENCHMARK ERROR: {exc}",
+                    file=sys.stderr,
+                )
+                exit_status = 2
+    return exit_status
 
 
 if __name__ == "__main__":

@@ -6,7 +6,8 @@ set(PYTHON_SOURCES
     ${CMAKE_SOURCE_DIR}/tools/benchmark/xrdp_console_bench.py
     ${CMAKE_SOURCE_DIR}/tools/benchmark/rfb_v6_v4_proxy.py
     ${CMAKE_SOURCE_DIR}/tools/diagnostics/xrdp_console_episode_sampler.py
-    ${CMAKE_SOURCE_DIR}/tools/diagnostics/vscode_gpu_probe.py)
+    ${CMAKE_SOURCE_DIR}/tools/diagnostics/vscode_gpu_probe.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_display_power.py)
 
 if(TARGET xrdp-console)
     list(APPEND PYTHON_SOURCES
@@ -31,6 +32,12 @@ set_tests_properties(python-syntax PROPERTIES
 add_test(NAME network-unit
     COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/test_network.py)
 set_tests_properties(network-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+add_test(NAME display-power-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_display_power.py)
+set_tests_properties(display-power-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
 add_test(NAME measurement-profile-unit
