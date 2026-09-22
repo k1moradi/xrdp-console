@@ -8,6 +8,7 @@
 #include "xrdp.h"
 
 #include "module_abi.h"
+#include "../rdp/rfx_capability_policy.h"
 
 int xrdp_console_context_start(void *context, int width, int height, int bpp);
 int xrdp_console_context_connect(void *context);
@@ -335,15 +336,17 @@ xrdp_console_module_get_rfx_capabilities(
     }
     if (wm->session->client_info == NULL ||
         wm->client_info->rfx_codec_id == 0 || wm->client_info->gfx != 0 ||
+        wm->client_info->bpp < 24 ||
         (wm->client_info->use_fast_path & 1) == 0)
     {
         return 1;
     }
 
-    maximum_payload_bytes = wm->client_info->max_fastpath_frag_bytes;
-    if (maximum_payload_bytes < 32 * 1024)
+    maximum_payload_bytes = xrdp_console_rfx_payload_capacity(
+        wm->client_info->max_fastpath_frag_bytes);
+    if (maximum_payload_bytes <= 0)
     {
-        maximum_payload_bytes = 32 * 1024;
+        return 1;
     }
     if (capabilities != NULL)
     {
@@ -369,10 +372,14 @@ xrdp_console_module_send_rfx_surface(
 {
     const struct xrdp_wm *wm;
 
-    if (xrdp_console_module_get_rfx_capabilities(module, NULL) != 0 ||
+    struct xrdp_console_rfx_capabilities capabilities;
+
+    if (xrdp_console_module_get_rfx_capabilities(module, &capabilities) != 0 ||
         destination_x < 0 || destination_y < 0 || width_pixels <= 0 ||
         height_pixels <= 0 || data_with_prefix == NULL || prefix_bytes <= 0 ||
         encoded_bytes <= 0 ||
+        prefix_bytes != XRDP_CONSOLE_SURFACE_PREFIX_BYTES ||
+        encoded_bytes > capabilities.maximum_payload_bytes ||
         destination_x > INT_MAX - width_pixels ||
         destination_y > INT_MAX - height_pixels)
     {

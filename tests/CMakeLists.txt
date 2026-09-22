@@ -97,6 +97,18 @@ if(TARGET xrdp-console)
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/librfxencode.a")
     add_test(NAME rfx-encoder-unit COMMAND rfx-encoder-unit)
 
+    add_executable(rfx-capability-policy-unit
+        test_rfx_capability_policy.c
+        ${CMAKE_SOURCE_DIR}/src/rdp/rfx_capability_policy.c)
+    set_target_properties(rfx-capability-policy-unit PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS OFF)
+    target_include_directories(rfx-capability-policy-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src/rdp)
+    add_test(NAME rfx-capability-policy-unit
+        COMMAND rfx-capability-policy-unit)
+
     add_executable(damage-region-unit
         test_damage_region.cpp
         ${CMAKE_SOURCE_DIR}/src/core/damage_region.cpp)

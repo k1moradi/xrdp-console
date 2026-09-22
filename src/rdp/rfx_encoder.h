@@ -17,6 +17,7 @@ extern "C" {
 
 #include "../core/framebuffer_view.h"
 #include "../core/geometry.h"
+#include "rfx_capability_policy.h"
 
 struct RfxEncodedBatch
 {
@@ -33,14 +34,16 @@ struct RfxEncodedBatch
 class RfxEncoder final
 {
 public:
-    static constexpr std::size_t kSurfacePrefixBytes = 256U;
+    static constexpr std::size_t kSurfacePrefixBytes =
+        XRDP_CONSOLE_SURFACE_PREFIX_BYTES;
+    static constexpr std::size_t kMinimumPayloadBytes = 24U * 1024U;
     static constexpr std::size_t kMaximumPayloadBytes = 64U * 1024U;
     static constexpr std::size_t kMaximumTilesPerCall = 16U;
 
     // A scaled presentation chunk is bounded to the cache-local working set.
     // This is the largest tile plan that such a chunk can require, including
     // narrow edge tiles.
-    static constexpr std::size_t kMaximumTilesPerChunk = 1024U;
+    static constexpr std::size_t kMaximumTilesPerChunk = 128U;
 
     RfxEncoder() noexcept = default;
     ~RfxEncoder() noexcept;
@@ -48,7 +51,8 @@ public:
     RfxEncoder(const RfxEncoder &) = delete;
     RfxEncoder &operator=(const RfxEncoder &) = delete;
 
-    [[nodiscard]] bool configure(PixelSize presentation) noexcept;
+    [[nodiscard]] bool configure(
+        PixelSize presentation, std::size_t maximumPayloadBytes) noexcept;
     void reset() noexcept;
 
     [[nodiscard]] bool valid() const noexcept
@@ -76,6 +80,7 @@ public:
 private:
     void *handle_{nullptr};
     PixelSize geometry_{};
+    std::size_t payloadCapacityBytes_{};
     std::array<rfx_tile, kMaximumTilesPerChunk> tiles_{};
     std::array<std::byte, kSurfacePrefixBytes + kMaximumPayloadBytes>
         output_{};

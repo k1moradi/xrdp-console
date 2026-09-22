@@ -16,16 +16,26 @@ RfxEncoder::~RfxEncoder() noexcept
 }
 
 bool
-RfxEncoder::configure(PixelSize presentation) noexcept
+RfxEncoder::configure(PixelSize presentation,
+                      std::size_t maximumPayloadBytes) noexcept
 {
     if (presentation.widthPixels == 0 || presentation.heightPixels == 0 ||
         presentation.widthPixels > static_cast<std::uint32_t>(INT_MAX) ||
-        presentation.heightPixels > static_cast<std::uint32_t>(INT_MAX))
+        presentation.heightPixels > static_cast<std::uint32_t>(INT_MAX) ||
+        maximumPayloadBytes == 0)
     {
         return false;
     }
 
-    if (handle_ != nullptr && geometry_ == presentation)
+    const std::size_t replacementCapacity =
+        std::min(maximumPayloadBytes, kMaximumPayloadBytes);
+    if (replacementCapacity < kMinimumPayloadBytes)
+    {
+        return false;
+    }
+
+    if (handle_ != nullptr && geometry_ == presentation &&
+        payloadCapacityBytes_ == replacementCapacity)
     {
         return true;
     }
@@ -41,6 +51,7 @@ RfxEncoder::configure(PixelSize presentation) noexcept
     reset();
     handle_ = replacement;
     geometry_ = presentation;
+    payloadCapacityBytes_ = replacementCapacity;
     return true;
 }
 
@@ -53,6 +64,7 @@ RfxEncoder::reset() noexcept
         handle_ = nullptr;
     }
     geometry_ = {};
+    payloadCapacityBytes_ = 0;
 }
 
 std::size_t
@@ -113,7 +125,7 @@ RfxEncoder::encode(FramebufferView pixels, std::size_t firstTile,
         return {};
     }
 
-    int outputBytes = static_cast<int>(kMaximumPayloadBytes);
+    int outputBytes = static_cast<int>(payloadCapacityBytes_);
     const int tilesWritten = rfxcodec_encode(
         handle_,
         reinterpret_cast<char *>(output_.data() + kSurfacePrefixBytes),
@@ -124,9 +136,10 @@ RfxEncoder::encode(FramebufferView pixels, std::size_t firstTile,
         static_cast<int>(pixels.strideBytes), &region, 1,
         tiles_.data() + firstTile, static_cast<int>(requested), nullptr, 0);
 
-    if (tilesWritten != static_cast<int>(requested) ||
+    if (tilesWritten <= 0 ||
+        tilesWritten > static_cast<int>(requested) ||
         outputBytes <= 0 ||
-        outputBytes > static_cast<int>(kMaximumPayloadBytes))
+        outputBytes > static_cast<int>(payloadCapacityBytes_))
     {
         return {};
     }

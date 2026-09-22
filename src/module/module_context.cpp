@@ -609,9 +609,13 @@ ModuleContext::connect() noexcept
 
         auto rfxEncoder = std::make_unique<RfxEncoder>();
         GraphicsTransport graphicsTransport = GraphicsTransport::ClassicBitmap;
+        struct xrdp_console_rfx_capabilities rfxCapabilities{};
         if (xrdp_console_module_get_rfx_capabilities(
-                impl_->module, nullptr) == 0 &&
-            rfxEncoder->configure(impl_->state.presentationGeometry))
+                impl_->module, &rfxCapabilities) == 0 &&
+            rfxEncoder->configure(
+                impl_->state.presentationGeometry,
+                static_cast<std::size_t>(
+                    rfxCapabilities.maximum_payload_bytes)))
         {
             graphicsTransport = GraphicsTransport::RemoteFx;
         }
@@ -781,8 +785,12 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
 
     auto rfxEncoder = std::make_unique<RfxEncoder>();
     GraphicsTransport graphicsTransport = GraphicsTransport::ClassicBitmap;
-    if (xrdp_console_module_get_rfx_capabilities(impl_->module, nullptr) == 0 &&
-        rfxEncoder->configure(presentationGeometry))
+    struct xrdp_console_rfx_capabilities rfxCapabilities{};
+    if (xrdp_console_module_get_rfx_capabilities(
+            impl_->module, &rfxCapabilities) == 0 &&
+        rfxEncoder->configure(
+            presentationGeometry,
+            static_cast<std::size_t>(rfxCapabilities.maximum_payload_bytes)))
     {
         graphicsTransport = GraphicsTransport::RemoteFx;
     }

@@ -29,6 +29,8 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         core/rectangle.h
         rdp/rfx_batch_plan.c
         rdp/rfx_batch_plan.h
+        rdp/rfx_capability_policy.c
+        rdp/rfx_capability_policy.h
         rdp/rfx_encoder.cpp
         rdp/rfx_encoder.h
         rdp/rfx_surface_sink.cpp
