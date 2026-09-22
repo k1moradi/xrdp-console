@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.util
 import socket
 import struct
+import sys
 import unittest
 from pathlib import Path
 
@@ -15,6 +16,7 @@ BENCHMARK = Path(__file__).parents[1] / "tools/benchmark/xrdp_console_bench.py"
 spec = importlib.util.spec_from_file_location("xrdp_console_bench", BENCHMARK)
 assert spec is not None and spec.loader is not None
 module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
 

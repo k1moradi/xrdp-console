@@ -11,8 +11,8 @@ The benchmark starts only user-owned, loopback services:
     ``--backend vnc`` is the default and timestamps the completed GL swap and
     polls the corresponding pixel in the FreeRDP window.  ``--backend
     direct-x11`` selects the first-party module and the same client-visible
-    graphics measurement; it uses fixed source/presentation geometry and
-    classic bitmap output.  Its input-roundtrip mode sends the same RDP key
+    graphics measurement; ``--direct-graphics-transport`` selects RemoteFX
+    (the default) or classic bitmap output.  Its input-roundtrip mode sends the same RDP key
     stimulus through the module's XTest controller.  ``--transport rfb`` instead
     starts a private no-password x11vnc and timestamps the same marker in RAW
     RFB bytes on the loopback socket.  ``--transport vnc-viewer`` puts an
@@ -26,6 +26,7 @@ The benchmark starts only user-owned, loopback services:
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import errno
 import math
 import os
@@ -166,6 +167,40 @@ VNC_PROFILES = {
     "noxdamage": ("-noxdamage",),
     "lan-noxdamage": ("-speeds", "lan", "-noxdamage"),
 }
+
+MARKER_HIGH_CHANNEL_THRESHOLD = 200
+MARKER_LOW_CHANNEL_THRESHOLD = 80
+MAX_REPORTED_GRAPHICS_MISSES = 3
+RFX_DECODER_FAILURE_MARKER = "Failed to process RemoteFX message"
+
+
+@dataclass(frozen=True)
+class DirectGraphicsRequest:
+    client_options: tuple[str, ...]
+    expected_negotiation: str
+
+
+def direct_graphics_request(transport: str) -> DirectGraphicsRequest:
+    if transport == "rfx":
+        return DirectGraphicsRequest(
+            client_options=(
+                "+rfx",
+                "-gfx",
+                "/network:lan",
+            ),
+            expected_negotiation="RFX",
+        )
+
+    if transport == "classic":
+        return DirectGraphicsRequest(
+            client_options=(
+                "-gfx",
+                "/network:lan",
+            ),
+            expected_negotiation="CLASSIC_BITMAP",
+        )
+
+    raise ValueError(f"unsupported direct graphics transport: {transport!r}")
 
 # X11 keysym for F9, the key consumed by x11vnc-latency-stimulus.
 RFB_KEY_F9 = 0xFFC6
@@ -1253,22 +1288,65 @@ def sample_remote_pixels(display: str, window: str, points: list[tuple[int, int]
     return results
 
 
-def marker_rgb_matches(parts: list[bytes], state: int) -> bool:
-    if len(parts) < 4:
-        return False
+@dataclass(frozen=True)
+class PixelObservation:
+    timestamp_ns: int
+    red: int
+    green: int
+    blue: int
+
+
+@dataclass
+class MarkerWaitDiagnostics:
+    sample_count: int = 0
+    last_observation: PixelObservation | None = None
+    malformed_sample_count: int = 0
+
+
+def parse_pixel_observation(line: bytes) -> PixelObservation | None:
+    fields = line.split()
+    if len(fields) != 4:
+        return None
+
     try:
-        red, green, blue = (int(value) for value in parts[1:4])
+        timestamp_ns = int(fields[0])
+        red = int(fields[1])
+        green = int(fields[2])
+        blue = int(fields[3])
     except ValueError:
-        return False
+        return None
+
+    if (timestamp_ns <= 0 or
+            not 0 <= red <= 255 or
+            not 0 <= green <= 255 or
+            not 0 <= blue <= 255):
+        return None
+
+    return PixelObservation(timestamp_ns, red, green, blue)
+
+
+def marker_observation_matches(
+        observation: PixelObservation, state: int) -> bool:
     if state:
-        return red > 200 and green < 80 and blue < 80
-    return blue > 200 and red < 80 and green < 80
+        return (
+            observation.red > MARKER_HIGH_CHANNEL_THRESHOLD and
+            observation.green < MARKER_LOW_CHANNEL_THRESHOLD and
+            observation.blue < MARKER_LOW_CHANNEL_THRESHOLD
+        )
+
+    return (
+        observation.blue > MARKER_HIGH_CHANNEL_THRESHOLD and
+        observation.red < MARKER_LOW_CHANNEL_THRESHOLD and
+        observation.green < MARKER_LOW_CHANNEL_THRESHOLD
+    )
 
 
 def wait_marker(probe: LineReader, probe_stdin, state: int,
                 visible_ns: int, timeout: float,
                 poll_interval: float, *, diagnostic: bool = False,
-                observed_ns_out: list[int] | None = None) -> float | None:
+                observed_ns_out: list[int] | None = None,
+                wait_diagnostics: MarkerWaitDiagnostics | None = None
+                ) -> float | None:
     deadline = time.monotonic() + timeout
     latest = b""
     while time.monotonic() < deadline:
@@ -1277,15 +1355,19 @@ def wait_marker(probe: LineReader, probe_stdin, state: int,
         line = probe.readline(min(0.5, max(0.02, deadline - time.monotonic())))
         if line:
             latest = line
-            fields = line.split()
-            if marker_rgb_matches(fields, state):
-                try:
-                    observed_ns = int(fields[0])
+            observation = parse_pixel_observation(line)
+            if observation is None:
+                if wait_diagnostics is not None:
+                    wait_diagnostics.malformed_sample_count += 1
+            else:
+                if wait_diagnostics is not None:
+                    wait_diagnostics.sample_count += 1
+                    wait_diagnostics.last_observation = observation
+
+                if marker_observation_matches(observation, state):
                     if observed_ns_out is not None:
-                        observed_ns_out.append(observed_ns)
-                    return (observed_ns - visible_ns) / 1e6
-                except (IndexError, ValueError):
-                    pass
+                        observed_ns_out.append(observation.timestamp_ns)
+                    return (observation.timestamp_ns - visible_ns) / 1e6
         time.sleep(poll_interval)
     if diagnostic:
         print(f"marker timeout state={state} last={latest.decode(errors='replace').strip()!r}")
@@ -1330,6 +1412,14 @@ def parse_graphics_frame(line: bytes) -> tuple[int, int, int]:
             f"non-numeric graphics stimulus response: {line!r}") from error
 
     return visible_ns, state, render_ns
+
+
+def require_no_rfx_decoder_failure(log_path: Path) -> None:
+    log_text = log_path.read_text(errors="replace")
+    if RFX_DECODER_FAILURE_MARKER in log_text:
+        raise RuntimeError(
+            "FreeRDP reported a RemoteFX decoder failure; "
+            f"see {log_path}")
 
 
 def print_transport_summary(label: str, start: TcpSnapshot | None,
@@ -2375,12 +2465,11 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                                    time.monotonic() + 8)
         xrdp_probe.close()
         if direct_backend:
-            pipeline_options = [
-                "+rfx",
-                "-gfx",
-                "/network:lan",
-            ]
+            graphics_request = direct_graphics_request(
+                args.direct_graphics_transport)
+            pipeline_options = list(graphics_request.client_options)
         else:
+            graphics_request = None
             pipeline_options = [
                 f"/{args.pipeline}",
                 "/network:lan",
@@ -2456,13 +2545,17 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                 )
             if args.disable_gfx_for_vnc and negotiated == "GFX":
                 raise RuntimeError("GFX remained active after the Console policy")
-        requested_path = "RFX" if direct_backend else args.pipeline.upper()
+        requested_path = (
+            graphics_request.expected_negotiation
+            if graphics_request is not None else args.pipeline.upper())
         print(f"{name}#{repetition}: backend={args.backend} "
               f"requested={requested_path} negotiated={negotiated}")
-        if direct_backend and negotiated != "RFX":
+        if direct_backend and graphics_request is not None and \
+                negotiated != graphics_request.expected_negotiation:
             raise RuntimeError(
-                "direct-X11 graphics benchmark requested RemoteFX "
-                f"but negotiated {negotiated}")
+                "direct-X11 graphics benchmark requested "
+                f"{args.direct_graphics_transport} but negotiated "
+                f"{negotiated}")
         window = find_window(client_display, "xrdp-gpu-bench", time.monotonic() + 10)
         measured_processes = [proc for proc in
                               (xvfb, chansrv, proxy, vnc, xrdp, client)
@@ -2518,9 +2611,11 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         if not warmup:
             raise RuntimeError("graphics stimulus produced no warm-up frame")
         warmup_visible_ns, warmup_state, _ = parse_graphics_frame(warmup)
+        warmup_diagnostics = MarkerWaitDiagnostics()
         warmup_latency = wait_marker(
             probe_reader, probe.stdin, warmup_state, warmup_visible_ns,
             args.timeout, args.poll_ms / 1000.0, diagnostic=True,
+            wait_diagnostics=warmup_diagnostics,
         )
         if warmup_latency is None:
             diagnostic_points = [
@@ -2541,13 +2636,14 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         point_visible_ns: list[int] = []
         point_expected_states: list[int] = []
         misses = 0
+        reported_misses = 0
         process_list = measured_processes
         cpu_start = {proc.pid: process_cpu_tree(proc) for proc in process_list}
         rss_start = {proc.pid: process_rss_tree(proc) for proc in process_list}
         transport_start = tcp_snapshot(xrdp_port)
         wall_start = time.monotonic()
         next_tick = wall_start
-        for _ in range(samples):
+        for sample_index in range(samples):
             next_tick += 1.0 / args.fps
             stimulus.stdin.write(b"frame\n")
             stimulus.stdin.flush()
@@ -2555,12 +2651,31 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             visible_ns, state, render_duration_ns = parse_graphics_frame(line)
             render_ns.append(render_duration_ns)
             observed_ns: list[int] = []
+            wait_diagnostics = MarkerWaitDiagnostics()
             latency = wait_marker(
                 probe_reader, probe.stdin, state, visible_ns, args.timeout,
                 args.poll_ms / 1000.0, observed_ns_out=observed_ns,
+                wait_diagnostics=wait_diagnostics,
             )
             if latency is None:
                 misses += 1
+                if reported_misses < MAX_REPORTED_GRAPHICS_MISSES:
+                    observation = wait_diagnostics.last_observation
+                    remote_pixel = (
+                        "none" if observation is None else
+                        f"{observation.red},{observation.green},"
+                        f"{observation.blue}"
+                    )
+                    print(
+                        "graphics miss "
+                        f"sample={sample_index + 1} "
+                        f"expected_state={state} "
+                        f"remote_rgb={remote_pixel} "
+                        f"probe_samples={wait_diagnostics.sample_count} "
+                        "malformed_samples="
+                        f"{wait_diagnostics.malformed_sample_count}"
+                    )
+                    reported_misses += 1
             else:
                 latencies.append(latency)
                 point_draw_ns.append(visible_ns)
@@ -2577,6 +2692,9 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         summarize_xrdp_profile(
             xrdp_log, f"{name}#{repetition} fps={args.fps:.1f}",
             point_draw_ns, point_visible_ns, point_expected_states)
+        if (direct_backend and args.mode == "graphics" and
+                args.direct_graphics_transport == "rfx"):
+            require_no_rfx_decoder_failure(case_dir / "xfreerdp.log")
     finally:
         for proc in (probe, stimulus, client, xrdp, proxy, vnc, chansrv, xvfb):
             kill_process(proc, privileged=(proc is client and network.enabled))
@@ -2603,6 +2721,11 @@ def main() -> int:
         "--backend", choices=("vnc", "direct-x11"), default="vnc",
         help=("RDP server backend: x11vnc/libvnc.so or the first-party "
               "XCB/XDamage/XShm module (default: vnc)"))
+    parser.add_argument(
+        "--direct-graphics-transport", choices=("rfx", "classic"),
+        default="rfx",
+        help=("graphics transport to require for the direct-X11 benchmark "
+              "(default: rfx)"))
     parser.add_argument("--input-hz", type=float, default=5.0,
                         help="key pulses per second in input-roundtrip mode")
     parser.add_argument("--input-churn-fps", type=float,
@@ -2705,6 +2828,9 @@ def main() -> int:
             parser.error("--backend direct-x11 requires --max-bpp 32")
         if args.only is not None:
             parser.error("--only is only valid for the VNC backend")
+    elif args.direct_graphics_transport != "rfx":
+        parser.error(
+            "--direct-graphics-transport requires --backend direct-x11")
     elif args.direct_dynamic_resizing:
         parser.error("--direct-dynamic-resizing requires --backend direct-x11")
     if (args.width <= 0 or args.height <= 0 or
@@ -2805,8 +2931,9 @@ def main() -> int:
             "xrdp-console direct-X11" if args.backend == "direct-x11"
             else "xrdp -> x11vnc end-to-end")
         effective_pipeline = (
-            "RFX" if args.backend == "direct-x11"
-            else args.pipeline.upper())
+            direct_graphics_request(
+                args.direct_graphics_transport).expected_negotiation
+            if args.backend == "direct-x11" else args.pipeline.upper())
         effective_gfx = (
             "disabled" if args.backend == "direct-x11" or
             args.disable_gfx_for_vnc else "requested")

@@ -7,6 +7,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import sys
 import unittest
 from pathlib import Path
 
@@ -15,6 +16,7 @@ BENCHMARK = Path(__file__).parents[1] / "tools/benchmark/xrdp_console_bench.py"
 spec = importlib.util.spec_from_file_location("xrdp_vnc_gpu_e2e_bench", BENCHMARK)
 assert spec is not None and spec.loader is not None
 module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
 spec.loader.exec_module(module)
 
 
@@ -81,6 +83,40 @@ class SyntheticNetworkTests(unittest.TestCase):
             module.parse_graphics_frame(b"10 bad 30\n")
         self.assertEqual(module.percentile([1.0, 2.0, 3.0, 4.0], 0.95), 4.0)
         self.assertEqual(module.percentile([1.0, 2.0, 3.0, 4.0], 0.50), 2.0)
+
+    def test_direct_graphics_transport_requests_are_explicit(self):
+        self.assertEqual(
+            module.direct_graphics_request("rfx"),
+            module.DirectGraphicsRequest(
+                client_options=("+rfx", "-gfx", "/network:lan"),
+                expected_negotiation="RFX",
+            ),
+        )
+        self.assertEqual(
+            module.direct_graphics_request("classic"),
+            module.DirectGraphicsRequest(
+                client_options=("-gfx", "/network:lan"),
+                expected_negotiation="CLASSIC_BITMAP",
+            ),
+        )
+        with self.assertRaises(ValueError):
+            module.direct_graphics_request("invalid")
+
+    def test_pixel_observation_and_marker_contracts(self):
+        self.assertEqual(
+            module.parse_pixel_observation(b"123456 255 0 0\n"),
+            module.PixelObservation(123456, 255, 0, 0),
+        )
+        self.assertIsNone(module.parse_pixel_observation(b"IMAGE_FAILED\n"))
+        self.assertIsNone(module.parse_pixel_observation(b"123 bad 0 0\n"))
+        self.assertIsNone(module.parse_pixel_observation(b"123 256 0 0\n"))
+
+        red = module.PixelObservation(1, 255, 0, 0)
+        blue = module.PixelObservation(1, 0, 0, 255)
+        self.assertTrue(module.marker_observation_matches(red, 1))
+        self.assertFalse(module.marker_observation_matches(red, 0))
+        self.assertTrue(module.marker_observation_matches(blue, 0))
+        self.assertFalse(module.marker_observation_matches(blue, 1))
 
 if __name__ == "__main__":
     unittest.main()
