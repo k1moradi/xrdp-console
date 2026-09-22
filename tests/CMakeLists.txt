@@ -99,7 +99,8 @@ if(TARGET xrdp-console)
     target_link_libraries(x11-damage-integration PRIVATE
         PkgConfig::XRDP_CONSOLE_TEST_XCB
         PkgConfig::XRDP_CONSOLE_TEST_XCB_DAMAGE
-        PkgConfig::XRDP_CONSOLE_TEST_XCB_SHM)
+        PkgConfig::XRDP_CONSOLE_TEST_XCB_SHM
+        PkgConfig::XRDP_CONSOLE_TEST_XCB_XFIXES)
     add_test(NAME x11-damage-integration
         COMMAND ${Python3_EXECUTABLE} -B
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_damage.py

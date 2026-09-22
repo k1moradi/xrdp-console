@@ -71,7 +71,7 @@ test_clipping_and_merging() noexcept
 }
 
 int
-test_fragmentation_fallback() noexcept
+test_fragmentation_stays_bounded() noexcept
 {
     constexpr PixelSize bounds{200, 100};
     DamageRegion region;
@@ -81,6 +81,23 @@ test_fragmentation_fallback() noexcept
         region.add({static_cast<std::int32_t>(index * 3), 0, 1, 1}, bounds);
     }
 
+    std::uint64_t representedPixels = 0;
+    for (const Rectangle rectangle : region.rectangles())
+    {
+        representedPixels +=
+            static_cast<std::uint64_t>(rectangle.widthPixels) *
+            rectangle.heightPixels;
+    }
+    if (region.fullScreenRequired() ||
+        region.rectangles().size() > DamageRegion::kMaxRectangles ||
+        representedPixels >=
+            static_cast<std::uint64_t>(bounds.widthPixels) *
+                bounds.heightPixels)
+    {
+        return 1;
+    }
+
+    region.add({0, 0, bounds.widthPixels, bounds.heightPixels}, bounds);
     if (!region.fullScreenRequired() || region.rectangles().size() != 1 ||
         !contains(region.rectangles(), {0, 0, bounds.widthPixels,
                                         bounds.heightPixels}))
@@ -116,14 +133,36 @@ test_bounded_consumption() noexcept
     return region.rectangles().empty() ? 0 : 1;
 }
 
+int
+test_stripe_consumption() noexcept
+{
+    constexpr PixelSize bounds{100, 80};
+    DamageRegion region;
+    region.add({0, 0, 40, 60}, bounds);
+
+    if (!region.consume_front({0, 0, 40, 20}) ||
+        region.rectangles().size() != 1 ||
+        !contains(region.rectangles(), {0, 20, 40, 40}) ||
+        region.consume_front({1, 20, 40, 20}))
+    {
+        return 1;
+    }
+
+    return region.consume_front({0, 20, 40, 40}) &&
+                   region.rectangles().empty()
+               ? 0
+               : 1;
+}
+
 } // namespace
 
 int
 main()
 {
     return test_clipping_and_merging() == 0 &&
-                   test_fragmentation_fallback() == 0 &&
-                   test_bounded_consumption() == 0
+                   test_fragmentation_stays_bounded() == 0 &&
+                   test_bounded_consumption() == 0 &&
+                   test_stripe_consumption() == 0
                ? EXIT_SUCCESS
                : EXIT_FAILURE;
 }

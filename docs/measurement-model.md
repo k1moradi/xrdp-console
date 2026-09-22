@@ -67,9 +67,12 @@ known red/blue marker assertion.
 For opt-in direct-module pipeline attribution, pass
 `--xrdp-env XRDP_CONSOLE_PROFILE=1`. The private xrdp log then emits one
 `XRDP_CONSOLE_PROFILE` record per approximately one-second window and a final
-partial window. Its counters distinguish raw XDamage area from captured and
-successfully painted area, and report `server_paint_rect()` calls plus the
-uncompressed bytes handed to xrdp. Profiling is disabled by default.
+partial window. Its counters distinguish Damage wake-ups and the server-region
+snapshot from captured and successfully painted area, and report presentation
+batches, `server_paint_rect()` calls, and the uncompressed bytes handed to
+xrdp. Profiling is disabled by default. `damage_wakeups` is the NON_EMPTY
+notification count; `damage_snapshot_pixels` is the authoritative XFixes
+region area handed to the bounded damage representation.
 
 Input-roundtrip also supports `--transport rfb --mode input-roundtrip`. The
 benchmark sends the same F9 RFB KeyEvent pulse as the RDP input path to the

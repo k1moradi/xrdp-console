@@ -33,7 +33,7 @@ check_request(xcb_connection_t *connection, xcb_void_cookie_t cookie,
 
 bool
 wait_for_damage(xcb_connection_t *connection, X11DamageTracker &tracker,
-                DamageRegion &region) noexcept
+                std::uint64_t minimumNotificationCount) noexcept
 {
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(3);
@@ -49,12 +49,13 @@ wait_for_damage(xcb_connection_t *connection, X11DamageTracker &tracker,
             }
             if (tracker.handles(*event))
             {
-                tracker.handle(*event, region);
+                tracker.handle(*event);
             }
             std::free(event);
         }
 
-        if (!region.rectangles().empty())
+        if (tracker.hasPendingDamage() &&
+            tracker.notificationCount() >= minimumNotificationCount)
         {
             return true;
         }
@@ -175,13 +176,26 @@ run() noexcept
             return 1;
         }
 
+        DamageRegion idleRegion;
+        if (!tracker.snapshot(idleRegion) || tracker.hasPendingDamage() ||
+            !idleRegion.rectangles().empty())
+        {
+            std::fprintf(stderr,
+                         "an idle Damage snapshot produced unexpected work\n");
+            xcb_free_gc(connection, graphicsContext);
+            xcb_destroy_window(connection, window);
+            xcb_flush(connection);
+            xcb_disconnect(connection);
+            return 1;
+        }
+
         DamageRegion region;
         const xcb_rectangle_t firstRectangle{2, 3, 20, 15};
         xcb_poly_fill_rectangle(connection, window, graphicsContext, 1,
                                 &firstRectangle);
         if (xcb_flush(connection) <= 0 ||
-            !wait_for_damage(connection, tracker, region) ||
-            !tracker.acknowledge())
+            !wait_for_damage(connection, tracker, 1) ||
+            !tracker.snapshot(region))
         {
             xcb_free_gc(connection, graphicsContext);
             xcb_destroy_window(connection, window);
@@ -210,9 +224,32 @@ run() noexcept
         xcb_poly_fill_rectangle(connection, window, graphicsContext, 1,
                                 &secondRectangle);
         if (xcb_flush(connection) <= 0 ||
-            !wait_for_damage(connection, tracker, region) ||
-            !tracker.acknowledge())
+            !wait_for_damage(connection, tracker, 2) ||
+            !tracker.snapshot(region))
         {
+            xcb_free_gc(connection, graphicsContext);
+            xcb_destroy_window(connection, window);
+            xcb_flush(connection);
+            xcb_disconnect(connection);
+            return 1;
+        }
+
+        region.clear();
+        const std::uint64_t notificationsBeforeBurst =
+            tracker.notificationCount();
+        for (int index = 0; index < 100; ++index)
+        {
+            xcb_poly_fill_rectangle(connection, window, graphicsContext, 1,
+                                    &firstRectangle);
+        }
+        if (xcb_flush(connection) <= 0 ||
+            !wait_for_damage(connection, tracker, notificationsBeforeBurst + 1) ||
+            tracker.notificationCount() != notificationsBeforeBurst + 1 ||
+            !tracker.snapshot(region) || region.rectangles().size() != 1 ||
+            region.rectangles()[0] != Rectangle{2, 3, 20, 15})
+        {
+            std::fprintf(stderr,
+                         "repeated damage was not coalesced into one snapshot\n");
             xcb_free_gc(connection, graphicsContext);
             xcb_destroy_window(connection, window);
             xcb_flush(connection);

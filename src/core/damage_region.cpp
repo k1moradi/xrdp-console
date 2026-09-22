@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 
 namespace
 {
@@ -25,12 +26,34 @@ bottom_edge(const Rectangle &rectangle) noexcept
 }
 
 bool
-touches_or_overlaps(const Rectangle &left, const Rectangle &right) noexcept
+is_full_screen(Rectangle rectangle, PixelSize bounds) noexcept
 {
-    return static_cast<WideCoordinate>(left.x) <= right_edge(right) &&
-           static_cast<WideCoordinate>(right.x) <= right_edge(left) &&
-           static_cast<WideCoordinate>(left.y) <= bottom_edge(right) &&
-           static_cast<WideCoordinate>(right.y) <= bottom_edge(left);
+    return rectangle.x == 0 && rectangle.y == 0 &&
+           rectangle.widthPixels == bounds.widthPixels &&
+           rectangle.heightPixels == bounds.heightPixels;
+}
+
+std::uint64_t
+area(const Rectangle &rectangle) noexcept
+{
+    return static_cast<std::uint64_t>(rectangle.widthPixels) *
+           rectangle.heightPixels;
+}
+
+std::uint64_t
+area(PixelSize bounds) noexcept
+{
+    return static_cast<std::uint64_t>(bounds.widthPixels) *
+           bounds.heightPixels;
+}
+
+bool
+strictly_overlaps(const Rectangle &left, const Rectangle &right) noexcept
+{
+    return static_cast<WideCoordinate>(left.x) < right_edge(right) &&
+           static_cast<WideCoordinate>(right.x) < right_edge(left) &&
+           static_cast<WideCoordinate>(left.y) < bottom_edge(right) &&
+           static_cast<WideCoordinate>(right.y) < bottom_edge(left);
 }
 
 Rectangle
@@ -91,54 +114,140 @@ clip_rectangle(Rectangle input, PixelSize bounds, Rectangle &output) noexcept
 void
 DamageRegion::add(Rectangle rectangle, PixelSize bounds) noexcept
 {
-    if (fullScreenRequired_)
-    {
-        return;
-    }
-
     Rectangle clipped{};
     if (!clip_rectangle(rectangle, bounds, clipped))
     {
         return;
     }
 
-    // Repeatedly merge because the new bounding rectangle can become
-    // adjacent to an earlier rectangle after one merge.
-    std::size_t index = 0;
-    while (index < count_)
+    if (is_full_screen(clipped, bounds))
     {
-        if (!touches_or_overlaps(rectangles_[index], clipped))
-        {
-            ++index;
-            continue;
-        }
-
-        clipped = bounding_rectangle(rectangles_[index], clipped);
-        for (std::size_t move = index + 1; move < count_; ++move)
-        {
-            rectangles_[move - 1] = rectangles_[move];
-        }
-        --count_;
-        index = 0;
-    }
-
-    if (count_ == kMaxRectangles)
-    {
-        // A bounded full-screen fallback keeps event processing O(1) and
-        // avoids preserving a stale, fragmented list indefinitely.
-        rectangles_[0] = {
-            0,
-            0,
-            bounds.widthPixels,
-            bounds.heightPixels,
-        };
+        rectangles_[0] = clipped;
         count_ = 1;
         fullScreenRequired_ = true;
         return;
     }
 
-    rectangles_[count_] = clipped;
-    ++count_;
+    // Once a complete frame is pending, later damage is already covered by
+    // it. This is the only case where new damage can be discarded locally.
+    if (fullScreenRequired_ && count_ == 1 &&
+        is_full_screen(rectangles_[0], bounds))
+    {
+        return;
+    }
+
+    auto coalesce_without_expansion = [&]() noexcept
+    {
+        bool merged = true;
+        while (merged)
+        {
+            merged = false;
+            for (std::size_t left = 0; left < count_ && !merged; ++left)
+            {
+                for (std::size_t right = left + 1; right < count_; ++right)
+                {
+                    const Rectangle combined =
+                        bounding_rectangle(rectangles_[left],
+                                           rectangles_[right]);
+                    const std::uint64_t leftArea = area(rectangles_[left]);
+                    const std::uint64_t rightArea = area(rectangles_[right]);
+                    const std::uint64_t combinedArea = area(combined);
+                    const std::uint64_t additionalArea =
+                        combinedArea > leftArea + rightArea
+                            ? combinedArea - leftArea - rightArea
+                            : 0;
+                    const bool limitedOverlapExpansion =
+                        strictly_overlaps(rectangles_[left],
+                                          rectangles_[right]) &&
+                        additionalArea <= std::min(leftArea, rightArea) / 4;
+                    if (additionalArea != 0 && !limitedOverlapExpansion)
+                    {
+                        continue;
+                    }
+
+                    rectangles_[left] = combined;
+                    for (std::size_t move = right + 1; move < count_; ++move)
+                    {
+                        rectangles_[move - 1] = rectangles_[move];
+                    }
+                    --count_;
+                    merged = true;
+                    break;
+                }
+            }
+        }
+    };
+
+    if (count_ < kMaxRectangles)
+    {
+        rectangles_[count_] = clipped;
+        ++count_;
+        coalesce_without_expansion();
+    }
+    else
+    {
+        // Keep the representation bounded without turning the 33rd small
+        // update into a full-screen repaint. Merge the pair with the least
+        // additional represented area, including the new rectangle.
+        std::array<Rectangle, kMaxRectangles + 1> candidates{};
+        std::copy(rectangles_.begin(), rectangles_.end(), candidates.begin());
+        candidates[kMaxRectangles] = clipped;
+
+        std::size_t bestLeft = 0;
+        std::size_t bestRight = 1;
+        std::int64_t bestCost = std::numeric_limits<std::int64_t>::max();
+        std::uint64_t bestArea = std::numeric_limits<std::uint64_t>::max();
+        for (std::size_t left = 0; left < candidates.size(); ++left)
+        {
+            for (std::size_t right = left + 1; right < candidates.size();
+                 ++right)
+            {
+                const Rectangle combined =
+                    bounding_rectangle(candidates[left], candidates[right]);
+                const std::int64_t mergeCost =
+                    static_cast<std::int64_t>(area(combined)) -
+                    static_cast<std::int64_t>(area(candidates[left])) -
+                    static_cast<std::int64_t>(area(candidates[right]));
+                const std::uint64_t combinedArea = area(combined);
+                if (mergeCost < bestCost ||
+                    (mergeCost == bestCost && combinedArea < bestArea))
+                {
+                    bestLeft = left;
+                    bestRight = right;
+                    bestCost = mergeCost;
+                    bestArea = combinedArea;
+                }
+            }
+        }
+
+        candidates[bestLeft] =
+            bounding_rectangle(candidates[bestLeft], candidates[bestRight]);
+        for (std::size_t index = bestRight + 1; index < candidates.size();
+             ++index)
+        {
+            candidates[index - 1] = candidates[index];
+        }
+        for (std::size_t index = 0; index < kMaxRectangles; ++index)
+        {
+            rectangles_[index] = candidates[index];
+        }
+        coalesce_without_expansion();
+    }
+
+    if (area(bounds) != 0)
+    {
+        std::uint64_t representedArea = 0;
+        for (std::size_t index = 0; index < count_; ++index)
+        {
+            representedArea += area(rectangles_[index]);
+        }
+        if (representedArea >= area(bounds))
+        {
+            rectangles_[0] = {0, 0, bounds.widthPixels, bounds.heightPixels};
+            count_ = 1;
+            fullScreenRequired_ = true;
+        }
+    }
 }
 
 std::span<const Rectangle>
@@ -158,6 +267,37 @@ DamageRegion::front(Rectangle &rectangle) const noexcept
     return true;
 }
 
+bool
+DamageRegion::consume_front(Rectangle rectangle) noexcept
+{
+    if (count_ == 0 || rectangle.widthPixels == 0 ||
+        rectangle.heightPixels == 0)
+    {
+        return false;
+    }
+
+    const Rectangle current = rectangles_[0];
+    if (rectangle == current)
+    {
+        remove_front();
+        return true;
+    }
+
+    // The module paints large rectangles as top-to-bottom horizontal stripes.
+    // Retain the unpainted tail without allocating or splitting the bounded
+    // representation.
+    if (rectangle.x != current.x || rectangle.widthPixels != current.widthPixels ||
+        rectangle.y != current.y || rectangle.heightPixels >= current.heightPixels)
+    {
+        return false;
+    }
+
+    rectangles_[0].y += static_cast<std::int32_t>(rectangle.heightPixels);
+    rectangles_[0].heightPixels -= rectangle.heightPixels;
+    fullScreenRequired_ = false;
+    return true;
+}
+
 void
 DamageRegion::remove_front() noexcept
 {
@@ -170,6 +310,10 @@ DamageRegion::remove_front() noexcept
         rectangles_[index - 1] = rectangles_[index];
     }
     --count_;
+    if (count_ == 0)
+    {
+        fullScreenRequired_ = false;
+    }
 }
 
 bool

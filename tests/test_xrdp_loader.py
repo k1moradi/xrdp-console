@@ -161,8 +161,15 @@ def assert_client_pixel(display: str, window_title: str, pixel_probe: Path,
         deadline = time.monotonic() + 8.0
         last_pixel = b""
         while time.monotonic() < deadline:
-            probe.stdin.write(b"sample\n")
-            probe.stdin.flush()
+            try:
+                probe.stdin.write(b"sample\n")
+                probe.stdin.flush()
+            except BrokenPipeError as error:
+                raise AssertionError(
+                    "pixel probe exited before the client-visible pixel "
+                    f"assertion completed (status={probe.poll()}):\n"
+                    f"{xrdp_log_excerpt(log_path)}"
+                ) from error
             line = read_line(probe.stdout, min(0.5, deadline - time.monotonic()))
             if not line:
                 continue

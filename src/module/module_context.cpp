@@ -95,6 +95,25 @@ public:
         counters_.capturedPixels += area(rectangle);
     }
 
+    void noteSnapshot(std::uint64_t rectangles,
+                      std::uint64_t pixels) noexcept
+    {
+        if (!enabled_)
+        {
+            return;
+        }
+        counters_.snapshotRectangles += rectangles;
+        counters_.snapshotPixels += pixels;
+    }
+
+    void notePresentationBatch() noexcept
+    {
+        if (enabled_)
+        {
+            ++counters_.presentationBatches;
+        }
+    }
+
     void notePaint(Rectangle rectangle, std::size_t bytes,
                    bool succeeded) noexcept
     {
@@ -149,11 +168,14 @@ private:
     {
         std::uint64_t damageNotifications{};
         std::uint64_t damagedPixels{};
+        std::uint64_t snapshotRectangles{};
+        std::uint64_t snapshotPixels{};
         std::uint64_t coalescedRectangles{};
         std::uint64_t coalescedPixels{};
         std::uint64_t capturedPixels{};
         std::uint64_t paintCalls{};
         std::uint64_t uncompressedBytes{};
+        std::uint64_t presentationBatches{};
     };
 
     static bool profileEnabled() noexcept
@@ -173,10 +195,13 @@ private:
     {
         return counters_.damageNotifications != 0 ||
                counters_.damagedPixels != 0 ||
+               counters_.snapshotRectangles != 0 ||
+               counters_.snapshotPixels != 0 ||
                counters_.coalescedRectangles != 0 ||
                counters_.coalescedPixels != 0 ||
                counters_.capturedPixels != 0 || counters_.paintCalls != 0 ||
-               counters_.uncompressedBytes != 0;
+               counters_.uncompressedBytes != 0 ||
+               counters_.presentationBatches != 0;
     }
 
     static double perSecond(std::uint64_t value,
@@ -191,21 +216,27 @@ private:
         log_message(
             LOG_LEVEL_INFO,
             "XRDP_CONSOLE_PROFILE window_us=%llu "
-            "damage_notifications=%llu damaged_pixels=%llu "
+            "damage_wakeups=%llu reported_damage_pixels=%llu "
+            "damage_snapshot_rectangles=%llu damage_snapshot_pixels=%llu "
             "coalesced_rectangles=%llu coalesced_pixels=%llu "
             "captured_pixels=%llu paint_calls=%llu "
-            "uncompressed_bytes=%llu "
-            "damage_pixels_per_s=%.0f captured_pixels_per_s=%.0f "
+            "uncompressed_bytes=%llu presentation_batches=%llu "
+            "reported_damage_pixels_per_s=%.0f "
+            "damage_snapshot_pixels_per_s=%.0f captured_pixels_per_s=%.0f "
             "paint_calls_per_s=%.0f uncompressed_bytes_per_s=%.0f",
             static_cast<unsigned long long>(window.count()),
             static_cast<unsigned long long>(counters_.damageNotifications),
             static_cast<unsigned long long>(counters_.damagedPixels),
+            static_cast<unsigned long long>(counters_.snapshotRectangles),
+            static_cast<unsigned long long>(counters_.snapshotPixels),
             static_cast<unsigned long long>(counters_.coalescedRectangles),
             static_cast<unsigned long long>(counters_.coalescedPixels),
             static_cast<unsigned long long>(counters_.capturedPixels),
             static_cast<unsigned long long>(counters_.paintCalls),
             static_cast<unsigned long long>(counters_.uncompressedBytes),
+            static_cast<unsigned long long>(counters_.presentationBatches),
             perSecond(counters_.damagedPixels, window),
+            perSecond(counters_.snapshotPixels, window),
             perSecond(counters_.capturedPixels, window),
             perSecond(counters_.paintCalls, window),
             perSecond(counters_.uncompressedBytes, window));
@@ -221,22 +252,19 @@ class ModuleEventSink final : public X11EventSink
 {
 public:
     ModuleEventSink(X11DamageTracker &damageTracker,
-                    DamageRegion &damageRegion,
                     X11CursorTracker &cursorTracker) noexcept
-        : damageTracker_(damageTracker), damageRegion_(damageRegion),
-          cursorTracker_(cursorTracker)
+        : damageTracker_(damageTracker), cursorTracker_(cursorTracker)
     {
     }
 
     void handle(const xcb_generic_event_t &event) noexcept override
     {
-        damageTracker_.handle(event, damageRegion_);
+        damageTracker_.handle(event);
         cursorTracker_.handle(event);
     }
 
 private:
     X11DamageTracker &damageTracker_;
-    DamageRegion &damageRegion_;
     X11CursorTracker &cursorTracker_;
 };
 
@@ -261,6 +289,7 @@ is_pointer_release_message(int message) noexcept
 constexpr std::size_t kMaximumX11EventsPerService = 128;
 constexpr std::size_t kMaximumPaintRectanglesPerService = 4;
 constexpr std::uint64_t kMaximumPaintPixelsPerService = 2U * 1024U * 1024U;
+constexpr auto kMinimumPresentationInterval = std::chrono::milliseconds{16};
 
 struct ModuleState
 {
@@ -280,6 +309,8 @@ struct ModuleState
 
 struct ModuleContext::Impl
 {
+    using Clock = std::chrono::steady_clock;
+
     xrdp_console_module *module{nullptr};
     ModuleState state{};
     std::unique_ptr<X11DisplayConnection> x11Connection{};
@@ -295,6 +326,25 @@ struct ModuleContext::Impl
     bool fullPresentationInvalidation{false};
     bool outputSuppressed{false};
     bool x11EventBudgetPending{false};
+    bool presentationDeadlineArmed{false};
+    Clock::time_point presentationDeadline{};
+
+    void armPresentationImmediately() noexcept
+    {
+        presentationDeadline = Clock::now();
+        presentationDeadlineArmed = true;
+    }
+
+    void armNextPresentation(Clock::time_point now) noexcept
+    {
+        presentationDeadline = now + kMinimumPresentationInterval;
+        presentationDeadlineArmed = true;
+    }
+
+    void disarmPresentation() noexcept
+    {
+        presentationDeadlineArmed = false;
+    }
 };
 
 ModuleContext::ModuleContext() noexcept : impl_(new (std::nothrow) Impl{})
@@ -501,6 +551,7 @@ ModuleContext::connect() noexcept
             {0, 0, sourceGeometry.widthPixels, sourceGeometry.heightPixels},
             sourceGeometry);
         impl_->fullPresentationInvalidation = true;
+        impl_->armPresentationImmediately();
         impl_->x11Connection = std::move(connection);
         impl_->damageTracker = std::move(damageTracker);
         impl_->cursorTracker = std::move(cursorTracker);
@@ -524,6 +575,7 @@ ModuleContext::connect() noexcept
         impl_->fullPresentationInvalidation = false;
         impl_->outputSuppressed = false;
         impl_->x11EventBudgetPending = false;
+        impl_->presentationDeadlineArmed = false;
         return 1;
     }
 }
@@ -572,6 +624,7 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
          impl_->state.sourceGeometry.heightPixels},
         impl_->state.sourceGeometry);
     impl_->fullPresentationInvalidation = true;
+    impl_->armPresentationImmediately();
     log_message(LOG_LEVEL_INFO,
                 "xrdp-console: presentation resized to %ux%u; source remains "
                 "%ux%u",
@@ -598,6 +651,7 @@ ModuleContext::invalidate_presentation(int width, int height) noexcept
          impl_->state.sourceGeometry.heightPixels},
         impl_->state.sourceGeometry);
     impl_->fullPresentationInvalidation = true;
+    impl_->armPresentationImmediately();
     return 0;
 }
 
@@ -627,6 +681,7 @@ ModuleContext::suppress_output(bool suppress, int left, int top, int right,
              impl_->state.sourceGeometry.heightPixels},
             impl_->state.sourceGeometry);
         impl_->fullPresentationInvalidation = true;
+        impl_->armPresentationImmediately();
     }
     return 0;
 }
@@ -696,6 +751,7 @@ ModuleContext::end() noexcept
     impl_->state.started = false;
     impl_->outputSuppressed = false;
     impl_->x11EventBudgetPending = false;
+    impl_->presentationDeadlineArmed = false;
     impl_->profile.reset();
     return 0;
 }
@@ -795,17 +851,39 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
     read_objects[*read_count] = waitObject;
     ++(*read_count);
 
-    if (timeout != nullptr && !impl_->outputSuppressed &&
-        (impl_->x11EventBudgetPending ||
-         (impl_->rdpUpdateSink.available() &&
-          (!impl_->damageRegion.rectangles().empty() ||
-           impl_->fullPresentationInvalidation))))
+    if (timeout != nullptr && !impl_->outputSuppressed)
     {
-        // XCB may own more events in its private queue after the socket is no
-        // longer readable.  A zero timeout keeps bounded work progressing and
-        // also lets a pending local damage batch yield back to xrdp's RDP
-        // transport between iterations.
-        *timeout = 0;
+        if (impl_->x11EventBudgetPending)
+        {
+            // XCB may own more events in its private queue after the socket is
+            // no longer readable. Keep draining those in bounded slices.
+            *timeout = 0;
+        }
+        else if (impl_->rdpUpdateSink.available() &&
+                 (impl_->damageTracker->hasPendingDamage() ||
+                  !impl_->damageRegion.rectangles().empty() ||
+                  impl_->fullPresentationInvalidation))
+        {
+            if (!impl_->presentationDeadlineArmed)
+            {
+                impl_->armPresentationImmediately();
+            }
+
+            const auto now = Impl::Clock::now();
+            const auto remaining = impl_->presentationDeadline - now;
+            const int requestedTimeout =
+                remaining <= Impl::Clock::duration::zero()
+                    ? 0
+                    : static_cast<int>(std::min<std::int64_t>(
+                          INT_MAX,
+                          std::chrono::ceil<std::chrono::milliseconds>(
+                              remaining)
+                              .count()));
+            if (*timeout < 0 || requestedTimeout < *timeout)
+            {
+                *timeout = requestedTimeout;
+            }
+        }
     }
     return 0;
 }
@@ -836,8 +914,7 @@ ModuleContext::check_wait_objs() noexcept
         impl_->damageTracker->notificationCount();
     const std::uint64_t previousDamagedPixels =
         impl_->damageTracker->damagedPixelCount();
-    ModuleEventSink eventSink(*impl_->damageTracker, impl_->damageRegion,
-                              *impl_->cursorTracker);
+    ModuleEventSink eventSink(*impl_->damageTracker, *impl_->cursorTracker);
     if (impl_->x11Connection->processEvents(
             eventSink, kMaximumX11EventsPerService,
             &impl_->x11EventBudgetPending) != ConnectionStatus::Ok)
@@ -847,9 +924,20 @@ ModuleContext::check_wait_objs() noexcept
     impl_->profile.noteDamage(
         impl_->damageTracker->notificationCount() - previousNotifications,
         impl_->damageTracker->damagedPixelCount() - previousDamagedPixels);
-    if (!impl_->damageTracker->acknowledge())
+
+    if (impl_->damageTracker->notificationCount() != previousNotifications &&
+        !impl_->presentationDeadlineArmed)
     {
-        return 1;
+        // The first wake-up after an idle interval is presented immediately.
+        // Subsequent wake-ups are held until the next frame deadline so the
+        // X server can coalesce them into one snapshot.
+        impl_->armPresentationImmediately();
+    }
+
+    if (impl_->x11EventBudgetPending)
+    {
+        impl_->profile.maybeLog();
+        return 0;
     }
 
     if (impl_->outputSuppressed)
@@ -890,8 +978,46 @@ ModuleContext::check_wait_objs() noexcept
     // ABI-only mode valid; a real xrdp session always has the sink available.
     if (!impl_->rdpUpdateSink.available() ||
         (impl_->damageRegion.rectangles().empty() &&
-         !impl_->fullPresentationInvalidation))
+         !impl_->fullPresentationInvalidation &&
+         !impl_->damageTracker->hasPendingDamage()))
     {
+        impl_->disarmPresentation();
+        impl_->profile.maybeLog();
+        return 0;
+    }
+
+    const auto now = Impl::Clock::now();
+    if (!impl_->presentationDeadlineArmed)
+    {
+        impl_->armPresentationImmediately();
+    }
+    if (now < impl_->presentationDeadline)
+    {
+        impl_->profile.maybeLog();
+        return 0;
+    }
+
+    if (impl_->damageTracker->hasPendingDamage())
+    {
+        const std::uint64_t previousSnapshotRectangles =
+            impl_->damageTracker->snapshotRectangleCount();
+        const std::uint64_t previousSnapshotPixels =
+            impl_->damageTracker->snapshotPixelCount();
+        if (!impl_->damageTracker->snapshot(impl_->damageRegion))
+        {
+            return 1;
+        }
+        impl_->profile.noteSnapshot(
+            impl_->damageTracker->snapshotRectangleCount() -
+                previousSnapshotRectangles,
+            impl_->damageTracker->snapshotPixelCount() -
+                previousSnapshotPixels);
+    }
+
+    if (impl_->damageRegion.rectangles().empty() &&
+        !impl_->fullPresentationInvalidation)
+    {
+        impl_->disarmPresentation();
         impl_->profile.maybeLog();
         return 0;
     }
@@ -913,39 +1039,55 @@ ModuleContext::check_wait_objs() noexcept
                       impl_->state.presentationGeometry.heightPixels,
                   });
     }
+    std::array<Rectangle, kMaximumPaintRectanglesPerService>
+        paintedRectangles{};
     const std::span<const Rectangle> pendingRectangles =
         impl_->damageRegion.rectangles();
-    const std::size_t rectangleLimit = std::min(
-        pendingRectangles.size(), kMaximumPaintRectanglesPerService);
+    std::array<Rectangle, DamageRegion::kMaxRectangles> plannedRectangles{};
+    const std::size_t plannedRectangleCount = std::min(
+        pendingRectangles.size(), plannedRectangles.size());
+    std::copy_n(pendingRectangles.begin(), plannedRectangleCount,
+                plannedRectangles.begin());
+    std::size_t plannedRectangleIndex = 0;
     std::size_t paintedRectangleCount = 0;
     std::uint64_t paintedPixels = 0;
-    for (std::size_t index = 0;
-         success && index < rectangleLimit; ++index)
+    while (success && paintedRectangleCount < kMaximumPaintRectanglesPerService &&
+           paintedPixels < kMaximumPaintPixelsPerService &&
+           plannedRectangleIndex < plannedRectangleCount)
     {
-        const Rectangle rectangle = pendingRectangles[index];
+        const Rectangle rectangle = plannedRectangles[plannedRectangleIndex];
         const std::uint64_t rectanglePixels =
             static_cast<std::uint64_t>(rectangle.widthPixels) *
             rectangle.heightPixels;
-        if (paintedRectangleCount != 0 &&
-            paintedPixels + rectanglePixels > kMaximumPaintPixelsPerService)
+        Rectangle captureRectangle = rectangle;
+        if (rectanglePixels > kMaximumPaintPixelsPerService - paintedPixels)
         {
-            break;
+            const std::uint64_t stripeHeight =
+                (kMaximumPaintPixelsPerService - paintedPixels) /
+                rectangle.widthPixels;
+            if (stripeHeight == 0)
+            {
+                success = false;
+                break;
+            }
+            captureRectangle.heightPixels = static_cast<std::uint32_t>(
+                std::min<std::uint64_t>(rectangle.heightPixels, stripeHeight));
         }
         Rectangle presentationRectangle{};
         if (!impl_->presentationTransform.mapSourceRectangle(
-                rectangle, presentationRectangle))
+                captureRectangle, presentationRectangle))
         {
             success = false;
             break;
         }
         const FramebufferView pixels =
-            impl_->sharedMemoryCapture->capture(rectangle);
+            impl_->sharedMemoryCapture->capture(captureRectangle);
         if (!pixels.valid())
         {
             success = false;
             break;
         }
-        impl_->profile.noteCapture(rectangle);
+        impl_->profile.noteCapture(captureRectangle);
         const FramebufferView scaledPixels =
             impl_->presentationScaler.scale(pixels, presentationRectangle);
         if (!scaledPixels.valid())
@@ -962,8 +1104,21 @@ ModuleContext::check_wait_objs() noexcept
             success = false;
             break;
         }
+        paintedRectangles[paintedRectangleCount] = captureRectangle;
         ++paintedRectangleCount;
-        paintedPixels += rectanglePixels;
+        paintedPixels += static_cast<std::uint64_t>(captureRectangle.widthPixels) *
+                         captureRectangle.heightPixels;
+        if (captureRectangle.heightPixels == rectangle.heightPixels)
+        {
+            ++plannedRectangleIndex;
+        }
+        else
+        {
+            plannedRectangles[plannedRectangleIndex].y +=
+                static_cast<std::int32_t>(captureRectangle.heightPixels);
+            plannedRectangles[plannedRectangleIndex].heightPixels -=
+                captureRectangle.heightPixels;
+        }
     }
 
     if (!impl_->rdpUpdateSink.endUpdate())
@@ -974,13 +1129,31 @@ ModuleContext::check_wait_objs() noexcept
     {
         for (std::size_t index = 0; index < paintedRectangleCount; ++index)
         {
-            impl_->damageRegion.remove_front();
+            if (!impl_->damageRegion.consume_front(paintedRectangles[index]))
+            {
+                success = false;
+                break;
+            }
         }
-        if (impl_->damageRegion.rectangles().empty())
+        if (success)
         {
-            impl_->damageRegion.clear();
             impl_->fullPresentationInvalidation = false;
         }
+    }
+    if (success)
+    {
+        if (impl_->damageRegion.rectangles().empty() &&
+            !impl_->damageTracker->hasPendingDamage())
+        {
+            impl_->disarmPresentation();
+        }
+        else
+        {
+            // Keep the latest server-side damage coalescing until the next
+            // presentation deadline instead of running at X draw-call rate.
+            impl_->armNextPresentation(Impl::Clock::now());
+        }
+        impl_->profile.notePresentationBatch();
     }
     impl_->profile.maybeLog();
     return success ? 0 : 1;

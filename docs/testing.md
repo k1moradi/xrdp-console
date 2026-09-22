@@ -13,8 +13,8 @@ Xauthority, x11vnc, and client binaries.
 | `proxy-backpressure-unit` | bounded relay buffering, selector write readiness, and peer cleanup |
 | `python-syntax` | source compilation for the installed Python helpers |
 | `systemd-unit` | clean SIGINT shutdown contract, no exit-status masking, and compatibility drop-in parity |
-| `damage-region-unit` | clipping, overlap/adjacency coalescing, empty input, and bounded full-screen fallback |
-| `x11-damage-integration` | authenticated-Xvfb XDamage resource setup, raw rectangle delivery, persistent XShm capture of a known pixel, acknowledge/re-arm, and teardown |
+| `damage-region-unit` | clipping, cost-aware overlap/adjacency coalescing, empty input, bounded sparse fragmentation, and explicit full-screen invalidation |
+| `x11-damage-integration` | authenticated-Xvfb XDamage/XFixes resource setup, idle no-op snapshots, NON_EMPTY wake-up coalescing, persistent-region snapshot/re-arm, persistent XShm capture of a known pixel, and teardown |
 | `x11-cursor-integration` | authenticated-Xvfb XFixes cursor-image capture, ARGB-to-xrdp conversion bounds, cursor-change notification delivery, and non-fatal oversized-cursor fallback |
 | `x11-input-integration` | authenticated-Xvfb XTest keyboard and pointer event delivery to a focused X11 window, including teardown release of held keys/buttons |
 | `module-lifecycle` | C++23 XCB module construction, authenticated-Xvfb connect/reconnect, fd-0 handling, geometry setup, dead-server failure, teardown, and wait-state preservation |

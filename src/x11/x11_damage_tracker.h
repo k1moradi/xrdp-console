@@ -5,6 +5,7 @@
 #include <cstdint>
 
 #include <xcb/damage.h>
+#include <xcb/xfixes.h>
 
 #include "../core/damage_region.h"
 
@@ -23,24 +24,33 @@ public:
 
     [[nodiscard]] std::uint64_t notificationCount() const noexcept;
     [[nodiscard]] std::uint64_t damagedPixelCount() const noexcept;
+    [[nodiscard]] std::uint64_t snapshotRectangleCount() const noexcept;
+    [[nodiscard]] std::uint64_t snapshotPixelCount() const noexcept;
 
     [[nodiscard]] bool handles(const xcb_generic_event_t &event) const noexcept;
 
-    void handle(const xcb_generic_event_t &event,
-                DamageRegion &damageRegion) noexcept;
+    void handle(const xcb_generic_event_t &event) noexcept;
 
-    [[nodiscard]] bool acknowledge() noexcept;
+    [[nodiscard]] bool hasPendingDamage() const noexcept;
+
+    // Move the accumulated server-side damage into the persistent XFixes
+    // region, fetch its rectangles, and add them to damageRegion. This is a
+    // presentation-boundary operation, not an event-loop acknowledgement.
+    [[nodiscard]] bool snapshot(DamageRegion &damageRegion) noexcept;
 
 private:
     void fail(const char *reason) noexcept;
 
     xcb_connection_t *connection_{nullptr};
     xcb_damage_damage_t damage_{XCB_NONE};
+    xcb_xfixes_region_t partsRegion_{XCB_NONE};
     xcb_window_t drawable_{XCB_NONE};
     PixelSize bounds_{};
     std::uint8_t firstEvent_{0};
     bool pendingAcknowledgement_{false};
     std::uint64_t notificationCount_{0};
     std::uint64_t damagedPixelCount_{0};
+    std::uint64_t snapshotRectangleCount_{0};
+    std::uint64_t snapshotPixelCount_{0};
     const char *failureReason_{"not initialized"};
 };
