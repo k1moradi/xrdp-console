@@ -125,7 +125,7 @@ def find_window(display: str, title: str, timeout: float) -> str:
 
 def assert_client_pixel(display: str, window_title: str, pixel_probe: Path,
                         stimulus_path: Path, environment: dict[str, str],
-                        log_path: Path) -> None:
+                        log_path: Path, probe_x: int, probe_y: int) -> None:
     """Draw a known source color and require it in the FreeRDP framebuffer."""
     window = find_window(display, window_title, 8.0)
     stimulus: subprocess.Popen[object] | None = None
@@ -138,7 +138,7 @@ def assert_client_pixel(display: str, window_title: str, pixel_probe: Path,
             start_new_session=True,
         )
         probe = subprocess.Popen(
-            [str(pixel_probe), display, window, "30", "30"],
+            [str(pixel_probe), display, window, str(probe_x), str(probe_y)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, env=environment, bufsize=0,
             start_new_session=True,
@@ -192,6 +192,26 @@ def assert_client_pixel(display: str, window_title: str, pixel_probe: Path,
     finally:
         stop_process(probe)
         stop_process(stimulus)
+
+
+def presentation_probe_point(width: int, height: int) -> tuple[int, int]:
+    """Map the stimulus pixel through the loader's aspect-fit transform."""
+    source_width = 1024
+    source_height = 768
+    source_x = 30
+    source_y = 30
+    if width * source_height <= height * source_width:
+        viewport_width = width
+        viewport_height = max(1, width * source_height // source_width)
+    else:
+        viewport_height = height
+        viewport_width = max(1, height * source_width // source_height)
+    viewport_x = (width - viewport_width) // 2
+    viewport_y = (height - viewport_height) // 2
+    return (
+        viewport_x + source_x * viewport_width // source_width,
+        viewport_y + source_y * viewport_height // source_height,
+    )
 
 
 def xrdp_log_excerpt(path: Path) -> str:
@@ -251,10 +271,10 @@ def ensure_test_display() -> None:
 
 
 def main() -> int:
-    if len(sys.argv) != 7:
+    if len(sys.argv) not in (7, 9):
         raise SystemExit(
             f"usage: {sys.argv[0]} MODULE XRDP INSTALL_ROOT FREERDP "
-            "PIXEL_PROBE STIMULUS"
+            "PIXEL_PROBE STIMULUS [PRESENTATION_WIDTH PRESENTATION_HEIGHT]"
         )
 
     ensure_test_display()
@@ -265,6 +285,18 @@ def main() -> int:
     freerdp_path = Path(sys.argv[4]).resolve()
     pixel_probe = Path(sys.argv[5]).resolve()
     stimulus_path = Path(sys.argv[6]).resolve()
+    presentation_width = 1024
+    presentation_height = 768
+    if len(sys.argv) == 9:
+        try:
+            presentation_width = int(sys.argv[7])
+            presentation_height = int(sys.argv[8])
+        except ValueError as error:
+            raise AssertionError("presentation geometry must be numeric") from error
+        if presentation_width <= 0 or presentation_height <= 0:
+            raise AssertionError("presentation geometry must be positive")
+    probe_x, probe_y = presentation_probe_point(
+        presentation_width, presentation_height)
     for required in (
             module_path, xrdp_path, freerdp_path, pixel_probe, stimulus_path):
         if not required.is_file():
@@ -350,7 +382,7 @@ password=smoke
                     "/u:smoke",
                     "/p:smoke",
                     "/cert:ignore",
-                    "/size:1024x768",
+                    f"/size:{presentation_width}x{presentation_height}",
                     "/t:xrdp-console-loader",
                     "-gfx",
                     "-compression",
@@ -378,7 +410,8 @@ password=smoke
                     )
                     assert_client_pixel(
                         os.environ["DISPLAY"], "xrdp-console-loader",
-                        pixel_probe, stimulus_path, os.environ.copy(), log_path)
+                        pixel_probe, stimulus_path, os.environ.copy(), log_path,
+                        probe_x, probe_y)
         finally:
             stop_process(client)
             stop_process(server)

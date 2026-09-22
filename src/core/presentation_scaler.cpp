@@ -10,7 +10,7 @@
 namespace
 {
 
-constexpr std::uint32_t kBytesPerPixel = 4;
+constexpr std::size_t kBytesPerPixel = sizeof(std::uint32_t);
 
 } // namespace
 
@@ -25,116 +25,162 @@ PresentationScaler::configure(PixelSize source, PixelSize presentation) noexcept
         return false;
     }
 
-    const std::size_t pixelCount =
-        static_cast<std::size_t>(presentation.widthPixels) *
+    const std::uint64_t presentationPixels =
+        static_cast<std::uint64_t>(presentation.widthPixels) *
         presentation.heightPixels;
-    if (pixelCount > std::numeric_limits<std::size_t>::max() /
-                         kBytesPerPixel ||
-        pixelCount * kBytesPerPixel > kMaximumStorageBytes)
+    if (presentationPixels > kMaximumPresentationPixels)
     {
         return false;
     }
 
-    if (source.widthPixels == presentation.widthPixels &&
-        source.heightPixels == presentation.heightPixels)
-    {
-        // The common physical-console case is already in the format expected
-        // by xrdp.  Keep no second full-size framebuffer in this mode.
-        capacity_ = presentation;
-        identity_ = true;
-        std::vector<std::uint32_t>().swap(pixels_);
-        std::vector<std::uint32_t>().swap(horizontalMap_);
-        std::vector<std::uint32_t>().swap(verticalMap_);
-        return true;
-    }
+    const bool replacementIdentity =
+        source.widthPixels == presentation.widthPixels &&
+        source.heightPixels == presentation.heightPixels;
 
     try
     {
-        std::vector<std::uint32_t> replacement(pixelCount);
-        std::vector<std::uint32_t> replacementHorizontalMap(
-            presentation.widthPixels);
-        std::vector<std::uint32_t> replacementVerticalMap(
-            presentation.heightPixels);
-        pixels_.swap(replacement);
+        std::vector<std::uint32_t> replacementPixels;
+        std::vector<std::uint32_t> replacementHorizontalMap;
+
+        if (!replacementIdentity)
+        {
+            replacementPixels.resize(kScratchPixelCapacity);
+            replacementHorizontalMap.resize(presentation.widthPixels);
+        }
+
+        pixels_.swap(replacementPixels);
         horizontalMap_.swap(replacementHorizontalMap);
-        verticalMap_.swap(replacementVerticalMap);
     }
     catch (...)
     {
         return false;
     }
-    capacity_ = presentation;
-    identity_ = false;
+
+    sourceGeometry_ = source;
+    presentationGeometry_ = presentation;
+    identity_ = replacementIdentity;
     return true;
 }
 
 bool
 PresentationScaler::valid() const noexcept
 {
-    return capacity_.widthPixels != 0 && capacity_.heightPixels != 0 &&
-           (identity_ || !pixels_.empty());
+    return sourceGeometry_.widthPixels != 0 &&
+           sourceGeometry_.heightPixels != 0 &&
+           presentationGeometry_.widthPixels != 0 &&
+           presentationGeometry_.heightPixels != 0 &&
+           (identity_ ||
+            (pixels_.size() == kScratchPixelCapacity &&
+             horizontalMap_.size() == presentationGeometry_.widthPixels));
+}
+
+std::uint32_t
+PresentationScaler::maximumRowsForWidth(std::uint32_t widthPixels) const noexcept
+{
+    if (!valid() || widthPixels == 0 ||
+        widthPixels > kScratchPixelCapacity)
+    {
+        return 0;
+    }
+
+    return static_cast<std::uint32_t>(kScratchPixelCapacity / widthPixels);
 }
 
 FramebufferView
-PresentationScaler::scale(FramebufferView source,
-                          Rectangle destination) noexcept
+PresentationScaler::scaleRows(FramebufferView source,
+                              PixelSize completeDestination,
+                              std::uint32_t firstDestinationRow,
+                              std::uint32_t destinationRowCount) noexcept
 {
-    if (!valid() || !source.valid() || destination.widthPixels == 0 ||
-        destination.heightPixels == 0 ||
-        destination.widthPixels > capacity_.widthPixels ||
-        destination.heightPixels > capacity_.heightPixels ||
-        destination.widthPixels >
-            std::numeric_limits<std::size_t>::max() / kBytesPerPixel)
+    if (!valid() || !source.valid() || completeDestination.widthPixels == 0 ||
+        completeDestination.heightPixels == 0 || destinationRowCount == 0 ||
+        completeDestination.widthPixels > presentationGeometry_.widthPixels ||
+        completeDestination.heightPixels > presentationGeometry_.heightPixels)
     {
         return {};
     }
 
-    if (source.widthPixels == destination.widthPixels &&
-        source.heightPixels == destination.heightPixels)
-    {
-        // The RDP sink supplies the destination coordinates separately, so a
-        // tight source view is directly usable even when destination.x/y are
-        // non-zero.
-        return source;
-    }
-
-    if (identity_ || horizontalMap_.size() < destination.widthPixels ||
-        verticalMap_.size() < destination.heightPixels)
+    if (source.widthPixels >
+            std::numeric_limits<std::size_t>::max() / kBytesPerPixel ||
+        source.strideBytes <
+            static_cast<std::size_t>(source.widthPixels) * kBytesPerPixel)
     {
         return {};
     }
 
-    for (std::uint32_t x = 0; x < destination.widthPixels; ++x)
+    const std::uint64_t endRow =
+        static_cast<std::uint64_t>(firstDestinationRow) +
+        destinationRowCount;
+    if (endRow > completeDestination.heightPixels)
+    {
+        return {};
+    }
+
+    const std::uint32_t maximumRows =
+        maximumRowsForWidth(completeDestination.widthPixels);
+    if (destinationRowCount > maximumRows)
+    {
+        return {};
+    }
+
+    if (source.widthPixels == completeDestination.widthPixels &&
+        source.heightPixels == completeDestination.heightPixels)
+    {
+        const std::size_t offset =
+            static_cast<std::size_t>(firstDestinationRow) *
+            source.strideBytes;
+        const std::size_t bytes =
+            static_cast<std::size_t>(destinationRowCount) *
+            source.strideBytes;
+        if (offset > source.pixels.size() ||
+            bytes > source.pixels.size() - offset)
+        {
+            return {};
+        }
+
+        return {
+            source.pixels.subspan(offset, bytes),
+            source.widthPixels,
+            destinationRowCount,
+            source.strideBytes,
+        };
+    }
+
+    if (identity_ || source.widthPixels == 0 || source.heightPixels == 0 ||
+        horizontalMap_.size() < completeDestination.widthPixels)
+    {
+        return {};
+    }
+
+    for (std::uint32_t x = 0; x < completeDestination.widthPixels; ++x)
     {
         horizontalMap_[x] = std::min(
             source.widthPixels - 1U,
             static_cast<std::uint32_t>(
                 (static_cast<std::uint64_t>(x) * source.widthPixels) /
-                destination.widthPixels));
-    }
-    for (std::uint32_t y = 0; y < destination.heightPixels; ++y)
-    {
-        verticalMap_[y] = std::min(
-            source.heightPixels - 1U,
-            static_cast<std::uint32_t>(
-                (static_cast<std::uint64_t>(y) * source.heightPixels) /
-                destination.heightPixels));
+                completeDestination.widthPixels));
     }
 
     const std::size_t destinationStride =
-        static_cast<std::size_t>(destination.widthPixels) * kBytesPerPixel;
-    std::uint32_t *destinationPixels = pixels_.data();
+        static_cast<std::size_t>(completeDestination.widthPixels) *
+        kBytesPerPixel;
 
-    for (std::uint32_t y = 0; y < destination.heightPixels; ++y)
+    for (std::uint32_t localY = 0; localY < destinationRowCount; ++localY)
     {
-        const std::uint32_t sourceY = verticalMap_[y];
+        const std::uint32_t destinationY = firstDestinationRow + localY;
+        const std::uint32_t sourceY = std::min(
+            source.heightPixels - 1U,
+            static_cast<std::uint32_t>(
+                (static_cast<std::uint64_t>(destinationY) *
+                 source.heightPixels) /
+                completeDestination.heightPixels));
         const auto *sourceRow = reinterpret_cast<const std::uint32_t *>(
             source.pixels.data() +
             static_cast<std::size_t>(sourceY) * source.strideBytes);
-        auto *destinationRow = reinterpret_cast<std::uint32_t *>(
-            reinterpret_cast<std::byte *>(destinationPixels) +
-            static_cast<std::size_t>(y) * destinationStride);
-        for (std::uint32_t x = 0; x < destination.widthPixels; ++x)
+        auto *destinationRow = pixels_.data() +
+                               static_cast<std::size_t>(localY) *
+                                   completeDestination.widthPixels;
+        for (std::uint32_t x = 0; x < completeDestination.widthPixels; ++x)
         {
             destinationRow[x] = sourceRow[horizontalMap_[x]];
         }
@@ -142,11 +188,11 @@ PresentationScaler::scale(FramebufferView source,
 
     return {
         std::span<const std::byte>(
-            reinterpret_cast<const std::byte *>(destinationPixels),
-            static_cast<std::size_t>(destination.heightPixels) *
+            reinterpret_cast<const std::byte *>(pixels_.data()),
+            static_cast<std::size_t>(destinationRowCount) *
                 destinationStride),
-        destination.widthPixels,
-        destination.heightPixels,
+        completeDestination.widthPixels,
+        destinationRowCount,
         destinationStride,
     };
 }

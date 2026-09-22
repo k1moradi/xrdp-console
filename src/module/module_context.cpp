@@ -11,7 +11,6 @@
 #include <cstring>
 #include <memory>
 #include <new>
-#include <span>
 #include <string_view>
 #include <utility>
 
@@ -327,6 +326,11 @@ constexpr std::size_t kMaximumPaintRectanglesPerService = 4;
 // Keep one synchronous 32-bpp graphics transaction near 512 KiB. This lets
 // xrdp service queued input between short stripes of a full-screen repaint.
 constexpr std::uint64_t kMaximumPaintPixelsPerService = 128U * 1024U;
+// Bound synchronous transform/copy/transport input to approximately 512 KiB
+// of 32-bpp presentation pixels between opportunities for xrdp to service
+// input. This is separate from the source/XShm capture budget above.
+constexpr std::uint64_t kMaximumPresentationPixelsPerService =
+    128U * 1024U;
 constexpr auto kMinimumPresentationInterval = std::chrono::milliseconds{16};
 
 struct ModuleState
@@ -341,6 +345,31 @@ struct ModuleState
     std::uint32_t bitsPerPixel{};
     bool has_client_info{false};
     bool started{false};
+};
+
+struct PendingPresentation
+{
+    Rectangle sourceRectangle{};
+    Rectangle presentationRectangle{};
+    FramebufferView sourcePixels{};
+    std::uint32_t nextPresentationRow{};
+
+    [[nodiscard]] bool active() const noexcept
+    {
+        return sourceRectangle.widthPixels != 0 &&
+               sourceRectangle.heightPixels != 0 &&
+               presentationRectangle.widthPixels != 0 &&
+               presentationRectangle.heightPixels != 0 &&
+               sourcePixels.valid();
+    }
+
+    void clear() noexcept
+    {
+        sourceRectangle = {};
+        presentationRectangle = {};
+        sourcePixels = {};
+        nextPresentationRow = 0;
+    }
 };
 
 } // namespace
@@ -360,6 +389,10 @@ struct ModuleContext::Impl
     PresentationTransform presentationTransform{};
     PresentationScaler presentationScaler{};
     DamageRegion damageRegion{};
+    // sourcePixels is a non-owning view into X11SharedMemoryCapture's
+    // persistent XShm arena. While this item is active, no subsequent
+    // capture() call may overwrite that arena.
+    PendingPresentation pendingPresentation{};
     RuntimeProfile profile{};
     RdpUpdateSink rdpUpdateSink{nullptr};
     bool fullPresentationInvalidation{false};
@@ -522,7 +555,7 @@ ModuleContext::connect() noexcept
                                           impl_->state.presentationGeometry))
         {
             log_message(LOG_LEVEL_ERROR,
-                        "xrdp-console: presentation framebuffer allocation "
+                        "xrdp-console: presentation scaler allocation "
                         "failed for %ux%u",
                         impl_->state.presentationGeometry.widthPixels,
                         impl_->state.presentationGeometry.heightPixels);
@@ -597,6 +630,7 @@ ModuleContext::connect() noexcept
             clipboard.reset();
         }
 
+        impl_->pendingPresentation.clear();
         impl_->state.sourceGeometry = sourceGeometry;
         impl_->presentationTransform = presentationTransform;
         impl_->presentationScaler = std::move(presentationScaler);
@@ -620,6 +654,7 @@ ModuleContext::connect() noexcept
     {
         // The C ABI must report allocation/constructor failures as a normal
         // module failure and leave no partially connected state behind.
+        impl_->pendingPresentation.clear();
         impl_->sharedMemoryCapture.reset();
         impl_->cursorTracker.reset();
         impl_->damageTracker.reset();
@@ -673,6 +708,7 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
         return 1;
     }
 
+    impl_->pendingPresentation.clear();
     impl_->state.presentationGeometry = presentationGeometry;
     impl_->presentationTransform = transform;
     impl_->presentationScaler = std::move(scaler);
@@ -703,6 +739,7 @@ ModuleContext::invalidate_presentation(int width, int height) noexcept
     {
         return 1;
     }
+    impl_->pendingPresentation.clear();
     impl_->damageRegion.clear();
     impl_->damageRegion.add(
         {0, 0, impl_->state.sourceGeometry.widthPixels,
@@ -727,6 +764,7 @@ ModuleContext::suppress_output(bool suppress, int left, int top, int right,
     }
 
     impl_->outputSuppressed = suppress;
+    impl_->pendingPresentation.clear();
     if (impl_->state.sourceGeometry.widthPixels != 0 &&
         impl_->state.sourceGeometry.heightPixels != 0)
     {
@@ -815,6 +853,7 @@ ModuleContext::end() noexcept
     impl_->profile.flush();
     // X11DisplayConnection destroys the xrdp wait object before disconnecting
     // XCB. Reset it before changing the lifecycle state.
+    impl_->pendingPresentation.clear();
     impl_->sharedMemoryCapture.reset();
     impl_->cursorTracker.reset();
     impl_->damageTracker.reset();
@@ -1101,7 +1140,8 @@ ModuleContext::check_wait_objs() noexcept
         return 0;
     }
 
-    if (impl_->damageTracker->hasPendingDamage())
+    if (!impl_->pendingPresentation.active() &&
+        impl_->damageTracker->hasPendingDamage())
     {
         const std::uint64_t previousSnapshotRectangles =
             impl_->damageTracker->snapshotRectangleCount();
@@ -1131,9 +1171,14 @@ ModuleContext::check_wait_objs() noexcept
         return 1;
     }
 
+    const DamageRegion damageBeforePresentation = impl_->damageRegion;
+    const PendingPresentation pendingBeforePresentation =
+        impl_->pendingPresentation;
+    const bool pendingWasActive = impl_->pendingPresentation.active();
     bool success = true;
-    if (impl_->fullPresentationInvalidation &&
-        impl_->rdpUpdateSink.fillAvailable())
+    bool filledPresentationBackground = false;
+    const bool fillAvailable = impl_->rdpUpdateSink.fillAvailable();
+    if (impl_->fullPresentationInvalidation && fillAvailable)
     {
         success = impl_->rdpUpdateSink.setForegroundColor(0) &&
                   impl_->rdpUpdateSink.fillRectangle({
@@ -1142,93 +1187,166 @@ ModuleContext::check_wait_objs() noexcept
                       impl_->state.presentationGeometry.widthPixels,
                       impl_->state.presentationGeometry.heightPixels,
                   });
+        filledPresentationBackground = success;
     }
-    std::array<Rectangle, kMaximumPaintRectanglesPerService>
-        paintedRectangles{};
-    const std::span<const Rectangle> pendingRectangles =
-        impl_->damageRegion.rectangles();
-    std::array<Rectangle, DamageRegion::kMaxRectangles> plannedRectangles{};
-    const std::size_t plannedRectangleCount = std::min(
-        pendingRectangles.size(), plannedRectangles.size());
-    std::copy_n(pendingRectangles.begin(), plannedRectangleCount,
-                plannedRectangles.begin());
-    std::size_t plannedRectangleIndex = 0;
-    std::size_t paintedRectangleCount = 0;
-    std::uint64_t paintedPixels = 0;
-    while (success && paintedRectangleCount < kMaximumPaintRectanglesPerService &&
-           paintedPixels < kMaximumPaintPixelsPerService &&
-           plannedRectangleIndex < plannedRectangleCount)
+    std::size_t paintCallCount = 0;
+    std::uint64_t capturedSourcePixels = 0;
+    std::uint64_t presentedPixels = 0;
+    while (success && paintCallCount < kMaximumPaintRectanglesPerService &&
+           presentedPixels < kMaximumPresentationPixelsPerService &&
+           (impl_->pendingPresentation.active() ||
+            capturedSourcePixels < kMaximumPaintPixelsPerService))
     {
-        const Rectangle rectangle = plannedRectangles[plannedRectangleIndex];
-        const std::uint64_t rectanglePixels =
-            static_cast<std::uint64_t>(rectangle.widthPixels) *
-            rectangle.heightPixels;
-        Rectangle captureRectangle = rectangle;
-        if (rectanglePixels > kMaximumPaintPixelsPerService - paintedPixels)
+        if (!impl_->pendingPresentation.active())
         {
-            const std::uint64_t remainingPixelBudget =
-                kMaximumPaintPixelsPerService - paintedPixels;
-            const PaintStripeDecision stripe = choosePaintStripe(
-                rectangle.widthPixels, rectangle.heightPixels,
-                remainingPixelBudget, paintedRectangleCount != 0);
-            if (stripe.yield)
+            Rectangle sourceRectangle{};
+            if (!impl_->damageRegion.front(sourceRectangle))
             {
-                // This batch already made progress. End it successfully and
-                // retain the unpainted tail for the next quantum.
                 break;
             }
-            if (stripe.heightPixels == 0)
+
+            const std::uint64_t rectanglePixels =
+                static_cast<std::uint64_t>(sourceRectangle.widthPixels) *
+                sourceRectangle.heightPixels;
+            Rectangle captureRectangle = sourceRectangle;
+            const std::uint64_t remainingSourceBudget =
+                capturedSourcePixels < kMaximumPaintPixelsPerService
+                    ? kMaximumPaintPixelsPerService - capturedSourcePixels
+                    : 0;
+            if (rectanglePixels > remainingSourceBudget)
+            {
+                const PaintStripeDecision stripe = choosePaintStripe(
+                    sourceRectangle.widthPixels,
+                    sourceRectangle.heightPixels,
+                    remainingSourceBudget, paintCallCount != 0);
+                if (stripe.yield)
+                {
+                    // This batch already made progress. Retain the current
+                    // DamageRegion front for the next service quantum.
+                    break;
+                }
+                if (stripe.heightPixels == 0)
+                {
+                    success = false;
+                    break;
+                }
+                captureRectangle.heightPixels = stripe.heightPixels;
+            }
+
+            Rectangle presentationRectangle{};
+            if (!impl_->presentationTransform.mapSourceRectangle(
+                    captureRectangle, presentationRectangle))
             {
                 success = false;
                 break;
             }
-            captureRectangle.heightPixels = stripe.heightPixels;
+
+            const FramebufferView pixels =
+                impl_->sharedMemoryCapture->capture(captureRectangle);
+            if (!pixels.valid())
+            {
+                success = false;
+                break;
+            }
+            impl_->profile.noteCapture(captureRectangle);
+            capturedSourcePixels +=
+                static_cast<std::uint64_t>(captureRectangle.widthPixels) *
+                captureRectangle.heightPixels;
+            impl_->pendingPresentation.sourceRectangle = captureRectangle;
+            impl_->pendingPresentation.presentationRectangle =
+                presentationRectangle;
+            impl_->pendingPresentation.sourcePixels = pixels;
+            impl_->pendingPresentation.nextPresentationRow = 0;
         }
-        Rectangle presentationRectangle{};
-        if (!impl_->presentationTransform.mapSourceRectangle(
-                captureRectangle, presentationRectangle))
+
+        PendingPresentation &pending = impl_->pendingPresentation;
+        const std::uint32_t maximumScratchRows =
+            impl_->presentationScaler.maximumRowsForWidth(
+                pending.presentationRectangle.widthPixels);
+        const std::uint64_t remainingPresentationBudget =
+            presentedPixels < kMaximumPresentationPixelsPerService
+                ? kMaximumPresentationPixelsPerService - presentedPixels
+                : 0;
+        const std::uint32_t rowsFromBudget =
+            pending.presentationRectangle.widthPixels == 0
+                ? 0
+                : static_cast<std::uint32_t>(
+                      remainingPresentationBudget /
+                      pending.presentationRectangle.widthPixels);
+        const std::uint32_t remainingRows =
+            pending.presentationRectangle.heightPixels -
+            pending.nextPresentationRow;
+        const std::uint32_t rowsThisChunk = std::min(
+            {maximumScratchRows, rowsFromBudget, remainingRows});
+
+        if (rowsThisChunk == 0)
+        {
+            if (presentedPixels != 0)
+            {
+                // The current update already made useful progress. Commit it
+                // and continue the pending presentation on the next quantum.
+                break;
+            }
+
+            // A valid configured geometry must fit at least one output row in
+            // the scratch arena and presentation budget.
+            success = false;
+            break;
+        }
+
+        const FramebufferView outputPixels =
+            impl_->presentationScaler.scaleRows(
+                pending.sourcePixels,
+                {pending.presentationRectangle.widthPixels,
+                 pending.presentationRectangle.heightPixels},
+                pending.nextPresentationRow, rowsThisChunk);
+        if (!outputPixels.valid())
         {
             success = false;
             break;
         }
-        const FramebufferView pixels =
-            impl_->sharedMemoryCapture->capture(captureRectangle);
-        if (!pixels.valid())
-        {
-            success = false;
-            break;
-        }
-        impl_->profile.noteCapture(captureRectangle);
-        const FramebufferView scaledPixels =
-            impl_->presentationScaler.scale(pixels, presentationRectangle);
-        if (!scaledPixels.valid())
-        {
-            success = false;
-            break;
-        }
+
+        const Rectangle destination{
+            pending.presentationRectangle.x,
+            pending.presentationRectangle.y +
+                static_cast<std::int32_t>(pending.nextPresentationRow),
+            pending.presentationRectangle.widthPixels,
+            rowsThisChunk,
+        };
         const bool painted = impl_->rdpUpdateSink.paintRectangle(
-            presentationRectangle, scaledPixels);
-        impl_->profile.notePaint(presentationRectangle,
-                                 scaledPixels.pixels.size_bytes(), painted);
+            destination, outputPixels);
+        impl_->profile.notePaint(destination, outputPixels.pixels.size_bytes(),
+                                 painted);
         if (!painted)
         {
             success = false;
             break;
         }
-        paintedRectangles[paintedRectangleCount] = captureRectangle;
-        ++paintedRectangleCount;
-        paintedPixels += static_cast<std::uint64_t>(captureRectangle.widthPixels) *
-                         captureRectangle.heightPixels;
-        if (captureRectangle.heightPixels == rectangle.heightPixels)
+
+        ++paintCallCount;
+        presentedPixels +=
+            static_cast<std::uint64_t>(destination.widthPixels) *
+            destination.heightPixels;
+        pending.nextPresentationRow += rowsThisChunk;
+
+        if (pending.nextPresentationRow ==
+            pending.presentationRectangle.heightPixels)
         {
-            ++plannedRectangleIndex;
-        }
-        else
-        {
-            plannedRectangles[plannedRectangleIndex].y +=
-                static_cast<std::int32_t>(captureRectangle.heightPixels);
-            plannedRectangles[plannedRectangleIndex].heightPixels -=
-                captureRectangle.heightPixels;
+            const Rectangle completedSource = pending.sourceRectangle;
+            pending.clear();
+            if (!impl_->damageRegion.consume_front(completedSource))
+            {
+                success = false;
+                break;
+            }
+            if (pendingWasActive)
+            {
+                // Do not capture a second source rectangle while the current
+                // transaction still depends on the reusable XShm arena. If
+                // endUpdate() fails, the original pending view remains valid
+                // and can be retried transactionally.
+                break;
+            }
         }
     }
 
@@ -1236,33 +1354,31 @@ ModuleContext::check_wait_objs() noexcept
     {
         success = false;
     }
-    if (success)
+    if (!success)
     {
-        for (std::size_t index = 0; index < paintedRectangleCount; ++index)
-        {
-            if (!impl_->damageRegion.consume_front(paintedRectangles[index]))
-            {
-                success = false;
-                break;
-            }
-        }
-        if (success)
-        {
-            impl_->fullPresentationInvalidation = false;
-        }
+        // A successful paint is not committed until endUpdate() also
+        // succeeds. Restore both bounded queues when a transaction fails so
+        // no source rectangle is lost and no stale XShm view is retained.
+        impl_->damageRegion = damageBeforePresentation;
+        impl_->pendingPresentation = pendingBeforePresentation;
+    }
+    if (success && (filledPresentationBackground || !fillAvailable))
+    {
+        impl_->fullPresentationInvalidation = false;
     }
     if (success)
     {
-        if (impl_->damageRegion.rectangles().empty() &&
-            !impl_->damageTracker->hasPendingDamage())
-        {
-            impl_->disarmPresentation();
-        }
-        else
+        if (impl_->pendingPresentation.active() ||
+            !impl_->damageRegion.rectangles().empty() ||
+            impl_->damageTracker->hasPendingDamage())
         {
             // Keep the latest server-side damage coalescing until the next
             // presentation deadline instead of running at X draw-call rate.
             impl_->armNextPresentation(Impl::Clock::now());
+        }
+        else
+        {
+            impl_->disarmPresentation();
         }
         impl_->profile.notePresentationBatch();
     }
