@@ -10,6 +10,13 @@ namespace
 
 using WideCoordinate = std::int64_t;
 
+[[nodiscard]] constexpr std::uint64_t
+ceilDivide(std::uint64_t numerator, std::uint64_t denominator) noexcept
+{
+    return numerator / denominator +
+           static_cast<std::uint64_t>(numerator % denominator != 0);
+}
+
 WideCoordinate
 right_edge(Rectangle rectangle) noexcept
 {
@@ -106,14 +113,15 @@ PresentationTransform::viewport() const noexcept
     return viewport_;
 }
 
-bool
+RectangleMapResult
 PresentationTransform::mapSourceRectangle(
     Rectangle sourceRectangle, Rectangle &presentationRectangle) const noexcept
 {
     if (!valid() || sourceRectangle.widthPixels == 0 ||
         sourceRectangle.heightPixels == 0)
     {
-        return false;
+        presentationRectangle = {};
+        return RectangleMapResult::Invalid;
     }
 
     const WideCoordinate sourceLeft = std::max<WideCoordinate>(
@@ -126,7 +134,8 @@ PresentationTransform::mapSourceRectangle(
         sourceGeometry_.heightPixels, bottom_edge(sourceRectangle));
     if (sourceRight <= sourceLeft || sourceBottom <= sourceTop)
     {
-        return false;
+        presentationRectangle = {};
+        return RectangleMapResult::Invalid;
     }
 
     const std::uint64_t sourceWidth = sourceGeometry_.widthPixels;
@@ -136,22 +145,20 @@ PresentationTransform::mapSourceRectangle(
 
     const std::uint64_t destinationLeft =
         static_cast<std::uint64_t>(viewport_.x) +
-        (static_cast<std::uint64_t>(sourceLeft) * viewportWidth) /
-            sourceWidth;
+        ceilDivide(static_cast<std::uint64_t>(sourceLeft) * viewportWidth,
+                   sourceWidth);
     const std::uint64_t destinationTop =
         static_cast<std::uint64_t>(viewport_.y) +
-        (static_cast<std::uint64_t>(sourceTop) * viewportHeight) /
-            sourceHeight;
+        ceilDivide(static_cast<std::uint64_t>(sourceTop) * viewportHeight,
+                   sourceHeight);
     const std::uint64_t destinationRight =
         static_cast<std::uint64_t>(viewport_.x) +
-        (static_cast<std::uint64_t>(sourceRight) * viewportWidth +
-         sourceWidth - 1U) /
-            sourceWidth;
+        ceilDivide(static_cast<std::uint64_t>(sourceRight) * viewportWidth,
+                   sourceWidth);
     const std::uint64_t destinationBottom =
         static_cast<std::uint64_t>(viewport_.y) +
-        (static_cast<std::uint64_t>(sourceBottom) * viewportHeight +
-         sourceHeight - 1U) /
-            sourceHeight;
+        ceilDivide(static_cast<std::uint64_t>(sourceBottom) * viewportHeight,
+                   sourceHeight);
 
     const std::uint64_t viewportRight =
         static_cast<std::uint64_t>(viewport_.x) + viewport_.widthPixels;
@@ -163,7 +170,8 @@ PresentationTransform::mapSourceRectangle(
         std::min(destinationBottom, viewportBottom);
     if (clippedRight <= destinationLeft || clippedBottom <= destinationTop)
     {
-        return false;
+        presentationRectangle = {};
+        return RectangleMapResult::Empty;
     }
 
     presentationRectangle = {
@@ -172,7 +180,7 @@ PresentationTransform::mapSourceRectangle(
         static_cast<std::uint32_t>(clippedRight - destinationLeft),
         static_cast<std::uint32_t>(clippedBottom - destinationTop),
     };
-    return true;
+    return RectangleMapResult::Mapped;
 }
 
 bool

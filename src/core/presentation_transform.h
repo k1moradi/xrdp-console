@@ -16,6 +16,13 @@ struct PresentationPoint
                            const PresentationPoint &) = default;
 };
 
+enum class RectangleMapResult
+{
+    Invalid,
+    Empty,
+    Mapped,
+};
+
 class PresentationTransform final
 {
 public:
@@ -28,7 +35,7 @@ public:
     [[nodiscard]] PixelSize presentationGeometry() const noexcept;
     [[nodiscard]] Rectangle viewport() const noexcept;
 
-    [[nodiscard]] bool mapSourceRectangle(
+    [[nodiscard]] RectangleMapResult mapSourceRectangle(
         Rectangle sourceRectangle,
         Rectangle &presentationRectangle) const noexcept;
 

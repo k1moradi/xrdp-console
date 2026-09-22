@@ -552,7 +552,8 @@ ModuleContext::connect() noexcept
         }
         PresentationScaler presentationScaler;
         if (!presentationScaler.configure(sourceGeometry,
-                                          impl_->state.presentationGeometry))
+                                          impl_->state.presentationGeometry,
+                                          presentationTransform.viewport()))
         {
             log_message(LOG_LEVEL_ERROR,
                         "xrdp-console: presentation scaler allocation "
@@ -703,7 +704,7 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     }
     PresentationScaler scaler;
     if (!scaler.configure(impl_->state.sourceGeometry,
-                          presentationGeometry))
+                          presentationGeometry, transform.viewport()))
     {
         return 1;
     }
@@ -1234,11 +1235,29 @@ ModuleContext::check_wait_objs() noexcept
             }
 
             Rectangle presentationRectangle{};
-            if (!impl_->presentationTransform.mapSourceRectangle(
-                    captureRectangle, presentationRectangle))
+            const RectangleMapResult mapping =
+                impl_->presentationTransform.mapSourceRectangle(
+                    captureRectangle, presentationRectangle);
+            if (mapping == RectangleMapResult::Invalid)
             {
                 success = false;
                 break;
+            }
+
+            if (mapping == RectangleMapResult::Empty)
+            {
+                // A source stripe can have no representative pixel after a
+                // downscale. It is still valid to consume that source damage;
+                // there is simply nothing visible to send for this interval.
+                if (!impl_->damageRegion.consume_front(captureRectangle))
+                {
+                    success = false;
+                    break;
+                }
+                capturedSourcePixels +=
+                    static_cast<std::uint64_t>(captureRectangle.widthPixels) *
+                    captureRectangle.heightPixels;
+                continue;
             }
 
             const FramebufferView pixels =
@@ -1297,8 +1316,8 @@ ModuleContext::check_wait_objs() noexcept
         const FramebufferView outputPixels =
             impl_->presentationScaler.scaleRows(
                 pending.sourcePixels,
-                {pending.presentationRectangle.widthPixels,
-                 pending.presentationRectangle.heightPixels},
+                pending.sourceRectangle,
+                pending.presentationRectangle,
                 pending.nextPresentationRow, rowsThisChunk);
         if (!outputPixels.valid())
         {

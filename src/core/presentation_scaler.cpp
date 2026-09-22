@@ -15,12 +15,19 @@ constexpr std::size_t kBytesPerPixel = sizeof(std::uint32_t);
 } // namespace
 
 bool
-PresentationScaler::configure(PixelSize source, PixelSize presentation) noexcept
+PresentationScaler::configure(PixelSize source, PixelSize presentation,
+                               Rectangle viewport) noexcept
 {
     if (source.widthPixels == 0 || source.heightPixels == 0 ||
         presentation.widthPixels == 0 || presentation.heightPixels == 0 ||
         presentation.widthPixels > kMaximumDimension ||
-        presentation.heightPixels > kMaximumDimension)
+        presentation.heightPixels > kMaximumDimension || viewport.x < 0 ||
+        viewport.y < 0 || viewport.widthPixels == 0 ||
+        viewport.heightPixels == 0 ||
+        static_cast<std::uint64_t>(viewport.x) + viewport.widthPixels >
+            presentation.widthPixels ||
+        static_cast<std::uint64_t>(viewport.y) + viewport.heightPixels >
+            presentation.heightPixels)
     {
         return false;
     }
@@ -35,7 +42,9 @@ PresentationScaler::configure(PixelSize source, PixelSize presentation) noexcept
 
     const bool replacementIdentity =
         source.widthPixels == presentation.widthPixels &&
-        source.heightPixels == presentation.heightPixels;
+        source.heightPixels == presentation.heightPixels && viewport.x == 0 &&
+        viewport.y == 0 && viewport.widthPixels == presentation.widthPixels &&
+        viewport.heightPixels == presentation.heightPixels;
 
     try
     {
@@ -45,11 +54,21 @@ PresentationScaler::configure(PixelSize source, PixelSize presentation) noexcept
         if (!replacementIdentity)
         {
             replacementPixels.resize(kScratchPixelCapacity);
-            replacementHorizontalMap.resize(presentation.widthPixels);
+            replacementHorizontalMap.resize(viewport.widthPixels);
+            for (std::uint32_t viewportX = 0;
+                 viewportX < viewport.widthPixels; ++viewportX)
+            {
+                replacementHorizontalMap[viewportX] = std::min(
+                    source.widthPixels - 1U,
+                    static_cast<std::uint32_t>(
+                        (static_cast<std::uint64_t>(viewportX) *
+                         source.widthPixels) /
+                        viewport.widthPixels));
+            }
         }
 
         pixels_.swap(replacementPixels);
-        horizontalMap_.swap(replacementHorizontalMap);
+        sourceXForViewportColumn_.swap(replacementHorizontalMap);
     }
     catch (...)
     {
@@ -58,6 +77,7 @@ PresentationScaler::configure(PixelSize source, PixelSize presentation) noexcept
 
     sourceGeometry_ = source;
     presentationGeometry_ = presentation;
+    viewport_ = viewport;
     identity_ = replacementIdentity;
     return true;
 }
@@ -69,9 +89,15 @@ PresentationScaler::valid() const noexcept
            sourceGeometry_.heightPixels != 0 &&
            presentationGeometry_.widthPixels != 0 &&
            presentationGeometry_.heightPixels != 0 &&
+           viewport_.x >= 0 && viewport_.y >= 0 &&
+           viewport_.widthPixels != 0 && viewport_.heightPixels != 0 &&
+           static_cast<std::uint64_t>(viewport_.x) + viewport_.widthPixels <=
+               presentationGeometry_.widthPixels &&
+           static_cast<std::uint64_t>(viewport_.y) + viewport_.heightPixels <=
+               presentationGeometry_.heightPixels &&
            (identity_ ||
             (pixels_.size() == kScratchPixelCapacity &&
-             horizontalMap_.size() == presentationGeometry_.widthPixels));
+             sourceXForViewportColumn_.size() == viewport_.widthPixels));
 }
 
 std::uint32_t
@@ -88,14 +114,32 @@ PresentationScaler::maximumRowsForWidth(std::uint32_t widthPixels) const noexcep
 
 FramebufferView
 PresentationScaler::scaleRows(FramebufferView source,
-                              PixelSize completeDestination,
-                              std::uint32_t firstDestinationRow,
-                              std::uint32_t destinationRowCount) noexcept
+                              Rectangle sourceRectangle,
+                              Rectangle presentationRectangle,
+                              std::uint32_t firstPresentationRow,
+                              std::uint32_t presentationRowCount) noexcept
 {
-    if (!valid() || !source.valid() || completeDestination.widthPixels == 0 ||
-        completeDestination.heightPixels == 0 || destinationRowCount == 0 ||
-        completeDestination.widthPixels > presentationGeometry_.widthPixels ||
-        completeDestination.heightPixels > presentationGeometry_.heightPixels)
+    if (!valid() || !source.valid() || sourceRectangle.x < 0 ||
+        sourceRectangle.y < 0 || sourceRectangle.widthPixels == 0 ||
+        sourceRectangle.heightPixels == 0 ||
+        sourceRectangle.widthPixels != source.widthPixels ||
+        sourceRectangle.heightPixels != source.heightPixels ||
+        static_cast<std::uint64_t>(sourceRectangle.x) +
+                sourceRectangle.widthPixels >
+            sourceGeometry_.widthPixels ||
+        static_cast<std::uint64_t>(sourceRectangle.y) +
+                sourceRectangle.heightPixels >
+            sourceGeometry_.heightPixels ||
+        presentationRectangle.x < viewport_.x ||
+        presentationRectangle.y < viewport_.y ||
+        presentationRectangle.widthPixels == 0 ||
+        presentationRectangle.heightPixels == 0 || presentationRowCount == 0 ||
+        static_cast<std::uint64_t>(presentationRectangle.x) +
+                presentationRectangle.widthPixels >
+            static_cast<std::uint64_t>(viewport_.x) + viewport_.widthPixels ||
+        static_cast<std::uint64_t>(presentationRectangle.y) +
+                presentationRectangle.heightPixels >
+            static_cast<std::uint64_t>(viewport_.y) + viewport_.heightPixels)
     {
         return {};
     }
@@ -109,28 +153,31 @@ PresentationScaler::scaleRows(FramebufferView source,
     }
 
     const std::uint64_t endRow =
-        static_cast<std::uint64_t>(firstDestinationRow) +
-        destinationRowCount;
-    if (endRow > completeDestination.heightPixels)
+        static_cast<std::uint64_t>(firstPresentationRow) +
+        presentationRowCount;
+    if (endRow > presentationRectangle.heightPixels)
     {
         return {};
     }
 
     const std::uint32_t maximumRows =
-        maximumRowsForWidth(completeDestination.widthPixels);
-    if (destinationRowCount > maximumRows)
+        maximumRowsForWidth(presentationRectangle.widthPixels);
+    if (presentationRowCount > maximumRows)
     {
         return {};
     }
 
-    if (source.widthPixels == completeDestination.widthPixels &&
-        source.heightPixels == completeDestination.heightPixels)
+    if (identity_)
     {
+        if (sourceRectangle != presentationRectangle)
+        {
+            return {};
+        }
         const std::size_t offset =
-            static_cast<std::size_t>(firstDestinationRow) *
+            static_cast<std::size_t>(firstPresentationRow) *
             source.strideBytes;
         const std::size_t bytes =
-            static_cast<std::size_t>(destinationRowCount) *
+            static_cast<std::size_t>(presentationRowCount) *
             source.strideBytes;
         if (offset > source.pixels.size() ||
             bytes > source.pixels.size() - offset)
@@ -141,58 +188,73 @@ PresentationScaler::scaleRows(FramebufferView source,
         return {
             source.pixels.subspan(offset, bytes),
             source.widthPixels,
-            destinationRowCount,
+            presentationRowCount,
             source.strideBytes,
         };
     }
 
-    if (identity_ || source.widthPixels == 0 || source.heightPixels == 0 ||
-        horizontalMap_.size() < completeDestination.widthPixels)
+    if (sourceXForViewportColumn_.size() < viewport_.widthPixels)
     {
         return {};
     }
 
-    for (std::uint32_t x = 0; x < completeDestination.widthPixels; ++x)
-    {
-        horizontalMap_[x] = std::min(
-            source.widthPixels - 1U,
-            static_cast<std::uint32_t>(
-                (static_cast<std::uint64_t>(x) * source.widthPixels) /
-                completeDestination.widthPixels));
-    }
-
     const std::size_t destinationStride =
-        static_cast<std::size_t>(completeDestination.widthPixels) *
+        static_cast<std::size_t>(presentationRectangle.widthPixels) *
         kBytesPerPixel;
 
-    for (std::uint32_t localY = 0; localY < destinationRowCount; ++localY)
+    for (std::uint32_t localY = 0; localY < presentationRowCount; ++localY)
     {
-        const std::uint32_t destinationY = firstDestinationRow + localY;
-        const std::uint32_t sourceY = std::min(
-            source.heightPixels - 1U,
+        const std::int32_t destinationY =
+            presentationRectangle.y +
+            static_cast<std::int32_t>(firstPresentationRow + localY);
+        const std::uint32_t viewportLocalY = static_cast<std::uint32_t>(
+            destinationY - viewport_.y);
+        const std::uint32_t globalSourceY = std::min(
+            sourceGeometry_.heightPixels - 1U,
             static_cast<std::uint32_t>(
-                (static_cast<std::uint64_t>(destinationY) *
-                 source.heightPixels) /
-                completeDestination.heightPixels));
+                (static_cast<std::uint64_t>(viewportLocalY) *
+                 sourceGeometry_.heightPixels) /
+                viewport_.heightPixels));
+        const std::int64_t localSourceY =
+            static_cast<std::int64_t>(globalSourceY) - sourceRectangle.y;
+        if (localSourceY < 0 ||
+            static_cast<std::uint64_t>(localSourceY) >= source.heightPixels)
+        {
+            return {};
+        }
         const auto *sourceRow = reinterpret_cast<const std::uint32_t *>(
             source.pixels.data() +
-            static_cast<std::size_t>(sourceY) * source.strideBytes);
+            static_cast<std::size_t>(localSourceY) * source.strideBytes);
         auto *destinationRow = pixels_.data() +
                                static_cast<std::size_t>(localY) *
-                                   completeDestination.widthPixels;
-        for (std::uint32_t x = 0; x < completeDestination.widthPixels; ++x)
+                                   presentationRectangle.widthPixels;
+        for (std::uint32_t x = 0;
+             x < presentationRectangle.widthPixels; ++x)
         {
-            destinationRow[x] = sourceRow[horizontalMap_[x]];
+            const std::int32_t destinationX =
+                presentationRectangle.x + static_cast<std::int32_t>(x);
+            const std::uint32_t viewportLocalX = static_cast<std::uint32_t>(
+                destinationX - viewport_.x);
+            const std::uint32_t globalSourceX =
+                sourceXForViewportColumn_[viewportLocalX];
+            const std::int64_t localSourceX =
+                static_cast<std::int64_t>(globalSourceX) - sourceRectangle.x;
+            if (localSourceX < 0 ||
+                static_cast<std::uint64_t>(localSourceX) >= source.widthPixels)
+            {
+                return {};
+            }
+            destinationRow[x] = sourceRow[localSourceX];
         }
     }
 
     return {
         std::span<const std::byte>(
             reinterpret_cast<const std::byte *>(pixels_.data()),
-            static_cast<std::size_t>(destinationRowCount) *
+            static_cast<std::size_t>(presentationRowCount) *
                 destinationStride),
-        completeDestination.widthPixels,
-        destinationRowCount,
+        presentationRectangle.widthPixels,
+        presentationRowCount,
         destinationStride,
     };
 }

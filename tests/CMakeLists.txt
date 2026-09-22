@@ -275,6 +275,19 @@ if(TARGET xrdp-console)
         set_tests_properties(xrdp-loader-scaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 30)
+        add_test(NAME xrdp-loader-downscaled-smoke
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11vnc-latency-stimulus>
+            800 600)
+        set_tests_properties(xrdp-loader-downscaled-smoke PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 30)
     else()
         message(STATUS
             "Skipping xrdp-loader-smoke: FreeRDP and benchmark pixel helpers are required")
