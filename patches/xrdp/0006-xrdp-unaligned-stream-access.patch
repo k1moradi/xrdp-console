@@ -1,0 +1,115 @@
+diff --git a/common/parse.h b/common/parse.h
+--- a/common/parse.h
++++ b/common/parse.h
+@@ -319,7 +319,9 @@
+ #define in_sint16_le(s, v) do \
+     { \
++        signed short parse_value; \
+         S_CHECK_REM((s), 2); \
+-        (v) = *((signed short*)((s)->p)); \
+-        (s)->p += 2; \
++        g_memcpy(&parse_value, (s)->p, sizeof(parse_value)); \
++        (v) = parse_value; \
++        (s)->p += sizeof(parse_value); \
+     } while (0)
+ #endif
+@@ -340,7 +342,9 @@
+ #define in_uint16_le(s, v) do \
+     { \
++        unsigned short parse_value; \
+         S_CHECK_REM((s), 2); \
+-        (v) = *((unsigned short*)((s)->p)); \
+-        (s)->p += 2; \
++        g_memcpy(&parse_value, (s)->p, sizeof(parse_value)); \
++        (v) = parse_value; \
++        (s)->p += sizeof(parse_value); \
+     } while (0)
+ #endif
+@@ -374,7 +378,9 @@
+ #define in_uint32_le(s, v) do \
+     { \
++        unsigned int parse_value; \
+         S_CHECK_REM((s), 4); \
+-        (v) = *((unsigned int*)((s)->p)); \
+-        (s)->p += 4; \
++        g_memcpy(&parse_value, (s)->p, sizeof(parse_value)); \
++        (v) = parse_value; \
++        (s)->p += sizeof(parse_value); \
+     } while (0)
+ #endif
+@@ -401,7 +407,9 @@
+ #define in_uint64_le(s, v) do \
+     { \
++        tui64 parse_value; \
+         S_CHECK_REM((s), 8); \
+-        (v) = *((tui64*)((s)->p)); \
+-        (s)->p += 8; \
++        g_memcpy(&parse_value, (s)->p, sizeof(parse_value)); \
++        (v) = parse_value; \
++        (s)->p += sizeof(parse_value); \
+     } while (0)
+ #endif
+@@ -445,7 +453,9 @@
+ #define out_uint16_le(s, v) do \
+     { \
++        unsigned short parse_value; \
+         S_CHECK_REM_OUT((s), 2); \
+-        *((unsigned short*)((s)->p)) = (unsigned short)(v); \
+-        (s)->p += 2; \
++        parse_value = (unsigned short)(v); \
++        g_memcpy((s)->p, &parse_value, sizeof(parse_value)); \
++        (s)->p += sizeof(parse_value); \
+     } while (0)
+ #endif
+@@ -478,7 +488,9 @@
+ #define out_uint32_le(s, v) do \
+     { \
++        unsigned int parse_value; \
+         S_CHECK_REM_OUT((s), 4); \
+-        *((unsigned int*)((s)->p)) = (v); \
+-        (s)->p += 4; \
++        parse_value = (unsigned int)(v); \
++        g_memcpy((s)->p, &parse_value, sizeof(parse_value)); \
++        (s)->p += sizeof(parse_value); \
+     } while (0)
+ #endif
+@@ -509,7 +521,9 @@
+ #define out_uint64_le(s, v) do \
+     { \
++        tui64 parse_value; \
+         S_CHECK_REM_OUT((s), 8); \
+-        *((tui64*)((s)->p)) = (v); \
+-        (s)->p += 8; \
++        parse_value = (tui64)(v); \
++        g_memcpy((s)->p, &parse_value, sizeof(parse_value)); \
++        (s)->p += sizeof(parse_value); \
+     } while (0)
+ #endif
+diff --git a/common/parse.c b/common/parse.c
+--- a/common/parse.c
++++ b/common/parse.c
+@@ -29,2 +29,3 @@
+ #include "log.h"
++#include "os_calls.h"
+ #include "string_calls.h"
+@@ -44,6 +45,7 @@
+ #define out_uint16_le_unchecked(s, v) do \
+     { \
+-        *((unsigned short*)((s)->p)) = (unsigned short)(v); \
+-        (s)->p += 2; \
++        unsigned short parse_value = (unsigned short)(v); \
++        g_memcpy((s)->p, &parse_value, sizeof(parse_value)); \
++        (s)->p += sizeof(parse_value); \
+     } while (0)
+ #endif
+@@ -63,6 +65,8 @@
+ #define in_uint16_le_unchecked(s, v) do \
+     { \
+-        (v) = *((unsigned short*)((s)->p)); \
+-        (s)->p += 2; \
++        unsigned short parse_value; \
++        g_memcpy(&parse_value, (s)->p, sizeof(parse_value)); \
++        (v) = parse_value; \
++        (s)->p += sizeof(parse_value); \
+     } while (0)
+ #endif

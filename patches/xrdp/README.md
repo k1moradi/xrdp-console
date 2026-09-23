@@ -38,9 +38,18 @@ historical fork's commit history:
    misaligned 16/32-bit typed loads and stores in the x86 RemoteFX stream
    macros with fixed-size `memcpy()` operations. This removes C undefined
    behavior flagged by UBSan without changing the little-endian wire bytes.
+6. `0006-xrdp-unaligned-stream-access.patch` replaces potentially misaligned
+   little-endian stream loads and stores in `common/parse.h` and the unchecked
+   UTF-16 stream helpers in `common/parse.c` with typed local values copied
+   using `g_memcpy()`. This removes UBSan-confirmed parser alignment undefined
+   behavior while preserving native little-endian bytes.
+7. `0007-xrdp-keyboard-layout-hex-conversion.patch` uses `g_atoix()` for the
+   two keyboard-layout ID paths. UBSan showed that `g_htoi()` shifts by 32 or
+   more bits when parsing normal `0x`-prefixed layout values such as
+   `0x00000409`; `g_atoix()` already handles that hexadecimal prefix safely.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-five patches are production compatibility and correctness changes, not
+seven patches are production compatibility and correctness changes, not
 benchmark knobs. Code
 `21` is deliberately used only by the direct module's profile; legacy VNC
 profiles continue using code `0`/`1`. The
