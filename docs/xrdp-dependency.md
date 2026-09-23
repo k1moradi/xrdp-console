@@ -57,7 +57,7 @@ The series is deliberately small and applies in this order:
 | `0004-xrdp-console-own-rfx-encoder.patch` | first-party synchronous RFX ownership | Prevents the asynchronous generic encoder thread from retaining pixel buffers owned by the direct module. |
 | `0005-librfxcodec-unaligned-stream-access.patch` | defined unaligned RFX stream access | Removes UBSan-confirmed misaligned typed loads/stores in the x86 stream macros while preserving wire bytes. |
 | `0006-xrdp-unaligned-stream-access.patch` | defined unaligned xrdp stream access | Removes UBSan-confirmed potentially misaligned typed loads/stores from `common/parse.h` and unchecked UTF-16 stream helpers in `common/parse.c` while preserving little-endian wire bytes. |
-| `0007-xrdp-keyboard-layout-hex-conversion.patch` | defined keyboard-layout parsing | Replaces two `g_htoi()` calls with the existing `g_atoix()` parser after UBSan found invalid 32-bit shifts for normal `0x`-prefixed keyboard-layout IDs. |
+| `0007-xrdp-keyboard-layout-hex-conversion.patch` | defined keyboard-layout parsing | Replaces two `g_htoi()` calls with the existing `g_atoix()` parser after UBSan found invalid 32-bit shifts for normal `0x`-prefixed keyboard-layout IDs. Custom bare hexadecimal values such as `409` now parse as decimal; the distributed configuration uses the supported `0x00000409` form. |
 
 These seven patches are production compatibility and correctness changes, not
 benchmark knobs.

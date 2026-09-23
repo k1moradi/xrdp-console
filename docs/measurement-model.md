@@ -114,3 +114,49 @@ The private IPv6-to-IPv4 RFB relay uses bounded per-direction buffers and
 selector write readiness. It closes a run if a peer leaves more than 16 MiB
 queued, which prevents a stalled destination from turning into unbounded
 memory growth or a busy-spin CPU artifact.
+
+## Controlled memory pressure
+
+The local direct-X11 RFX benchmark accepts
+`--memory-pressure-mib N` for a bounded, page-touched anonymous allocation
+held by a helper process during measurement. `0` is the no-pressure baseline;
+positive values are limited to 1536 MiB and only accepted for direct-X11/RDP
+RemoteFX `graphics-under-churn` or `input-roundtrip` runs. The helper is
+installed with the benchmark in its `helpers` subdirectory and needs no
+`stress-ng` dependency.
+
+The benchmark requires preflight `MemAvailable >= requested MiB + 512 MiB`,
+then waits one second and refuses to allocate if swap-in or swap-out is already
+active. During allocation and measurement it monitors `/proc/meminfo` and
+`/proc/vmstat`, releases the allocation and aborts if available memory falls
+below 512 MiB or either swap counter advances. Consequently, higher matrix
+levels can be refused without starting the RDP run; do not bypass that safety
+decision. An unexpected exit of the pressure helper also invalidates and
+aborts the measurement. The zero-pressure control records swap deltas but does
+not treat ambient swap activity as a pressure-induced abort. Output records
+before/during/after memory and swap snapshots, observed minimum
+available memory, swap extrema, process-tree RSS/CPU/major-fault deltas, and
+the time from FreeRDP termination to xrdp's module-cleanup log marker. That
+marker measures cleanup onset, not completion of the module destructor.
+
+For the memory-resilience gate, run the graphics and input modes independently
+at each accepted level, keeping the 30-fps workload and all other settings
+fixed. For example:
+
+```bash
+python3 -B tools/benchmark/xrdp_console_bench.py \
+  --backend direct-x11 --transport rdp --mode graphics-under-churn \
+  --direct-graphics-transport rfx --fps 30 --duration 20 \
+  --memory-pressure-mib 512 --repetitions 1
+
+python3 -B tools/benchmark/xrdp_console_bench.py \
+  --backend direct-x11 --transport rdp --mode input-roundtrip \
+  --direct-graphics-transport rfx --fps 30 --input-churn-fps 30 \
+  --duration 20 --memory-pressure-mib 512 --repetitions 1
+```
+
+Compare zero-pressure and accepted pressure runs for misses, latency percentiles,
+xrdp major faults/RSS/CPU, disconnect cleanup time, and whether memory and
+swap return to baseline after the helper releases its allocation. This is a
+host-local resilience check, not a substitute for the outstanding Microsoft
+Windows and macOS client interoperability tests.

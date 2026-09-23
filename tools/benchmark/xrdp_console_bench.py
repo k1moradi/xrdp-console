@@ -176,6 +176,10 @@ MARKER_WIDTH_PIXELS = 160
 MARKER_HEIGHT_PIXELS = 100
 GRAPHICS_LATENCY_MARKER_HZ = 5.0
 MINIMUM_CHURN_RATE_FRACTION = 0.95
+MINIMUM_MEMORY_RESERVE_KIB = 512 * 1024
+MAXIMUM_MEMORY_PRESSURE_MIB = 1536
+DISCONNECT_CLEANUP_TIMEOUT_SECONDS = 5.0
+SWAP_QUIET_PREFLIGHT_SECONDS = 1.0
 
 
 @dataclass(frozen=True)
@@ -495,6 +499,259 @@ class LineReader:
             self._buffer.extend(chunk)
 
 
+class MemoryPressureSession:
+    """Hold and supervise a safety-bounded anonymous-memory allocation."""
+
+    def __init__(self, requested_mib: int) -> None:
+        self.requested_mib = requested_mib
+        self.before: MemorySnapshot | None = None
+        self.during: MemorySnapshot | None = None
+        self.after: MemorySnapshot | None = None
+        self.process: subprocess.Popen[bytes] | None = None
+        self.abort_reason: str | None = None
+        self.minimum_available_kib: int | None = None
+        self.maximum_swap_used_kib: int | None = None
+        self._monitor_stop = threading.Event()
+        self._monitor_thread: threading.Thread | None = None
+        self._process_lock = threading.Lock()
+        self._process_released = False
+
+    def _unsafe_reason(self, snapshot: MemorySnapshot) -> str | None:
+        if self.requested_mib == 0:
+            return None
+        return memory_pressure_unsafe_reason(snapshot, self.before)
+
+    def _helper_exit_reason(self) -> str | None:
+        if self.requested_mib == 0 or self.process is None:
+            return None
+        returncode = self.process.poll()
+        if returncode is None:
+            return None
+        return (
+            "memory pressure helper exited unexpectedly "
+            f"(status={returncode})"
+        )
+
+    def _record_during(self, snapshot: MemorySnapshot) -> None:
+        self.during = snapshot
+        self.minimum_available_kib = min(
+            snapshot.mem_available_kib,
+            self.minimum_available_kib
+            if self.minimum_available_kib is not None
+            else snapshot.mem_available_kib,
+        )
+        self.maximum_swap_used_kib = max(
+            snapshot.swap_used_kib,
+            self.maximum_swap_used_kib
+            if self.maximum_swap_used_kib is not None
+            else snapshot.swap_used_kib,
+        )
+
+    def _release_helper(self) -> None:
+        process = self.process
+        if process is None:
+            return
+        with self._process_lock:
+            if self._process_released:
+                return
+            self._process_released = True
+            if process.stdin is not None and not process.stdin.closed:
+                try:
+                    process.stdin.close()
+                except BrokenPipeError:
+                    pass
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=2.0)
+
+    def _monitor(self) -> None:
+        while not self._monitor_stop.wait(0.5):
+            try:
+                snapshot = read_memory_snapshot()
+            except (OSError, ValueError) as error:
+                self.abort_reason = f"cannot monitor memory state: {error}"
+            else:
+                self._record_during(snapshot)
+                reason = (
+                    self._helper_exit_reason() or
+                    self._unsafe_reason(snapshot)
+                )
+                if reason is None:
+                    continue
+                self.abort_reason = reason
+
+            print(
+                f"MEMORY pressure_abort reason={self.abort_reason}",
+                file=sys.stderr,
+                flush=True,
+            )
+            self._release_helper()
+            os.kill(os.getpid(), signal.SIGINT)
+            return
+
+    def start(self) -> None:
+        if not 0 <= self.requested_mib <= MAXIMUM_MEMORY_PRESSURE_MIB:
+            raise ValueError(
+                "memory pressure must be between 0 and "
+                f"{MAXIMUM_MEMORY_PRESSURE_MIB} MiB"
+            )
+
+        self.before = read_memory_snapshot()
+        self.minimum_available_kib = self.before.mem_available_kib
+        self.maximum_swap_used_kib = self.before.swap_used_kib
+        print(format_memory_snapshot("before", self.requested_mib,
+                                     self.before))
+        if self.requested_mib == 0:
+            self.during = self.before
+            return
+
+        required_kib = (self.requested_mib + 512) * 1024
+        if self.before.mem_available_kib < required_kib:
+            raise RuntimeError(
+                "memory pressure preflight refused: requires at least "
+                f"{required_kib} KiB MemAvailable to preserve a 512 MiB "
+                f"reserve; observed {self.before.mem_available_kib} KiB"
+            )
+
+        swap_quiet_start = self.before
+        time.sleep(SWAP_QUIET_PREFLIGHT_SECONDS)
+        self.before = read_memory_snapshot()
+        print(format_memory_snapshot("preflight", self.requested_mib,
+                                     self.before))
+        if (self.before.swap_pages_in != swap_quiet_start.swap_pages_in or
+                self.before.swap_pages_out != swap_quiet_start.swap_pages_out):
+            raise RuntimeError(
+                "memory pressure preflight refused: system swap activity was "
+                "already occurring; no pressure allocation was started"
+            )
+        if self.before.mem_available_kib < required_kib:
+            raise RuntimeError(
+                "memory pressure preflight refused after quiet check: requires "
+                f"{required_kib} KiB MemAvailable; observed "
+                f"{self.before.mem_available_kib} KiB"
+            )
+
+        helper = SCRIPT_DIR / "helpers" / "memory_pressure.py"
+        if not helper.is_file():
+            raise RuntimeError(f"memory pressure helper is missing: {helper}")
+        self.process = subprocess.Popen(
+            [sys.executable, str(helper), "--mib", str(self.requested_mib)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+            start_new_session=True,
+        )
+        if self.process.stdin is None or self.process.stdout is None:
+            self._release_helper()
+            raise RuntimeError("memory pressure helper pipes were not created")
+
+        reader = LineReader(self.process.stdout)
+        ready = reader.readline(20.0)
+        fields = ready.split()
+        try:
+            values = {
+                field.split(b"=", 1)[0]: field.split(b"=", 1)[1]
+                for field in fields[1:]
+                if b"=" in field
+            }
+            expected_bytes = self.requested_mib * 1024 * 1024
+            if (not fields or fields[0] != b"READY" or
+                    int(values[b"bytes"]) != expected_bytes or
+                    int(values[b"pressure_mib"]) != self.requested_mib or
+                    int(values[b"pid"]) != self.process.pid):
+                raise ValueError("READY fields do not match the requested allocation")
+        except (IndexError, KeyError, TypeError, ValueError) as error:
+            self._release_helper()
+            stderr = (
+                self.process.stderr.read().decode(errors="replace").strip()
+                if self.process.stderr is not None else ""
+            )
+            raise RuntimeError(
+                "memory pressure helper did not become ready: "
+                f"{ready!r} {stderr}"
+            ) from error
+
+        helper_exit_reason = self._helper_exit_reason()
+        if helper_exit_reason is not None:
+            self._release_helper()
+            raise RuntimeError(helper_exit_reason)
+
+        self._record_during(read_memory_snapshot())
+        print(format_memory_snapshot("during", self.requested_mib,
+                                     self.during))
+        print(
+            f"memory_pressure allocated_bytes={expected_bytes} "
+            f"helper_pid={self.process.pid} "
+            f"helper_rss_bytes={process_rss_bytes(self.process.pid)}"
+        )
+        reason = self._unsafe_reason(self.during)
+        if reason is not None:
+            self._release_helper()
+            raise RuntimeError(
+                f"memory pressure became unsafe before measurement: {reason}"
+            )
+
+        self._monitor_thread = threading.Thread(
+            target=self._monitor,
+            name="xrdp-bench-memory-pressure-monitor",
+            daemon=True,
+        )
+        self._monitor_thread.start()
+
+    def sample_during(self) -> MemorySnapshot:
+        snapshot = read_memory_snapshot()
+        self._record_during(snapshot)
+        print(format_memory_snapshot("during", self.requested_mib, snapshot))
+        reason = self._helper_exit_reason() or self._unsafe_reason(snapshot)
+        if reason is not None:
+            self.abort_reason = reason
+            self._release_helper()
+            raise RuntimeError(f"memory pressure became unsafe: {reason}")
+        return snapshot
+
+    def stop(self) -> None:
+        self._monitor_stop.set()
+        if (self._monitor_thread is not None and
+                threading.current_thread() is not self._monitor_thread):
+            self._monitor_thread.join(timeout=2.0)
+            if self._monitor_thread.is_alive():
+                raise RuntimeError("memory pressure monitor did not stop")
+        self._release_helper()
+        self.after = read_memory_snapshot()
+        print(format_memory_snapshot("after", self.requested_mib,
+                                     self.after))
+        if self.before is not None:
+            print(
+                f"MEMORY delta pressure_mib={self.requested_mib} "
+                f"mem_available_kib="
+                f"{self.after.mem_available_kib - self.before.mem_available_kib} "
+                f"swap_used_kib="
+                f"{self.after.swap_used_kib - self.before.swap_used_kib} "
+                f"swap_pages_out="
+                f"{self.after.swap_pages_out - self.before.swap_pages_out}"
+            )
+        if (self.minimum_available_kib is not None and
+                self.maximum_swap_used_kib is not None):
+            print(
+                f"MEMORY extrema pressure_mib={self.requested_mib} "
+                f"minimum_mem_available_kib={self.minimum_available_kib} "
+                f"maximum_swap_used_kib={self.maximum_swap_used_kib}"
+            )
+
+
 def calculate_achieved_fps(frame_timestamps_ns: list[int]) -> float:
     if len(frame_timestamps_ns) < 2:
         return 0.0
@@ -525,6 +782,107 @@ class ChurnStatistics:
 
         elapsed_ns = self.last_frame_ns - self.first_frame_ns
         return (self.generated_frames - 1) * 1e9 / elapsed_ns
+
+
+@dataclass(frozen=True)
+class MemorySnapshot:
+    mem_available_kib: int
+    swap_total_kib: int
+    swap_free_kib: int
+    swap_pages_in: int
+    swap_pages_out: int
+
+    @property
+    def swap_used_kib(self) -> int:
+        return self.swap_total_kib - self.swap_free_kib
+
+
+def parse_memory_snapshot(meminfo_text: str,
+                          vmstat_text: str) -> MemorySnapshot:
+    meminfo: dict[str, int] = {}
+    for line in meminfo_text.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        key = fields[0].rstrip(":")
+        if key in {"MemAvailable", "SwapTotal", "SwapFree"}:
+            if len(fields) != 3 or fields[2] != "kB":
+                raise ValueError(f"malformed /proc/meminfo field: {line!r}")
+            try:
+                meminfo[key] = int(fields[1])
+            except ValueError as error:
+                raise ValueError(
+                    f"non-numeric /proc/meminfo field: {line!r}") from error
+
+    vmstat: dict[str, int] = {}
+    for line in vmstat_text.splitlines():
+        fields = line.split()
+        if fields and fields[0] in {"pswpin", "pswpout"}:
+            if len(fields) != 2:
+                raise ValueError(f"malformed /proc/vmstat field: {line!r}")
+            try:
+                vmstat[fields[0]] = int(fields[1])
+            except ValueError as error:
+                raise ValueError(
+                    f"non-numeric /proc/vmstat field: {line!r}") from error
+
+    required_meminfo = {"MemAvailable", "SwapTotal", "SwapFree"}
+    required_vmstat = {"pswpin", "pswpout"}
+    if required_meminfo - meminfo.keys():
+        raise ValueError("/proc/meminfo lacks required memory fields")
+    if required_vmstat - vmstat.keys():
+        raise ValueError("/proc/vmstat lacks swap activity counters")
+    if any(value < 0 for value in (*meminfo.values(), *vmstat.values())):
+        raise ValueError("memory counters must be nonnegative")
+    if meminfo["SwapFree"] > meminfo["SwapTotal"]:
+        raise ValueError("SwapFree exceeds SwapTotal")
+
+    return MemorySnapshot(
+        mem_available_kib=meminfo["MemAvailable"],
+        swap_total_kib=meminfo["SwapTotal"],
+        swap_free_kib=meminfo["SwapFree"],
+        swap_pages_in=vmstat["pswpin"],
+        swap_pages_out=vmstat["pswpout"],
+    )
+
+
+def read_memory_snapshot() -> MemorySnapshot:
+    return parse_memory_snapshot(
+        Path("/proc/meminfo").read_text(encoding="ascii"),
+        Path("/proc/vmstat").read_text(encoding="ascii"),
+    )
+
+
+def format_memory_snapshot(stage: str, requested_mib: int,
+                           snapshot: MemorySnapshot) -> str:
+    return (
+        f"MEMORY stage={stage} pressure_mib={requested_mib} "
+        f"mem_available_kib={snapshot.mem_available_kib} "
+        f"swap_used_kib={snapshot.swap_used_kib} "
+        f"swap_total_kib={snapshot.swap_total_kib} "
+        f"swap_pages_in={snapshot.swap_pages_in} "
+        f"swap_pages_out={snapshot.swap_pages_out}"
+    )
+
+
+def memory_pressure_unsafe_reason(
+    snapshot: MemorySnapshot,
+    baseline: MemorySnapshot | None,
+) -> str | None:
+    if snapshot.mem_available_kib < MINIMUM_MEMORY_RESERVE_KIB:
+        return (
+            f"MemAvailable fell below 512 MiB "
+            f"({snapshot.mem_available_kib} KiB)"
+        )
+    if baseline is not None:
+        page_in_delta = snapshot.swap_pages_in - baseline.swap_pages_in
+        page_out_delta = snapshot.swap_pages_out - baseline.swap_pages_out
+        if page_in_delta > 0 or page_out_delta > 0:
+            return (
+                "swap activity began "
+                f"(pswpin_delta={page_in_delta}, pswpout_delta={page_out_delta})"
+            )
+    return None
 
 
 class GpuChurnDriver:
@@ -672,13 +1030,47 @@ def process_cpu_seconds(proc: subprocess.Popen[bytes]) -> float:
     return process_cpu_seconds_pid(proc.pid)
 
 
+def proc_stat_fields(pid: int) -> list[str]:
+    """Return fields after comm, preserving commands containing spaces."""
+    contents = Path(f"/proc/{pid}/stat").read_text(encoding="ascii")
+    _, _, fields = parse_proc_stat(contents)
+    return fields
+
+
+def parse_proc_stat(contents: str) -> tuple[int, int, list[str]]:
+    """Parse PID, parent PID, and post-comm fields from proc stat text."""
+    opening_parenthesis = contents.find(" (")
+    closing_parenthesis = contents.rfind(")")
+    if opening_parenthesis <= 0 or closing_parenthesis <= opening_parenthesis:
+        raise ValueError("malformed /proc/<pid>/stat comm field")
+    try:
+        pid = int(contents[:opening_parenthesis])
+        fields = contents[closing_parenthesis + 1:].split()
+        parent_pid = int(fields[1])
+    except (IndexError, ValueError) as error:
+        raise ValueError("malformed /proc/<pid>/stat fields") from error
+    if len(fields) < 13 or pid <= 0 or parent_pid < 0:
+        raise ValueError("incomplete /proc/<pid>/stat fields")
+    return pid, parent_pid, fields
+
+
 def process_cpu_seconds_pid(pid: int) -> float:
     try:
-        fields = Path(f"/proc/{pid}/stat").read_text().split()
+        fields = proc_stat_fields(pid)
         ticks = os.sysconf(os.sysconf_names["SC_CLK_TCK"])
-        return (int(fields[13]) + int(fields[14])) / ticks
+        # The first item after comm is field 3 (state); utime/stime are
+        # fields 14/15 and therefore offsets 11/12 in this list.
+        return (int(fields[11]) + int(fields[12])) / ticks
     except (FileNotFoundError, IndexError, ValueError):
         return 0.0
+
+
+def process_major_faults_pid(pid: int) -> int:
+    try:
+        # majflt is field 12, offset 9 after the comm field.
+        return int(proc_stat_fields(pid)[9])
+    except (FileNotFoundError, IndexError, ValueError):
+        return 0
 
 
 def process_rss_bytes(proc: subprocess.Popen[bytes]) -> int:
@@ -700,9 +1092,10 @@ def process_tree_pids(root_pid: int) -> set[int]:
     children: dict[int, list[int]] = {}
     for entry in Path("/proc").glob("[0-9]*"):
         try:
-            fields = (entry / "stat").read_text().split()
-            pid = int(fields[0])
-            parent = int(fields[3])
+            stat = (entry / "stat").read_text(encoding="ascii")
+            pid, parent, _ = parse_proc_stat(stat)
+            if pid != int(entry.name):
+                continue
         except (FileNotFoundError, IndexError, ValueError):
             continue
         children.setdefault(parent, []).append(pid)
@@ -723,6 +1116,17 @@ def process_cpu_tree(proc: subprocess.Popen[bytes]) -> float:
 
 def process_rss_tree(proc: subprocess.Popen[bytes]) -> int:
     return sum(process_rss_bytes_pid(pid) for pid in process_tree_pids(proc.pid))
+
+
+def process_major_faults_tree(proc: subprocess.Popen[bytes]) -> int:
+    return sum(process_major_faults_pid(pid)
+               for pid in process_tree_pids(proc.pid))
+
+
+def process_label(proc: subprocess.Popen[bytes]) -> str:
+    command = proc.args
+    executable = command[0] if isinstance(command, (list, tuple)) else command
+    return Path(str(executable)).name
 
 
 def kill_process(proc: subprocess.Popen[bytes] | None, *, privileged: bool = False) -> None:
@@ -1664,6 +2068,21 @@ def wait_log_marker(path: Path, marker: str, deadline: float) -> None:
     raise RuntimeError(f"helper did not become ready; log={contents!r}")
 
 
+def count_log_marker(path: Path, marker: str) -> int:
+    if not path.is_file():
+        return 0
+    return path.read_text(errors="replace").count(marker)
+
+
+def wait_log_marker_count(path: Path, marker: str, previous_count: int,
+                          deadline: float) -> bool:
+    while time.monotonic() < deadline:
+        if count_log_marker(path, marker) > previous_count:
+            return True
+        time.sleep(0.02)
+    return count_log_marker(path, marker) > previous_count
+
+
 def wait_process_log(process: subprocess.Popen[bytes], log: Path,
                      marker: str, timeout: float,
                      diagnostics: Path | None = None) -> None:
@@ -1949,6 +2368,7 @@ def summarize(name: str, latencies: list[float], misses: int,
               samples: int, render_ns: list[int], processes: list,
               cpu_start: dict[int, float], wall_start: float,
               rss_start: dict[int, int], *,
+              major_faults_start: dict[int, int] | None = None,
               transport_label: str | None = None,
               transport_start: TcpSnapshot | None = None,
               transport_end: TcpSnapshot | None = None) -> None:
@@ -1982,7 +2402,19 @@ def summarize(name: str, latencies: list[float], misses: int,
         before = cpu_start.get(proc.pid, 0.0)
         cpu = max(0.0, process_cpu_tree(proc) - before) / elapsed * 100.0
         start_rss = rss_start.get(proc.pid, 0)
-        metrics.append(f"pid{proc.pid} cpu={cpu:.1f}% rss={start_rss / 1048576:.1f}->{process_rss_tree(proc) / 1048576:.1f}MiB")
+        metric = (
+            f"{process_label(proc)} pid={proc.pid} cpu={cpu:.1f}% "
+            f"rss={start_rss / 1048576:.1f}->"
+            f"{process_rss_tree(proc) / 1048576:.1f}MiB"
+        )
+        if major_faults_start is not None:
+            major_faults = max(
+                0,
+                process_major_faults_tree(proc) -
+                major_faults_start.get(proc.pid, 0),
+            )
+            metric += f" major_faults={major_faults}"
+        metrics.append(metric)
     print(f"{'':10} " + "; ".join(metrics))
     if transport_label is not None:
         print_transport_summary(transport_label, transport_start,
@@ -2380,6 +2812,10 @@ def run_direct_rfb_input_case(args: argparse.Namespace, name: str,
                      for proc in measured_processes}
         rss_start = {proc.pid: process_rss_tree(proc)
                      for proc in measured_processes}
+        major_faults_start = {
+            proc.pid: process_major_faults_tree(proc)
+            for proc in measured_processes
+        }
         transport_start = tcp_snapshot(vnc_port)
         wall_start = time.monotonic()
         next_tick = wall_start
@@ -2422,10 +2858,16 @@ def run_direct_rfb_input_case(args: argparse.Namespace, name: str,
         for proc in measured_processes:
             before = cpu_start.get(proc.pid, 0.0)
             cpu = max(0.0, process_cpu_tree(proc) - before) / elapsed * 100.0
+            major_faults = max(
+                0,
+                process_major_faults_tree(proc) -
+                major_faults_start.get(proc.pid, 0),
+            )
             metrics.append(
-                f"pid{proc.pid} cpu={cpu:.1f}% "
+                f"{process_label(proc)} pid={proc.pid} cpu={cpu:.1f}% "
                 f"rss={rss_start.get(proc.pid, 0) / 1048576:.1f}->"
-                f"{process_rss_tree(proc) / 1048576:.1f}MiB")
+                f"{process_rss_tree(proc) / 1048576:.1f}MiB "
+                f"major_faults={major_faults}")
         print(f"{'':18} " + "; ".join(metrics))
         if churn_driver is not None:
             driver = churn_driver
@@ -2538,6 +2980,10 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
             measured_processes.append(churn)
         cpu_start = {proc.pid: process_cpu_tree(proc) for proc in measured_processes}
         rss_start = {proc.pid: process_rss_tree(proc) for proc in measured_processes}
+        major_faults_start = {
+            proc.pid: process_major_faults_tree(proc)
+            for proc in measured_processes
+        }
         transport_start = tcp_snapshot(xrdp_port)
         wall_start = time.monotonic()
         next_tick = wall_start
@@ -2593,10 +3039,16 @@ def run_input_roundtrip(args: argparse.Namespace, name: str, repetition: int,
         for proc in measured_processes:
             before = cpu_start.get(proc.pid, 0.0)
             cpu = max(0.0, process_cpu_tree(proc) - before) / elapsed * 100.0
+            major_faults = max(
+                0,
+                process_major_faults_tree(proc) -
+                major_faults_start.get(proc.pid, 0),
+            )
             metrics.append(
-                f"pid{proc.pid} cpu={cpu:.1f}% "
+                f"{process_label(proc)} pid={proc.pid} cpu={cpu:.1f}% "
                 f"rss={rss_start.get(proc.pid, 0) / 1048576:.1f}->"
-                f"{process_rss_tree(proc) / 1048576:.1f}MiB")
+                f"{process_rss_tree(proc) / 1048576:.1f}MiB "
+                f"major_faults={major_faults}")
         print(f"{'':18} " + "; ".join(metrics))
         if churn_driver is not None:
             driver = churn_driver
@@ -2716,6 +3168,10 @@ def run_graphics_under_churn(
                      for proc in measured_processes}
         rss_start = {proc.pid: process_rss_tree(proc)
                      for proc in measured_processes}
+        major_faults_start = {
+            proc.pid: process_major_faults_tree(proc)
+            for proc in measured_processes
+        }
         transport_start = tcp_snapshot(xrdp_port)
         wall_start = time.monotonic()
         next_marker = wall_start
@@ -2780,6 +3236,7 @@ def run_graphics_under_churn(
         summarize(
             f"{name}#{repetition}", latencies, misses, samples, render_ns,
             measured_processes, cpu_start, wall_start, rss_start,
+            major_faults_start=major_faults_start,
             transport_label="rdp-private-wire",
             transport_start=transport_start, transport_end=transport_end,
         )
@@ -3333,11 +3790,63 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                 args.direct_graphics_transport == "rfx"):
             require_no_rfx_decoder_failure(case_dir / "xfreerdp.log")
     finally:
-        for proc in (probe, stimulus, client, xrdp, proxy, vnc, chansrv, xvfb):
-            kill_process(proc, privileged=(proc is client and network.enabled))
-        if module_link is not None:
-            module_link.unlink(missing_ok=True)
-        network.cleanup()
+        interrupted_during_cleanup = False
+        try:
+            if (direct_backend and args.transport == "rdp" and
+                    args.mode in {"graphics-under-churn", "input-roundtrip"} and
+                    client is not None):
+                if client.poll() is None:
+                    cleanup_marker = "xrdp_mm_module_cleanup"
+                    previous_count = count_log_marker(xrdp_log, cleanup_marker)
+                    disconnect_start = time.monotonic()
+                    try:
+                        kill_process(
+                            client,
+                            privileged=network.enabled,
+                        )
+                    except KeyboardInterrupt:
+                        interrupted_during_cleanup = True
+                    cleanup_seen = wait_log_marker_count(
+                        xrdp_log,
+                        cleanup_marker,
+                        previous_count,
+                        disconnect_start + DISCONNECT_CLEANUP_TIMEOUT_SECONDS,
+                    )
+                    cleanup_elapsed_ms = (
+                        time.monotonic() - disconnect_start
+                    ) * 1000.0
+                    print(
+                        f"DISCONNECT module_cleanup_marker_ms="
+                        f"{cleanup_elapsed_ms:.1f} observed="
+                        f"{int(cleanup_seen)} timeout_s="
+                        f"{DISCONNECT_CLEANUP_TIMEOUT_SECONDS:.1f}"
+                    )
+                else:
+                    print(
+                        "DISCONNECT module_cleanup_marker_ms=NA observed=0 "
+                        "reason=client_already_exited"
+                    )
+        except KeyboardInterrupt:
+            interrupted_during_cleanup = True
+        finally:
+            for proc in (probe, stimulus, client, xrdp, proxy, vnc,
+                         chansrv, xvfb):
+                try:
+                    kill_process(
+                        proc,
+                        privileged=(proc is client and network.enabled),
+                    )
+                except KeyboardInterrupt:
+                    interrupted_during_cleanup = True
+                    kill_process(
+                        proc,
+                        privileged=(proc is client and network.enabled),
+                    )
+            if module_link is not None:
+                module_link.unlink(missing_ok=True)
+            network.cleanup()
+        if interrupted_during_cleanup:
+            raise KeyboardInterrupt
 
 
 def main() -> int:
@@ -3347,6 +3856,11 @@ def main() -> int:
     parser.add_argument("--auth")
     parser.add_argument("--duration", type=float, default=20.0)
     parser.add_argument("--fps", type=float, default=15.0)
+    parser.add_argument(
+        "--memory-pressure-mib", type=int, default=0,
+        help=("hold this many MiB of page-touched anonymous memory during "
+              f"measurement (0..{MAXIMUM_MEMORY_PRESSURE_MIB}; "
+              "default: 0)"))
     parser.add_argument(
         "--mode", choices=("graphics", "graphics-under-churn", "input-roundtrip"),
         default="graphics",
@@ -3472,6 +3986,25 @@ def main() -> int:
             "--direct-graphics-transport requires --backend direct-x11")
     elif args.direct_dynamic_resizing:
         parser.error("--direct-dynamic-resizing requires --backend direct-x11")
+    if not 0 <= args.memory_pressure_mib <= MAXIMUM_MEMORY_PRESSURE_MIB:
+        parser.error(
+            "--memory-pressure-mib must be between 0 and "
+            f"{MAXIMUM_MEMORY_PRESSURE_MIB}"
+        )
+    if args.memory_pressure_mib > 0:
+        if args.backend != "direct-x11" or args.transport != "rdp":
+            parser.error(
+                "memory pressure is supported only with direct-x11/RDP"
+            )
+        if args.direct_graphics_transport != "rfx":
+            parser.error(
+                "memory pressure requires the standard RemoteFX path"
+            )
+        if args.mode not in {"graphics-under-churn", "input-roundtrip"}:
+            parser.error(
+                "memory pressure requires graphics-under-churn or "
+                "input-roundtrip mode"
+            )
     if args.mode == "graphics-under-churn" and args.transport != "rdp":
         parser.error("--mode graphics-under-churn requires --transport rdp")
     if (args.width <= 0 or args.height <= 0 or
@@ -3556,6 +4089,7 @@ def main() -> int:
         if not required.is_file() and not shutil.which(str(required)):
             parser.error(f"required executable is missing: {required}")
     display_power_guard: X11DisplayPowerGuard | None = None
+    pressure_session = MemoryPressureSession(args.memory_pressure_mib)
     exit_status = 0
     try:
         auth = discover_auth(args.auth)
@@ -3576,6 +4110,7 @@ def main() -> int:
                 )
                 args.client_width = source_width
                 args.client_height = source_height
+        pressure_session.start()
         ISOLATED.mkdir(parents=True, exist_ok=True)
         runtime = Path(tempfile.mkdtemp(prefix="xrdp-vnc-gpu-", dir=ISOLATED))
         benchmark_backend = (
@@ -3640,19 +4175,37 @@ def main() -> int:
                     else:
                         run_case(args, name, use_lan, auth, runtime,
                                  args.base_port + port_offset, repetition)
+                    pressure_session.sample_during()
                 finally:
                     verify_benchmark_power_state(display_power_guard)
         final_power = display_power_guard.current_state()
         display_power_guard.verify_controlled(final_power)
         print(f"runtime logs: {runtime}")
     except KeyboardInterrupt:
-        print("BENCHMARK interrupted; isolated child processes were cleaned up",
-              file=sys.stderr)
-        exit_status = 130
-    except (OSError, RuntimeError, subprocess.CalledProcessError) as exc:
+        if pressure_session.abort_reason is not None:
+            print(
+                "BENCHMARK safely aborted by memory-pressure guard: "
+                f"{pressure_session.abort_reason}",
+                file=sys.stderr,
+            )
+            exit_status = 2
+        else:
+            print(
+                "BENCHMARK interrupted; isolated child processes were cleaned up",
+                file=sys.stderr,
+            )
+            exit_status = 130
+    except (OSError, RuntimeError, ValueError,
+            subprocess.CalledProcessError) as exc:
         print(f"BENCHMARK ERROR: {exc}", file=sys.stderr)
         exit_status = 2
     finally:
+        try:
+            pressure_session.stop()
+        except (OSError, RuntimeError, ValueError) as exc:
+            print(f"BENCHMARK ERROR stopping memory pressure: {exc}",
+                  file=sys.stderr)
+            exit_status = 2
         if display_power_guard is not None:
             try:
                 display_power_guard.restore()

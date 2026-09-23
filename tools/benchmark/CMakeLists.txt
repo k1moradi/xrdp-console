@@ -84,3 +84,5 @@ install(TARGETS ${BENCHMARK_BINARIES}
     RUNTIME DESTINATION ${XRDP_CONSOLE_HELPER_DIR})
 install(PROGRAMS xrdp_console_bench.py rfb_v6_v4_proxy.py
     DESTINATION ${XRDP_CONSOLE_DATA_DIR}/benchmark)
+install(PROGRAMS helpers/memory_pressure.py
+    DESTINATION ${XRDP_CONSOLE_DATA_DIR}/benchmark/helpers)

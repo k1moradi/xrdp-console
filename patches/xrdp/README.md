@@ -47,6 +47,10 @@ historical fork's commit history:
    two keyboard-layout ID paths. UBSan showed that `g_htoi()` shifts by 32 or
    more bits when parsing normal `0x`-prefixed layout values such as
    `0x00000409`; `g_atoix()` already handles that hexadecimal prefix safely.
+   Custom keyboard-layout values written as bare hexadecimal text (for
+   example `409`) are a compatibility caveat: `g_htoi()` interpreted that as
+   hexadecimal, while `g_atoix()` interprets it as decimal. The distributed
+   keyboard configuration uses the supported `0x00000409` form.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
 seven patches are production compatibility and correctness changes, not

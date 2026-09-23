@@ -4,10 +4,12 @@ find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
 set(PYTHON_SOURCES
     ${CMAKE_SOURCE_DIR}/tools/benchmark/xrdp_console_bench.py
+    ${CMAKE_SOURCE_DIR}/tools/benchmark/helpers/memory_pressure.py
     ${CMAKE_SOURCE_DIR}/tools/benchmark/rfb_v6_v4_proxy.py
     ${CMAKE_SOURCE_DIR}/tools/diagnostics/xrdp_console_episode_sampler.py
     ${CMAKE_SOURCE_DIR}/tools/diagnostics/vscode_gpu_probe.py
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_display_power.py)
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_display_power.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_memory_pressure.py)
 
 if(TARGET xrdp-console)
     list(APPEND PYTHON_SOURCES
@@ -45,6 +47,13 @@ add_test(NAME measurement-profile-unit
     ${CMAKE_CURRENT_SOURCE_DIR}/test_measurement_profile.py)
 set_tests_properties(measurement-profile-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+add_test(NAME memory-pressure-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_memory_pressure.py)
+set_tests_properties(memory-pressure-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 20)
 
 add_test(NAME rfb-client-unit
     COMMAND ${Python3_EXECUTABLE} -B
