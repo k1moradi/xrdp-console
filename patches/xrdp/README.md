@@ -61,11 +61,12 @@ historical fork's commit history:
    bounding-box behavior.
 10. `0010-xrdp-console-batched-planar-frames.patch` reuses per-session Planar
     compression scratch, sends one bounded dirty-region batch per GFX frame,
-    commits dirty rectangles only after a successful frame end, retains the
-    remainder after a partial flush, and allows immediate Console continuation
-    between bounded batches. Fresh changes remain paced by the module's 16 ms
-    presentation scheduler. Legacy sessions keep the upstream 40 ms cadence
-    and per-rectangle transaction behavior.
+    caps region inspection to 32 entries per monitor pass, and commits sent
+    stripes or confirmed offscreen stale entries only after a successful frame
+    end. Later visible damage remains pending for the next bounded Console
+    continuation. Fresh changes remain paced by the module's 16 ms presentation
+    scheduler. Legacy sessions keep the upstream 40 ms cadence and per-rectangle
+    transaction behavior.
 
 The activation script requires the `XRDP_CONSOLE_GFX_PLANAR_BATCH_V1` marker
 in the candidate daemon, so an older patched generation cannot be mistaken

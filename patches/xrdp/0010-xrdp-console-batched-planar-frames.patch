@@ -17,7 +17,7 @@
  
      trans_delete(self->sesman_trans);
      self->sesman_trans = 0;
-@@ -991,6 +994,89 @@
+@@ -991,6 +994,92 @@
  
  #define GFX_PLANAR_BYTES (32 * 1024)
  
@@ -40,7 +40,10 @@
 +{
 +    struct xrdp_rect committed[
 +        XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH];
++    struct xrdp_rect discarded[
++        XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH];
 +    int committed_count;
++    int discarded_count;
 +    int pixels_sent;
 +    int rectangles_sent;
 +    int tiles_sent;
@@ -107,7 +110,7 @@
  /******************************************************************************/
  int
  xrdp_mm_egfx_send_planar_bitmap(struct xrdp_mm *self,
-@@ -1014,6 +1100,10 @@
+@@ -1014,6 +1103,10 @@
      int cx;
      int cy;
      int frame_id;
@@ -118,7 +121,7 @@
      int rv = 0;
  
      LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_egfx_send_planar_bitmap:");
-@@ -1056,23 +1146,55 @@
+@@ -1056,23 +1149,55 @@
          }
      }
      LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_egfx_send_planar_bitmap: cx %d cy %d", cx, cy);
@@ -187,7 +190,7 @@
      }
  
      LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_egfx_send_planar_bitmap: left %d top %d right %d "
-@@ -1105,6 +1227,8 @@
+@@ -1105,6 +1230,8 @@
              {
                  LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_send_planar_bitmap: "
                      "lines(%d) != bheight(%d) error", lines, bheight);
@@ -196,7 +199,7 @@
              }
              else
              {
-@@ -1126,51 +1250,132 @@
+@@ -1126,51 +1253,193 @@
                      rv = 1;
                      goto cleanup;
                  }
@@ -243,6 +246,51 @@
  /*****************************************************************************/
 -/* Send exact dirty rectangles for the direct console. The legacy GFX path
 - * intentionally retains its historical single-bounds behavior. */
++/* Return whether a dirty rectangle intersects any active display surface. */
++static int
++xrdp_mm_console_rect_intersects_active_display(
++    const struct xrdp_mm *self, const struct xrdp_rect *rect)
++{
++    struct monitor_info *monitor;
++    struct xrdp_rect screen_rect;
++    int monitor_count;
++    int monitor_index;
++
++    if (self == NULL || self->wm == NULL || self->wm->screen == NULL ||
++            self->wm->client_info == NULL || rect == NULL)
++    {
++        return 0;
++    }
++
++    monitor_count = self->wm->client_info->display_sizes.monitorCount;
++    if (monitor_count < 1)
++    {
++        screen_rect.left = 0;
++        screen_rect.top = 0;
++        screen_rect.right = self->wm->screen->width;
++        screen_rect.bottom = self->wm->screen->height;
++        return rect->left < screen_rect.right &&
++               screen_rect.left < rect->right &&
++               rect->top < screen_rect.bottom &&
++               screen_rect.top < rect->bottom;
++    }
++
++    for (monitor_index = 0; monitor_index < monitor_count; ++monitor_index)
++    {
++        monitor = self->wm->client_info->display_sizes.minfo_wm +
++                  monitor_index;
++        if (rect->left < monitor->right + 1 &&
++                monitor->left < rect->right &&
++                rect->top < monitor->bottom + 1 &&
++                monitor->top < rect->bottom)
++        {
++            return 1;
++        }
++    }
++
++    return 0;
++}
++
 +/* Send bounded exact dirty rectangles in the active Console frame. Dirty
 + * state is committed only after the enclosing frame ends successfully. */
  static int
@@ -250,6 +298,7 @@
                                  struct xrdp_bitmap *bitmap,
                                  struct xrdp_region *region,
 +                                const struct xrdp_rect *clip_rect,
++                                int discard_offscreen,
                                  int surface_id, int x, int y)
  {
 +    struct xrdp_rect current;
@@ -257,6 +306,7 @@
 +    struct xrdp_rect stripe;
 +    struct xrdp_console_planar_batch *batch;
      int index = 0;
++    int examined = 0;
 -    int rv;
 -    struct xrdp_rect rect;
 +    int width;
@@ -283,10 +333,24 @@
 +     * successfully transmitted stripes enter the bounded commit list. */
 +    while (batch->committed_count <
 +                XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH &&
++            examined < XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH &&
 +            batch->pixels_sent < XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH &&
 +            xrdp_region_get_rect(region, index, &current) == 0)
 +    {
 +        ++index;
++        ++examined;
++        if (discard_offscreen &&
++                !xrdp_mm_console_rect_intersects_active_display(
++                    self, &current))
++        {
++            if (batch->discarded_count >=
++                    XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH)
++            {
++                return 1;
++            }
++            batch->discarded[batch->discarded_count++] = current;
++            continue;
++        }
 +        clipped = current;
 +        if (clip_rect != NULL)
 +        {
@@ -344,7 +408,7 @@
  }
  
  /******************************************************************************/
-@@ -3631,7 +3836,6 @@
+@@ -3631,7 +3900,6 @@
      }
  }
  
@@ -352,7 +416,7 @@
  #define MIN_MS_TO_WAIT_FOR_MORE_UPDATES 0
  /*****************************************************************************/
  int
-@@ -3683,13 +3887,14 @@
+@@ -3683,13 +3951,14 @@
      {
          if (xrdp_region_not_empty(self->wm->screen_dirty_region))
          {
@@ -369,7 +433,7 @@
              LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_get_wait_objs:"
                        " not empty diff %d", diff);
              if ((ltimeout < 0) || (ltimeout > diff))
-@@ -3923,6 +4128,162 @@
+@@ -3923,6 +4192,153 @@
  
  /*****************************************************************************/
  static int
@@ -378,7 +442,6 @@
 +    struct xrdp_console_planar_batch batch = {0};
 +    struct xrdp_rect monitor_rect;
 +    struct xrdp_rect full_screen;
-+    struct xrdp_rect stale_rect;
 +    struct monitor_info *monitor;
 +    int monitor_count;
 +    int monitor_index;
@@ -422,7 +485,7 @@
 +        full_screen.bottom = self->wm->screen->height;
 +        rv = xrdp_mm_egfx_send_planar_region(
 +                 self, self->wm->screen, self->wm->screen_dirty_region,
-+                 &full_screen, self->egfx->surface_id, 0, 0);
++                 &full_screen, 1, self->egfx->surface_id, 0, 0);
 +    }
 +    else
 +    {
@@ -442,7 +505,8 @@
 +            monitor_rect.bottom = monitor->bottom + 1;
 +            rv = xrdp_mm_egfx_send_planar_region(
 +                     self, self->wm->screen, self->wm->screen_dirty_region,
-+                     &monitor_rect, monitor_index, monitor->left,
++                     &monitor_rect, monitor_index == 0,
++                     monitor_index, monitor->left,
 +                     monitor->top);
 +            if (rv != 0)
 +            {
@@ -460,54 +524,45 @@
 +    }
 +    else if (rv == 0)
 +    {
-+        if (batch.committed_count == 0)
++        for (index = 0; index < batch.committed_count; ++index)
 +        {
-+            /* Everything left lies outside the active monitor surfaces. */
-+            while (xrdp_region_not_empty(self->wm->screen_dirty_region))
++            if (xrdp_region_subtract_rect(
++                        self->wm->screen_dirty_region,
++                        &batch.committed[index]) != 0)
 +            {
-+                if (xrdp_region_get_rect(self->wm->screen_dirty_region, 0,
-+                                         &stale_rect) != 0 ||
-+                        xrdp_region_subtract_rect(
-+                            self->wm->screen_dirty_region, &stale_rect) != 0)
-+                {
-+                    LOG(LOG_LEVEL_ERROR,
-+                        "xrdp_mm_draw_dirty_console: failed to discard "
-+                        "dirty region outside active monitor surfaces");
-+                    rv = 1;
-+                    break;
-+                }
++                commit_rv = 1;
++                break;
 +            }
 +        }
-+        else
++        for (index = 0;
++             commit_rv == 0 && index < batch.discarded_count;
++             ++index)
 +        {
-+            for (index = 0; index < batch.committed_count; ++index)
++            if (xrdp_region_subtract_rect(
++                        self->wm->screen_dirty_region,
++                        &batch.discarded[index]) != 0)
 +            {
-+                if (xrdp_region_subtract_rect(
-+                            self->wm->screen_dirty_region,
-+                            &batch.committed[index]) != 0)
-+                {
-+                    commit_rv = 1;
-+                    break;
-+                }
++                commit_rv = 1;
++                break;
 +            }
-+            if (commit_rv != 0)
++        }
++        if (commit_rv != 0)
++        {
++            full_screen.left = 0;
++            full_screen.top = 0;
++            full_screen.right = self->wm->screen->width;
++            full_screen.bottom = self->wm->screen->height;
++            if (xrdp_region_add_rect(self->wm->screen_dirty_region,
++                                     &full_screen) != 0)
 +            {
-+                full_screen.left = 0;
-+                full_screen.top = 0;
-+                full_screen.right = self->wm->screen->width;
-+                full_screen.bottom = self->wm->screen->height;
-+                if (xrdp_region_add_rect(self->wm->screen_dirty_region,
-+                                         &full_screen) != 0)
-+                {
-+                    LOG(LOG_LEVEL_ERROR,
-+                        "xrdp_mm_draw_dirty_console: failed to restore full "
-+                        "screen dirty state after region commit failure");
-+                }
 +                LOG(LOG_LEVEL_ERROR,
-+                    "xrdp_mm_draw_dirty_console: dirty region commit failed; "
-+                    "forcing full-screen retry");
-+                rv = 1;
++                    "xrdp_mm_draw_dirty_console: failed to restore full "
++                    "screen dirty state after region commit failure");
 +            }
++            LOG(LOG_LEVEL_ERROR,
++                "xrdp_mm_draw_dirty_console: dirty region commit failed; "
++                "forcing full-screen retry");
++            rv = 1;
 +        }
 +    }
 +
@@ -532,7 +587,7 @@
  xrdp_mm_draw_dirty(struct xrdp_mm *self)
  {
      struct xrdp_rect rect;
-@@ -3937,6 +4298,10 @@
+@@ -3937,6 +4353,10 @@
      int rv = 0;
  
      LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_draw_dirty:");
@@ -543,27 +598,27 @@
      count = self->wm->client_info->display_sizes.monitorCount;
      if (count < 1)
      {
-@@ -3944,7 +4309,7 @@
+@@ -3944,7 +4364,7 @@
          {
              rv = xrdp_mm_egfx_send_planar_region(
                       self, self->wm->screen, self->wm->screen_dirty_region,
 -                     self->egfx->surface_id, 0, 0);
-+                     NULL, self->egfx->surface_id, 0, 0);
++                     NULL, 0, self->egfx->surface_id, 0, 0);
          }
          else
          {
-@@ -3992,8 +4357,8 @@
+@@ -3992,8 +4412,8 @@
                  if (self->code == XRDP_CONSOLE_SESSION_CODE)
                  {
                      rv = xrdp_mm_egfx_send_planar_region(
 -                             self, self->wm->screen, mon_reg, surface_id,
 -                             mi->left, mi->top);
-+                             self, self->wm->screen, mon_reg, NULL,
++                             self, self->wm->screen, mon_reg, NULL, 0,
 +                             surface_id, mi->left, mi->top);
                  }
                  else
                  {
-@@ -4096,16 +4461,22 @@
+@@ -4096,16 +4516,22 @@
      {
          if (xrdp_region_not_empty(self->wm->screen_dirty_region))
          {
