@@ -77,6 +77,8 @@ install(PROGRAMS scripts/fix-console-gfx-black-screen.sh
     DESTINATION ${XRDP_CONSOLE_DATA_DIR})
 install(PROGRAMS scripts/use-matched-xrdp-console-daemon.sh
     DESTINATION ${XRDP_CONSOLE_DATA_DIR})
+install(PROGRAMS scripts/activate-direct-console.sh
+    DESTINATION ${XRDP_CONSOLE_DATA_DIR})
 install(PROGRAMS scripts/build-optimized-xrdp.sh
     DESTINATION ${XRDP_CONSOLE_DATA_DIR})
 install(PROGRAMS scripts/diagnose-console-stack.sh

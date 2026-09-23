@@ -223,6 +223,38 @@ requiring a particular adapter model.
 
 ## Console profile
 
+The first-party direct-X11 backend can be activated as the host's production
+Console module after building and testing the pinned native daemon and module:
+
+```sh
+scripts/build-optimized-xrdp.sh
+SUDO_ASKPASS=/usr/bin/ssh-askpass SSH_ASKPASS_REQUIRE=force \
+  sudo -A scripts/activate-direct-console.sh
+```
+
+Activation keeps the configured RDP listener at **port 3389**, installs the
+tested `libxrdp_console.so` beside the matching xrdp 0.10.6.1 daemon, and
+switches `[Console]` to module code 21. It enables the direct text clipboard
+and dynamic-resize channels while leaving graphics selection capability-gated:
+standard RemoteFX is used only when negotiated and supported, otherwise the
+module retains classic bitmap output. Unsupported device/audio/remote-app
+channels are disabled for this Console session. The operation refuses to
+restart while an RDP client is connected and keeps a root-only backup under
+`/var/backups/xrdp-x11vnc/`.
+
+To restore the previous configuration, module, and daemon override, use the
+backup path printed by activation:
+
+```sh
+SUDO_ASKPASS=/usr/bin/ssh-askpass SSH_ASKPASS_REQUIRE=force \
+  sudo -A scripts/activate-direct-console.sh --rollback \
+  /var/backups/xrdp-x11vnc/direct-console-TIMESTAMP
+```
+
+The graphical askpass command prompts for sudo authorization without putting
+the password in shell history or process arguments. Keep the RDP client on
+port 3389; activation does not rewrite that setting.
+
 The toolkit documents the measured x11vnc profile for a local network, but it
 does not silently rewrite `/etc/xrdp` or install a privileged systemd unit. A
 deployment that wants the Windows-like shared-console behavior can use the
