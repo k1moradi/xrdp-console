@@ -24,6 +24,20 @@ fail()
     exit 1
 }
 
+wait_for_rdp_listener()
+{
+    attempts=0
+    while [ "$attempts" -lt 50 ]; do
+        listener=$(ss -ltnH 'sport = :3389') || listener=
+        if [ -n "$listener" ]; then
+            return 0
+        fi
+        sleep 0.2
+        attempts=$((attempts + 1))
+    done
+    return 1
+}
+
 workspace_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build_root=${XRDP_CONSOLE_BUILD_DIR:-$workspace_root/build}
 prefix=${XRDP_CONSOLE_XRDP_INSTALL_DIR:-$build_root/_deps/xrdp-install}
@@ -63,6 +77,7 @@ rollback()
     systemctl daemon-reload
     systemctl restart xrdp || fail "rollback restored files but xrdp restart failed"
     systemctl is-active --quiet xrdp || fail "xrdp is not active after rollback"
+    wait_for_rdp_listener || fail "xrdp did not restore its port 3389 listener"
     echo "Restored xrdp configuration, module, and service drop-in from: $backup_directory"
     echo "The RDP listener remains configured for port 3389."
 }
@@ -314,13 +329,16 @@ if ! printf '[Service]\nExecStart=\nExecStart=%s --nodaemon --config /etc/xrdp/x
     fail "could not write the pinned xrdp service override"
 fi
 
-if ! systemctl daemon-reload || ! systemctl restart xrdp ||
-   ! systemctl is-active --quiet xrdp; then
-    fail "the direct-console service did not remain active on port 3389"
-fi
-listener=$(ss -ltnH 'sport = :3389') ||
-    fail "could not inspect the restarted xrdp listener"
-[ -n "$listener" ] || fail "xrdp did not return to port 3389"
+systemctl daemon-reload || fail "systemd daemon-reload failed"
+systemctl restart xrdp || fail "the pinned xrdp daemon failed to start"
+systemctl is-active --quiet xrdp || fail "the pinned xrdp service is not active"
+active_exec=$(systemctl show xrdp.service -p ExecStart --value) ||
+    fail "could not inspect the active xrdp command"
+case "$active_exec" in
+    *"$daemon"*) ;;
+    *) fail "systemd is not running the pinned candidate daemon" ;;
+esac
+wait_for_rdp_listener || fail "xrdp did not return to port 3389 within 10 seconds"
 
 if ! cmp -s -- "$module_source" "$module_target"; then
     fail "installed module differs from the tested build artifact"
