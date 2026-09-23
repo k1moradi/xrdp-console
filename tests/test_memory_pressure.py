@@ -12,6 +12,7 @@ from pathlib import Path
 import select
 import subprocess
 import sys
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -104,6 +105,77 @@ class MemorySnapshotTests(unittest.TestCase):
         session = benchmark.MemoryPressureSession(0)
         session.before = baseline
         self.assertIsNone(session._unsafe_reason(changed))
+
+    def test_zero_control_validity_uses_swap_io_not_existing_swap_use(self):
+        baseline = benchmark.MemorySnapshot(
+            mem_available_kib=700 * 1024,
+            swap_total_kib=8 * 1024 * 1024,
+            swap_free_kib=6 * 1024 * 1024,
+            swap_pages_in=10,
+            swap_pages_out=20,
+        )
+        cases = (
+            (baseline, "MEMORY control_valid=1 swap_pages_in_delta=0 "
+             "swap_pages_out_delta=0"),
+            (benchmark.MemorySnapshot(
+                mem_available_kib=700 * 1024,
+                swap_total_kib=8 * 1024 * 1024,
+                swap_free_kib=6 * 1024 * 1024,
+                swap_pages_in=11,
+                swap_pages_out=20,
+             ), "MEMORY control_valid=0 swap_pages_in_delta=1 "
+             "swap_pages_out_delta=0"),
+            (benchmark.MemorySnapshot(
+                mem_available_kib=700 * 1024,
+                swap_total_kib=8 * 1024 * 1024,
+                swap_free_kib=6 * 1024 * 1024,
+                swap_pages_in=10,
+                swap_pages_out=21,
+             ), "MEMORY control_valid=0 swap_pages_in_delta=0 "
+             "swap_pages_out_delta=1"),
+        )
+        for after, expected in cases:
+            with self.subTest(expected=expected):
+                session = benchmark.MemoryPressureSession(0)
+                session.before = baseline
+                output = io.StringIO()
+                with (patch.object(benchmark, "read_memory_snapshot",
+                                   return_value=after),
+                      contextlib.redirect_stdout(output)):
+                    session.stop()
+                self.assertIn(expected, output.getvalue())
+
+    def test_concurrent_memory_samples_preserve_extrema(self):
+        session = benchmark.MemoryPressureSession(512)
+        worker_count = 4
+        barrier = threading.Barrier(worker_count)
+        available_values = (800_000, 600_000, 700_000, 500_000)
+        used_values = (100_000, 400_000, 200_000, 600_000)
+
+        def record_samples(index: int) -> None:
+            barrier.wait()
+            for _ in range(1000):
+                used = used_values[index]
+                session._record_during(benchmark.MemorySnapshot(
+                    mem_available_kib=available_values[index],
+                    swap_total_kib=1_000_000,
+                    swap_free_kib=1_000_000 - used,
+                    swap_pages_in=index,
+                    swap_pages_out=index,
+                ))
+
+        workers = [
+            threading.Thread(target=record_samples, args=(index,))
+            for index in range(worker_count)
+        ]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(timeout=5)
+            self.assertFalse(worker.is_alive(), "telemetry worker stalled")
+
+        self.assertEqual(session.minimum_available_kib, min(available_values))
+        self.assertEqual(session.maximum_swap_used_kib, max(used_values))
 
     def test_pressure_helper_exit_invalidates_the_measurement(self):
         session = benchmark.MemoryPressureSession(512)

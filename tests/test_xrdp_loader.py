@@ -310,6 +310,7 @@ def main() -> int:
             raise AssertionError("presentation geometry must be positive")
     probe_x, probe_y = presentation_probe_point(
         presentation_width, presentation_height)
+    window_title = f"xrdp-console-loader-{os.getpid()}"
     for required in (
             module_path, xrdp_path, freerdp_path, pixel_probe, stimulus_path):
         if not required.is_file():
@@ -397,7 +398,7 @@ password=smoke
                     "/p:smoke",
                     "/cert:ignore",
                     f"/size:{presentation_width}x{presentation_height}",
-                    "/t:xrdp-console-loader",
+                    f"/t:{window_title}",
                     "-compression",
                     "/network:lan",
                     "/timeout:5000",
@@ -436,7 +437,7 @@ password=smoke
                             stdout_path,
                         )
                     assert_client_pixel(
-                        os.environ["DISPLAY"], "xrdp-console-loader",
+                        os.environ["DISPLAY"], window_title,
                         pixel_probe, stimulus_path, os.environ.copy(), log_path,
                         probe_x, probe_y)
         finally:

@@ -322,6 +322,13 @@ if(TARGET xrdp-console)
         $<TARGET_FILE:xrdp-console>)
     set_tests_properties(module-lifecycle PROPERTIES
         ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+    set_tests_properties(
+        x11-clipboard-integration
+        x11-cursor-integration
+        x11-damage-integration
+        x11-input-integration
+        module-lifecycle
+        PROPERTIES RESOURCE_LOCK xrdp_console_private_xvfb)
 
     find_program(XRDP_CONSOLE_FREERDP_EXECUTABLE
         NAMES xfreerdp3 xfreerdp)
@@ -404,6 +411,14 @@ if(TARGET xrdp-console)
         set_tests_properties(xrdp-loader-rfx-downscaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 30)
+        set_tests_properties(
+            xrdp-loader-smoke
+            xrdp-loader-scaled-smoke
+            xrdp-loader-downscaled-smoke
+            xrdp-loader-rfx-smoke
+            xrdp-loader-rfx-scaled-smoke
+            xrdp-loader-rfx-downscaled-smoke
+            PROPERTIES RESOURCE_LOCK xrdp_console_loader_display)
     else()
         message(STATUS
             "Skipping xrdp-loader-smoke: FreeRDP and benchmark pixel helpers are required")

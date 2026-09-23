@@ -132,27 +132,31 @@ active. During allocation and measurement it monitors `/proc/meminfo` and
 below 512 MiB or either swap counter advances. Consequently, higher matrix
 levels can be refused without starting the RDP run; do not bypass that safety
 decision. An unexpected exit of the pressure helper also invalidates and
-aborts the measurement. The zero-pressure control records swap deltas but does
-not treat ambient swap activity as a pressure-induced abort. Output records
+aborts the measurement. For a zero-pressure control, `MEMORY control_valid=1`
+means neither swap I/O counter advanced from before to after the run. Existing
+`SwapUsed` alone does not invalidate a control. Output records
 before/during/after memory and swap snapshots, observed minimum
 available memory, swap extrema, process-tree RSS/CPU/major-fault deltas, and
 the time from FreeRDP termination to xrdp's module-cleanup log marker. That
 marker measures cleanup onset, not completion of the module destructor.
 
-For the memory-resilience gate, run the graphics and input modes independently
-at each accepted level, keeping the 30-fps workload and all other settings
-fixed. For example:
+For the memory-resilience gate, first establish a zero-pressure run with
+`MEMORY control_valid=1`. Then use an adaptive ladder (for example 128, 256,
+384, then 512 MiB), running graphics and input modes independently at each
+accepted level while keeping the 30-fps workload and other settings fixed.
+Stop when a level is refused or trips the safety guard; do not bypass it. For
+example, a 128 MiB attempt is:
 
 ```bash
 python3 -B tools/benchmark/xrdp_console_bench.py \
   --backend direct-x11 --transport rdp --mode graphics-under-churn \
   --direct-graphics-transport rfx --fps 30 --duration 20 \
-  --memory-pressure-mib 512 --repetitions 1
+  --memory-pressure-mib 128 --repetitions 1
 
 python3 -B tools/benchmark/xrdp_console_bench.py \
   --backend direct-x11 --transport rdp --mode input-roundtrip \
   --direct-graphics-transport rfx --fps 30 --input-churn-fps 30 \
-  --duration 20 --memory-pressure-mib 512 --repetitions 1
+  --duration 20 --memory-pressure-mib 128 --repetitions 1
 ```
 
 Compare zero-pressure and accepted pressure runs for misses, latency percentiles,

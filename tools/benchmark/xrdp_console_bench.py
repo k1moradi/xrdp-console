@@ -514,6 +514,7 @@ class MemoryPressureSession:
         self._monitor_stop = threading.Event()
         self._monitor_thread: threading.Thread | None = None
         self._process_lock = threading.Lock()
+        self._telemetry_lock = threading.Lock()
         self._process_released = False
 
     def _unsafe_reason(self, snapshot: MemorySnapshot) -> str | None:
@@ -533,19 +534,20 @@ class MemoryPressureSession:
         )
 
     def _record_during(self, snapshot: MemorySnapshot) -> None:
-        self.during = snapshot
-        self.minimum_available_kib = min(
-            snapshot.mem_available_kib,
-            self.minimum_available_kib
-            if self.minimum_available_kib is not None
-            else snapshot.mem_available_kib,
-        )
-        self.maximum_swap_used_kib = max(
-            snapshot.swap_used_kib,
-            self.maximum_swap_used_kib
-            if self.maximum_swap_used_kib is not None
-            else snapshot.swap_used_kib,
-        )
+        with self._telemetry_lock:
+            self.during = snapshot
+            self.minimum_available_kib = min(
+                snapshot.mem_available_kib,
+                self.minimum_available_kib
+                if self.minimum_available_kib is not None
+                else snapshot.mem_available_kib,
+            )
+            self.maximum_swap_used_kib = max(
+                snapshot.swap_used_kib,
+                self.maximum_swap_used_kib
+                if self.maximum_swap_used_kib is not None
+                else snapshot.swap_used_kib,
+            )
 
     def _release_helper(self) -> None:
         process = self.process
@@ -734,15 +736,31 @@ class MemoryPressureSession:
         print(format_memory_snapshot("after", self.requested_mib,
                                      self.after))
         if self.before is not None:
+            swap_pages_in_delta = (
+                self.after.swap_pages_in - self.before.swap_pages_in
+            )
+            swap_pages_out_delta = (
+                self.after.swap_pages_out - self.before.swap_pages_out
+            )
             print(
                 f"MEMORY delta pressure_mib={self.requested_mib} "
                 f"mem_available_kib="
                 f"{self.after.mem_available_kib - self.before.mem_available_kib} "
                 f"swap_used_kib="
                 f"{self.after.swap_used_kib - self.before.swap_used_kib} "
-                f"swap_pages_out="
-                f"{self.after.swap_pages_out - self.before.swap_pages_out}"
+                f"swap_pages_in_delta={swap_pages_in_delta} "
+                f"swap_pages_out_delta={swap_pages_out_delta}"
             )
+            if self.requested_mib == 0:
+                control_valid = (
+                    swap_pages_in_delta == 0 and
+                    swap_pages_out_delta == 0
+                )
+                print(
+                    f"MEMORY control_valid={int(control_valid)} "
+                    f"swap_pages_in_delta={swap_pages_in_delta} "
+                    f"swap_pages_out_delta={swap_pages_out_delta}"
+                )
         if (self.minimum_available_kib is not None and
                 self.maximum_swap_used_kib is not None):
             print(
