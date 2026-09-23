@@ -1,0 +1,97 @@
+diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -1143,0 +1144,31 @@
++
++/*****************************************************************************/
++/* Send exact dirty rectangles for the direct console. The legacy GFX path
++ * intentionally retains its historical single-bounds behavior. */
++static int
++xrdp_mm_egfx_send_planar_region(struct xrdp_mm *self,
++                                struct xrdp_bitmap *bitmap,
++                                struct xrdp_region *region,
++                                int surface_id, int x, int y)
++{
++    int index = 0;
++    int rv;
++    struct xrdp_rect rect;
++
++    if (region == NULL || !xrdp_region_not_empty(region))
++    {
++        return 0;
++    }
++
++    while (xrdp_region_get_rect(region, index, &rect) == 0)
++    {
++        rv = xrdp_mm_egfx_send_planar_bitmap(self, bitmap, &rect,
++                                             surface_id, x, y);
++        if (rv != 0)
++        {
++            return rv;
++        }
++        ++index;
++    }
++    return 0;
++}
+@@ -3910,10 +3941,20 @@
+     if (count < 1)
+     {
+-        error = xrdp_region_get_bounds(self->wm->screen_dirty_region, &rect);
+-        if (error == 0)
++        if (self->code == XRDP_CONSOLE_SESSION_CODE)
+         {
+-            rv = xrdp_mm_egfx_send_planar_bitmap(self,
+-                                                 self->wm->screen, &rect,
+-                                                 self->egfx->surface_id, 0, 0);
++            rv = xrdp_mm_egfx_send_planar_region(
++                     self, self->wm->screen, self->wm->screen_dirty_region,
++                     self->egfx->surface_id, 0, 0);
++        }
++        else
++        {
++            error = xrdp_region_get_bounds(self->wm->screen_dirty_region,
++                                           &rect);
++            if (error == 0)
++            {
++                rv = xrdp_mm_egfx_send_planar_bitmap(
++                         self, self->wm->screen, &rect,
++                         self->egfx->surface_id, 0, 0);
++            }
+         }
+     }
+@@ -3948,16 +3989,27 @@
+             if (xrdp_region_not_empty(mon_reg))
+             {
+-                error = xrdp_region_get_bounds(mon_reg, &rect);
+-                if (error == 0)
++                surface_id = index;
++                if (self->code == XRDP_CONSOLE_SESSION_CODE)
+                 {
+-                    surface_id = index;
+-                    rv = xrdp_mm_egfx_send_planar_bitmap(self,
+-                                                         self->wm->screen,
+-                                                         &rect,
+-                                                         surface_id,
+-                                                         mi->left, mi->top);
++                    rv = xrdp_mm_egfx_send_planar_region(
++                             self, self->wm->screen, mon_reg, surface_id,
++                             mi->left, mi->top);
++                }
++                else
++                {
++                    error = xrdp_region_get_bounds(mon_reg, &rect);
++                    if (error == 0)
++                    {
++                        rv = xrdp_mm_egfx_send_planar_bitmap(
++                                 self, self->wm->screen, &rect, surface_id,
++                                 mi->left, mi->top);
++                    }
+                 }
+             }
+             xrdp_region_delete(mon_reg);
++            if (rv != 0)
++            {
++                break;
++            }
+         }
+     }

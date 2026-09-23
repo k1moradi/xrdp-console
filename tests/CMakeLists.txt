@@ -408,6 +408,19 @@ if(TARGET xrdp-console)
         set_tests_properties(xrdp-loader-downscaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 30)
+        add_test(NAME xrdp-loader-gfx-planar-smoke
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11vnc-latency-stimulus>
+            --gfx-planar)
+        set_tests_properties(xrdp-loader-gfx-planar-smoke PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 30)
         add_test(NAME xrdp-loader-rfx-smoke
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
@@ -451,6 +464,7 @@ if(TARGET xrdp-console)
             xrdp-loader-smoke
             xrdp-loader-scaled-smoke
             xrdp-loader-downscaled-smoke
+            xrdp-loader-gfx-planar-smoke
             xrdp-loader-rfx-smoke
             xrdp-loader-rfx-scaled-smoke
             xrdp-loader-rfx-downscaled-smoke

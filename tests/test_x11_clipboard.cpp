@@ -29,6 +29,7 @@ struct FakeChannel
     std::vector<std::uint8_t> pending{};
     std::vector<std::vector<std::uint8_t>> pdus{};
     std::vector<ClipboardChannelCallbacks::TraceRecord> traces{};
+    bool chansrvInUse{};
 };
 
 int callbacks_ready(void *) noexcept
@@ -65,9 +66,9 @@ int send_to_channel(void *context, int channelId, char *data, int dataLength,
     return 0;
 }
 
-int chansrv_in_use(void *) noexcept
+int chansrv_in_use(void *context) noexcept
 {
-    return 0;
+    return static_cast<FakeChannel *>(context)->chansrvInUse ? 1 : 0;
 }
 
 void trace_clipboard(void *context,
@@ -208,6 +209,37 @@ int main()
     const xcb_atom_t clipboard = intern_atom(connection, "CLIPBOARD");
     const xcb_atom_t utf8 = intern_atom(connection, "UTF8_STRING");
     const xcb_atom_t property = intern_atom(connection, "_CLIP_TEST_PROPERTY");
+
+    // When xrdp-chansrv owns channel routing, the first-party controller must
+    // not independently watch or request the same X11 selection.
+    xcb_set_selection_owner(connection, externalOwner, clipboard,
+                             XCB_CURRENT_TIME);
+    xcb_flush(connection);
+    FakeChannel chansrvChannel;
+    chansrvChannel.chansrvInUse = true;
+    ClipboardChannelCallbacks chansrvCallbacks{};
+    chansrvCallbacks.context = &chansrvChannel;
+    chansrvCallbacks.callbacksReady = callbacks_ready;
+    chansrvCallbacks.getChannelId = get_channel_id;
+    chansrvCallbacks.sendToChannel = send_to_channel;
+    chansrvCallbacks.chansrvInUse = chansrv_in_use;
+    chansrvCallbacks.trace = trace_clipboard;
+    {
+        ClipboardController chansrvController(connection, root,
+                                               chansrvCallbacks);
+        assert(chansrvController.valid());
+        chansrvController.startChannel();
+        assert(!chansrvController.channelEnabled());
+        assert(!chansrvController.hasPendingSelection());
+        assert(chansrvChannel.pdus.empty());
+        assert(pump(connection, chansrvController, clipboard, utf8, {}, true,
+                    std::chrono::milliseconds(100)));
+        assert(!chansrvController.hasPendingSelection());
+        assert(chansrvChannel.traces.empty());
+    }
+    xcb_set_selection_owner(connection, XCB_WINDOW_NONE, clipboard,
+                             XCB_CURRENT_TIME);
+    xcb_flush(connection);
 
     FakeChannel fake;
     ClipboardChannelCallbacks callbacks{};

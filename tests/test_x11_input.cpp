@@ -74,6 +74,8 @@ struct ObservedEvents
 {
     bool keyPress{false};
     bool keyRelease{false};
+    std::size_t keyPressCount{};
+    std::size_t keyReleaseCount{};
     bool motion{false};
     bool buttonPress{false};
     bool buttonRelease{false};
@@ -102,6 +104,7 @@ wait_for_input_events(xcb_connection_t *connection, xcb_window_t window,
                     if (key->event == window)
                     {
                         observed.keyPress = true;
+                        ++observed.keyPressCount;
                     }
                     break;
                 }
@@ -112,6 +115,7 @@ wait_for_input_events(xcb_connection_t *connection, xcb_window_t window,
                     if (key->event == window)
                     {
                         observed.keyRelease = true;
+                        ++observed.keyReleaseCount;
                     }
                     break;
                 }
@@ -403,6 +407,8 @@ run() noexcept
         !controller->handle(WM_LBUTTONDOWN, pointerX, pointerY, 0, 0) ||
         !controller->handle(WM_LBUTTONUP, pointerX, pointerY, 0, 0) ||
         !controller->handle(WM_KEYDOWN, 0, XK_a, 30, KBD_FLAG_DOWN) ||
+        !controller->handle(WM_KEYDOWN, 0, XK_a, 30, KBD_FLAG_DOWN) ||
+        !controller->handle(WM_KEYUP, 0, XK_a, 30, KBD_FLAG_UP) ||
         !controller->handle(WM_KEYUP, 0, XK_a, 30, KBD_FLAG_UP))
     {
         std::fprintf(stderr, "XTest controller rejected an input event: %s\n",
@@ -419,6 +425,8 @@ run() noexcept
     ObservedEvents observed;
     const bool received = wait_for_input_events(
         connection, window, pointerX, pointerY, observed);
+    const bool keyTransitionsAreIdempotent =
+        observed.keyPressCount == 1 && observed.keyReleaseCount == 1;
     if (!received)
     {
         std::fprintf(stderr,
@@ -427,6 +435,13 @@ run() noexcept
                      "button release=%d)\n",
                      observed.keyPress, observed.keyRelease, observed.motion,
                      observed.buttonPress, observed.buttonRelease);
+    }
+    if (!keyTransitionsAreIdempotent)
+    {
+        std::fprintf(stderr,
+                     "duplicate RDP make/break events produced %zu key "
+                     "presses and %zu releases; expected one transition each\n",
+                     observed.keyPressCount, observed.keyReleaseCount);
     }
 
     bool scrollReceived = false;
@@ -506,7 +521,8 @@ run() noexcept
     const bool flushed = xcb_flush(connection) > 0;
     const bool healthy = xcb_connection_has_error(connection) == 0;
     xcb_disconnect(connection);
-    return received && scrollReceived && teardownReleased && destroyed &&
+    return received && keyTransitionsAreIdempotent && scrollReceived &&
+                   teardownReleased && destroyed &&
                    flushed && healthy
                ? 0
                : 1;

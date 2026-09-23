@@ -79,6 +79,7 @@ private:
 
     [[nodiscard]] bool internAtom(const char *name, xcb_atom_t &atom) noexcept;
     [[nodiscard]] bool checkRequest(xcb_void_cookie_t cookie) noexcept;
+    [[nodiscard]] bool beginSelectionMonitoring() noexcept;
     void requestCurrentSelection(xcb_window_t owner) noexcept;
     void requestSelectionTarget(SelectionTarget target) noexcept;
     void handleSelectionNotify(const xcb_selection_notify_event_t &event) noexcept;
@@ -118,6 +119,7 @@ private:
     int channelId_{-1};
     bool channelStarted_{false};
     bool channelDisabled_{false};
+    bool selectionMonitoring_{false};
     bool ownsSelection_{false};
     bool pendingSelection_{false};
     SelectionTarget pendingTarget_{SelectionTarget::Utf8};

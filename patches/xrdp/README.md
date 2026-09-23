@@ -55,9 +55,13 @@ historical fork's commit history:
    frame IDs to Console Planar fallback frames and stops logging a missing
    generic encoder for each acknowledgement when code 21 intentionally owns
    graphics outside xrdp's asynchronous encoder.
+9. `0009-xrdp-console-preserve-gfx-dirty-regions.patch` sends the exact
+   pixman dirty rectangles through the Console GFX Planar fallback instead of
+   encoding their union bounding box. Legacy sessions retain the upstream
+   bounding-box behavior.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-eight patches are production compatibility and correctness changes, not
+these nine patches are production compatibility and correctness changes, not
 benchmark knobs. Code
 `21` is deliberately used only by the direct module's profile; legacy VNC
 profiles continue using code `0`/`1`. The

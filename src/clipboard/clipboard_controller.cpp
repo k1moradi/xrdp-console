@@ -101,32 +101,6 @@ ClipboardController::ClipboardController(
         return;
     }
 
-    if (!checkRequest(xcb_xfixes_select_selection_input_checked(
-            connection_, rootWindow_, clipboardAtom_, kSelectionOwnerMask)))
-    {
-        failed_ = true;
-        return;
-    }
-
-    xcb_generic_error_t *ownerError = nullptr;
-    const xcb_get_selection_owner_cookie_t ownerCookie =
-        xcb_get_selection_owner(connection_, clipboardAtom_);
-    xcb_get_selection_owner_reply_t *ownerReply =
-        xcb_get_selection_owner_reply(connection_, ownerCookie, &ownerError);
-    std::free(ownerError);
-    if (ownerReply != nullptr)
-    {
-        if (ownerReply->owner != XCB_WINDOW_NONE &&
-            ownerReply->owner != ownerWindow_)
-        {
-            requestCurrentSelection(ownerReply->owner);
-        }
-        else if (ownerReply->owner == ownerWindow_)
-        {
-            ownsSelection_ = true;
-        }
-    }
-    std::free(ownerReply);
     xcb_flush(connection_);
 }
 
@@ -209,11 +183,19 @@ void ClipboardController::startChannel() noexcept
     }
     if (callbacks_.chansrvInUse(callbacks_.context) != 0)
     {
+        // In a sesman session xrdp routes CLIPRDR through chansrv. Do not
+        // subscribe as a second X11 clipboard bridge or issue selection
+        // conversions that can race with chansrv's owner.
         channelDisabled_ = true;
         return;
     }
     channelId_ = callbacks_.getChannelId(callbacks_.context, "cliprdr");
     if (channelId_ < 0)
+    {
+        channelDisabled_ = true;
+        return;
+    }
+    if (!beginSelectionMonitoring())
     {
         channelDisabled_ = true;
         return;
@@ -238,9 +220,44 @@ void ClipboardController::startChannel() noexcept
     }
 }
 
+bool ClipboardController::beginSelectionMonitoring() noexcept
+{
+    if (selectionMonitoring_)
+    {
+        return true;
+    }
+    if (!checkRequest(xcb_xfixes_select_selection_input_checked(
+            connection_, rootWindow_, clipboardAtom_, kSelectionOwnerMask)))
+    {
+        return false;
+    }
+    selectionMonitoring_ = true;
+
+    xcb_generic_error_t *ownerError = nullptr;
+    const xcb_get_selection_owner_cookie_t ownerCookie =
+        xcb_get_selection_owner(connection_, clipboardAtom_);
+    xcb_get_selection_owner_reply_t *ownerReply =
+        xcb_get_selection_owner_reply(connection_, ownerCookie, &ownerError);
+    std::free(ownerError);
+    if (ownerReply != nullptr)
+    {
+        if (ownerReply->owner != XCB_WINDOW_NONE &&
+            ownerReply->owner != ownerWindow_)
+        {
+            requestCurrentSelection(ownerReply->owner);
+        }
+        else if (ownerReply->owner == ownerWindow_)
+        {
+            ownsSelection_ = true;
+        }
+    }
+    std::free(ownerReply);
+    return xcb_connection_has_error(connection_) == 0;
+}
+
 void ClipboardController::checkTimeout() noexcept
 {
-    if (!pendingSelection_ ||
+    if (!channelEnabled() || !pendingSelection_ ||
         std::chrono::steady_clock::now() < selectionDeadline_)
     {
         return;
@@ -565,7 +582,7 @@ void ClipboardController::handleChannelData(int channelId, const char *data,
 
 void ClipboardController::handleX11Event(const xcb_generic_event_t &event) noexcept
 {
-    if (!valid())
+    if (!valid() || !channelEnabled())
     {
         return;
     }

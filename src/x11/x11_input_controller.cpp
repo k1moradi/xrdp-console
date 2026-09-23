@@ -369,9 +369,23 @@ X11InputController::handleKey(bool pressed, long keysym, long scanCode,
     }
 
     xcb_keycode_t keycode = activeKeycodes_[slot];
-    if (pressed || keycode == XCB_NO_SYMBOL)
+    if (pressed)
     {
+        // RDP clients may send repeated make events while a key is held.
+        // XTest makes the key logically down on the first event; forwarding
+        // every duplicate can synthesize extra KeyPress events in addition
+        // to the X server's own autorepeat stream.
+        if (keycode != XCB_NO_SYMBOL)
+        {
+            return true;
+        }
         keycode = keycodeFor(static_cast<xcb_keysym_t>(keysym));
+    }
+    else if (keycode == XCB_NO_SYMBOL)
+    {
+        // Ignore an unmatched break instead of failing the whole RDP input
+        // event. There is no X11 state transition to perform.
+        return true;
     }
     if (keycode == XCB_NO_SYMBOL)
     {

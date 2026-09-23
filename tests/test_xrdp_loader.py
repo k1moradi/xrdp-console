@@ -277,17 +277,23 @@ def ensure_test_display() -> None:
 def main() -> int:
     arguments = list(sys.argv[1:])
     rfx_mode = False
-    if "--rfx" in arguments:
-        if arguments[-1] != "--rfx" or arguments.count("--rfx") != 1:
-            raise SystemExit("--rfx must be the final loader-smoke option")
+    gfx_planar_mode = False
+    mode_options = [option for option in ("--rfx", "--gfx-planar")
+                    if option in arguments]
+    if mode_options:
+        if (len(mode_options) != 1 or arguments[-1] != mode_options[0] or
+                arguments.count(mode_options[0]) != 1):
+            raise SystemExit(
+                "--rfx or --gfx-planar must be the final, sole loader-smoke option")
         arguments.pop()
-        rfx_mode = True
+        rfx_mode = mode_options[0] == "--rfx"
+        gfx_planar_mode = mode_options[0] == "--gfx-planar"
 
     if len(arguments) not in (6, 8):
         raise SystemExit(
             f"usage: {sys.argv[0]} MODULE XRDP INSTALL_ROOT FREERDP "
             "PIXEL_PROBE STIMULUS [PRESENTATION_WIDTH PRESENTATION_HEIGHT] "
-            "[--rfx]"
+            "[--rfx|--gfx-planar]"
         )
 
     ensure_test_display()
@@ -330,6 +336,7 @@ def main() -> int:
         module_link = module_dir / module_name
         module_link.symlink_to(module_path)
         fastpath_option = "use_fastpath=both\n" if rfx_mode else ""
+        drdynvc_enabled = "true" if gfx_planar_mode else "false"
 
         config_path.write_text(
             f"""[Globals]
@@ -356,7 +363,7 @@ EnableConsole=false
 [Channels]
 rdpdr=false
 rdpsnd=false
-drdynvc=false
+drdynvc={drdynvc_enabled}
 cliprdr=true
 rail=false
 xrdpvr=false
@@ -409,6 +416,8 @@ password=smoke
                     # RemoteFX bitmap codec with the modern graphics pipeline
                     # disabled. The module's capability gate requires gfx=0.
                     client_command.extend(["+rfx", "-gfx"])
+                elif gfx_planar_mode:
+                    client_command.append("/gfx")
                 else:
                     client_command.append("-gfx")
                 with client_log_path.open("w", encoding="utf-8") as client_log:
@@ -433,6 +442,14 @@ password=smoke
                             server,
                             log_path,
                             "actual_output=standard-rfx",
+                            4.0,
+                            stdout_path,
+                        )
+                    if gfx_planar_mode:
+                        wait_for_log(
+                            server,
+                            log_path,
+                            "actual_output=gfx-planar",
                             4.0,
                             stdout_path,
                         )
