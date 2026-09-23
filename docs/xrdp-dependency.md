@@ -54,8 +54,11 @@ The series is deliberately small and applies in this order:
 | `0001-xrdp-resize-state-and-failure-recovery.patch` | VNC resize state and error recovery | Prevents the fixed-console session from losing its graphics state after a client resize or failed update. |
 | `0002-xrdp-fixed-console-vnc-path.patch` | fixed geometry, direct bitmap path, end-to-end update error propagation, and first-party capability code `21` | Keeps the physical X11 framebuffer authoritative, makes update failures visible to the session, and gives the direct module an explicit complete-framebuffer/smooth-scroll classification. |
 | `0003-xrdp-console-input-priority.patch` | console-only transport priority | Drains a bounded burst of queued RDP input and disconnects before direct-X11 backend work, then performs one transport check afterward, while preserving the legacy service order for other module codes. |
+| `0004-xrdp-console-own-rfx-encoder.patch` | first-party synchronous RFX ownership | Prevents the asynchronous generic encoder thread from retaining pixel buffers owned by the direct module. |
+| `0005-librfxcodec-unaligned-stream-access.patch` | defined unaligned RFX stream access | Removes UBSan-confirmed misaligned typed loads/stores in the x86 stream macros while preserving wire bytes. |
 
-These three patches are production compatibility changes, not benchmark knobs.
+These five patches are production compatibility and correctness changes, not
+benchmark knobs.
 The old
 fork's profiling records, incremental parser, request-ahead scheduling,
 progressive flush, variable RAW quantum, first-frame/cache experiments, and
@@ -63,8 +66,9 @@ experimental GFX flow-control code are intentionally not in the series.
 
 ## Classification of the old fork
 
-* **KEEP:** the three patches listed above; they are required by the measured
-  fixed-console/direct-console product path.
+* **KEEP:** the five patches listed above; they are required by the measured
+  fixed-console/direct-console product path and remove sanitizer-confirmed
+  undefined behavior in the active RemoteFX encoder.
 * **TOOLING:** profiling and benchmark-only changes; these belong in the
   benchmark or diagnostic tools and remain opt-in.
 * **DELETE:** parser, request-ahead, progressive-flush, cache, and GFX

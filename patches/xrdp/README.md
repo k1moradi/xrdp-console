@@ -34,9 +34,14 @@ historical fork's commit history:
 4. `0004-xrdp-console-own-rfx-encoder.patch` prevents pinned xrdp from
    creating its asynchronous generic encoder for module code `21`, leaving
    synchronous RemoteFX ownership at the first-party module boundary.
+5. `0005-librfxcodec-unaligned-stream-access.patch` replaces potentially
+   misaligned 16/32-bit typed loads and stores in the x86 RemoteFX stream
+   macros with fixed-size `memcpy()` operations. This removes C undefined
+   behavior flagged by UBSan without changing the little-endian wire bytes.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-four patches are production compatibility changes, not benchmark knobs. Code
+five patches are production compatibility and correctness changes, not
+benchmark knobs. Code
 `21` is deliberately used only by the direct module's profile; legacy VNC
 profiles continue using code `0`/`1`. The
 old checked-in fork contained profiling, parser-quantum, request-ahead,

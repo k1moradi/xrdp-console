@@ -1,0 +1,34 @@
+diff --git a/librfxcodec/src/rfxcommon.h b/librfxcodec/src/rfxcommon.h
+--- a/librfxcodec/src/rfxcommon.h
++++ b/librfxcodec/src/rfxcommon.h
+@@ -21,0 +22,2 @@
++#include <string.h>
++
+@@ -47,5 +49,23 @@
+-#define stream_read_uint16(_s, _v) do { _v = ((uint16 *) ((_s)->p))[0]; (_s)->p += 2; } while (0)
+-#define stream_read_uint32(_s, _v) do { _v = ((uint32 *) ((_s)->p))[0]; (_s)->p += 4; } while (0)
++#define stream_read_uint16(_s, _v) do { \
++    uint16 rfx_stream_value; \
++    memcpy(&rfx_stream_value, (_s)->p, sizeof(rfx_stream_value)); \
++    (_v) = rfx_stream_value; \
++    (_s)->p += sizeof(rfx_stream_value); \
++} while (0)
++#define stream_read_uint32(_s, _v) do { \
++    uint32 rfx_stream_value; \
++    memcpy(&rfx_stream_value, (_s)->p, sizeof(rfx_stream_value)); \
++    (_v) = rfx_stream_value; \
++    (_s)->p += sizeof(rfx_stream_value); \
++} while (0)
+ #define stream_write_uint8(_s, _v) do { ((uint8 *) ((_s)->p))[0] = _v; (_s)->p += 1; } while (0)
+-#define stream_write_uint16(_s, _v) do { ((uint16 *) ((_s)->p))[0] = _v; (_s)->p += 2; } while (0)
+-#define stream_write_uint32(_s, _v) do { ((uint32 *) ((_s)->p))[0] = _v; (_s)->p += 4; } while (0)
++#define stream_write_uint16(_s, _v) do { \
++    const uint16 rfx_stream_value = (uint16)(_v); \
++    memcpy((_s)->p, &rfx_stream_value, sizeof(rfx_stream_value)); \
++    (_s)->p += sizeof(rfx_stream_value); \
++} while (0)
++#define stream_write_uint32(_s, _v) do { \
++    const uint32 rfx_stream_value = (uint32)(_v); \
++    memcpy((_s)->p, &rfx_stream_value, sizeof(rfx_stream_value)); \
++    (_s)->p += sizeof(rfx_stream_value); \
++} while (0)

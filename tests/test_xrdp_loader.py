@@ -419,7 +419,7 @@ password=smoke
                         start_new_session=True,
                     )
                     marker = f"loaded module '{module_name}' ok"
-                    wait_for_log(server, log_path, marker, 12.0)
+                    wait_for_log(server, log_path, marker, 12.0, stdout_path)
                     wait_for_log(
                         server,
                         log_path,
