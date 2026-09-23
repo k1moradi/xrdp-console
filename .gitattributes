@@ -2,3 +2,5 @@
 *.sh text eol=lf
 *.py text eol=lf
 *.c text eol=lf
+# Unified-diff patch files use a leading context marker on empty context lines.
+patches/xrdp/*.patch whitespace=-blank-at-eol

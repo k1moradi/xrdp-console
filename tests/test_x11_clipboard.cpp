@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <poll.h>
 #include <string>
 #include <thread>
@@ -249,7 +250,9 @@ int main()
     callbacks.sendToChannel = send_to_channel;
     callbacks.chansrvInUse = chansrv_in_use;
     callbacks.trace = trace_clipboard;
-    ClipboardController controller(connection, root, callbacks);
+    auto controllerOwner =
+        std::make_unique<ClipboardController>(connection, root, callbacks);
+    ClipboardController &controller = *controllerOwner;
     assert(controller.valid());
     controller.startChannel();
     assert(fake.pdus.size() == 2);
@@ -358,6 +361,9 @@ int main()
     assert(controller.hasText());
     assert(controller.text() == recoveredText);
 
+    // ClipboardController owns X11 resources through the borrowed connection;
+    // destroy it before disconnecting that connection.
+    controllerOwner.reset();
     xcb_destroy_window(connection, externalOwner);
     xcb_flush(connection);
     xcb_disconnect(connection);

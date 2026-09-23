@@ -231,28 +231,51 @@ bool ClipboardController::beginSelectionMonitoring() noexcept
     {
         return false;
     }
-    selectionMonitoring_ = true;
-
     xcb_generic_error_t *ownerError = nullptr;
     const xcb_get_selection_owner_cookie_t ownerCookie =
         xcb_get_selection_owner(connection_, clipboardAtom_);
     xcb_get_selection_owner_reply_t *ownerReply =
         xcb_get_selection_owner_reply(connection_, ownerCookie, &ownerError);
-    std::free(ownerError);
-    if (ownerReply != nullptr)
+    if (ownerError != nullptr || ownerReply == nullptr)
     {
-        if (ownerReply->owner != XCB_WINDOW_NONE &&
-            ownerReply->owner != ownerWindow_)
+        std::free(ownerError);
+        std::free(ownerReply);
+        selectionMonitoring_ = false;
+
+        if (xcb_connection_has_error(connection_) == 0)
         {
-            requestCurrentSelection(ownerReply->owner);
+            const xcb_void_cookie_t rollbackCookie =
+                xcb_xfixes_select_selection_input_checked(
+                    connection_, rootWindow_, clipboardAtom_, 0);
+            xcb_generic_error_t *rollbackError =
+                xcb_request_check(connection_, rollbackCookie);
+            std::free(rollbackError);
+            xcb_flush(connection_);
         }
-        else if (ownerReply->owner == ownerWindow_)
-        {
-            ownsSelection_ = true;
-        }
+        return false;
     }
+
+    const xcb_window_t owner = ownerReply->owner;
     std::free(ownerReply);
-    return xcb_connection_has_error(connection_) == 0;
+    selectionMonitoring_ = true;
+    if (owner != XCB_WINDOW_NONE && owner != ownerWindow_)
+    {
+        requestCurrentSelection(owner);
+    }
+    else if (owner == ownerWindow_)
+    {
+        ownsSelection_ = true;
+    }
+
+    if (xcb_connection_has_error(connection_) == 0)
+    {
+        return true;
+    }
+
+    selectionMonitoring_ = false;
+    pendingSelection_ = false;
+    selectionDeadline_ = {};
+    return false;
 }
 
 void ClipboardController::checkTimeout() noexcept

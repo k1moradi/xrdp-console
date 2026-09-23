@@ -189,6 +189,15 @@ class DirectGraphicsRequest:
 
 
 def direct_graphics_request(transport: str) -> DirectGraphicsRequest:
+    if transport == "gfx-planar":
+        return DirectGraphicsRequest(
+            client_options=(
+                "/gfx",
+                "/network:lan",
+            ),
+            expected_negotiation="GFX_PLANAR",
+        )
+
     if transport == "rfx":
         return DirectGraphicsRequest(
             client_options=(
@@ -1830,14 +1839,15 @@ def write_direct_xrdp_config(target: Path, port: int, log_path: Path,
                              display: str, bind_host: str,
                              bitmap_compression: bool | None,
                              bulk_compression: bool | None,
-                             dynamic_resizing: bool = False) -> None:
+                             dynamic_resizing: bool = False,
+                             enable_gfx: bool = False) -> None:
     """Write the direct-X11 benchmark profile."""
     bitmap = "true" if bitmap_compression is not False else "false"
     bulk = "true" if bulk_compression is not False else "false"
     # The first-party module owns the text-only cliprdr channel directly;
     # chansrv remains absent from this private profile.
     allow_channels = "true"
-    drdynvc = "true" if dynamic_resizing else "false"
+    drdynvc = "true" if dynamic_resizing or enable_gfx else "false"
     enable_dynamic_resizing = "true" if dynamic_resizing else "false"
     target.write_text(
         f"""[Globals]
@@ -3461,7 +3471,8 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             write_direct_xrdp_config(
                 config, xrdp_port, xrdp_log, cert, key, module_name,
                 args.display, network.host_ip, args.bitmap_compression,
-                args.bulk_compression, args.direct_dynamic_resizing)
+                args.bulk_compression, args.direct_dynamic_resizing,
+                args.direct_graphics_transport == "gfx-planar")
         else:
             rewrite_xrdp_config(
                 Path("/etc/xrdp/xrdp.ini"), config, xrdp_port, vnc_port,
@@ -3897,10 +3908,12 @@ def main() -> int:
         help=("RDP server backend: x11vnc/libvnc.so or the first-party "
               "XCB/XDamage/XShm module (default: vnc)"))
     parser.add_argument(
-        "--direct-graphics-transport", choices=("rfx", "classic"),
+        "--direct-graphics-transport",
+        choices=("rfx", "classic", "gfx-planar"),
         default="rfx",
-        help=("graphics transport to require for the direct-X11 benchmark "
-              "(default: rfx)"))
+        help=("graphics transport to require for direct-X11 "
+              "(rfx, classic bitmap, or negotiated GFX Planar fallback; "
+              "default: rfx)"))
     parser.add_argument("--input-hz", type=float, default=5.0,
                         help="key pulses per second in input-roundtrip mode")
     parser.add_argument("--input-churn-fps", type=float,

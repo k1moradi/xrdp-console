@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -30,6 +31,17 @@ def main() -> int:
     environment["DISPLAY"] = display
     environment["XAUTHORITY"] = str(auth_file)
     try:
+        xset = shutil.which("xset")
+        if xset is None:
+            raise AssertionError("held-key repeat integration needs xset")
+        subprocess.run(
+            [xset, "r", "rate", "250", "25"],
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=3.0,
+        )
         result = subprocess.run(
             [sys.argv[1]],
             env=environment,

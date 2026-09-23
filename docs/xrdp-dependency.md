@@ -42,8 +42,9 @@ Configure
 `XRDP_CONSOLE_XRDP_CPPFLAGS`, `XRDP_CONSOLE_XRDP_LDFLAGS`, and
 `XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH` when development libraries are installed
 under a private prefix. A normal system installation should provide
-`libxkbfile-dev`, `libx264-dev`, JPEG, FreeType, OpenSSL, and the other xrdp
-build dependencies. The private install is never activated by CMake.
+`libxkbfile-dev`, `libx264-dev`, `libfuse3-dev`, JPEG, FreeType, OpenSSL, and the
+other xrdp build dependencies. FUSE is explicitly enabled for chansrv file
+clipboard support. The private install is never activated by CMake.
 
 ## Retained patch rationale
 

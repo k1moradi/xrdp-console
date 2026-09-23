@@ -42,33 +42,8 @@ X11DamageTracker::X11DamageTracker(xcb_connection_t &connection,
         return;
     }
 
-    const xcb_query_extension_reply_t *xfixesExtension =
-        xcb_get_extension_data(connection_, &xcb_xfixes_id);
-    if (xfixesExtension == nullptr || !xfixesExtension->present)
-    {
-        fail("XFixes extension is unavailable for Damage snapshots");
-        return;
-    }
-
-    const auto xfixesVersionCookie = xcb_xfixes_query_version(
-        connection_, XCB_XFIXES_MAJOR_VERSION, XCB_XFIXES_MINOR_VERSION);
-    xcb_generic_error_t *xfixesVersionError = nullptr;
-    xcb_xfixes_query_version_reply_t *xfixesVersion =
-        xcb_xfixes_query_version_reply(connection_, xfixesVersionCookie,
-                                       &xfixesVersionError);
-    if (xfixesVersionError != nullptr || xfixesVersion == nullptr ||
-        xfixesVersion->major_version < 2)
-    {
-        std::free(xfixesVersionError);
-        std::free(xfixesVersion);
-        fail("XFixes region version negotiation failed");
-        return;
-    }
-    std::free(xfixesVersion);
-
     damage_ = xcb_generate_id(connection_);
-    partsRegion_ = xcb_generate_id(connection_);
-    if (damage_ == XCB_NONE || partsRegion_ == XCB_NONE)
+    if (damage_ == XCB_NONE)
     {
         fail("XDamage resource ID allocation failed");
         return;
@@ -76,7 +51,7 @@ X11DamageTracker::X11DamageTracker(xcb_connection_t &connection,
 
     const xcb_void_cookie_t createCookie = xcb_damage_create_checked(
         connection_, damage_, drawable_,
-        XCB_DAMAGE_REPORT_LEVEL_NON_EMPTY);
+        XCB_DAMAGE_REPORT_LEVEL_DELTA_RECTANGLES);
     xcb_generic_error_t *createError =
         xcb_request_check(connection_, createCookie);
     if (createError != nullptr)
@@ -87,31 +62,29 @@ X11DamageTracker::X11DamageTracker(xcb_connection_t &connection,
         return;
     }
 
-    const xcb_void_cookie_t regionCookie =
-        xcb_xfixes_create_region_checked(connection_, partsRegion_, 0, nullptr);
-    xcb_generic_error_t *regionError =
-        xcb_request_check(connection_, regionCookie);
-    if (regionError != nullptr)
+    // The module seeds a full-screen local invalidation independently. Clear
+    // any server-side damage accumulated before/while the Damage resource was
+    // created so the first ordinary damage wake-up cannot turn that later
+    // small change into an accidental full-screen snapshot.
+    const xcb_void_cookie_t initialSubtractCookie =
+        xcb_damage_subtract_checked(connection_, damage_, XCB_NONE, XCB_NONE);
+    xcb_generic_error_t *initialSubtractError =
+        xcb_request_check(connection_, initialSubtractCookie);
+    if (initialSubtractError != nullptr)
     {
-        std::free(regionError);
+        std::free(initialSubtractError);
         xcb_damage_destroy(connection_, damage_);
         damage_ = XCB_NONE;
-        partsRegion_ = XCB_NONE;
-        fail("XFixes Damage snapshot region creation failed");
+        fail("initial XDamage region clear failed");
         return;
     }
     if (xcb_connection_has_error(connection_) != 0 || xcb_flush(connection_) <= 0)
     {
-        if (partsRegion_ != XCB_NONE)
-        {
-            xcb_xfixes_destroy_region(connection_, partsRegion_);
-        }
         if (damage_ != XCB_NONE)
         {
             xcb_damage_destroy(connection_, damage_);
         }
         damage_ = XCB_NONE;
-        partsRegion_ = XCB_NONE;
         fail("XDamage resource initialization lost the X connection");
         return;
     }
@@ -122,29 +95,17 @@ X11DamageTracker::X11DamageTracker(xcb_connection_t &connection,
 X11DamageTracker::~X11DamageTracker() noexcept
 {
     if (connection_ == nullptr ||
-        (damage_ == XCB_NONE && partsRegion_ == XCB_NONE) ||
+        damage_ == XCB_NONE ||
         xcb_connection_has_error(connection_) != 0)
     {
         return;
     }
 
-    if (partsRegion_ != XCB_NONE)
-    {
-        const xcb_void_cookie_t destroyRegionCookie =
-            xcb_xfixes_destroy_region_checked(connection_, partsRegion_);
-        xcb_generic_error_t *destroyRegionError =
-            xcb_request_check(connection_, destroyRegionCookie);
-        std::free(destroyRegionError);
-        partsRegion_ = XCB_NONE;
-    }
-    if (damage_ != XCB_NONE)
-    {
-        const xcb_void_cookie_t destroyCookie =
-            xcb_damage_destroy_checked(connection_, damage_);
-        xcb_generic_error_t *destroyError =
-            xcb_request_check(connection_, destroyCookie);
-        std::free(destroyError);
-    }
+    const xcb_void_cookie_t destroyCookie =
+        xcb_damage_destroy_checked(connection_, damage_);
+    xcb_generic_error_t *destroyError =
+        xcb_request_check(connection_, destroyCookie);
+    std::free(destroyError);
     damage_ = XCB_NONE;
 }
 
@@ -152,8 +113,7 @@ bool
 X11DamageTracker::valid() const noexcept
 {
     return failureReason_ == nullptr && connection_ != nullptr &&
-           damage_ != XCB_NONE && partsRegion_ != XCB_NONE &&
-           xcb_connection_has_error(connection_) == 0;
+           damage_ != XCB_NONE && xcb_connection_has_error(connection_) == 0;
 }
 
 const char *
@@ -216,9 +176,10 @@ X11DamageTracker::handle(const xcb_generic_event_t &event) noexcept
     const auto &notification =
         reinterpret_cast<const xcb_damage_notify_event_t &>(event);
     ++notificationCount_;
-    // NON_EMPTY deliberately carries only a wake-up. The event rectangle is
-    // not used as the dirty region; the authoritative region is fetched with
-    // DamageSubtract at the presentation deadline.
+    pendingDamageRegion_.add(
+        {notification.area.x, notification.area.y,
+         notification.area.width, notification.area.height},
+        bounds_);
     damagedPixelCount_ +=
         static_cast<std::uint64_t>(notification.area.width) *
         notification.area.height;
@@ -243,56 +204,27 @@ X11DamageTracker::snapshot(DamageRegion &damageRegion) noexcept
         return true;
     }
 
-    // Move the accumulated server-side region into the persistent XFixes
-    // region and clear/re-arm NON_EMPTY. Fetching the region is the one
-    // synchronization point per presentation batch, rather than one request
-    // check for every X11 service pass.
-    xcb_damage_subtract(connection_, damage_, XCB_NONE, partsRegion_);
-    const auto fetchCookie = xcb_xfixes_fetch_region(connection_, partsRegion_);
-    xcb_generic_error_t *fetchError = nullptr;
-    xcb_xfixes_fetch_region_reply_t *reply =
-        xcb_xfixes_fetch_region_reply(connection_, fetchCookie, &fetchError);
-    if (fetchError != nullptr || reply == nullptr)
+    // DeltaRectangles preserves the newly changed rectangles in the event
+    // stream. The X server's accumulated parts region can collapse a sparse
+    // root-window update to its extent, so keep the bounded event rectangles
+    // as the authoritative local snapshot and merely re-arm the server.
+    xcb_damage_subtract(connection_, damage_, XCB_NONE, XCB_NONE);
+    if (xcb_flush(connection_) <= 0 ||
+        xcb_connection_has_error(connection_) != 0)
     {
-        std::free(fetchError);
-        std::free(reply);
-        fail("XDamage region snapshot failed");
+        fail("XDamage snapshot acknowledgement failed");
         return false;
     }
-
-    const int rectangleCount =
-        xcb_xfixes_fetch_region_rectangles_length(reply);
-    const xcb_rectangle_t *rectangles =
-        xcb_xfixes_fetch_region_rectangles(reply);
-    if (rectangleCount < 0 ||
-        (rectangleCount > 0 && rectangles == nullptr))
+    for (const Rectangle &rectangle : pendingDamageRegion_.rectangles())
     {
-        std::free(reply);
-        fail("XDamage region snapshot response was invalid");
-        return false;
-    }
-    for (int index = 0; index < rectangleCount; ++index)
-    {
-        const auto &rectangle = rectangles[index];
         damageRegion.add(
-            {
-                static_cast<std::int32_t>(rectangle.x),
-                static_cast<std::int32_t>(rectangle.y),
-                rectangle.width,
-                rectangle.height,
-            },
-            bounds_);
+            rectangle, bounds_);
         ++snapshotRectangleCount_;
         snapshotPixelCount_ +=
-            static_cast<std::uint64_t>(rectangle.width) * rectangle.height;
+            static_cast<std::uint64_t>(rectangle.widthPixels) *
+            rectangle.heightPixels;
     }
-    std::free(reply);
-
-    if (xcb_connection_has_error(connection_) != 0)
-    {
-        fail("XDamage region snapshot lost the X connection");
-        return false;
-    }
+    pendingDamageRegion_.clear();
     pendingAcknowledgement_ = false;
     return true;
 }

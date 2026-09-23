@@ -181,6 +181,131 @@ wait_for_input_events(xcb_connection_t *connection, xcb_window_t window,
     return false;
 }
 
+bool
+wait_for_key_repeats(xcb_connection_t *connection, xcb_window_t window,
+                     xcb_keycode_t keycode,
+                     std::size_t minimumPresses) noexcept
+{
+    std::size_t pressCount = 0;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline)
+    {
+        xcb_generic_event_t *event = nullptr;
+        while ((event = xcb_poll_for_event(connection)) != nullptr)
+        {
+            const std::uint8_t type = event->response_type & 0x7f;
+            if (type == XCB_KEY_PRESS)
+            {
+                const auto *key = reinterpret_cast<
+                    const xcb_key_press_event_t *>(event);
+                if (key->event == window && key->detail == keycode)
+                {
+                    ++pressCount;
+                }
+            }
+            std::free(event);
+        }
+
+        if (pressCount >= minimumPresses)
+        {
+            return true;
+        }
+        if (xcb_connection_has_error(connection) != 0)
+        {
+            return false;
+        }
+
+        pollfd descriptor{};
+        descriptor.fd = xcb_get_file_descriptor(connection);
+        descriptor.events = POLLIN | POLLERR | POLLHUP;
+        if (descriptor.fd < 0 || poll(&descriptor, 1, 50) < 0)
+        {
+            return false;
+        }
+    }
+    std::fprintf(stderr,
+                 "held key produced %zu presses, expected at least %zu\n",
+                 pressCount, minimumPresses);
+    return false;
+}
+
+bool
+find_keycode(xcb_connection_t *connection, xcb_keysym_t keysym,
+             xcb_keycode_t &keycode) noexcept
+{
+    constexpr xcb_keycode_t kFirstKeycode = 8;
+    constexpr std::uint8_t kKeycodeCount = 248;
+    xcb_generic_error_t *error = nullptr;
+    xcb_get_keyboard_mapping_reply_t *reply = xcb_get_keyboard_mapping_reply(
+        connection,
+        xcb_get_keyboard_mapping(connection, kFirstKeycode, kKeycodeCount),
+        &error);
+    if (error != nullptr || reply == nullptr)
+    {
+        std::free(error);
+        std::free(reply);
+        return false;
+    }
+
+    const xcb_keysym_t *symbols = xcb_get_keyboard_mapping_keysyms(reply);
+    const int symbolCount = xcb_get_keyboard_mapping_keysyms_length(reply);
+    const int symbolsPerKeycode = reply->keysyms_per_keycode;
+    bool found = false;
+    if (symbols != nullptr && symbolsPerKeycode > 0 && symbolCount >= 0)
+    {
+        const int keycodeCount = symbolCount / symbolsPerKeycode;
+        for (int codeIndex = 0; codeIndex < keycodeCount && !found;
+             ++codeIndex)
+        {
+            for (int symbolIndex = 0; symbolIndex < symbolsPerKeycode;
+                 ++symbolIndex)
+            {
+                const int index =
+                    codeIndex * symbolsPerKeycode + symbolIndex;
+                if (symbols[index] == keysym)
+                {
+                    keycode = static_cast<xcb_keycode_t>(
+                        kFirstKeycode + codeIndex);
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    std::free(reply);
+    return found;
+}
+
+bool
+exercise_held_key_repeat(X11InputController &controller,
+                         xcb_connection_t *connection,
+                         xcb_window_t window, xcb_keysym_t keysym,
+                         int scanCode, const char *name) noexcept
+{
+    xcb_keycode_t keycode = XCB_NO_SYMBOL;
+    if (!find_keycode(connection, keysym, keycode))
+    {
+        std::fprintf(stderr, "could not find X keycode for held %s key\n",
+                     name);
+        return false;
+    }
+    const bool downAccepted =
+        controller.handle(WM_KEYDOWN, 0, keysym, scanCode, KBD_FLAG_DOWN) &&
+        // A repeated transport make while the key is held must not create a
+        // second XTest transition; X server typematic should still repeat it.
+        controller.handle(WM_KEYDOWN, 0, keysym, scanCode, KBD_FLAG_DOWN);
+    const bool repeated = downAccepted &&
+                          wait_for_key_repeats(connection, window, keycode, 3);
+    const bool released = controller.handle(
+        WM_KEYUP, 0, keysym, scanCode, KBD_FLAG_UP);
+    if (!released)
+    {
+        std::fprintf(stderr, "held %s key release was rejected\n", name);
+    }
+    return repeated && released;
+}
+
 struct ScrollEvents
 {
     int upPresses{};
@@ -444,6 +569,19 @@ run() noexcept
                      observed.keyPressCount, observed.keyReleaseCount);
     }
 
+    bool heldLetterRepeats = false;
+    bool heldBackspaceRepeats = false;
+    bool heldArrowRepeats = false;
+    if (received)
+    {
+        heldLetterRepeats = exercise_held_key_repeat(
+            *controller, connection, window, XK_a, 30, "letter");
+        heldBackspaceRepeats = exercise_held_key_repeat(
+            *controller, connection, window, XK_BackSpace, 14, "Backspace");
+        heldArrowRepeats = exercise_held_key_repeat(
+            *controller, connection, window, XK_Left, 75, "arrow");
+    }
+
     bool scrollReceived = false;
     if (received)
     {
@@ -521,7 +659,8 @@ run() noexcept
     const bool flushed = xcb_flush(connection) > 0;
     const bool healthy = xcb_connection_has_error(connection) == 0;
     xcb_disconnect(connection);
-    return received && keyTransitionsAreIdempotent && scrollReceived &&
+    return received && keyTransitionsAreIdempotent && heldLetterRepeats &&
+                   heldBackspaceRepeats && heldArrowRepeats && scrollReceived &&
                    teardownReleased && destroyed &&
                    flushed && healthy
                ? 0

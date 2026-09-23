@@ -70,9 +70,10 @@ For opt-in direct-module pipeline attribution, pass
 partial window. Its counters distinguish Damage wake-ups and the server-region
 snapshot from captured and successfully painted area, and report presentation
 batches, `server_paint_rect()` calls, and the uncompressed bytes handed to
-xrdp. Profiling is disabled by default. `damage_wakeups` is the NON_EMPTY
-notification count; `damage_snapshot_pixels` is the authoritative XFixes
-region area handed to the bounded damage representation.
+xrdp. Profiling is disabled by default. `damage_wakeups` is the delta-region
+notification count; `damage_snapshot_pixels` sums the bounded delta rectangles
+after local coalescing, so overlapping rectangles can make it exceed unique
+changed-pixel area.
 
 Input-roundtrip also supports `--transport rfb --mode input-roundtrip`. The
 benchmark sends the same F9 RFB KeyEvent pulse as the RDP input path to the

@@ -80,6 +80,127 @@ wait_for_damage(xcb_connection_t *connection, X11DamageTracker &tracker,
     return false;
 }
 
+bool
+drain_damage_events_through_barrier(xcb_connection_t *connection,
+                                    X11DamageTracker &tracker) noexcept
+{
+    xcb_generic_error_t *barrierError = nullptr;
+    xcb_get_input_focus_reply_t *barrierReply = xcb_get_input_focus_reply(
+        connection, xcb_get_input_focus(connection), &barrierError);
+    if (barrierError != nullptr || barrierReply == nullptr)
+    {
+        std::free(barrierError);
+        std::free(barrierReply);
+        return false;
+    }
+    std::free(barrierReply);
+    std::free(barrierError);
+
+    xcb_generic_event_t *event = nullptr;
+    while ((event = xcb_poll_for_event(connection)) != nullptr)
+    {
+        if (event->response_type == 0)
+        {
+            std::free(event);
+            return false;
+        }
+        if (tracker.handles(*event))
+        {
+            tracker.handle(*event);
+        }
+        std::free(event);
+    }
+
+    return xcb_connection_has_error(connection) == 0;
+}
+
+bool
+root_damage_preserves_disjoint_rectangles(xcb_connection_t *connection,
+                                           xcb_window_t root,
+                                           xcb_window_t child,
+                                           xcb_gcontext_t graphicsContext,
+                                           PixelSize bounds) noexcept
+{
+    X11DamageTracker tracker(*connection, root, bounds);
+    if (!tracker.valid())
+    {
+        std::fprintf(stderr, "root XDamage setup failed: %s\n",
+                     tracker.failureReason() != nullptr
+                         ? tracker.failureReason()
+                         : "unknown error");
+        return false;
+    }
+
+    // Window creation/map damage may still be in flight when this root-level
+    // tracker is installed. Synchronize and discard that baseline before the
+    // controlled sparse update, otherwise the baseline rectangles would be
+    // included in the controlled delta snapshot.
+    for (int attempt = 0; attempt < 4; ++attempt)
+    {
+        if (!drain_damage_events_through_barrier(connection, tracker))
+        {
+            std::fprintf(stderr, "root XDamage synchronization failed\n");
+            return false;
+        }
+        if (!tracker.hasPendingDamage())
+        {
+            break;
+        }
+        DamageRegion baseline;
+        if (!tracker.snapshot(baseline))
+        {
+            std::fprintf(stderr, "root XDamage baseline snapshot failed\n");
+            return false;
+        }
+    }
+    if (tracker.hasPendingDamage())
+    {
+        std::fprintf(stderr, "root XDamage baseline did not settle\n");
+        return false;
+    }
+
+    const xcb_rectangle_t sourceRectangles[] = {
+        {2, 3, 20, 15},
+        {60, 70, 25, 18},
+    };
+    const std::uint64_t notificationCount = tracker.notificationCount();
+    xcb_poly_fill_rectangle(connection, child, graphicsContext,
+                            1, &sourceRectangles[0]);
+    xcb_poly_fill_rectangle(connection, child, graphicsContext,
+                            1, &sourceRectangles[1]);
+    if (xcb_flush(connection) <= 0 ||
+        !wait_for_damage(connection, tracker, notificationCount + 1) ||
+        !drain_damage_events_through_barrier(connection, tracker))
+    {
+        std::fprintf(stderr, "root XDamage did not report sparse drawing\n");
+        return false;
+    }
+
+    DamageRegion region;
+    if (!tracker.snapshot(region))
+    {
+        std::fprintf(stderr, "root XDamage snapshot failed\n");
+        return false;
+    }
+    bool foundFirst = false;
+    bool foundSecond = false;
+    for (const Rectangle &rectangle : region.rectangles())
+    {
+        foundFirst = foundFirst || rectangle == Rectangle{12, 13, 20, 15};
+        foundSecond = foundSecond || rectangle == Rectangle{70, 80, 25, 18};
+    }
+    if (region.rectangles().size() != 2 || !foundFirst || !foundSecond)
+    {
+        std::fprintf(stderr,
+                     "root XDamage merged sparse rectangles: count=%zu pixels=%llu\n",
+                     region.rectangles().size(),
+                     static_cast<unsigned long long>(
+                         tracker.snapshotPixelCount()));
+        return false;
+    }
+    return true;
+}
+
 int
 run() noexcept
 {
@@ -195,6 +316,7 @@ run() noexcept
                                 &firstRectangle);
         if (xcb_flush(connection) <= 0 ||
             !wait_for_damage(connection, tracker, 1) ||
+            !drain_damage_events_through_barrier(connection, tracker) ||
             !tracker.snapshot(region))
         {
             xcb_free_gc(connection, graphicsContext);
@@ -255,6 +377,7 @@ run() noexcept
                                 &secondRectangle);
         if (xcb_flush(connection) <= 0 ||
             !wait_for_damage(connection, tracker, 2) ||
+            !drain_damage_events_through_barrier(connection, tracker) ||
             !tracker.snapshot(region))
         {
             xcb_free_gc(connection, graphicsContext);
@@ -272,23 +395,64 @@ run() noexcept
             xcb_poly_fill_rectangle(connection, window, graphicsContext, 1,
                                     &firstRectangle);
         }
-        if (xcb_flush(connection) <= 0 ||
-            !wait_for_damage(connection, tracker, notificationsBeforeBurst + 1) ||
-            tracker.notificationCount() != notificationsBeforeBurst + 1 ||
-            !tracker.snapshot(region) || region.rectangles().size() != 1 ||
-            region.rectangles()[0] != Rectangle{2, 3, 20, 15})
+        const bool burstFlushed = xcb_flush(connection) > 0;
+        const bool burstReceived =
+            burstFlushed && wait_for_damage(
+                                connection, tracker,
+                                notificationsBeforeBurst + 1) &&
+            drain_damage_events_through_barrier(connection, tracker);
+        const bool burstSnapshotted =
+            burstReceived && tracker.snapshot(region);
+        const bool burstMatches =
+            burstSnapshotted &&
+            tracker.notificationCount() > notificationsBeforeBurst &&
+            region.rectangles().size() == 1 &&
+            region.rectangles()[0] == Rectangle{2, 3, 20, 15};
+        if (!burstMatches)
         {
             std::fprintf(stderr,
-                         "repeated damage was not coalesced into one snapshot\n");
+                         "repeated damage mismatch: flushed=%d received=%d "
+                         "snapshotted=%d notifications=%llu expected=%llu "
+                         "rectangles=%zu\n",
+                         burstFlushed, burstReceived, burstSnapshotted,
+                         static_cast<unsigned long long>(
+                             tracker.notificationCount()),
+                         static_cast<unsigned long long>(
+                             notificationsBeforeBurst + 1),
+                         region.rectangles().size());
+            for (const Rectangle &rectangle : region.rectangles())
+            {
+                std::fprintf(stderr, "damage rectangle %d %d %u %u\n",
+                             rectangle.x, rectangle.y,
+                             rectangle.widthPixels,
+                             rectangle.heightPixels);
+            }
             xcb_free_gc(connection, graphicsContext);
             xcb_destroy_window(connection, window);
             xcb_flush(connection);
-            xcb_disconnect(connection);
             return 1;
         }
 
         xcb_free_gc(connection, graphicsContext);
     }
+
+    const xcb_gcontext_t rootGraphicsContext = xcb_generate_id(connection);
+    const std::uint32_t rootForeground[] = {screen->white_pixel};
+    if (!check_request(
+            connection,
+            xcb_create_gc_checked(connection, rootGraphicsContext, window,
+                                  XCB_GC_FOREGROUND, rootForeground),
+            "create root damage graphics context") ||
+        !root_damage_preserves_disjoint_rectangles(
+            connection, screen->root, window, rootGraphicsContext, bounds))
+    {
+        xcb_free_gc(connection, rootGraphicsContext);
+        xcb_destroy_window(connection, window);
+        xcb_flush(connection);
+        xcb_disconnect(connection);
+        return 1;
+    }
+    xcb_free_gc(connection, rootGraphicsContext);
 
     xcb_destroy_window(connection, window);
     const bool flushed = xcb_flush(connection) > 0;

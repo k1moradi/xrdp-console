@@ -7,6 +7,9 @@ if(NOT XRDP_CONSOLE_MAKE_PROGRAM)
     message(FATAL_ERROR "A make-compatible program is required to build xrdp")
 endif()
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(XRDP_CONSOLE_FUSE3 REQUIRED fuse3)
+
 set(XRDP_CONSOLE_XRDP_VERSION "0.10.6.1" CACHE STRING
     "Pinned xrdp version")
 set(XRDP_CONSOLE_XRDP_SOURCE_URL
@@ -69,13 +72,59 @@ set_property(DIRECTORY "${CMAKE_SOURCE_DIR}" APPEND PROPERTY
     CMAKE_CONFIGURE_DEPENDS "${_xrdp_patch_script}")
 file(SHA256 "${_xrdp_patch_script}" _xrdp_patch_script_hash)
 
+if(DEFINED XRDP_CONSOLE_XRDP_CFLAGS AND
+   XRDP_CONSOLE_XRDP_CFLAGS STREQUAL "-O3 -march=native")
+    # Migrate the previous default while preserving user-supplied values.
+    set(XRDP_CONSOLE_XRDP_CFLAGS "-O3 -march=native -mtune=native"
+        CACHE STRING "CFLAGS used for the host-native xrdp dependency build"
+        FORCE)
+else()
+    set(XRDP_CONSOLE_XRDP_CFLAGS "-O3 -march=native -mtune=native"
+        CACHE STRING "CFLAGS used for the host-native xrdp dependency build")
+endif()
+set(XRDP_CONSOLE_XRDP_CPPFLAGS "" CACHE STRING
+    "Additional CPPFLAGS used for the xrdp dependency build")
+set(XRDP_CONSOLE_XRDP_LDFLAGS "" CACHE STRING
+    "Additional LDFLAGS used for the xrdp dependency build")
+set(XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH "$ENV{PKG_CONFIG_PATH}" CACHE STRING
+    "PKG_CONFIG_PATH used for the xrdp dependency build")
+
+set(_xrdp_configure_args
+    "<SOURCE_DIR>/configure"
+    "--prefix=<INSTALL_DIR>"
+    "--sysconfdir=<INSTALL_DIR>/etc"
+    "--localstatedir=<INSTALL_DIR>/var"
+    "--runstatedir=/run"
+    "--with-socketdir=/run/xrdp/sockdir"
+    "--enable-strict-locations"
+    "--enable-rfxcodec"
+    "--enable-x264"
+    "--enable-jpeg"
+    "--enable-fuse"
+    "--enable-ipv6"
+    "--enable-vsock"
+    "--enable-utmp"
+    "--with-freetype2=yes"
+    "--disable-neutrinordp")
+
+string(JOIN "\n" _xrdp_configure_arg_material ${_xrdp_configure_args})
+set(_xrdp_build_configuration_material
+    "CFLAGS=${XRDP_CONSOLE_XRDP_CFLAGS}\n"
+    "CPPFLAGS=${XRDP_CONSOLE_XRDP_CPPFLAGS}\n"
+    "LDFLAGS=${XRDP_CONSOLE_XRDP_LDFLAGS}\n"
+    "PKG_CONFIG_PATH=${XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH}\n"
+    "configure-args=${_xrdp_configure_arg_material}\n")
+string(JOIN "" _xrdp_build_configuration_material
+    ${_xrdp_build_configuration_material})
+
 string(SHA256 _xrdp_patchset_hash "${_xrdp_patch_material}")
 set(_xrdp_state_material
     "version=${XRDP_CONSOLE_XRDP_VERSION}\n"
     "url=${XRDP_CONSOLE_XRDP_SOURCE_URL}\n"
     "archive=${XRDP_CONSOLE_XRDP_SOURCE_SHA256}\n"
     "patchset=${_xrdp_patchset_hash}\n"
-    "patch-script=${_xrdp_patch_script_hash}\n")
+    "patch-script=${_xrdp_patch_script_hash}\n"
+    "${_xrdp_build_configuration_material}")
 string(JOIN "" _xrdp_state_material ${_xrdp_state_material})
 string(SHA256 _xrdp_state_hash "${_xrdp_state_material}")
 string(SUBSTRING "${_xrdp_state_hash}" 0 16 _xrdp_state_tag)
@@ -95,41 +144,7 @@ set(XRDP_CONSOLE_XRDP_INSTALL_DIR
     "${XRDP_CONSOLE_XRDP_DEPS_ROOT}/xrdp-install" CACHE PATH
     "Private xrdp installation prefix")
 
-if(DEFINED XRDP_CONSOLE_XRDP_CFLAGS AND
-   XRDP_CONSOLE_XRDP_CFLAGS STREQUAL "-O3 -march=native")
-    # Migrate the previous default while preserving user-supplied values.
-    set(XRDP_CONSOLE_XRDP_CFLAGS "-O3 -march=native -mtune=native"
-        CACHE STRING "CFLAGS used for the host-native xrdp dependency build"
-        FORCE)
-else()
-    set(XRDP_CONSOLE_XRDP_CFLAGS "-O3 -march=native -mtune=native"
-        CACHE STRING "CFLAGS used for the host-native xrdp dependency build")
-endif()
-set(XRDP_CONSOLE_XRDP_CPPFLAGS "" CACHE STRING
-    "Additional CPPFLAGS used for the xrdp dependency build")
-set(XRDP_CONSOLE_XRDP_LDFLAGS "" CACHE STRING
-    "Additional LDFLAGS used for the xrdp dependency build")
-set(XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH "$ENV{PKG_CONFIG_PATH}" CACHE STRING
-    "PKG_CONFIG_PATH used for the xrdp dependency build")
-
 set(_xrdp_make_flags "CFLAGS=${XRDP_CONSOLE_XRDP_CFLAGS}")
-
-set(_xrdp_configure_args
-    "<SOURCE_DIR>/configure"
-    "--prefix=<INSTALL_DIR>"
-    "--sysconfdir=<INSTALL_DIR>/etc"
-    "--localstatedir=<INSTALL_DIR>/var"
-    "--runstatedir=/run"
-    "--with-socketdir=/run/xrdp/sockdir"
-    "--enable-strict-locations"
-    "--enable-rfxcodec"
-    "--enable-x264"
-    "--enable-jpeg"
-    "--enable-ipv6"
-    "--enable-vsock"
-    "--enable-utmp"
-    "--with-freetype2=yes"
-    "--disable-neutrinordp")
 
 ExternalProject_Add(xrdp_upstream
     PREFIX "${CMAKE_BINARY_DIR}/xrdp_upstream-${_xrdp_state_tag}-prefix"

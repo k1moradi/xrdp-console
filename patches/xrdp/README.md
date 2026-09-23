@@ -59,9 +59,18 @@ historical fork's commit history:
    pixman dirty rectangles through the Console GFX Planar fallback instead of
    encoding their union bounding box. Legacy sessions retain the upstream
    bounding-box behavior.
+10. `0010-xrdp-console-batched-planar-frames.patch` reuses per-session Planar
+    compression scratch, sends one bounded dirty-region batch per GFX frame,
+    subtracts only successfully sent tiles, retains the remainder after a
+    partial flush, and uses a Console-only 16 ms cadence. Legacy sessions keep
+    the upstream 40 ms cadence and per-rectangle transaction behavior.
+
+The activation script requires the `XRDP_CONSOLE_GFX_PLANAR_BATCH_V1` marker
+in the candidate daemon, so an older patched generation cannot be mistaken
+for this Planar batching implementation.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-these nine patches are production compatibility and correctness changes, not
+these ten patches are production compatibility and correctness changes, not
 benchmark knobs. Code
 `21` is deliberately used only by the direct module's profile; legacy VNC
 profiles continue using code `0`/`1`. The

@@ -1,0 +1,5 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+#pragma once
+
+#define XRDP_CONSOLE_BUILD_REVISION "@XRDP_CONSOLE_BUILD_REVISION@"

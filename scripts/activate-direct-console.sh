@@ -44,6 +44,7 @@ prefix=${XRDP_CONSOLE_XRDP_INSTALL_DIR:-$build_root/_deps/xrdp-install}
 daemon=$prefix/sbin/xrdp
 module_source=$build_root/src/libxrdp_console.so
 module_target=$prefix/lib/xrdp/libxrdp_console.so
+revision_header=$build_root/generated/build_revision.h
 config=/etc/xrdp/xrdp.ini
 dropin_directory=/etc/systemd/system/xrdp.service.d
 dropin=$dropin_directory/upstream-local.conf
@@ -98,13 +99,26 @@ fi
 [ "$(id -u)" -eq 0 ] || fail "run as root (for example, with sudo)"
 [ -x "$daemon" ] || fail "missing pinned xrdp daemon: $daemon"
 [ -f "$module_source" ] || fail "missing direct-X11 module: $module_source"
+[ -r "$revision_header" ] ||
+    fail "missing generated build identity: $revision_header"
 [ -f "$config" ] || fail "missing xrdp configuration: $config"
 [ -d "$(dirname -- "$module_target")" ] ||
     fail "missing xrdp module directory: $(dirname -- "$module_target")"
 "$daemon" --version 2>/dev/null | grep -q '^xrdp 0\.10\.6\.1' ||
     fail "candidate daemon is not the pinned xrdp 0.10.6.1 build"
+if ! grep -aFq -- 'XRDP_CONSOLE_GFX_PLANAR_BATCH_V1' "$daemon"; then
+    fail "candidate daemon lacks the Console Planar batching patch marker"
+fi
 if ldd "$module_source" 2>/dev/null | grep -q 'not found'; then
     fail "direct-X11 module has an unresolved shared-library dependency"
+fi
+build_revision=$(sed -n \
+    's/^#define XRDP_CONSOLE_BUILD_REVISION "\(.*\)"$/\1/p' \
+    "$revision_header")
+[ -n "$build_revision" ] ||
+    fail "could not read the generated build revision"
+if ! grep -aFq -- "$build_revision" "$module_source"; then
+    fail "module does not contain expected build revision $build_revision"
 fi
 
 systemctl is-active --quiet xrdp || fail "xrdp.service must be active before activation"

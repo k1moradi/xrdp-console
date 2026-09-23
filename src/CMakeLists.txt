@@ -66,6 +66,7 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         VISIBILITY_INLINES_HIDDEN ON)
     target_compile_features(xrdp-console PRIVATE cxx_std_23)
     target_include_directories(xrdp-console PRIVATE
+        "${CMAKE_BINARY_DIR}/generated"
         "${XRDP_CONSOLE_XRDP_SOURCE_DIR}"
         "${XRDP_CONSOLE_XRDP_SOURCE_DIR}/common"
         "${XRDP_CONSOLE_XRDP_SOURCE_DIR}/xrdp"
@@ -90,7 +91,7 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         BUILD_RPATH
             "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp;${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib"
         INSTALL_RPATH "$ORIGIN/../xrdp")
-    add_dependencies(xrdp-console xrdp_upstream)
+    add_dependencies(xrdp-console xrdp_upstream xrdp-console-build-revision)
 
     # Keep the first-party module in the normal project install tree until the
     # deployment workflow explicitly wires it into the private xrdp prefix.

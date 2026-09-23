@@ -66,18 +66,32 @@ int main(int argc, char **argv)
     Window window = XCreateSimpleWindow(display, root, x, y, width, height, 0,
                                         BlackPixel(display, screen),
                                         WhitePixel(display, screen));
+    Window sparse_window_a = XCreateSimpleWindow(
+        display, root, x + 5, y + 5, 20, 20, 0,
+        BlackPixel(display, screen), BlackPixel(display, screen));
+    Window sparse_window_b = XCreateSimpleWindow(
+        display, root, x + 130, y + 70, 20, 20, 0,
+        BlackPixel(display, screen), BlackPixel(display, screen));
     XSetWindowAttributes window_attributes = {0};
     window_attributes.override_redirect = True;
     XChangeWindowAttributes(display, window, CWOverrideRedirect,
                             &window_attributes);
+    XChangeWindowAttributes(display, sparse_window_a, CWOverrideRedirect,
+                            &window_attributes);
+    XChangeWindowAttributes(display, sparse_window_b, CWOverrideRedirect,
+                            &window_attributes);
     XSelectInput(display, window, ExposureMask | (key_mode ? KeyPressMask : 0));
     XMapRaised(display, window);
+    XMapRaised(display, sparse_window_a);
+    XMapRaised(display, sparse_window_b);
     if (key_mode) {
         XSetInputFocus(display, window, RevertToPointerRoot, CurrentTime);
     }
     XFlush(display);
 
     GC gc = XCreateGC(display, window, 0, NULL);
+    GC sparse_gc_a = XCreateGC(display, sparse_window_a, 0, NULL);
+    GC sparse_gc_b = XCreateGC(display, sparse_window_b, 0, NULL);
     XEvent event;
     XSync(display, False);
     while (XPending(display)) {
@@ -103,6 +117,12 @@ int main(int argc, char **argv)
                 unsigned long color = state ? 0x0000ff : 0xff0000;
                 XSetForeground(display, gc, color);
                 XFillRectangle(display, window, gc, 0, 0, width, height);
+                XSetForeground(display, sparse_gc_a, color);
+                XSetForeground(display, sparse_gc_b, color);
+                XFillRectangle(display, sparse_window_a, sparse_gc_a,
+                               0, 0, 20, 20);
+                XFillRectangle(display, sparse_window_b, sparse_gc_b,
+                               0, 0, 20, 20);
                 /* XFlush only queues the request. XSync gives the benchmark
                  * a timestamp after the X server has processed the draw, so
                  * the returned line can distinguish input delivery from
@@ -121,16 +141,36 @@ int main(int argc, char **argv)
 
     char line[32];
     while (fgets(line, sizeof(line), stdin) != NULL) {
+        if (strcmp(line, "sparse\n") == 0) {
+            XSetForeground(display, sparse_gc_a, 0x0000ff);
+            XSetForeground(display, sparse_gc_b, 0x0000ff);
+            XFillRectangle(display, sparse_window_a, sparse_gc_a,
+                           0, 0, 20, 20);
+            XFillRectangle(display, sparse_window_b, sparse_gc_b,
+                           0, 0, 20, 20);
+            XSync(display, False);
+            puts("SPARSE_DONE");
+            fflush(stdout);
+            continue;
+        }
         const long long event_ns = monotonic_ns();
         unsigned long color = state ? 0x0000ff : 0xff0000;
         XSetForeground(display, gc, color);
         XFillRectangle(display, window, gc, 0, 0, width, height);
+        XSetForeground(display, sparse_gc_a, color);
+        XSetForeground(display, sparse_gc_b, color);
+        XFillRectangle(display, sparse_window_a, sparse_gc_a,
+                       0, 0, 20, 20);
+        XFillRectangle(display, sparse_window_b, sparse_gc_b,
+                       0, 0, 20, 20);
         XSync(display, False);
         const long long draw_done_ns = monotonic_ns();
         printf("%lld %lld %d\n", event_ns, draw_done_ns, state);
         fflush(stdout);
         state = !state;
     }
+    XFreeGC(display, sparse_gc_a);
+    XFreeGC(display, sparse_gc_b);
     XFreeGC(display, gc);
     XDestroyWindow(display, window);
     XCloseDisplay(display);

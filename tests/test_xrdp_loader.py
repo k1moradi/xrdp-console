@@ -101,6 +101,49 @@ def read_line(stream, timeout: float) -> bytes:
     return stream.readline() if ready else b""
 
 
+def start_source_xvfb(log_path: Path) -> tuple[subprocess.Popen[bytes], str]:
+    executable = shutil.which("Xvfb")
+    if executable is None:
+        raise AssertionError("xrdp loader smoke test needs Xvfb")
+
+    with log_path.open("w", encoding="utf-8") as log_file:
+        process = subprocess.Popen(
+            [executable, "-displayfd", "1", "-screen", "0", "1024x768x24",
+             "-nolisten", "tcp", "-noreset"],
+            stdout=subprocess.PIPE,
+            stderr=log_file,
+            start_new_session=True,
+        )
+    if process.stdout is None:
+        stop_process(process)
+        raise AssertionError("source Xvfb display-number pipe was not created")
+    display_number = read_line(process.stdout, 5.0).strip()
+    if not display_number.isdigit():
+        details = read_text(log_path)
+        stop_process(process)
+        raise AssertionError(
+            f"source Xvfb did not allocate a display: {details}")
+    display = ":" + display_number.decode("ascii")
+
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        result = subprocess.run(
+            ["xdpyinfo", "-display", display],
+            capture_output=True,
+            check=False,
+            timeout=2.0,
+        )
+        if result.returncode == 0:
+            return process, display
+        if process.poll() is not None:
+            break
+        time.sleep(0.05)
+
+    details = read_text(log_path)
+    stop_process(process)
+    raise AssertionError(f"source Xvfb display {display} did not become ready:\n{details}")
+
+
 def find_window(display: str, title: str, timeout: float) -> str:
     pattern = re.compile(
         r"^\s*(0x[0-9a-fA-F]+) \"" + re.escape(title) + r"\"",
@@ -123,35 +166,57 @@ def find_window(display: str, title: str, timeout: float) -> str:
     )
 
 
-def assert_client_pixel(display: str, window_title: str, pixel_probe: Path,
-                        stimulus_path: Path, environment: dict[str, str],
-                        log_path: Path, probe_x: int, probe_y: int) -> None:
+def start_stimulus(stimulus_path: Path, display: str,
+                   environment: dict[str, str]) -> subprocess.Popen[bytes]:
+    process = subprocess.Popen(
+        [str(stimulus_path), display], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment,
+        bufsize=0, start_new_session=True,
+    )
+    if process.stdin is None or process.stdout is None:
+        stop_process(process)
+        raise AssertionError("source stimulus pipes were not created")
+    ready = read_line(process.stdout, 5.0)
+    if ready != b"READY 160 100\n":
+        stop_process(process)
+        details = process.stderr.read().decode(errors="replace") if process.stderr else ""
+        raise AssertionError(f"source stimulus did not become ready: {ready!r} {details}")
+    return process
+
+
+def assert_client_pixel(client_display: str,
+                        stimulus: subprocess.Popen[bytes],
+                        window_title: str, pixel_probe: Path,
+                        log_path: Path, stdout_path: Path,
+                        probe_x: int, probe_y: int,
+                        assert_sparse_planar_batch: bool = False) -> None:
     """Draw a known source color and require it in the FreeRDP framebuffer."""
-    window = find_window(display, window_title, 8.0)
-    stimulus: subprocess.Popen[object] | None = None
+    window = find_window(client_display, window_title, 8.0)
     probe: subprocess.Popen[object] | None = None
     try:
-        stimulus = subprocess.Popen(
-            [str(stimulus_path), display],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, env=environment, bufsize=0,
-            start_new_session=True,
-        )
         probe = subprocess.Popen(
-            [str(pixel_probe), display, window, str(probe_x), str(probe_y)],
+            [str(pixel_probe), client_display, window,
+             str(probe_x), str(probe_y)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, env=environment, bufsize=0,
+            stderr=subprocess.PIPE, env=os.environ.copy(), bufsize=0,
             start_new_session=True,
         )
         if (stimulus.stdin is None or stimulus.stdout is None or
                 probe.stdin is None or probe.stdout is None):
             raise AssertionError("pixel assertion pipes were not created")
-        stimulus_ready = read_line(stimulus.stdout, 5.0)
-        if stimulus_ready != b"READY 160 100\n":
-            raise AssertionError(
-                f"source stimulus did not become ready: {stimulus_ready!r}")
         if not read_line(probe.stdout, 5.0).startswith(b"READY "):
             raise AssertionError("pixel probe did not become ready")
+
+        batch_lines = [
+            line for line in read_text(log_path).splitlines()
+            if "XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 frame=" in line
+        ]
+        prior_batch_numbers = [
+            int(value) for line in batch_lines
+            if (match := re.search(r"\bframe=(\d+)", line)) is not None
+            for value in [match.group(1)]
+        ]
+        prior_batch_number = max(prior_batch_numbers, default=0)
 
         stimulus.stdin.write(b"frame\n")
         stimulus.stdin.flush()
@@ -162,40 +227,108 @@ def assert_client_pixel(display: str, window_title: str, pixel_probe: Path,
         state = int(fields[2])
         expected_red = state == 0
 
-        deadline = time.monotonic() + 8.0
-        last_pixel = b""
-        while time.monotonic() < deadline:
-            try:
-                probe.stdin.write(b"sample\n")
-                probe.stdin.flush()
-            except BrokenPipeError as error:
-                raise AssertionError(
-                    "pixel probe exited before the client-visible pixel "
-                    f"assertion completed (status={probe.poll()}):\n"
-                    f"{xrdp_log_excerpt(log_path)}"
-                ) from error
-            line = read_line(probe.stdout, min(0.5, deadline - time.monotonic()))
-            if not line:
-                continue
-            last_pixel = line
-            pixel = line.split()
-            if len(pixel) < 4:
-                continue
-            red, green, blue = (int(value) for value in pixel[1:4])
-            matches = (
-                red > 200 and green < 80 and blue < 80
-                if expected_red else
-                blue > 200 and red < 80 and green < 80
+        def wait_for_pixel(expected_red: bool) -> bytes:
+            deadline = time.monotonic() + 8.0
+            last_pixel = b""
+            while time.monotonic() < deadline:
+                try:
+                    probe.stdin.write(b"sample\n")
+                    probe.stdin.flush()
+                except BrokenPipeError as error:
+                    raise AssertionError(
+                        "pixel probe exited before the client-visible pixel "
+                        f"assertion completed (status={probe.poll()}):\n"
+                        f"{xrdp_log_excerpt(log_path)}"
+                    ) from error
+                line = read_line(
+                    probe.stdout, min(0.5, deadline - time.monotonic()))
+                if not line:
+                    continue
+                last_pixel = line
+                pixel = line.split()
+                if len(pixel) < 4:
+                    continue
+                red, green, blue = (int(value) for value in pixel[1:4])
+                matches = (
+                    red > 200 and green < 80 and blue < 80
+                    if expected_red else
+                    blue > 200 and red < 80 and green < 80
+                )
+                if matches:
+                    return last_pixel
+            raise AssertionError(
+                "known source pixel did not reach the FreeRDP framebuffer: "
+                f"last={last_pixel!r}\n{xrdp_log_excerpt(log_path)}"
             )
-            if matches:
-                return
-        raise AssertionError(
-            "known source pixel did not reach the FreeRDP framebuffer: "
-            f"last={last_pixel!r}\n{xrdp_log_excerpt(log_path)}"
-        )
+
+        wait_for_pixel(expected_red)
+        if assert_sparse_planar_batch:
+            # A client-visible pixel may precede the next xrdp GFX dirty
+            # flush. Wait for the baseline draw's own completed Planar batch,
+            # not merely an older pending=0 record, before drawing the sparse
+            # pair.
+            idle_deadline = time.monotonic() + 5.0
+            last_idle_summary = ""
+            idle_since = 0.0
+            while time.monotonic() < idle_deadline:
+                summaries = [
+                    line for line in read_text(log_path).splitlines()
+                    if "XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 frame=" in line
+                ]
+                latest_summary = summaries[-1] if summaries else ""
+                frame_match = re.search(r"\bframe=(\d+)", latest_summary)
+                has_new_idle_frame = (
+                    frame_match is not None and
+                    int(frame_match.group(1)) > prior_batch_number and
+                    latest_summary.endswith("pending=0")
+                )
+                if has_new_idle_frame:
+                    if latest_summary != last_idle_summary:
+                        last_idle_summary = latest_summary
+                        idle_since = time.monotonic()
+                    elif time.monotonic() - idle_since >= 0.10:
+                        break
+                else:
+                    last_idle_summary = ""
+                    idle_since = 0.0
+                time.sleep(0.01)
+            else:
+                raise AssertionError(
+                    "initial full-screen Planar damage did not drain before "
+                    f"the sparse test:\n{xrdp_log_excerpt(log_path)}")
+
+            try:
+                stimulus.stdin.write(b"sparse\n")
+                stimulus.stdin.flush()
+            except BrokenPipeError as error:
+                raise AssertionError("source stimulus exited before sparse draw") from error
+            if read_line(stimulus.stdout, 5.0) != b"SPARSE_DONE\n":
+                raise AssertionError("source stimulus did not complete sparse draw")
+            wait_for_pixel(expected_red=False)
+
+            deadline = time.monotonic() + 5.0
+            batch_pattern = re.compile(
+                r"XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 .*starts=1 ends=1 "
+                r"rects=2 tiles=2 pixels=800 pending=0")
+            while time.monotonic() < deadline:
+                if batch_pattern.search(read_text(log_path)) is not None:
+                    break
+                time.sleep(0.05)
+            else:
+                summaries = "\n".join(
+                    line for line in read_text(log_path).splitlines()
+                    if "XRDP_CONSOLE_GFX_PLANAR_BATCH_V1" in line)
+                damage_debug = "\n".join(
+                    line for line in read_text(stdout_path).splitlines()
+                    if "DAMAGE_" in line)
+                raise AssertionError(
+                    "two sparse 20x20 updates were not emitted as one exact "
+                    "Planar frame (expected starts=1 ends=1 rects=2 "
+                    f"tiles=2 pixels=800 pending=0):\n{summaries}\n"
+                    f"{damage_debug}\n"
+                    f"{xrdp_log_excerpt(log_path)}")
     finally:
         stop_process(probe)
-        stop_process(stimulus)
 
 
 def presentation_probe_point(width: int, height: int) -> tuple[int, int]:
@@ -327,8 +460,10 @@ def main() -> int:
         log_path = root / "xrdp.log"
         stdout_path = root / "xrdp-stdout.log"
         client_log_path = root / "freerdp.log"
+        source_xvfb_log_path = root / "source-xvfb.log"
         config_path = root / "xrdp.ini"
         port = free_tcp_port()
+        source_xvfb, source_display = start_source_xvfb(source_xvfb_log_path)
 
         module_dir = install_root / "lib" / "xrdp"
         module_dir.mkdir(parents=True, exist_ok=True)
@@ -373,7 +508,7 @@ name=console
 lib={module_name}
 # First-party physical-console capability: complete pixels plus smooth scroll.
 code=21
-display={os.environ["DISPLAY"]}
+display={source_display}
 username=smoke
 password=smoke
 """,
@@ -382,7 +517,13 @@ password=smoke
 
         server: subprocess.Popen[object] | None = None
         client: subprocess.Popen[object] | None = None
+        stimulus: subprocess.Popen[bytes] | None = None
         try:
+            # Create/map the source window before the module connects and
+            # installs root XDamage. This excludes map/expose churn from the
+            # sparse-rectangle acceptance assertion.
+            stimulus = start_stimulus(
+                stimulus_path, source_display, os.environ.copy())
             with stdout_path.open("w", encoding="utf-8") as server_stdout:
                 server = subprocess.Popen(
                     [
@@ -433,6 +574,20 @@ password=smoke
                     wait_for_log(
                         server,
                         log_path,
+                        "xrdp-console: build revision=",
+                        4.0,
+                        stdout_path,
+                    )
+                    if re.search(
+                            r"xrdp-console: build revision="
+                            r"[0-9a-fA-F]{12}(?:-dirty)?\b",
+                            read_text(log_path)) is None:
+                        raise AssertionError(
+                            "module startup did not report a concrete build revision\n"
+                            f"{xrdp_log_excerpt(log_path)}")
+                    wait_for_log(
+                        server,
+                        log_path,
                         "status from xrdp_mm_connect() : 0",
                         4.0,
                         stdout_path,
@@ -454,12 +609,15 @@ password=smoke
                             stdout_path,
                         )
                     assert_client_pixel(
-                        os.environ["DISPLAY"], window_title,
-                        pixel_probe, stimulus_path, os.environ.copy(), log_path,
-                        probe_x, probe_y)
+                        os.environ["DISPLAY"], stimulus, window_title,
+                        pixel_probe, log_path, stdout_path,
+                        probe_x, probe_y,
+                        assert_sparse_planar_batch=gfx_planar_mode)
         finally:
             stop_process(client)
             stop_process(server)
+            stop_process(stimulus)
+            stop_process(source_xvfb)
             try:
                 module_link.unlink()
             except FileNotFoundError:

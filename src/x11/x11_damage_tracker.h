@@ -5,7 +5,6 @@
 #include <cstdint>
 
 #include <xcb/damage.h>
-#include <xcb/xfixes.h>
 
 #include "../core/damage_region.h"
 
@@ -33,9 +32,8 @@ public:
 
     [[nodiscard]] bool hasPendingDamage() const noexcept;
 
-    // Move the accumulated server-side damage into the persistent XFixes
-    // region, fetch its rectangles, and add them to damageRegion. This is a
-    // presentation-boundary operation, not an event-loop acknowledgement.
+    // Clear the accumulated server-side delta and publish bounded event
+    // rectangles into damageRegion at the presentation boundary.
     [[nodiscard]] bool snapshot(DamageRegion &damageRegion) noexcept;
 
 private:
@@ -43,11 +41,11 @@ private:
 
     xcb_connection_t *connection_{nullptr};
     xcb_damage_damage_t damage_{XCB_NONE};
-    xcb_xfixes_region_t partsRegion_{XCB_NONE};
     xcb_window_t drawable_{XCB_NONE};
     PixelSize bounds_{};
     std::uint8_t firstEvent_{0};
     bool pendingAcknowledgement_{false};
+    DamageRegion pendingDamageRegion_{};
     std::uint64_t notificationCount_{0};
     std::uint64_t damagedPixelCount_{0};
     std::uint64_t snapshotRectangleCount_{0};

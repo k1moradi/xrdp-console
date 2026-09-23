@@ -7,3 +7,4 @@
 0007-xrdp-keyboard-layout-hex-conversion.patch
 0008-xrdp-console-planar-frame-ids.patch
 0009-xrdp-console-preserve-gfx-dirty-regions.patch
+0010-xrdp-console-batched-planar-frames.patch

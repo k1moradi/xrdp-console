@@ -14,9 +14,9 @@ Xauthority, x11vnc, and client binaries.
 | `python-syntax` | source compilation for the installed Python helpers |
 | `systemd-unit` | clean SIGINT shutdown contract, no exit-status masking, and compatibility drop-in parity |
 | `damage-region-unit` | clipping, cost-aware overlap/adjacency coalescing, empty input, bounded sparse fragmentation, and explicit full-screen invalidation |
-| `x11-damage-integration` | authenticated-Xvfb XDamage/XFixes resource setup, idle no-op snapshots, NON_EMPTY wake-up coalescing, persistent-region snapshot/re-arm, persistent XShm capture of a known pixel, and teardown |
+| `x11-damage-integration` | authenticated-Xvfb XDamage setup, idle no-op snapshots, delta-rectangle coalescing and sparse-root preservation, snapshot/re-arm, persistent XShm capture of a known pixel, and teardown |
 | `x11-cursor-integration` | authenticated-Xvfb XFixes cursor-image capture, ARGB-to-xrdp conversion bounds, cursor-change notification delivery, and non-fatal oversized-cursor fallback |
-| `x11-input-integration` | authenticated-Xvfb XTest keyboard and pointer event delivery to a focused X11 window, including teardown release of held keys/buttons |
+| `x11-input-integration` | authenticated-Xvfb XTest keyboard and pointer event delivery to a focused X11 window, including held-key typematic with duplicate makes and teardown release of held keys/buttons |
 | `module-lifecycle` | C++23 XCB module construction, authenticated-Xvfb connect/reconnect, fd-0 handling, geometry setup, dead-server failure, teardown, and wait-state preservation |
 | `xrdp-loader-smoke` | generated xrdp loading the module through FreeRDP, accepting the initial cursor update, then drawing a known red/blue source marker and asserting that the expected pixel reaches the FreeRDP framebuffer |
 

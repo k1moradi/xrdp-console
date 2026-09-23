@@ -47,6 +47,16 @@ endif()
 if(XRDP_CONSOLE_BUILD_XRDP)
     enable_language(CXX)
     include(cmake/xrdp_dependency.cmake)
+
+    # Refresh at every build so a new commit or clean working tree cannot
+    # leave a stale startup identity in an otherwise up-to-date module.
+    add_custom_target(xrdp-console-build-revision
+        COMMAND ${CMAKE_COMMAND}
+            "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+            "-DOUTPUT=${CMAKE_BINARY_DIR}/generated/build_revision.h"
+            -P "${CMAKE_SOURCE_DIR}/cmake/write_build_revision.cmake"
+        BYPRODUCTS "${CMAKE_BINARY_DIR}/generated/build_revision.h"
+        VERBATIM)
 endif()
 
 # Keep the first-party runtime before the tools so the ownership boundary is

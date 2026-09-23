@@ -1,0 +1,619 @@
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -45,6 +45,8 @@
+ xrdp_mm_chansrv_connect(struct xrdp_mm *self, const char *port);
+ static void
+ xrdp_mm_connect_sm(struct xrdp_mm *self);
++static void
++xrdp_mm_console_planar_scratch_delete(struct xrdp_mm *self);
+ 
+ /*****************************************************************************/
+ static void
+@@ -184,6 +186,7 @@
+ 
+     /* shutdown thread */
+     xrdp_encoder_delete(self->encoder);
++    xrdp_mm_console_planar_scratch_delete(self);
+ 
+     trans_delete(self->sesman_trans);
+     self->sesman_trans = 0;
+@@ -991,6 +994,71 @@
+ 
+ #define GFX_PLANAR_BYTES (32 * 1024)
+ 
++enum
++{
++    XRDP_LEGACY_GFX_MINIMUM_FLUSH_MS = 40,
++    XRDP_CONSOLE_GFX_MINIMUM_FLUSH_MS = 16,
++    XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH = 32,
++    XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH = 128 * 1024
++};
++
++struct xrdp_console_planar_scratch
++{
++    char *pixels;
++    struct stream *compressed;
++    struct stream *temporary;
++};
++
++static void
++xrdp_mm_console_planar_scratch_delete(struct xrdp_mm *self)
++{
++    struct xrdp_console_planar_scratch *scratch;
++
++    scratch = self->console_planar_scratch;
++    if (scratch != NULL)
++    {
++        g_free(scratch->pixels);
++        free_stream(scratch->compressed);
++        free_stream(scratch->temporary);
++        g_free(scratch);
++        self->console_planar_scratch = NULL;
++    }
++}
++
++static struct xrdp_console_planar_scratch *
++xrdp_mm_console_planar_scratch(struct xrdp_mm *self)
++{
++    struct xrdp_console_planar_scratch *scratch;
++
++    scratch = self->console_planar_scratch;
++    if (scratch == NULL)
++    {
++        scratch = (struct xrdp_console_planar_scratch *)
++                  g_malloc(sizeof(*scratch), 1);
++        if (scratch == NULL)
++        {
++            return NULL;
++        }
++        scratch->pixels = g_new(char, GFX_PLANAR_BYTES);
++        make_stream(scratch->compressed);
++        make_stream(scratch->temporary);
++        if (scratch->pixels == NULL || scratch->compressed == NULL ||
++                scratch->temporary == NULL)
++        {
++            g_free(scratch->pixels);
++            free_stream(scratch->compressed);
++            free_stream(scratch->temporary);
++            g_free(scratch);
++            return NULL;
++        }
++        init_stream(scratch->compressed, GFX_PLANAR_BYTES);
++        init_stream(scratch->temporary, GFX_PLANAR_BYTES);
++        self->console_planar_scratch = scratch;
++    }
++
++    return scratch;
++}
++
+ /******************************************************************************/
+ int
+ xrdp_mm_egfx_send_planar_bitmap(struct xrdp_mm *self,
+@@ -1014,6 +1082,11 @@
+     int cx;
+     int cy;
+     int frame_id;
++    int owns_frame;
++    int owns_scratch;
++    int frame_started = 0;
++    struct xrdp_console_planar_scratch *scratch;
++    struct xrdp_rect sent_rect;
+     int rv = 0;
+ 
+     LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_egfx_send_planar_bitmap:");
+@@ -1056,23 +1129,55 @@
+         }
+     }
+     LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_egfx_send_planar_bitmap: cx %d cy %d", cx, cy);
+-    pixels = g_new(char, GFX_PLANAR_BYTES);
+-    make_stream(comp_s);
+-    init_stream(comp_s, GFX_PLANAR_BYTES);
+-    make_stream(temp_s);
+-    init_stream(temp_s, GFX_PLANAR_BYTES);
+-    if (self->wm->console_gfx_frame_id == INT_MAX)
++    owns_scratch = self->code != XRDP_CONSOLE_SESSION_CODE;
++    if (owns_scratch)
+     {
+-        self->wm->console_gfx_frame_id = 0;
++        pixels = g_new(char, GFX_PLANAR_BYTES);
++        make_stream(comp_s);
++        make_stream(temp_s);
++        if (pixels == NULL || comp_s == NULL || temp_s == NULL)
++        {
++            rv = 1;
++            goto cleanup;
++        }
++        init_stream(comp_s, GFX_PLANAR_BYTES);
++        init_stream(temp_s, GFX_PLANAR_BYTES);
++    }
++    else
++    {
++        scratch = xrdp_mm_console_planar_scratch(self);
++        if (scratch == NULL)
++        {
++            rv = 1;
++            goto cleanup;
++        }
++        pixels = scratch->pixels;
++        comp_s = scratch->compressed;
++        temp_s = scratch->temporary;
++        init_stream(comp_s, GFX_PLANAR_BYTES);
++        init_stream(temp_s, GFX_PLANAR_BYTES);
+     }
+-    frame_id = ++self->wm->console_gfx_frame_id;
+ 
+-    if (xrdp_egfx_send_frame_start(self->egfx, frame_id, 0) != 0)
++    owns_frame = !self->console_planar_frame_open;
++    if (owns_frame)
+     {
+-        LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_send_planar_bitmap: "
+-            "xrdp_egfx_send_frame_start error");
+-        rv = 1;
+-        goto cleanup;
++        if (self->wm->console_gfx_frame_id == INT_MAX)
++        {
++            self->wm->console_gfx_frame_id = 0;
++        }
++        frame_id = ++self->wm->console_gfx_frame_id;
++        if (xrdp_egfx_send_frame_start(self->egfx, frame_id, 0) != 0)
++        {
++            LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_send_planar_bitmap: "
++                "xrdp_egfx_send_frame_start error");
++            rv = 1;
++            goto cleanup;
++        }
++        frame_started = 1;
++    }
++    else
++    {
++        frame_id = self->console_planar_frame_id;
+     }
+ 
+     LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_egfx_send_planar_bitmap: left %d top %d right %d "
+@@ -1105,6 +1210,8 @@
+             {
+                 LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_send_planar_bitmap: "
+                     "lines(%d) != bheight(%d) error", lines, bheight);
++                rv = 1;
++                goto cleanup;
+             }
+             else
+             {
+@@ -1126,51 +1233,147 @@
+                     rv = 1;
+                     goto cleanup;
+                 }
++                if (self->code == XRDP_CONSOLE_SESSION_CODE &&
++                        self->console_planar_frame_open)
++                {
++                    sent_rect.left = xindex;
++                    sent_rect.top = yindex;
++                    sent_rect.right = xindex + bwidth;
++                    sent_rect.bottom = yindex + bheight;
++                    if (self->wm->screen_dirty_region != NULL &&
++                            xrdp_region_subtract_rect(
++                                self->wm->screen_dirty_region,
++                                &sent_rect) != 0)
++                    {
++                        rv = 1;
++                        goto cleanup;
++                    }
++                    self->console_planar_pixels_sent += bwidth * bheight;
++                    ++self->console_planar_tiles_sent;
++                }
+             }
+         }
+     }
+-    if (xrdp_egfx_send_frame_end(self->egfx, frame_id) != 0)
++    if (frame_started)
++    {
++        if (xrdp_egfx_send_frame_end(self->egfx, frame_id) != 0)
++        {
++            LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_send_planar_bitmap: "
++                "xrdp_egfx_send_frame_end error");
++            rv = 1;
++        }
++        frame_started = 0;
++    }
++cleanup:
++    if (frame_started && xrdp_egfx_send_frame_end(self->egfx, frame_id) != 0)
+     {
+         LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_send_planar_bitmap: "
+-            "xrdp_egfx_send_frame_end error");
++            "xrdp_egfx_send_frame_end error after partial update");
+         rv = 1;
+     }
+-cleanup:
+-    g_free(pixels);
+-    free_stream(comp_s);
+-    free_stream(temp_s);
++    if (owns_scratch)
++    {
++        g_free(pixels);
++        free_stream(comp_s);
++        free_stream(temp_s);
++    }
+     return rv;
+ }
+ 
+ /*****************************************************************************/
+-/* Send exact dirty rectangles for the direct console. The legacy GFX path
+- * intentionally retains its historical single-bounds behavior. */
++/* Send a bounded snapshot of exact dirty rectangles in the active Console
++ * frame. Successfully sent Planar tiles are removed from the global dirty
++ * region by xrdp_mm_egfx_send_planar_bitmap(). */
+ static int
+ xrdp_mm_egfx_send_planar_region(struct xrdp_mm *self,
+                                 struct xrdp_bitmap *bitmap,
+                                 struct xrdp_region *region,
+                                 int surface_id, int x, int y)
+ {
++    struct xrdp_region *snapshot;
++    struct xrdp_rect current;
+     int index = 0;
+-    int rv;
++    int rv = 0;
+     struct xrdp_rect rect;
++    int rows;
++    int remaining_pixels;
++    int remaining_height;
+ 
+     if (region == NULL || !xrdp_region_not_empty(region))
+     {
+         return 0;
+     }
+ 
++    if (!self->console_planar_frame_open)
++    {
++        return 1;
++    }
++
++    snapshot = xrdp_region_create(self->wm);
++    if (snapshot == NULL)
++    {
++        return 1;
++    }
+     while (xrdp_region_get_rect(region, index, &rect) == 0)
+     {
+-        rv = xrdp_mm_egfx_send_planar_bitmap(self, bitmap, &rect,
+-                                             surface_id, x, y);
+-        if (rv != 0)
++        if (xrdp_region_add_rect(snapshot, &rect) != 0)
+         {
+-            return rv;
++            xrdp_region_delete(snapshot);
++            return 1;
+         }
+         ++index;
+     }
+-    return 0;
++
++    index = 0;
++    while (xrdp_region_get_rect(snapshot, index, &current) == 0)
++    {
++        if (self->console_planar_rectangles_sent >=
++                XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH)
++        {
++            break;
++        }
++
++        ++self->console_planar_rectangles_sent;
++        remaining_height = current.bottom - current.top;
++        while (remaining_height > 0)
++        {
++            remaining_pixels =
++                XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH -
++                self->console_planar_pixels_sent;
++            rows = remaining_pixels / (current.right - current.left);
++            if (rows < 1)
++            {
++                if (self->console_planar_pixels_sent != 0)
++                {
++                    goto done;
++                }
++                /* At most one row may exceed the nominal limit. */
++                rows = 1;
++            }
++            rows = MIN(rows, remaining_height);
++            rect.left = current.left;
++            rect.top = current.bottom - remaining_height;
++            rect.right = current.right;
++            rect.bottom = rect.top + rows;
++            rv = xrdp_mm_egfx_send_planar_bitmap(
++                     self, bitmap, &rect, surface_id, x, y);
++            if (rv != 0)
++            {
++                goto done;
++            }
++            remaining_height -= rows;
++            if (self->console_planar_pixels_sent >=
++                    XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH)
++            {
++                goto done;
++            }
++        }
++        ++index;
++    }
++
++done:
++    xrdp_region_delete(snapshot);
++    return rv;
+ }
+ 
+ /******************************************************************************/
+@@ -3631,7 +3834,6 @@
+     }
+ }
+ 
+-#define MIN_MS_BETWEEN_FRAMES 40
+ #define MIN_MS_TO_WAIT_FOR_MORE_UPDATES 0
+ /*****************************************************************************/
+ int
+@@ -3683,13 +3885,16 @@
+     {
+         if (xrdp_region_not_empty(self->wm->screen_dirty_region))
+         {
++            int minimum_flush_ms = self->code == XRDP_CONSOLE_SESSION_CODE ?
++                                   XRDP_CONSOLE_GFX_MINIMUM_FLUSH_MS :
++                                   XRDP_LEGACY_GFX_MINIMUM_FLUSH_MS;
+             int now = g_time3();
+             int next_screen_draw_time = self->wm->last_screen_draw_time +
+-                                        MIN_MS_BETWEEN_FRAMES;
++                                        minimum_flush_ms;
+             int diff = next_screen_draw_time - now;
+             int ltimeout = *timeout;
+             diff = MAX(diff, MIN_MS_TO_WAIT_FOR_MORE_UPDATES);
+-            diff = MIN(diff, MIN_MS_BETWEEN_FRAMES);
++            diff = MIN(diff, minimum_flush_ms);
+             LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_get_wait_objs:"
+                       " not empty diff %d", diff);
+             if ((ltimeout < 0) || (ltimeout > diff))
+@@ -3922,6 +4127,184 @@
+ }
+ 
+ /*****************************************************************************/
++static struct xrdp_region *
++xrdp_mm_copy_region(struct xrdp_wm *wm, struct xrdp_region *source)
++{
++    struct xrdp_region *copy;
++    struct xrdp_rect rect;
++    int index = 0;
++
++    copy = xrdp_region_create(wm);
++    if (copy == NULL)
++    {
++        return NULL;
++    }
++    while (xrdp_region_get_rect(source, index, &rect) == 0)
++    {
++        if (xrdp_region_add_rect(copy, &rect) != 0)
++        {
++            xrdp_region_delete(copy);
++            return NULL;
++        }
++        ++index;
++    }
++    return copy;
++}
++
++static int
++xrdp_mm_restore_console_dirty_region(struct xrdp_mm *self,
++                                     struct xrdp_region *snapshot)
++{
++    struct xrdp_rect rect;
++    int index = 0;
++    int rv = 0;
++
++    if (self->wm->screen_dirty_region == NULL)
++    {
++        self->wm->screen_dirty_region = xrdp_region_create(self->wm);
++    }
++    if (self->wm->screen_dirty_region == NULL)
++    {
++        return 1;
++    }
++    while (xrdp_region_get_rect(snapshot, index, &rect) == 0)
++    {
++        if (xrdp_region_add_rect(self->wm->screen_dirty_region, &rect) != 0)
++        {
++            rv = 1;
++        }
++        ++index;
++    }
++    return rv;
++}
++
++static int
++xrdp_mm_draw_dirty_console(struct xrdp_mm *self)
++{
++    struct xrdp_region *snapshot;
++    struct xrdp_region *monitor_region;
++    struct xrdp_rect monitor_rect;
++    struct monitor_info *monitor;
++    int monitor_count;
++    int monitor_index;
++    int frame_id;
++    int rv = 0;
++    int end_rv;
++
++    if (self->wm->screen_dirty_region == NULL ||
++            !xrdp_region_not_empty(self->wm->screen_dirty_region))
++    {
++        return 0;
++    }
++
++    snapshot = xrdp_mm_copy_region(self->wm,
++                                   self->wm->screen_dirty_region);
++    if (snapshot == NULL)
++    {
++        return 1;
++    }
++    if (xrdp_mm_console_planar_scratch(self) == NULL)
++    {
++        xrdp_region_delete(snapshot);
++        return 1;
++    }
++
++    if (self->wm->console_gfx_frame_id == INT_MAX)
++    {
++        self->wm->console_gfx_frame_id = 0;
++    }
++    frame_id = ++self->wm->console_gfx_frame_id;
++    if (xrdp_egfx_send_frame_start(self->egfx, frame_id, 0) != 0)
++    {
++        xrdp_region_delete(snapshot);
++        return 1;
++    }
++
++    self->console_planar_frame_open = 1;
++    self->console_planar_frame_id = frame_id;
++    self->console_planar_pixels_sent = 0;
++    self->console_planar_rectangles_sent = 0;
++    self->console_planar_tiles_sent = 0;
++
++    monitor_count = self->wm->client_info->display_sizes.monitorCount;
++    if (monitor_count < 1)
++    {
++        rv = xrdp_mm_egfx_send_planar_region(
++                 self, self->wm->screen, self->wm->screen_dirty_region,
++                 self->egfx->surface_id, 0, 0);
++    }
++    else
++    {
++        for (monitor_index = 0; monitor_index < monitor_count;
++             ++monitor_index)
++        {
++            monitor_region = xrdp_mm_copy_region(
++                                 self->wm, self->wm->screen_dirty_region);
++            if (monitor_region == NULL)
++            {
++                rv = 1;
++                break;
++            }
++            monitor = self->wm->client_info->display_sizes.minfo_wm +
++                      monitor_index;
++            monitor_rect.left = monitor->left;
++            monitor_rect.top = monitor->top;
++            monitor_rect.right = monitor->right + 1;
++            monitor_rect.bottom = monitor->bottom + 1;
++            if (xrdp_region_intersect_rect(monitor_region,
++                                           &monitor_rect) != 0)
++            {
++                rv = 1;
++            }
++            else
++            {
++                rv = xrdp_mm_egfx_send_planar_region(
++                         self, self->wm->screen, monitor_region,
++                         monitor_index, monitor->left, monitor->top);
++            }
++            xrdp_region_delete(monitor_region);
++            if (rv != 0 || self->console_planar_pixels_sent >=
++                    XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH ||
++                    self->console_planar_rectangles_sent >=
++                    XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH)
++            {
++                break;
++            }
++        }
++    }
++
++    self->console_planar_frame_open = 0;
++    end_rv = xrdp_egfx_send_frame_end(self->egfx, frame_id);
++    if (end_rv != 0)
++    {
++        if (xrdp_mm_restore_console_dirty_region(self, snapshot) != 0)
++        {
++            LOG(LOG_LEVEL_ERROR,
++                "xrdp_mm_draw_dirty_console: failed to restore all dirty "
++                "rectangles after GFX frame failure");
++        }
++        rv = 1;
++    }
++
++    if (self->console_planar_batch_log_count == 0)
++    {
++        LOG(LOG_LEVEL_INFO, "XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 enabled");
++    }
++    if (self->console_planar_batch_log_count < 64)
++    {
++        LOG(LOG_LEVEL_DEBUG,
++            "XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 frame=%d starts=1 ends=%d "
++            "rects=%d tiles=%d pixels=%d pending=%d",
++            frame_id, end_rv == 0, self->console_planar_rectangles_sent,
++            self->console_planar_tiles_sent,
++            self->console_planar_pixels_sent,
++            xrdp_region_not_empty(self->wm->screen_dirty_region));
++    }
++    ++self->console_planar_batch_log_count;
++    xrdp_region_delete(snapshot);
++    return rv;
++}
++
+ static int
+ xrdp_mm_draw_dirty(struct xrdp_mm *self)
+ {
+@@ -3937,6 +4320,10 @@
+     int rv = 0;
+ 
+     LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_draw_dirty:");
++    if (self->code == XRDP_CONSOLE_SESSION_CODE)
++    {
++        return xrdp_mm_draw_dirty_console(self);
++    }
+     count = self->wm->client_info->display_sizes.monitorCount;
+     if (count < 1)
+     {
+@@ -4096,16 +4483,24 @@
+     {
+         if (xrdp_region_not_empty(self->wm->screen_dirty_region))
+         {
++            int minimum_flush_ms = self->code == XRDP_CONSOLE_SESSION_CODE ?
++                                   XRDP_CONSOLE_GFX_MINIMUM_FLUSH_MS :
++                                   XRDP_LEGACY_GFX_MINIMUM_FLUSH_MS;
+             int now = g_time3();
+             int diff = now - self->wm->last_screen_draw_time;
+             LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_check_wait_objs: not empty diff %d", diff);
+-            if ((diff < 0) || (diff >= 40))
++            if ((diff < 0) || (diff >= minimum_flush_ms))
+             {
+                 if (self->egfx_up)
+                 {
+                     rv = xrdp_mm_draw_dirty(self);
+-                    xrdp_region_delete(self->wm->screen_dirty_region);
+-                    self->wm->screen_dirty_region = NULL;
++                    if (self->code != XRDP_CONSOLE_SESSION_CODE ||
++                            !xrdp_region_not_empty(
++                                self->wm->screen_dirty_region))
++                    {
++                        xrdp_region_delete(self->wm->screen_dirty_region);
++                        self->wm->screen_dirty_region = NULL;
++                    }
+                     self->wm->last_screen_draw_time = now;
+                 }
+                 else
+--- a/xrdp/xrdp_types.h
++++ b/xrdp/xrdp_types.h
+@@ -57,6 +57,7 @@
+ 
+ struct source_info;
+ struct list16;
++struct xrdp_console_planar_scratch;
+ 
+ /* lib */
+ struct xrdp_mod
+@@ -441,6 +442,14 @@
+     struct xrdp_egfx *egfx;
+     int egfx_up;
+     enum xrdp_egfx_flags egfx_flags;
++    /* Reused only by the first-party Console GFX Planar fallback. */
++    struct xrdp_console_planar_scratch *console_planar_scratch;
++    int console_planar_frame_open;
++    int console_planar_batch_log_count;
++    int console_planar_pixels_sent;
++    int console_planar_rectangles_sent;
++    int console_planar_tiles_sent;
++    int console_planar_frame_id;
+     int gfx_delay_autologin;
+     int mod_uses_wm_screen_for_gfx;
+     /* Whether a working h.264 library is loaded.
