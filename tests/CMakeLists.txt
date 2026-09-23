@@ -9,6 +9,7 @@ set(PYTHON_SOURCES
     ${CMAKE_SOURCE_DIR}/tools/diagnostics/xrdp_console_episode_sampler.py
     ${CMAKE_SOURCE_DIR}/tools/diagnostics/vscode_gpu_probe.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_display_power.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_direct_presentation_geometry.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_memory_pressure.py)
 
 if(TARGET xrdp-console)
@@ -41,6 +42,12 @@ add_test(NAME display-power-unit
     COMMAND ${Python3_EXECUTABLE} -B
     ${CMAKE_CURRENT_SOURCE_DIR}/test_display_power.py)
 set_tests_properties(display-power-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+add_test(NAME direct-presentation-geometry-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_direct_presentation_geometry.py)
+set_tests_properties(direct-presentation-geometry-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
 add_test(NAME measurement-profile-unit
@@ -421,6 +428,19 @@ if(TARGET xrdp-console)
         set_tests_properties(xrdp-loader-gfx-planar-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 30)
+        add_test(NAME xrdp-loader-gfx-planar-scaled-smoke
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11vnc-latency-stimulus>
+            1512 949 --gfx-planar)
+        set_tests_properties(xrdp-loader-gfx-planar-scaled-smoke PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 30)
         add_test(NAME xrdp-loader-rfx-smoke
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
@@ -465,6 +485,7 @@ if(TARGET xrdp-console)
             xrdp-loader-scaled-smoke
             xrdp-loader-downscaled-smoke
             xrdp-loader-gfx-planar-smoke
+            xrdp-loader-gfx-planar-scaled-smoke
             xrdp-loader-rfx-smoke
             xrdp-loader-rfx-scaled-smoke
             xrdp-loader-rfx-downscaled-smoke

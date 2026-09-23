@@ -16,6 +16,8 @@ import tempfile
 import time
 from pathlib import Path
 
+PLANAR_PIXEL_LIMIT = 128 * 1024
+
 
 def free_tcp_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
@@ -189,7 +191,10 @@ def assert_client_pixel(client_display: str,
                         window_title: str, pixel_probe: Path,
                         log_path: Path, stdout_path: Path,
                         probe_x: int, probe_y: int,
-                        assert_sparse_planar_batch: bool = False) -> None:
+                        assert_sparse_planar_batch: bool = False,
+                        scaled_presentation: bool = False,
+                        presentation_width: int = 1024,
+                        presentation_height: int = 768) -> None:
     """Draw a known source color and require it in the FreeRDP framebuffer."""
     window = find_window(client_display, window_title, 8.0)
     probe: subprocess.Popen[object] | None = None
@@ -297,6 +302,9 @@ def assert_client_pixel(client_display: str,
                     "initial full-screen Planar damage did not drain before "
                     f"the sparse test:\n{xrdp_log_excerpt(log_path)}")
 
+            sparse_baseline_frame = int(
+                re.search(r"\bframe=(\d+)", last_idle_summary).group(1))
+
             try:
                 stimulus.stdin.write(b"sparse\n")
                 stimulus.stdin.flush()
@@ -308,13 +316,34 @@ def assert_client_pixel(client_display: str,
 
             deadline = time.monotonic() + 5.0
             batch_pattern = re.compile(
-                r"XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 .*starts=1 ends=1 "
-                r"rects=2 tiles=2 pixels=800 pending=0")
+                r"XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 frame=(\d+) "
+                r"starts=1 ends=1 rects=(\d+) tiles=(\d+) "
+                r"pixels=(\d+) pending=0")
+            matched_batch = False
             while time.monotonic() < deadline:
-                if batch_pattern.search(read_text(log_path)) is not None:
+                for line in read_text(log_path).splitlines():
+                    match = batch_pattern.search(line)
+                    if (match is None or
+                            int(match.group(1)) <= sparse_baseline_frame):
+                        continue
+                    rects, tiles, pixels = (
+                        int(match.group(index)) for index in (2, 3, 4))
+                    sparse_pixels_valid = (
+                        0 < pixels <= PLANAR_PIXEL_LIMIT and
+                        pixels <
+                        (presentation_width * presentation_height) // 8)
+                    if scaled_presentation:
+                        matched_batch = (
+                            rects == 2 and tiles >= 2 and sparse_pixels_valid)
+                    else:
+                        matched_batch = (
+                            rects == 2 and tiles == 2 and pixels == 800)
+                    if matched_batch:
+                        break
+                if matched_batch:
                     break
                 time.sleep(0.05)
-            else:
+            if not matched_batch:
                 summaries = "\n".join(
                     line for line in read_text(log_path).splitlines()
                     if "XRDP_CONSOLE_GFX_PLANAR_BATCH_V1" in line)
@@ -322,9 +351,9 @@ def assert_client_pixel(client_display: str,
                     line for line in read_text(stdout_path).splitlines()
                     if "DAMAGE_" in line)
                 raise AssertionError(
-                    "two sparse 20x20 updates were not emitted as one exact "
-                    "Planar frame (expected starts=1 ends=1 rects=2 "
-                    f"tiles=2 pixels=800 pending=0):\n{summaries}\n"
+                    "two sparse 20x20 updates did not produce one bounded "
+                    "Planar frame (expected two rects, <=128 Ki pixels, "
+                    f"pending=0):\n{summaries}\n"
                     f"{damage_debug}\n"
                     f"{xrdp_log_excerpt(log_path)}")
     finally:
@@ -356,7 +385,7 @@ def xrdp_log_excerpt(path: Path) -> str:
     return text[-12000:]
 
 
-def display_is_usable() -> bool:
+def display_is_usable(minimum_width: int, minimum_height: int) -> bool:
     display = os.environ.get("DISPLAY")
     if not display:
         return False
@@ -373,18 +402,22 @@ def display_is_usable() -> bool:
         )
         if result.returncode != 0:
             return False
-        return any(
-            line.strip().startswith("dimensions:") and
-            line.split()[1] == "1024x768"
-            for line in result.stdout.splitlines()
-            if len(line.split()) > 1
-        )
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) < 2 or fields[0] != "dimensions:":
+                continue
+            width_text, separator, height_text = fields[1].partition("x")
+            if not separator:
+                continue
+            return (int(width_text) >= minimum_width and
+                    int(height_text) >= minimum_height)
+        return False
     except (OSError, subprocess.TimeoutExpired):
         return False
 
 
-def ensure_test_display() -> None:
-    if display_is_usable():
+def ensure_test_display(minimum_width: int, minimum_height: int) -> None:
+    if display_is_usable(minimum_width, minimum_height):
         return
 
     xvfb_run = shutil.which("xvfb-run")
@@ -398,7 +431,7 @@ def ensure_test_display() -> None:
             xvfb_run,
             "-a",
             "-s",
-            "-screen 0 1024x768x24",
+            f"-screen 0 {minimum_width}x{minimum_height}x24",
             sys.executable,
             "-B",
             *sys.argv,
@@ -429,14 +462,6 @@ def main() -> int:
             "[--rfx|--gfx-planar]"
         )
 
-    ensure_test_display()
-
-    module_path = Path(arguments[0]).resolve()
-    xrdp_path = Path(arguments[1]).resolve()
-    install_root = Path(arguments[2]).resolve()
-    freerdp_path = Path(arguments[3]).resolve()
-    pixel_probe = Path(arguments[4]).resolve()
-    stimulus_path = Path(arguments[5]).resolve()
     presentation_width = 1024
     presentation_height = 768
     if len(arguments) == 8:
@@ -447,6 +472,15 @@ def main() -> int:
             raise AssertionError("presentation geometry must be numeric") from error
         if presentation_width <= 0 or presentation_height <= 0:
             raise AssertionError("presentation geometry must be positive")
+
+    ensure_test_display(presentation_width, presentation_height)
+
+    module_path = Path(arguments[0]).resolve()
+    xrdp_path = Path(arguments[1]).resolve()
+    install_root = Path(arguments[2]).resolve()
+    freerdp_path = Path(arguments[3]).resolve()
+    pixel_probe = Path(arguments[4]).resolve()
+    stimulus_path = Path(arguments[5]).resolve()
     probe_x, probe_y = presentation_probe_point(
         presentation_width, presentation_height)
     window_title = f"xrdp-console-loader-{os.getpid()}"
@@ -612,7 +646,12 @@ password=smoke
                         os.environ["DISPLAY"], stimulus, window_title,
                         pixel_probe, log_path, stdout_path,
                         probe_x, probe_y,
-                        assert_sparse_planar_batch=gfx_planar_mode)
+                        assert_sparse_planar_batch=gfx_planar_mode,
+                        scaled_presentation=(
+                            presentation_width != 1024 or
+                            presentation_height != 768),
+                        presentation_width=presentation_width,
+                        presentation_height=presentation_height)
         finally:
             stop_process(client)
             stop_process(server)

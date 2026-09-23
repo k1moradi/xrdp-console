@@ -220,6 +220,25 @@ def direct_graphics_request(transport: str) -> DirectGraphicsRequest:
     raise ValueError(f"unsupported direct graphics transport: {transport!r}")
 
 
+def resolve_direct_presentation_geometry(
+        requested_width: int, requested_height: int,
+        source_width: int, source_height: int,
+        dynamic_resizing: bool,
+        allow_scaled_presentation: bool) -> tuple[int, int]:
+    """Keep explicit presentation geometry unless fixed-size mode forbids it."""
+    if dynamic_resizing or allow_scaled_presentation:
+        return requested_width, requested_height
+    return source_width, source_height
+
+
+def effective_gfx_state(backend: str, direct_transport: str,
+                        disable_gfx_for_vnc: bool) -> str:
+    if backend == "direct-x11":
+        return ("required-planar"
+                if direct_transport == "gfx-planar" else "disabled")
+    return "disabled" if disable_gfx_for_vnc else "requested"
+
+
 @dataclass(frozen=True)
 class X11DisplayPowerState:
     saver_timeout_seconds: int
@@ -3943,6 +3962,11 @@ def main() -> int:
     parser.add_argument("--direct-dynamic-resizing", action="store_true",
                         help=("enable dynamic monitor resizing for the direct-X11 "
                               "profile; use with explicit client dimensions"))
+    parser.add_argument(
+        "--direct-allow-scaled-presentation",
+        action="store_true",
+        help=("allow initial RDP presentation geometry to differ from the "
+              "physical X11 source without enabling dynamic resize"))
     parser.add_argument("--client-display", type=int, default=99)
     parser.add_argument("--client-width", type=int, default=1366,
                         help="isolated RDP client width (default: 1366)")
@@ -4019,8 +4043,10 @@ def main() -> int:
     elif args.direct_graphics_transport != "rfx":
         parser.error(
             "--direct-graphics-transport requires --backend direct-x11")
-    elif args.direct_dynamic_resizing:
-        parser.error("--direct-dynamic-resizing requires --backend direct-x11")
+    elif (args.direct_dynamic_resizing or
+          args.direct_allow_scaled_presentation):
+        parser.error(
+            "direct resize/presentation options require --backend direct-x11")
     if not 0 <= args.memory_pressure_mib <= MAXIMUM_MEMORY_PRESSURE_MIB:
         parser.error(
             "--memory-pressure-mib must be between 0 and "
@@ -4136,15 +4162,19 @@ def main() -> int:
         )
         if args.backend == "direct-x11":
             source_width, source_height = display_geometry(args.display, auth)
-            if (not args.direct_dynamic_resizing and
-                    (args.client_width, args.client_height) !=
-                    (source_width, source_height)):
+            requested_geometry = (args.client_width, args.client_height)
+            resolved_geometry = resolve_direct_presentation_geometry(
+                *requested_geometry,
+                source_width,
+                source_height,
+                args.direct_dynamic_resizing,
+                args.direct_allow_scaled_presentation)
+            if resolved_geometry != requested_geometry:
                 print(
                     f"direct-x11: forcing client geometry to physical "
                     f"{source_width}x{source_height}"
                 )
-                args.client_width = source_width
-                args.client_height = source_height
+            args.client_width, args.client_height = resolved_geometry
         pressure_session.start()
         ISOLATED.mkdir(parents=True, exist_ok=True)
         runtime = Path(tempfile.mkdtemp(prefix="xrdp-vnc-gpu-", dir=ISOLATED))
@@ -4155,9 +4185,9 @@ def main() -> int:
             direct_graphics_request(
                 args.direct_graphics_transport).expected_negotiation
             if args.backend == "direct-x11" else args.pipeline.upper())
-        effective_gfx = (
-            "disabled" if args.backend == "direct-x11" or
-            args.disable_gfx_for_vnc else "requested")
+        effective_gfx = effective_gfx_state(
+            args.backend, args.direct_graphics_transport,
+            args.disable_gfx_for_vnc)
         effective_resizing = (
             "enabled" if args.backend == "direct-x11" and
             args.direct_dynamic_resizing else

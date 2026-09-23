@@ -17,14 +17,14 @@
  
      trans_delete(self->sesman_trans);
      self->sesman_trans = 0;
-@@ -991,6 +994,71 @@
+@@ -991,6 +994,89 @@
  
  #define GFX_PLANAR_BYTES (32 * 1024)
  
 +enum
 +{
 +    XRDP_LEGACY_GFX_MINIMUM_FLUSH_MS = 40,
-+    XRDP_CONSOLE_GFX_MINIMUM_FLUSH_MS = 16,
++    XRDP_CONSOLE_GFX_MINIMUM_FLUSH_MS = 0,
 +    XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH = 32,
 +    XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH = 128 * 1024
 +};
@@ -35,6 +35,24 @@
 +    struct stream *compressed;
 +    struct stream *temporary;
 +};
++
++struct xrdp_console_planar_batch
++{
++    struct xrdp_rect committed[
++        XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH];
++    int committed_count;
++    int pixels_sent;
++    int rectangles_sent;
++    int tiles_sent;
++};
++
++static int
++xrdp_mm_gfx_minimum_flush_ms(const struct xrdp_mm *self)
++{
++    return self->code == XRDP_CONSOLE_SESSION_CODE ?
++           XRDP_CONSOLE_GFX_MINIMUM_FLUSH_MS :
++           XRDP_LEGACY_GFX_MINIMUM_FLUSH_MS;
++}
 +
 +static void
 +xrdp_mm_console_planar_scratch_delete(struct xrdp_mm *self)
@@ -89,7 +107,7 @@
  /******************************************************************************/
  int
  xrdp_mm_egfx_send_planar_bitmap(struct xrdp_mm *self,
-@@ -1014,6 +1082,11 @@
+@@ -1014,6 +1100,10 @@
      int cx;
      int cy;
      int frame_id;
@@ -97,11 +115,10 @@
 +    int owns_scratch;
 +    int frame_started = 0;
 +    struct xrdp_console_planar_scratch *scratch;
-+    struct xrdp_rect sent_rect;
      int rv = 0;
  
      LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_egfx_send_planar_bitmap:");
-@@ -1056,23 +1129,55 @@
+@@ -1056,23 +1146,55 @@
          }
      }
      LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_egfx_send_planar_bitmap: cx %d cy %d", cx, cy);
@@ -170,7 +187,7 @@
      }
  
      LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_egfx_send_planar_bitmap: left %d top %d right %d "
-@@ -1105,6 +1210,8 @@
+@@ -1105,6 +1227,8 @@
              {
                  LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_send_planar_bitmap: "
                      "lines(%d) != bheight(%d) error", lines, bheight);
@@ -179,27 +196,14 @@
              }
              else
              {
-@@ -1126,51 +1233,147 @@
+@@ -1126,51 +1250,132 @@
                      rv = 1;
                      goto cleanup;
                  }
 +                if (self->code == XRDP_CONSOLE_SESSION_CODE &&
-+                        self->console_planar_frame_open)
++                        self->console_planar_batch != NULL)
 +                {
-+                    sent_rect.left = xindex;
-+                    sent_rect.top = yindex;
-+                    sent_rect.right = xindex + bwidth;
-+                    sent_rect.bottom = yindex + bheight;
-+                    if (self->wm->screen_dirty_region != NULL &&
-+                            xrdp_region_subtract_rect(
-+                                self->wm->screen_dirty_region,
-+                                &sent_rect) != 0)
-+                    {
-+                        rv = 1;
-+                        goto cleanup;
-+                    }
-+                    self->console_planar_pixels_sent += bwidth * bheight;
-+                    ++self->console_planar_tiles_sent;
++                    ++self->console_planar_batch->tiles_sent;
 +                }
              }
          }
@@ -239,109 +243,108 @@
  /*****************************************************************************/
 -/* Send exact dirty rectangles for the direct console. The legacy GFX path
 - * intentionally retains its historical single-bounds behavior. */
-+/* Send a bounded snapshot of exact dirty rectangles in the active Console
-+ * frame. Successfully sent Planar tiles are removed from the global dirty
-+ * region by xrdp_mm_egfx_send_planar_bitmap(). */
++/* Send bounded exact dirty rectangles in the active Console frame. Dirty
++ * state is committed only after the enclosing frame ends successfully. */
  static int
  xrdp_mm_egfx_send_planar_region(struct xrdp_mm *self,
                                  struct xrdp_bitmap *bitmap,
                                  struct xrdp_region *region,
++                                const struct xrdp_rect *clip_rect,
                                  int surface_id, int x, int y)
  {
-+    struct xrdp_region *snapshot;
 +    struct xrdp_rect current;
++    struct xrdp_rect clipped;
++    struct xrdp_rect stripe;
++    struct xrdp_console_planar_batch *batch;
      int index = 0;
 -    int rv;
-+    int rv = 0;
-     struct xrdp_rect rect;
+-    struct xrdp_rect rect;
++    int width;
++    int height;
 +    int rows;
 +    int remaining_pixels;
-+    int remaining_height;
++    int rv = 0;
  
      if (region == NULL || !xrdp_region_not_empty(region))
      {
          return 0;
      }
  
-+    if (!self->console_planar_frame_open)
-+    {
-+        return 1;
-+    }
-+
-+    snapshot = xrdp_region_create(self->wm);
-+    if (snapshot == NULL)
-+    {
-+        return 1;
-+    }
-     while (xrdp_region_get_rect(region, index, &rect) == 0)
+-    while (xrdp_region_get_rect(region, index, &rect) == 0)
++    batch = self->console_planar_batch;
++    if (!self->console_planar_frame_open || batch == NULL)
      {
 -        rv = xrdp_mm_egfx_send_planar_bitmap(self, bitmap, &rect,
 -                                             surface_id, x, y);
--        if (rv != 0)
-+        if (xrdp_region_add_rect(snapshot, &rect) != 0)
-         {
--            return rv;
-+            xrdp_region_delete(snapshot);
-+            return 1;
-         }
-         ++index;
-     }
--    return 0;
++        return 1;
++    }
 +
-+    index = 0;
-+    while (xrdp_region_get_rect(snapshot, index, &current) == 0)
++    /* The region is stable until FRAME_END. Examine it in place; only
++     * successfully transmitted stripes enter the bounded commit list. */
++    while (batch->committed_count <
++                XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH &&
++            batch->pixels_sent < XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH &&
++            xrdp_region_get_rect(region, index, &current) == 0)
 +    {
-+        if (self->console_planar_rectangles_sent >=
-+                XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH)
++        ++index;
++        clipped = current;
++        if (clip_rect != NULL)
++        {
++            clipped.left = MAX(clipped.left, clip_rect->left);
++            clipped.top = MAX(clipped.top, clip_rect->top);
++            clipped.right = MIN(clipped.right, clip_rect->right);
++            clipped.bottom = MIN(clipped.bottom, clip_rect->bottom);
++        }
++
++        width = clipped.right - clipped.left;
++        height = clipped.bottom - clipped.top;
++        if (width <= 0 || height <= 0)
++        {
++            continue;
++        }
++
++        remaining_pixels =
++            XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH - batch->pixels_sent;
++        rows = remaining_pixels / width;
++        if (rows < 1)
++        {
++            if (batch->pixels_sent != 0)
++            {
++                break;
++            }
++            /* At most one source row may exceed the nominal pixel quantum. */
++            rows = 1;
++        }
++        rows = MIN(rows, height);
++        stripe = clipped;
++        stripe.bottom = stripe.top + rows;
++        rv = xrdp_mm_egfx_send_planar_bitmap(
++                 self, bitmap, &stripe, surface_id, x, y);
+         if (rv != 0)
+         {
+             return rv;
+         }
+-        ++index;
++
++        batch->committed[batch->committed_count++] = stripe;
++        batch->pixels_sent += width * rows;
++        ++batch->rectangles_sent;
++
++        /* One stripe per source rectangle bounds transaction bookkeeping;
++         * remaining rows stay dirty for the next immediate quantum. */
++        if (rows < height ||
++                batch->pixels_sent >=
++                    XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH)
 +        {
 +            break;
 +        }
-+
-+        ++self->console_planar_rectangles_sent;
-+        remaining_height = current.bottom - current.top;
-+        while (remaining_height > 0)
-+        {
-+            remaining_pixels =
-+                XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH -
-+                self->console_planar_pixels_sent;
-+            rows = remaining_pixels / (current.right - current.left);
-+            if (rows < 1)
-+            {
-+                if (self->console_planar_pixels_sent != 0)
-+                {
-+                    goto done;
-+                }
-+                /* At most one row may exceed the nominal limit. */
-+                rows = 1;
-+            }
-+            rows = MIN(rows, remaining_height);
-+            rect.left = current.left;
-+            rect.top = current.bottom - remaining_height;
-+            rect.right = current.right;
-+            rect.bottom = rect.top + rows;
-+            rv = xrdp_mm_egfx_send_planar_bitmap(
-+                     self, bitmap, &rect, surface_id, x, y);
-+            if (rv != 0)
-+            {
-+                goto done;
-+            }
-+            remaining_height -= rows;
-+            if (self->console_planar_pixels_sent >=
-+                    XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH)
-+            {
-+                goto done;
-+            }
-+        }
-+        ++index;
-+    }
-+
-+done:
-+    xrdp_region_delete(snapshot);
+     }
+-    return 0;
 +    return rv;
  }
  
  /******************************************************************************/
-@@ -3631,7 +3834,6 @@
+@@ -3631,7 +3836,6 @@
      }
  }
  
@@ -349,13 +352,11 @@
  #define MIN_MS_TO_WAIT_FOR_MORE_UPDATES 0
  /*****************************************************************************/
  int
-@@ -3683,13 +3885,16 @@
+@@ -3683,13 +3887,14 @@
      {
          if (xrdp_region_not_empty(self->wm->screen_dirty_region))
          {
-+            int minimum_flush_ms = self->code == XRDP_CONSOLE_SESSION_CODE ?
-+                                   XRDP_CONSOLE_GFX_MINIMUM_FLUSH_MS :
-+                                   XRDP_LEGACY_GFX_MINIMUM_FLUSH_MS;
++            int minimum_flush_ms = xrdp_mm_gfx_minimum_flush_ms(self);
              int now = g_time3();
              int next_screen_draw_time = self->wm->last_screen_draw_time +
 -                                        MIN_MS_BETWEEN_FRAMES;
@@ -368,73 +369,24 @@
              LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_get_wait_objs:"
                        " not empty diff %d", diff);
              if ((ltimeout < 0) || (ltimeout > diff))
-@@ -3922,6 +4127,184 @@
- }
+@@ -3923,6 +4128,162 @@
  
  /*****************************************************************************/
-+static struct xrdp_region *
-+xrdp_mm_copy_region(struct xrdp_wm *wm, struct xrdp_region *source)
-+{
-+    struct xrdp_region *copy;
-+    struct xrdp_rect rect;
-+    int index = 0;
-+
-+    copy = xrdp_region_create(wm);
-+    if (copy == NULL)
-+    {
-+        return NULL;
-+    }
-+    while (xrdp_region_get_rect(source, index, &rect) == 0)
-+    {
-+        if (xrdp_region_add_rect(copy, &rect) != 0)
-+        {
-+            xrdp_region_delete(copy);
-+            return NULL;
-+        }
-+        ++index;
-+    }
-+    return copy;
-+}
-+
-+static int
-+xrdp_mm_restore_console_dirty_region(struct xrdp_mm *self,
-+                                     struct xrdp_region *snapshot)
-+{
-+    struct xrdp_rect rect;
-+    int index = 0;
-+    int rv = 0;
-+
-+    if (self->wm->screen_dirty_region == NULL)
-+    {
-+        self->wm->screen_dirty_region = xrdp_region_create(self->wm);
-+    }
-+    if (self->wm->screen_dirty_region == NULL)
-+    {
-+        return 1;
-+    }
-+    while (xrdp_region_get_rect(snapshot, index, &rect) == 0)
-+    {
-+        if (xrdp_region_add_rect(self->wm->screen_dirty_region, &rect) != 0)
-+        {
-+            rv = 1;
-+        }
-+        ++index;
-+    }
-+    return rv;
-+}
-+
-+static int
+ static int
 +xrdp_mm_draw_dirty_console(struct xrdp_mm *self)
 +{
-+    struct xrdp_region *snapshot;
-+    struct xrdp_region *monitor_region;
++    struct xrdp_console_planar_batch batch = {0};
 +    struct xrdp_rect monitor_rect;
++    struct xrdp_rect full_screen;
++    struct xrdp_rect stale_rect;
 +    struct monitor_info *monitor;
 +    int monitor_count;
 +    int monitor_index;
 +    int frame_id;
 +    int rv = 0;
 +    int end_rv;
++    int commit_rv = 0;
++    int index;
 +
 +    if (self->wm->screen_dirty_region == NULL ||
 +            !xrdp_region_not_empty(self->wm->screen_dirty_region))
@@ -442,15 +394,8 @@
 +        return 0;
 +    }
 +
-+    snapshot = xrdp_mm_copy_region(self->wm,
-+                                   self->wm->screen_dirty_region);
-+    if (snapshot == NULL)
-+    {
-+        return 1;
-+    }
 +    if (xrdp_mm_console_planar_scratch(self) == NULL)
 +    {
-+        xrdp_region_delete(snapshot);
 +        return 1;
 +    }
 +
@@ -461,57 +406,45 @@
 +    frame_id = ++self->wm->console_gfx_frame_id;
 +    if (xrdp_egfx_send_frame_start(self->egfx, frame_id, 0) != 0)
 +    {
-+        xrdp_region_delete(snapshot);
 +        return 1;
 +    }
 +
 +    self->console_planar_frame_open = 1;
 +    self->console_planar_frame_id = frame_id;
-+    self->console_planar_pixels_sent = 0;
-+    self->console_planar_rectangles_sent = 0;
-+    self->console_planar_tiles_sent = 0;
++    self->console_planar_batch = &batch;
 +
 +    monitor_count = self->wm->client_info->display_sizes.monitorCount;
 +    if (monitor_count < 1)
 +    {
++        full_screen.left = 0;
++        full_screen.top = 0;
++        full_screen.right = self->wm->screen->width;
++        full_screen.bottom = self->wm->screen->height;
 +        rv = xrdp_mm_egfx_send_planar_region(
 +                 self, self->wm->screen, self->wm->screen_dirty_region,
-+                 self->egfx->surface_id, 0, 0);
++                 &full_screen, self->egfx->surface_id, 0, 0);
 +    }
 +    else
 +    {
-+        for (monitor_index = 0; monitor_index < monitor_count;
++        for (monitor_index = 0;
++             monitor_index < monitor_count &&
++                 batch.committed_count <
++                     XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH &&
++                 batch.pixels_sent <
++                     XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH;
 +             ++monitor_index)
 +        {
-+            monitor_region = xrdp_mm_copy_region(
-+                                 self->wm, self->wm->screen_dirty_region);
-+            if (monitor_region == NULL)
-+            {
-+                rv = 1;
-+                break;
-+            }
 +            monitor = self->wm->client_info->display_sizes.minfo_wm +
 +                      monitor_index;
 +            monitor_rect.left = monitor->left;
 +            monitor_rect.top = monitor->top;
 +            monitor_rect.right = monitor->right + 1;
 +            monitor_rect.bottom = monitor->bottom + 1;
-+            if (xrdp_region_intersect_rect(monitor_region,
-+                                           &monitor_rect) != 0)
-+            {
-+                rv = 1;
-+            }
-+            else
-+            {
-+                rv = xrdp_mm_egfx_send_planar_region(
-+                         self, self->wm->screen, monitor_region,
-+                         monitor_index, monitor->left, monitor->top);
-+            }
-+            xrdp_region_delete(monitor_region);
-+            if (rv != 0 || self->console_planar_pixels_sent >=
-+                    XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH ||
-+                    self->console_planar_rectangles_sent >=
-+                    XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH)
++            rv = xrdp_mm_egfx_send_planar_region(
++                     self, self->wm->screen, self->wm->screen_dirty_region,
++                     &monitor_rect, monitor_index, monitor->left,
++                     monitor->top);
++            if (rv != 0)
 +            {
 +                break;
 +            }
@@ -519,16 +452,63 @@
 +    }
 +
 +    self->console_planar_frame_open = 0;
++    self->console_planar_batch = NULL;
 +    end_rv = xrdp_egfx_send_frame_end(self->egfx, frame_id);
 +    if (end_rv != 0)
 +    {
-+        if (xrdp_mm_restore_console_dirty_region(self, snapshot) != 0)
-+        {
-+            LOG(LOG_LEVEL_ERROR,
-+                "xrdp_mm_draw_dirty_console: failed to restore all dirty "
-+                "rectangles after GFX frame failure");
-+        }
 +        rv = 1;
++    }
++    else if (rv == 0)
++    {
++        if (batch.committed_count == 0)
++        {
++            /* Everything left lies outside the active monitor surfaces. */
++            while (xrdp_region_not_empty(self->wm->screen_dirty_region))
++            {
++                if (xrdp_region_get_rect(self->wm->screen_dirty_region, 0,
++                                         &stale_rect) != 0 ||
++                        xrdp_region_subtract_rect(
++                            self->wm->screen_dirty_region, &stale_rect) != 0)
++                {
++                    LOG(LOG_LEVEL_ERROR,
++                        "xrdp_mm_draw_dirty_console: failed to discard "
++                        "dirty region outside active monitor surfaces");
++                    rv = 1;
++                    break;
++                }
++            }
++        }
++        else
++        {
++            for (index = 0; index < batch.committed_count; ++index)
++            {
++                if (xrdp_region_subtract_rect(
++                            self->wm->screen_dirty_region,
++                            &batch.committed[index]) != 0)
++                {
++                    commit_rv = 1;
++                    break;
++                }
++            }
++            if (commit_rv != 0)
++            {
++                full_screen.left = 0;
++                full_screen.top = 0;
++                full_screen.right = self->wm->screen->width;
++                full_screen.bottom = self->wm->screen->height;
++                if (xrdp_region_add_rect(self->wm->screen_dirty_region,
++                                         &full_screen) != 0)
++                {
++                    LOG(LOG_LEVEL_ERROR,
++                        "xrdp_mm_draw_dirty_console: failed to restore full "
++                        "screen dirty state after region commit failure");
++                }
++                LOG(LOG_LEVEL_ERROR,
++                    "xrdp_mm_draw_dirty_console: dirty region commit failed; "
++                    "forcing full-screen retry");
++                rv = 1;
++            }
++        }
 +    }
 +
 +    if (self->console_planar_batch_log_count == 0)
@@ -540,20 +520,19 @@
 +        LOG(LOG_LEVEL_DEBUG,
 +            "XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 frame=%d starts=1 ends=%d "
 +            "rects=%d tiles=%d pixels=%d pending=%d",
-+            frame_id, end_rv == 0, self->console_planar_rectangles_sent,
-+            self->console_planar_tiles_sent,
-+            self->console_planar_pixels_sent,
++            frame_id, end_rv == 0, batch.rectangles_sent,
++            batch.tiles_sent, batch.pixels_sent,
 +            xrdp_region_not_empty(self->wm->screen_dirty_region));
 +    }
 +    ++self->console_planar_batch_log_count;
-+    xrdp_region_delete(snapshot);
 +    return rv;
 +}
 +
- static int
++static int
  xrdp_mm_draw_dirty(struct xrdp_mm *self)
  {
-@@ -3937,6 +4320,10 @@
+     struct xrdp_rect rect;
+@@ -3937,6 +4298,10 @@
      int rv = 0;
  
      LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_draw_dirty:");
@@ -564,13 +543,31 @@
      count = self->wm->client_info->display_sizes.monitorCount;
      if (count < 1)
      {
-@@ -4096,16 +4483,24 @@
+@@ -3944,7 +4309,7 @@
+         {
+             rv = xrdp_mm_egfx_send_planar_region(
+                      self, self->wm->screen, self->wm->screen_dirty_region,
+-                     self->egfx->surface_id, 0, 0);
++                     NULL, self->egfx->surface_id, 0, 0);
+         }
+         else
+         {
+@@ -3992,8 +4357,8 @@
+                 if (self->code == XRDP_CONSOLE_SESSION_CODE)
+                 {
+                     rv = xrdp_mm_egfx_send_planar_region(
+-                             self, self->wm->screen, mon_reg, surface_id,
+-                             mi->left, mi->top);
++                             self, self->wm->screen, mon_reg, NULL,
++                             surface_id, mi->left, mi->top);
+                 }
+                 else
+                 {
+@@ -4096,16 +4461,22 @@
      {
          if (xrdp_region_not_empty(self->wm->screen_dirty_region))
          {
-+            int minimum_flush_ms = self->code == XRDP_CONSOLE_SESSION_CODE ?
-+                                   XRDP_CONSOLE_GFX_MINIMUM_FLUSH_MS :
-+                                   XRDP_LEGACY_GFX_MINIMUM_FLUSH_MS;
++            int minimum_flush_ms = xrdp_mm_gfx_minimum_flush_ms(self);
              int now = g_time3();
              int diff = now - self->wm->last_screen_draw_time;
              LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_check_wait_objs: not empty diff %d", diff);
@@ -594,25 +591,24 @@
                  else
 --- a/xrdp/xrdp_types.h
 +++ b/xrdp/xrdp_types.h
-@@ -57,6 +57,7 @@
+@@ -57,6 +57,8 @@
  
  struct source_info;
  struct list16;
 +struct xrdp_console_planar_scratch;
++struct xrdp_console_planar_batch;
  
  /* lib */
  struct xrdp_mod
-@@ -441,6 +442,14 @@
+@@ -441,6 +443,12 @@
      struct xrdp_egfx *egfx;
      int egfx_up;
      enum xrdp_egfx_flags egfx_flags;
 +    /* Reused only by the first-party Console GFX Planar fallback. */
 +    struct xrdp_console_planar_scratch *console_planar_scratch;
++    struct xrdp_console_planar_batch *console_planar_batch;
 +    int console_planar_frame_open;
 +    int console_planar_batch_log_count;
-+    int console_planar_pixels_sent;
-+    int console_planar_rectangles_sent;
-+    int console_planar_tiles_sent;
 +    int console_planar_frame_id;
      int gfx_delay_autologin;
      int mod_uses_wm_screen_for_gfx;
