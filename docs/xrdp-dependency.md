@@ -58,8 +58,9 @@ The series is deliberately small and applies in this order:
 | `0005-librfxcodec-unaligned-stream-access.patch` | defined unaligned RFX stream access | Removes UBSan-confirmed misaligned typed loads/stores in the x86 stream macros while preserving wire bytes. |
 | `0006-xrdp-unaligned-stream-access.patch` | defined unaligned xrdp stream access | Removes UBSan-confirmed potentially misaligned typed loads/stores from `common/parse.h` and unchecked UTF-16 stream helpers in `common/parse.c` while preserving little-endian wire bytes. |
 | `0007-xrdp-keyboard-layout-hex-conversion.patch` | defined keyboard-layout parsing | Replaces two `g_htoi()` calls with the existing `g_atoix()` parser after UBSan found invalid 32-bit shifts for normal `0x`-prefixed keyboard-layout IDs. Custom bare hexadecimal values such as `409` now parse as decimal; the distributed configuration uses the supported `0x00000409` form. |
+| `0008-xrdp-console-planar-frame-ids.patch` | Console GFX Planar fallback frame IDs and acknowledgement logging | Gives each Planar frame a monotonically advancing ID and avoids logging a missing generic encoder for every acknowledgement when Console code `21` intentionally owns the graphics path. |
 
-These seven patches are production compatibility and correctness changes, not
+These eight patches are production compatibility and correctness changes, not
 benchmark knobs.
 The old
 fork's profiling records, incremental parser, request-ahead scheduling,
@@ -68,7 +69,7 @@ experimental GFX flow-control code are intentionally not in the series.
 
 ## Classification of the old fork
 
-* **KEEP:** the seven patches listed above; they are required by the measured
+* **KEEP:** the eight patches listed above; they are required by the measured
   fixed-console/direct-console product path and address concrete transport,
   parser, codec, and keyboard-layout correctness issues.
 * **TOOLING:** profiling and benchmark-only changes; these belong in the

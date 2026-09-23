@@ -7,6 +7,7 @@
 #include <chrono>
 #include <climits>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -25,6 +26,7 @@ extern "C" {
 #include "../core/presentation_scaler.h"
 #include "../core/presentation_transform.h"
 #include "../clipboard/clipboard_controller.h"
+#include "../rdp/classic_graphics_scheduler.h"
 #include "../rdp/rdp_update_sink.h"
 #include "../rdp/rfx_encoder.h"
 #include "../rdp/remote_fx_scheduler.h"
@@ -33,10 +35,70 @@ extern "C" {
 #include "../x11/x11_cursor_tracker.h"
 #include "../x11/x11_display_connection.h"
 #include "../x11/x11_input_controller.h"
+#include "../x11/x11_pointer_position_tracker.h"
 #include "../x11/x11_shared_memory_capture.h"
 
 namespace
 {
+
+const char *
+clipboard_pdu_name(std::uint16_t type) noexcept
+{
+    using namespace xrdp_console::clipboard;
+    switch (type)
+    {
+        case kMonitorReady:
+            return "monitor-ready";
+        case kFormatList:
+            return "format-list";
+        case kFormatListResponse:
+            return "format-list-response";
+        case kFormatDataRequest:
+            return "format-data-request";
+        case kFormatDataResponse:
+            return "format-data-response";
+        case kClipCaps:
+            return "capabilities";
+        default:
+            return "unknown";
+    }
+}
+
+void
+clipboard_trace(void *context,
+                const ClipboardChannelCallbacks::TraceRecord &record) noexcept
+{
+    (void)context;
+    char formatIds[192]{};
+    std::size_t used = 0;
+    for (std::size_t index = 0; index < record.recordedFormatIds; ++index)
+    {
+        const int written = std::snprintf(
+            formatIds + used, sizeof(formatIds) - used, "%s%u",
+            index == 0 ? "" : ",", record.formatIds[index]);
+        if (written < 0 ||
+            static_cast<std::size_t>(written) >= sizeof(formatIds) - used)
+        {
+            formatIds[sizeof(formatIds) - 1] = '\0';
+            break;
+        }
+        used += static_cast<std::size_t>(written);
+    }
+    if (record.recordedFormatIds == 0)
+    {
+        std::snprintf(formatIds, sizeof(formatIds), "none");
+    }
+    log_message(
+        LOG_LEVEL_INFO,
+        "XRDP_CONSOLE_CLIPRDR event=%s pdu_type=%u pdu_name=%s "
+        "flags=0x%04x bytes=%llu format_id=%u format_count=%u "
+        "format_ids=%s truncated=%u",
+        record.event != nullptr ? record.event : "unknown", record.type,
+        clipboard_pdu_name(record.type), record.flags,
+        static_cast<unsigned long long>(record.pduBytes), record.formatId,
+        record.formatCount, formatIds,
+        record.formatIdsTruncated ? 1U : 0U);
+}
 
 void
 copy_text(char *destination, std::size_t capacity, const char *value) noexcept
@@ -258,9 +320,10 @@ class ModuleEventSink final : public X11EventSink
 public:
     ModuleEventSink(X11DamageTracker &damageTracker,
                     X11CursorTracker &cursorTracker,
+                    X11PointerPositionTracker *pointerTracker,
                     ClipboardController *clipboard) noexcept
         : damageTracker_(damageTracker), cursorTracker_(cursorTracker),
-          clipboard_(clipboard)
+          pointerTracker_(pointerTracker), clipboard_(clipboard)
     {
     }
 
@@ -272,11 +335,16 @@ public:
         }
         damageTracker_.handle(event);
         cursorTracker_.handle(event);
+        if (pointerTracker_ != nullptr)
+        {
+            pointerTracker_->handle(event);
+        }
     }
 
 private:
     X11DamageTracker &damageTracker_;
     X11CursorTracker &cursorTracker_;
+    X11PointerPositionTracker *pointerTracker_;
     ClipboardController *clipboard_;
 };
 
@@ -439,6 +507,7 @@ struct ModuleContext::Impl
     std::unique_ptr<X11CursorTracker> cursorTracker{};
     std::unique_ptr<X11SharedMemoryCapture> sharedMemoryCapture{};
     std::unique_ptr<X11InputController> inputController{};
+    std::unique_ptr<X11PointerPositionTracker> pointerPositionTracker{};
     std::unique_ptr<ClipboardController> clipboard{};
     PresentationTransform presentationTransform{};
     PresentationScaler presentationScaler{};
@@ -675,6 +744,35 @@ ModuleContext::connect() noexcept
             rfxEncoder.reset();
         }
 
+        struct xrdp_console_graphics_capabilities negotiatedGraphics{};
+        if (xrdp_console_module_get_graphics_capabilities(
+                impl_->module, &negotiatedGraphics) != 0)
+        {
+            log_message(LOG_LEVEL_WARNING,
+                        "xrdp-console: negotiated graphics capabilities "
+                        "could not be inspected");
+        }
+        const char *selectedGfxMode = "none";
+        if (negotiatedGraphics.selected_gfx_mode == XRDP_CONSOLE_GFX_H264)
+        {
+            selectedGfxMode = "h264";
+        }
+        else if (negotiatedGraphics.selected_gfx_mode ==
+                 XRDP_CONSOLE_GFX_RFX_PROGRESSIVE)
+        {
+            selectedGfxMode = "rfx-progressive";
+        }
+        const char *firstPartyTransport =
+            graphicsTransport == GraphicsTransport::RemoteFx
+                ? "standard-rfx"
+                : "classic-bitmap";
+        const char *actualOutputPath =
+            negotiatedGraphics.gfx_enabled != 0
+                ? "gfx-planar"
+                : (graphicsTransport == GraphicsTransport::RemoteFx
+                       ? "standard-rfx"
+                       : "legacy-bitmap");
+
         auto damageTracker = std::make_unique<X11DamageTracker>(
             *connection->nativeConnection(), connection->rootWindow(),
             connection->sourceGeometry());
@@ -727,12 +825,29 @@ ModuleContext::connect() noexcept
             return 1;
         }
 
+        auto pointerPositionTracker =
+            std::make_unique<X11PointerPositionTracker>(
+                *connection->nativeConnection(), connection->rootWindow(),
+                sourceGeometry);
+        if (!pointerPositionTracker->valid())
+        {
+            log_message(
+                LOG_LEVEL_WARNING,
+                "xrdp-console: physical pointer synchronization unavailable: "
+                "%s",
+                pointerPositionTracker->failureReason() != nullptr
+                    ? pointerPositionTracker->failureReason()
+                    : "unknown XInput2 error");
+            pointerPositionTracker.reset();
+        }
+
         ClipboardChannelCallbacks clipboardCallbacks{};
         clipboardCallbacks.context = impl_->module;
         clipboardCallbacks.callbacksReady = clipboard_callbacks_ready;
         clipboardCallbacks.getChannelId = clipboard_channel_id;
         clipboardCallbacks.sendToChannel = clipboard_send_to_channel;
         clipboardCallbacks.chansrvInUse = clipboard_chansrv_in_use;
+        clipboardCallbacks.trace = clipboard_trace;
         auto clipboard = std::make_unique<ClipboardController>(
             connection->nativeConnection(), connection->rootWindow(),
             clipboardCallbacks);
@@ -762,6 +877,7 @@ ModuleContext::connect() noexcept
         impl_->cursorTracker = std::move(cursorTracker);
         impl_->sharedMemoryCapture = std::move(sharedMemoryCapture);
         impl_->inputController = std::move(inputController);
+        impl_->pointerPositionTracker = std::move(pointerPositionTracker);
         impl_->clipboard = std::move(clipboard);
         impl_->rfxEncoder = std::move(rfxEncoder);
         impl_->graphicsTransport = graphicsTransport;
@@ -772,10 +888,17 @@ ModuleContext::connect() noexcept
         impl_->fullPresentationInvalidation =
             graphicsTransport == GraphicsTransport::ClassicBitmap ||
             impl_->rfxLetterboxFill.active();
-        log_message(LOG_LEVEL_INFO, "xrdp-console: graphics transport %s",
-                    graphicsTransport == GraphicsTransport::RemoteFx
-                        ? "RemoteFX"
-                        : "classic bitmap");
+        log_message(
+            LOG_LEVEL_INFO,
+            "xrdp-console: negotiated graphics "
+            "bitmap_rfx_codec_id=%d nscodec_codec_id=%d "
+            "h264_codec_id=%d gfx_enabled=%d selected_gfx_mode=%s "
+            "first_party_transport=%s actual_output=%s",
+            negotiatedGraphics.bitmap_rfx_codec_id,
+            negotiatedGraphics.nscodec_codec_id,
+            negotiatedGraphics.h264_codec_id,
+            negotiatedGraphics.gfx_enabled, selectedGfxMode,
+            firstPartyTransport, actualOutputPath);
         return 0;
     }
     catch (...)
@@ -790,6 +913,7 @@ ModuleContext::connect() noexcept
         impl_->sharedMemoryCapture.reset();
         impl_->cursorTracker.reset();
         impl_->damageTracker.reset();
+        impl_->pointerPositionTracker.reset();
         impl_->inputController.reset();
         impl_->clipboard.reset();
         impl_->x11Connection.reset();
@@ -1011,10 +1135,16 @@ ModuleContext::event(int message, long param1, long param2, long param3,
             return 0;
         }
     }
-    return impl_->inputController->handle(message, param1, param2, param3,
-                                          param4)
-               ? 0
-               : 1;
+    const bool handled = impl_->inputController->handle(
+        message, param1, param2, param3, param4);
+    if (handled && is_pointer_message(message) &&
+        impl_->pointerPositionTracker != nullptr)
+    {
+        impl_->pointerPositionTracker->noteRemotePointerPosition(
+            {static_cast<std::int32_t>(param1),
+             static_cast<std::int32_t>(param2)});
+    }
+    return handled ? 0 : 1;
 }
 
 int
@@ -1035,6 +1165,7 @@ ModuleContext::end() noexcept
     impl_->sharedMemoryCapture.reset();
     impl_->cursorTracker.reset();
     impl_->damageTracker.reset();
+    impl_->pointerPositionTracker.reset();
     impl_->inputController.reset();
     impl_->clipboard.reset();
     impl_->x11Connection.reset();
@@ -1156,6 +1287,16 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
     const bool remoteFxAvailable =
         impl_->graphicsTransport == GraphicsTransport::RemoteFx &&
         impl_->rfxEncoder != nullptr && impl_->rfxSurfaceSink.available();
+    const bool classicAvailable =
+        impl_->graphicsTransport == GraphicsTransport::ClassicBitmap &&
+        impl_->rdpUpdateSink.available();
+    const ClassicWorkClass classicWorkClass = classifyClassicWork(
+        impl_->pendingPresentation.active(),
+        !impl_->damageRegion.rectangles().empty(),
+        impl_->damageTracker->hasPendingDamage());
+    const bool classicContinuation =
+        classicAvailable &&
+        classicWorkClass == ClassicWorkClass::ImmediateContinuation;
 
     if (timeout != nullptr && !impl_->outputSuppressed)
     {
@@ -1165,7 +1306,8 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
              impl_->pendingPresentation.active() ||
              impl_->rfxLetterboxFill.active() ||
              !impl_->damageRegion.rectangles().empty());
-        if (impl_->x11EventBudgetPending || remoteFxContinuation)
+        if (impl_->x11EventBudgetPending || remoteFxContinuation ||
+            classicContinuation)
         {
             // XCB may own more events in its private queue after the socket is
             // no longer readable. Keep draining those in bounded slices. A
@@ -1173,7 +1315,7 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
             // invocation is intentionally the largest synchronous unit.
             *timeout = 0;
         }
-        else if ((remoteFxAvailable || impl_->rdpUpdateSink.available()) &&
+        else if ((remoteFxAvailable || classicAvailable) &&
                  (impl_->damageTracker->hasPendingDamage() ||
                   !impl_->damageRegion.rectangles().empty() ||
                   impl_->fullPresentationInvalidation ||
@@ -1564,6 +1706,7 @@ ModuleContext::check_wait_objs() noexcept
         impl_->clipboard->startChannel();
     }
     ModuleEventSink eventSink(*impl_->damageTracker, *impl_->cursorTracker,
+                              impl_->pointerPositionTracker.get(),
                               impl_->clipboard.get());
     if (impl_->x11Connection->processEvents(
             eventSink, kMaximumX11EventsPerService,
@@ -1598,6 +1741,31 @@ ModuleContext::check_wait_objs() noexcept
     {
         impl_->profile.maybeLog();
         return 0;
+    }
+
+    if (impl_->pointerPositionTracker != nullptr &&
+        impl_->rdpUpdateSink.pointerPositionAvailable())
+    {
+        X11PointerPosition sourcePosition{};
+        if (impl_->pointerPositionTracker->pendingPosition(sourcePosition))
+        {
+            bool forwarded = false;
+            if (impl_->pointerPositionTracker->shouldForward(sourcePosition))
+            {
+                PresentationPoint presentationPosition{};
+                if (!impl_->presentationTransform.mapSourcePoint(
+                        sourcePosition.x, sourcePosition.y,
+                        presentationPosition) ||
+                    !impl_->rdpUpdateSink.setPointerPosition(
+                        presentationPosition.x, presentationPosition.y))
+                {
+                    return 1;
+                }
+                forwarded = true;
+            }
+            impl_->pointerPositionTracker->acknowledge(sourcePosition,
+                                                       forwarded);
+        }
     }
 
     if (impl_->cursorTracker->pending() &&
@@ -1645,19 +1813,23 @@ ModuleContext::check_wait_objs() noexcept
         return 0;
     }
 
+    const ClassicWorkClass classicWorkClass = classifyClassicWork(
+        impl_->pendingPresentation.active(),
+        !impl_->damageRegion.rectangles().empty(),
+        impl_->damageTracker->hasPendingDamage());
     const auto now = Impl::Clock::now();
     if (!impl_->presentationDeadlineArmed)
     {
         impl_->armPresentationImmediately();
     }
-    if (now < impl_->presentationDeadline)
+    if (classicWorkClass != ClassicWorkClass::ImmediateContinuation &&
+        now < impl_->presentationDeadline)
     {
         impl_->profile.maybeLog();
         return 0;
     }
 
-    if (!impl_->pendingPresentation.active() &&
-        impl_->damageTracker->hasPendingDamage())
+    if (shouldSnapshotClassicDamage(classicWorkClass))
     {
         const std::uint64_t previousSnapshotRectangles =
             impl_->damageTracker->snapshotRectangleCount();
@@ -1902,12 +2074,20 @@ ModuleContext::check_wait_objs() noexcept
     }
     if (success)
     {
-        if (impl_->pendingPresentation.active() ||
-            !impl_->damageRegion.rectangles().empty() ||
-            impl_->damageTracker->hasPendingDamage())
+        const ClassicWorkClass remainingWorkClass = classifyClassicWork(
+            impl_->pendingPresentation.active(),
+            !impl_->damageRegion.rectangles().empty(),
+            impl_->damageTracker->hasPendingDamage());
+        if (remainingWorkClass ==
+            ClassicWorkClass::ImmediateContinuation)
         {
-            // Keep the latest server-side damage coalescing until the next
-            // presentation deadline instead of running at X draw-call rate.
+            // Continue a frozen local snapshot at once. The next xrdp loop
+            // still services transport before this bounded graphics quantum.
+            impl_->armPresentationImmediately();
+        }
+        else if (remainingWorkClass == ClassicWorkClass::NewDamage)
+        {
+            // New server-side damage gets the normal coalescing interval.
             impl_->armNextPresentation(Impl::Clock::now());
         }
         else

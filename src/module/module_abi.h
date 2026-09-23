@@ -14,6 +14,22 @@ struct xrdp_console_rfx_capabilities
     int maximum_payload_bytes;
 };
 
+enum xrdp_console_gfx_mode
+{
+    XRDP_CONSOLE_GFX_NONE = 0,
+    XRDP_CONSOLE_GFX_H264 = 1,
+    XRDP_CONSOLE_GFX_RFX_PROGRESSIVE = 2
+};
+
+struct xrdp_console_graphics_capabilities
+{
+    int bitmap_rfx_codec_id;
+    int nscodec_codec_id;
+    int h264_codec_id;
+    int gfx_enabled;
+    int selected_gfx_mode;
+};
+
 xrdp_console_module *xrdp_console_module_create(void *context);
 void *xrdp_console_module_abi(xrdp_console_module *module);
 void *xrdp_console_module_context(xrdp_console_module *module);
@@ -44,11 +60,18 @@ int xrdp_console_module_send_rfx_surface(
     xrdp_console_module *module, int destination_x, int destination_y,
     int width_pixels, int height_pixels, char *data_with_prefix,
     int prefix_bytes, int encoded_bytes);
+int xrdp_console_module_get_graphics_capabilities(
+    const xrdp_console_module *module,
+    struct xrdp_console_graphics_capabilities *capabilities);
 int xrdp_console_module_pointer_callback_ready(
     const xrdp_console_module *module);
 int xrdp_console_module_server_set_pointer_large(
     xrdp_console_module *module, int x, int y, char *data, char *mask,
     int bpp, int width, int height);
+int xrdp_console_module_pointer_position_callback_ready(
+    const xrdp_console_module *module);
+int xrdp_console_module_server_set_pointer_position(
+    xrdp_console_module *module, int x, int y);
 
 int xrdp_console_module_clipboard_callbacks_ready(
     const xrdp_console_module *module);

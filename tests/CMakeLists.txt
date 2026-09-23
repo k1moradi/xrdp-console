@@ -18,6 +18,7 @@ if(TARGET xrdp-console)
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_cursor.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_damage.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_input.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_pointer_position.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py)
 endif()
 
@@ -214,6 +215,17 @@ if(TARGET xrdp-console)
     add_test(NAME remote-fx-scheduler-unit
         COMMAND remote-fx-scheduler-unit)
 
+    add_executable(classic-graphics-scheduler-unit
+        test_classic_graphics_scheduler.cpp)
+    set_target_properties(classic-graphics-scheduler-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(classic-graphics-scheduler-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME classic-graphics-scheduler-unit
+        COMMAND classic-graphics-scheduler-unit)
+
     add_executable(x11-capture-arena-unit
         test_x11_capture_arena.cpp)
     set_target_properties(x11-capture-arena-unit PROPERTIES
@@ -232,6 +244,8 @@ if(TARGET xrdp-console)
         IMPORTED_TARGET xcb-shm)
     pkg_check_modules(XRDP_CONSOLE_TEST_XCB_XFIXES REQUIRED
         IMPORTED_TARGET xcb-xfixes)
+    pkg_check_modules(XRDP_CONSOLE_TEST_XCB_XINPUT REQUIRED
+        IMPORTED_TARGET xcb-xinput)
     pkg_check_modules(XRDP_CONSOLE_TEST_XCB_XTEST REQUIRED
         IMPORTED_TARGET xcb-xtest)
     add_executable(x11-damage-integration
@@ -276,6 +290,27 @@ if(TARGET xrdp-console)
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_cursor.py
         $<TARGET_FILE:x11-cursor-integration>)
     set_tests_properties(x11-cursor-integration PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+        TIMEOUT 30)
+
+    add_executable(x11-pointer-position-integration
+        test_x11_pointer_position.cpp
+        ${CMAKE_SOURCE_DIR}/src/x11/x11_pointer_position_tracker.cpp)
+    set_target_properties(x11-pointer-position-integration PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(x11-pointer-position-integration PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(x11-pointer-position-integration PRIVATE
+        PkgConfig::XRDP_CONSOLE_TEST_XCB
+        PkgConfig::XRDP_CONSOLE_TEST_XCB_XINPUT
+        PkgConfig::XRDP_CONSOLE_TEST_XCB_XTEST)
+    add_test(NAME x11-pointer-position-integration
+        COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_pointer_position.py
+        $<TARGET_FILE:x11-pointer-position-integration>)
+    set_tests_properties(x11-pointer-position-integration PROPERTIES
         ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
         TIMEOUT 30)
 
@@ -327,6 +362,7 @@ if(TARGET xrdp-console)
         x11-cursor-integration
         x11-damage-integration
         x11-input-integration
+        x11-pointer-position-integration
         module-lifecycle
         PROPERTIES RESOURCE_LOCK xrdp_console_private_xvfb)
 

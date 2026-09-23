@@ -5,3 +5,4 @@
 0005-librfxcodec-unaligned-stream-access.patch
 0006-xrdp-unaligned-stream-access.patch
 0007-xrdp-keyboard-layout-hex-conversion.patch
+0008-xrdp-console-planar-frame-ids.patch

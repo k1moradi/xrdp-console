@@ -432,7 +432,7 @@ password=smoke
                         wait_for_log(
                             server,
                             log_path,
-                            "xrdp-console: graphics transport RemoteFX",
+                            "actual_output=standard-rfx",
                             4.0,
                             stdout_path,
                         )

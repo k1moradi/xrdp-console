@@ -216,6 +216,26 @@ transform_tests()
         return false;
     }
 
+    PresentationPoint presentationPoint{};
+    if (!check(transform.mapSourcePoint(0, 0, presentationPoint) &&
+                   presentationPoint == PresentationPoint{0, 49},
+               "source top-left did not map into the fitted viewport"))
+    {
+        return false;
+    }
+    if (!check(transform.mapSourcePoint(1365, 767, presentationPoint) &&
+                   presentationPoint == PresentationPoint{1511, 898},
+               "source bottom-right did not map into the fitted viewport"))
+    {
+        return false;
+    }
+    if (!check(!transform.mapSourcePoint(-1, 0, presentationPoint) &&
+                   !transform.mapSourcePoint(0, 768, presentationPoint),
+               "out-of-range source point was accepted"))
+    {
+        return false;
+    }
+
     PresentationTransform narrow;
     if (!check(narrow.configure({1366, 768}, {1364, 768}),
                "narrow presentation configuration failed"))

@@ -365,6 +365,52 @@ xrdp_console_module_rfx_available(
 }
 
 int
+xrdp_console_module_get_graphics_capabilities(
+    const xrdp_console_module *module,
+    struct xrdp_console_graphics_capabilities *capabilities)
+{
+    const struct xrdp_wm *wm;
+
+    if (capabilities != NULL)
+    {
+        capabilities->bitmap_rfx_codec_id = 0;
+        capabilities->nscodec_codec_id = 0;
+        capabilities->h264_codec_id = 0;
+        capabilities->gfx_enabled = 0;
+        capabilities->selected_gfx_mode = XRDP_CONSOLE_GFX_NONE;
+    }
+
+    if (module == NULL || capabilities == NULL || module->abi.wm == 0)
+    {
+        return 1;
+    }
+
+    wm = (const struct xrdp_wm *)module->abi.wm;
+    if (wm->client_info == NULL)
+    {
+        return 1;
+    }
+
+    capabilities->bitmap_rfx_codec_id = wm->client_info->rfx_codec_id;
+    capabilities->nscodec_codec_id = wm->client_info->ns_codec_id;
+    capabilities->h264_codec_id = wm->client_info->h264_codec_id;
+    capabilities->gfx_enabled = wm->client_info->gfx != 0;
+    if (wm->mm != NULL)
+    {
+        if (wm->mm->egfx_flags == XRDP_EGFX_H264)
+        {
+            capabilities->selected_gfx_mode = XRDP_CONSOLE_GFX_H264;
+        }
+        else if (wm->mm->egfx_flags == XRDP_EGFX_RFX_PRO)
+        {
+            capabilities->selected_gfx_mode =
+                XRDP_CONSOLE_GFX_RFX_PROGRESSIVE;
+        }
+    }
+    return 0;
+}
+
+int
 xrdp_console_module_send_rfx_surface(
     xrdp_console_module *module, int destination_x, int destination_y,
     int width_pixels, int height_pixels, char *data_with_prefix,
@@ -409,6 +455,24 @@ xrdp_console_module_server_set_pointer_large(
     return xrdp_console_module_pointer_callback_ready(module)
                ? module->abi.server_set_pointer_large(
                      &module->abi, x, y, data, mask, bpp, width, height)
+               : 1;
+}
+
+int
+xrdp_console_module_pointer_position_callback_ready(
+    const xrdp_console_module *module)
+{
+    return module != NULL &&
+           module->abi.server_set_pointer_position != NULL;
+}
+
+int
+xrdp_console_module_server_set_pointer_position(
+    xrdp_console_module *module, int x, int y)
+{
+    return xrdp_console_module_pointer_position_callback_ready(module) &&
+                   x >= 0 && y >= 0
+               ? module->abi.server_set_pointer_position(&module->abi, x, y)
                : 1;
 }
 

@@ -1,0 +1,50 @@
+diff --git a/xrdp/xrdp_types.h b/xrdp/xrdp_types.h
+--- a/xrdp/xrdp_types.h
++++ b/xrdp/xrdp_types.h
+@@ -570,3 +570,5 @@ struct xrdp_wm
+     struct xrdp_region *screen_dirty_region;
+     int last_screen_draw_time;
++    /* Monotonic frame IDs for the Console-owned GFX Planar fallback. */
++    int console_gfx_frame_id;
+ };
+diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -1015,2 +1015,3 @@ xrdp_mm_egfx_send_planar_bitmap(struct xrdp_mm *self,
+     int cy;
++    int frame_id;
+     int rv = 0;
+@@ -1060,6 +1061,12 @@ xrdp_mm_egfx_send_planar_bitmap(struct xrdp_mm *self,
+     make_stream(temp_s);
+     init_stream(temp_s, GFX_PLANAR_BYTES);
+-    if (xrdp_egfx_send_frame_start(self->egfx, 1, 0) != 0)
++    if (self->wm->console_gfx_frame_id == INT_MAX)
++    {
++        self->wm->console_gfx_frame_id = 0;
++    }
++    frame_id = ++self->wm->console_gfx_frame_id;
++
++    if (xrdp_egfx_send_frame_start(self->egfx, frame_id, 0) != 0)
+     {
+         LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_send_planar_bitmap: "
+             "xrdp_egfx_send_frame_start error");
+@@ -1122,7 +1129,7 @@ xrdp_mm_egfx_send_planar_bitmap(struct xrdp_mm *self,
+             }
+         }
+     }
+-    if (xrdp_egfx_send_frame_end(self->egfx, 1) != 0)
++    if (xrdp_egfx_send_frame_end(self->egfx, frame_id) != 0)
+     {
+         LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_send_planar_bitmap: "
+             "xrdp_egfx_send_frame_end error");
+@@ -1534,6 +1542,9 @@ xrdp_mm_egfx_frame_ack(void *user, uint32_t queue_depth, int frame_id,
+     encoder = self->encoder;
+     if (encoder == NULL)
+     {
+-        LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_frame_ack: encoder is nil");
++        if (self->code != XRDP_CONSOLE_SESSION_CODE)
++        {
++            LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_frame_ack: encoder is nil");
++        }
+         return 0;
+     }

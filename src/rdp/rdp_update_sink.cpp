@@ -119,6 +119,23 @@ RdpUpdateSink::pointerAvailable() const noexcept
 }
 
 bool
+RdpUpdateSink::pointerPositionAvailable() const noexcept
+{
+    return xrdp_console_module_pointer_position_callback_ready(module_) != 0;
+}
+
+bool
+RdpUpdateSink::setPointerPosition(std::int32_t x, std::int32_t y) noexcept
+{
+    if (!pointerPositionAvailable() || x < 0 || y < 0)
+    {
+        return false;
+    }
+    return xrdp_console_module_server_set_pointer_position(
+               module_, static_cast<int>(x), static_cast<int>(y)) == 0;
+}
+
+bool
 RdpUpdateSink::setPointer(std::int32_t hotspotX, std::int32_t hotspotY,
                           std::uint32_t widthPixels,
                           std::uint32_t heightPixels,

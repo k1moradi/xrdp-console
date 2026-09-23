@@ -30,7 +30,10 @@ convert_cursor_image(std::span<const std::uint32_t> argb,
 
     std::fill(pixels.begin(), pixels.begin() + outputPixelBytes,
               std::byte{0});
-    std::fill(mask.begin(), mask.begin() + outputMaskBytes, std::byte{0});
+    // xrdp's AND plane uses set bits for transparent pixels. The fixed
+    // 32x32 canvas may be larger than the X cursor, so initialize its entire
+    // padding as transparent and clear bits only for visible source pixels.
+    std::fill(mask.begin(), mask.begin() + outputMaskBytes, std::byte{0xff});
 
     for (std::uint32_t y = 0; y < height; ++y)
     {
@@ -52,16 +55,18 @@ convert_cursor_image(std::span<const std::uint32_t> argb,
             // XFixes returns ARGB32.  xrdp's classic 32-bpp pointer path
             // consumes little-endian BGRX words; alpha is represented by the
             // AND mask instead of the data plane.
-            pixels[offset] = static_cast<std::byte>(pixel & 0xffU);
-            pixels[offset + 1] =
-                static_cast<std::byte>((pixel >> 8) & 0xffU);
-            pixels[offset + 2] =
-                static_cast<std::byte>((pixel >> 16) & 0xffU);
-            pixels[offset + 3] = std::byte{0};
-            if ((pixel >> 24) == 0)
+            if ((pixel >> 24) != 0)
             {
-                mask[maskOffset] |=
-                    static_cast<std::byte>(1U << bit);
+                const unsigned byteValue =
+                    std::to_integer<unsigned>(mask[maskOffset]);
+                mask[maskOffset] = static_cast<std::byte>(
+                    byteValue & ~(1U << bit));
+                pixels[offset] = static_cast<std::byte>(pixel & 0xffU);
+                pixels[offset + 1] =
+                    static_cast<std::byte>((pixel >> 8U) & 0xffU);
+                pixels[offset + 2] =
+                    static_cast<std::byte>((pixel >> 16U) & 0xffU);
+                pixels[offset + 3] = std::byte{0};
             }
         }
     }

@@ -43,6 +43,10 @@ public:
         std::int32_t presentationX, std::int32_t presentationY,
         PresentationPoint &sourcePoint) const noexcept;
 
+    [[nodiscard]] bool mapSourcePoint(
+        std::int32_t sourceX, std::int32_t sourceY,
+        PresentationPoint &presentationPoint) const noexcept;
+
 private:
     PixelSize sourceGeometry_{};
     PixelSize presentationGeometry_{};

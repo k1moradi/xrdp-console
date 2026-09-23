@@ -74,5 +74,19 @@ main()
     {
         return 1;
     }
+
+    for (std::uint32_t y = 0; y < 32; ++y)
+    {
+        for (std::uint32_t x = 0; x < 32; ++x)
+        {
+            const bool insideSource = x < 2 && y >= 30;
+            if (!insideSource && !maskAt(mask, x, y))
+            {
+                std::cerr << "padded cursor pixel is not transparent at "
+                          << x << ',' << y << '\n';
+                return 1;
+            }
+        }
+    }
     return 0;
 }

@@ -4,6 +4,7 @@
 
 #include "clipboard_protocol.h"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -22,6 +23,19 @@ struct ClipboardChannelCallbacks
                          int dataLength, int totalDataLength,
                          int flags) noexcept{};
     int (*chansrvInUse)(void *context) noexcept{};
+    struct TraceRecord
+    {
+        const char *event{};
+        std::uint16_t type{};
+        std::uint16_t flags{};
+        std::size_t pduBytes{};
+        std::uint32_t formatId{};
+        std::uint32_t formatCount{};
+        std::array<std::uint32_t, 16> formatIds{};
+        std::size_t recordedFormatIds{};
+        bool formatIdsTruncated{};
+    };
+    void (*trace)(void *context, const TraceRecord &record) noexcept{};
 };
 
 /**
@@ -79,6 +93,7 @@ private:
     void sendPdu(std::uint16_t type, std::uint16_t flags,
                  std::span<const std::uint8_t> payload) noexcept;
     void sendFormatDataRequest(std::uint16_t format) noexcept;
+    void emitTrace(const ClipboardChannelCallbacks::TraceRecord &record) noexcept;
     void replyToSelectionRequest(xcb_window_t requestor, xcb_atom_t selection,
                                  xcb_atom_t target, xcb_atom_t property,
                                  xcb_timestamp_t time, bool success) noexcept;

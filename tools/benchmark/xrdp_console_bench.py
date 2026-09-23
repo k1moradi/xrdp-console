@@ -3594,10 +3594,14 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                 xrdp, xrdp_log, "status from xrdp_mm_connect() : 0", 20.0,
                 case_dir / "xrdp-stderr.log")
             log_text = xrdp_log.read_text(errors="replace")
-            if "xrdp-console: graphics transport RemoteFX" in log_text:
+            if "actual_output=standard-rfx" in log_text:
                 negotiated = "RFX"
-            elif "xrdp-console: graphics transport classic bitmap" in log_text:
+            elif "actual_output=legacy-bitmap" in log_text:
                 negotiated = "CLASSIC_BITMAP"
+            elif "actual_output=gfx-planar" in log_text:
+                negotiated = "GFX_PLANAR"
+            elif "actual_output=gfx-progressive-rfx" in log_text:
+                negotiated = "GFX_RFX_PROGRESSIVE"
             else:
                 negotiated = "UNKNOWN"
         else:

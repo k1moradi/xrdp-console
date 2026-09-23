@@ -214,3 +214,36 @@ PresentationTransform::mapPresentationPoint(
     };
     return true;
 }
+
+bool
+PresentationTransform::mapSourcePoint(
+    std::int32_t sourceX, std::int32_t sourceY,
+    PresentationPoint &presentationPoint) const noexcept
+{
+    if (!valid() || sourceX < 0 || sourceY < 0 ||
+        static_cast<std::uint32_t>(sourceX) >= sourceGeometry_.widthPixels ||
+        static_cast<std::uint32_t>(sourceY) >= sourceGeometry_.heightPixels)
+    {
+        return false;
+    }
+
+    // Map the center of each source pixel into the aspect-fit viewport. This
+    // agrees with inverse mapping for representable pixels and avoids
+    // systematic drift when source and presentation sizes differ.
+    const std::uint64_t mappedX =
+        ((static_cast<std::uint64_t>(sourceX) * 2U + 1U) *
+         viewport_.widthPixels) /
+        (static_cast<std::uint64_t>(sourceGeometry_.widthPixels) * 2U);
+    const std::uint64_t mappedY =
+        ((static_cast<std::uint64_t>(sourceY) * 2U + 1U) *
+         viewport_.heightPixels) /
+        (static_cast<std::uint64_t>(sourceGeometry_.heightPixels) * 2U);
+
+    presentationPoint = {
+        viewport_.x + static_cast<std::int32_t>(std::min<std::uint64_t>(
+                          viewport_.widthPixels - 1U, mappedX)),
+        viewport_.y + static_cast<std::int32_t>(std::min<std::uint64_t>(
+                          viewport_.heightPixels - 1U, mappedY)),
+    };
+    return true;
+}

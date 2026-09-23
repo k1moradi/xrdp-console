@@ -245,9 +245,22 @@ void ClipboardController::checkTimeout() noexcept
     {
         return;
     }
+    ClipboardChannelCallbacks::TraceRecord record{};
+    record.event = "selection-timeout";
+    record.formatId = pendingRdpRequest_ ? pendingRdpFormat_ : 0;
+    emitTrace(record);
     pendingSelection_ = false;
     selectionDeadline_ = {};
     finishLocalSelectionRequest();
+}
+
+void ClipboardController::emitTrace(
+    const ClipboardChannelCallbacks::TraceRecord &record) noexcept
+{
+    if (callbacks_.trace != nullptr)
+    {
+        callbacks_.trace(callbacks_.context, record);
+    }
 }
 
 void ClipboardController::sendPdu(std::uint16_t type, std::uint16_t flags,
@@ -262,6 +275,16 @@ void ClipboardController::sendPdu(std::uint16_t type, std::uint16_t flags,
         pdu.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()))
     {
         return;
+    }
+    ClipboardChannelCallbacks::TraceRecord traceRecord{};
+    traceRecord.event = "send";
+    traceRecord.type = type;
+    traceRecord.flags = flags;
+    traceRecord.pduBytes = pdu.size();
+    if (type == xrdp_console::clipboard::kFormatDataRequest &&
+        payload.size() >= 4)
+    {
+        traceRecord.formatId = read32(payload.data());
     }
     std::size_t offset = 0;
     while (offset < pdu.size())
@@ -288,10 +311,13 @@ void ClipboardController::sendPdu(std::uint16_t type, std::uint16_t flags,
             channelFlags);
         if (result != 0)
         {
+            traceRecord.event = "send-failed";
+            emitTrace(traceRecord);
             return;
         }
         offset += length;
     }
+    emitTrace(traceRecord);
 }
 
 void ClipboardController::sendFormatList() noexcept
@@ -378,8 +404,29 @@ void ClipboardController::handleChannelData(int channelId, const char *data,
     xrdp_console::clipboard::PduView pdu;
     if (!xrdp_console::clipboard::decodePdu(complete, pdu))
     {
+        ClipboardChannelCallbacks::TraceRecord record{};
+        record.event = "malformed-pdu";
+        record.pduBytes = complete.size();
+        emitTrace(record);
         return;
     }
+
+    ClipboardChannelCallbacks::TraceRecord receiveRecord{};
+    receiveRecord.event = "receive";
+    receiveRecord.type = pdu.type;
+    receiveRecord.flags = pdu.flags;
+    receiveRecord.pduBytes = complete.size();
+    if (pdu.type == xrdp_console::clipboard::kFormatDataRequest &&
+        pdu.payload.size() >= 4)
+    {
+        receiveRecord.formatId = read32(pdu.payload.data());
+    }
+    else if (pdu.type == xrdp_console::clipboard::kFormatDataResponse &&
+             pendingRdpRequest_)
+    {
+        receiveRecord.formatId = pendingRdpFormat_;
+    }
+    emitTrace(receiveRecord);
 
     using namespace xrdp_console::clipboard;
     switch (pdu.type)
@@ -391,6 +438,11 @@ void ClipboardController::handleChannelData(int channelId, const char *data,
 
         case kFormatList:
         {
+            ClipboardChannelCallbacks::TraceRecord formatListRecord{};
+            formatListRecord.event = "format-list";
+            formatListRecord.type = pdu.type;
+            formatListRecord.flags = pdu.flags;
+            formatListRecord.pduBytes = complete.size();
             if (pdu.payload.empty())
             {
                 hasText_ = false;
@@ -402,6 +454,7 @@ void ClipboardController::handleChannelData(int channelId, const char *data,
                     ownsSelection_ = false;
                     xcb_flush(connection_);
                 }
+                emitTrace(formatListRecord);
                 sendPdu(kFormatListResponse, kResponseOk, {});
                 return;
             }
@@ -412,6 +465,17 @@ void ClipboardController::handleChannelData(int channelId, const char *data,
             {
                 const std::uint32_t format = read32(pdu.payload.data() + offset);
                 offset += 4;
+                ++formatListRecord.formatCount;
+                if (formatListRecord.recordedFormatIds <
+                    formatListRecord.formatIds.size())
+                {
+                    formatListRecord.formatIds[
+                        formatListRecord.recordedFormatIds++] = format;
+                }
+                else
+                {
+                    formatListRecord.formatIdsTruncated = true;
+                }
                 if (longNames)
                 {
                     bool terminator = false;
@@ -454,6 +518,8 @@ void ClipboardController::handleChannelData(int channelId, const char *data,
             {
                 return;
             }
+            formatListRecord.formatId = selected;
+            emitTrace(formatListRecord);
             sendPdu(kFormatListResponse, kResponseOk, {});
             if (selected != 0)
             {
@@ -692,6 +758,10 @@ void ClipboardController::handleSelectionOwnerChange(
     ownsSelection_ = false;
     if (event.owner == XCB_WINDOW_NONE)
     {
+        ClipboardChannelCallbacks::TraceRecord record{};
+        record.event = "selection-owner-exited";
+        record.formatId = pendingRdpRequest_ ? pendingRdpFormat_ : 0;
+        emitTrace(record);
         pendingSelection_ = false;
         selectionDeadline_ = {};
         hasText_ = false;

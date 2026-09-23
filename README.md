@@ -35,7 +35,8 @@ On Debian or Ubuntu, install the development dependencies first:
 ```sh
 sudo apt install \
   cmake ninja-build build-essential pkg-config python3 \
-  libxcb1-dev libxcb-damage0-dev libxcb-xfixes0-dev libxcb-xtest0-dev \
+  libxcb1-dev libxcb-damage0-dev libxcb-xfixes0-dev libxcb-xinput-dev \
+  libxcb-xtest0-dev \
   libx11-dev libxtst-dev libgl-dev libvulkan-dev \
   xauth x11-utils xrdp x11vnc freerdp3-x11 tigervnc-viewer xvfb
 ```

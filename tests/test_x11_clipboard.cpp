@@ -28,6 +28,7 @@ struct FakeChannel
 {
     std::vector<std::uint8_t> pending{};
     std::vector<std::vector<std::uint8_t>> pdus{};
+    std::vector<ClipboardChannelCallbacks::TraceRecord> traces{};
 };
 
 int callbacks_ready(void *) noexcept
@@ -67,6 +68,18 @@ int send_to_channel(void *context, int channelId, char *data, int dataLength,
 int chansrv_in_use(void *) noexcept
 {
     return 0;
+}
+
+void trace_clipboard(void *context,
+                     const ClipboardChannelCallbacks::TraceRecord &record) noexcept
+{
+    try
+    {
+        static_cast<FakeChannel *>(context)->traces.push_back(record);
+    }
+    catch (...)
+    {
+    }
 }
 
 xcb_atom_t intern_atom(xcb_connection_t *connection, const char *name)
@@ -203,6 +216,7 @@ int main()
     callbacks.getChannelId = get_channel_id;
     callbacks.sendToChannel = send_to_channel;
     callbacks.chansrvInUse = chansrv_in_use;
+    callbacks.trace = trace_clipboard;
     ClipboardController controller(connection, root, callbacks);
     assert(controller.valid());
     controller.startChannel();
@@ -225,6 +239,19 @@ int main()
         xrdp_console::clipboard::kFormatList,
         xrdp_console::clipboard::kUseLongFormatNames, remoteFormats, pdu));
     feed_pdu(controller, pdu);
+    bool tracedOfferedFormats = false;
+    for (const auto &record : fake.traces)
+    {
+        if (record.event != nullptr &&
+            std::strcmp(record.event, "format-list") == 0 &&
+            record.formatCount == 2 && record.recordedFormatIds == 2 &&
+            record.formatIds[0] == 13 && record.formatIds[1] == 1 &&
+            record.formatId == 13 && record.pduBytes == pdu.size())
+        {
+            tracedOfferedFormats = true;
+        }
+    }
+    assert(tracedOfferedFormats);
     std::vector<std::uint8_t> dataRequest;
     assert(last_pdu_of_type(fake, xrdp_console::clipboard::kFormatDataRequest,
                             dataRequest));

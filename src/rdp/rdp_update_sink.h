@@ -25,6 +25,9 @@ public:
     [[nodiscard]] bool endUpdate() noexcept;
 
     [[nodiscard]] bool pointerAvailable() const noexcept;
+    [[nodiscard]] bool pointerPositionAvailable() const noexcept;
+    [[nodiscard]] bool setPointerPosition(std::int32_t x,
+                                         std::int32_t y) noexcept;
     [[nodiscard]] bool setPointer(
         std::int32_t hotspotX, std::int32_t hotspotY,
         std::uint32_t widthPixels, std::uint32_t heightPixels,
