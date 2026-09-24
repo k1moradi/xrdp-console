@@ -61,8 +61,10 @@ The series is deliberately small and applies in this order:
 | `0007-xrdp-keyboard-layout-hex-conversion.patch` | defined keyboard-layout parsing | Replaces two `g_htoi()` calls with the existing `g_atoix()` parser after UBSan found invalid 32-bit shifts for normal `0x`-prefixed keyboard-layout IDs. Custom bare hexadecimal values such as `409` now parse as decimal; the distributed configuration uses the supported `0x00000409` form. |
 | `0008-xrdp-console-planar-frame-ids.patch` | Console GFX Planar fallback frame IDs and acknowledgement logging | Gives each Planar frame a monotonically advancing ID and avoids logging a missing generic encoder for every acknowledgement when Console code `21` intentionally owns the graphics path. |
 | `0009-xrdp-console-preserve-gfx-dirty-regions.patch` | Console GFX Planar dirty-region preservation | Prevents sparse Console damage from becoming a large bounding-box Planar encode; legacy module codes retain their existing behavior. |
+| `0010-xrdp-console-batched-planar-frames.patch` | bounded Console Planar transactions | Reuses compression scratch, limits each pass to 32 dirty rectangles and 128 KiPixels, and commits dirty state only after frame end. |
+| `0011-xrdp-console-fail-safe-stale-dirty-regions.patch` | fail-safe offscreen classification and stale-prefix regression | Invalid display geometry can no longer authorize destructive dirty-region cleanup; the production scan/commit helpers are tested for a 32-stale prefix followed by visible continuation. |
 
-These nine patches are production compatibility and correctness changes, not
+These eleven patches are production compatibility and correctness changes, not
 benchmark knobs.
 The old
 fork's profiling records, incremental parser, request-ahead scheduling,
@@ -71,7 +73,7 @@ experimental GFX flow-control code are intentionally not in the series.
 
 ## Classification of the old fork
 
-* **KEEP:** the nine patches listed above; they are required by the measured
+* **KEEP:** the eleven patches listed above; they are required by the measured
   fixed-console/direct-console product path and address concrete transport,
   parser, codec, and keyboard-layout correctness issues.
 * **TOOLING:** profiling and benchmark-only changes; these belong in the
