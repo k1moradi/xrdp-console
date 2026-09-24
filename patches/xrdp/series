@@ -10,3 +10,4 @@
 0010-xrdp-console-batched-planar-frames.patch
 0011-xrdp-console-fail-safe-stale-dirty-regions.patch
 0012-xrdp-console-planar-fresh-continuation-pacing.patch
+0013-xrdp-console-gfx-ack-telemetry.patch

@@ -82,14 +82,23 @@ historical fork's commit history:
     no-progress transactions fall back to the coalescing delay to prevent a
     zero-delay retry loop. The unit tests cover fresh, continuation, completed,
     failed, and no-progress transaction states.
+13. `0013-xrdp-console-gfx-ack-telemetry.patch` records Console RDPGFX
+    acknowledgements before the intentional code-21 generic-encoder early
+    return. It keeps allocation-free session-thread telemetry for
+    acknowledgement count, latest/maximum queue depth, decoded-frame progress,
+    and acknowledgement suspension, and appends that snapshot to the existing
+    bounded Planar diagnostic record. Aggregate counters saturate rather than
+    wrap. Focused xrdp tests cover zero/typical queue depth, maximum retention,
+    repeated suspension/resume, frame-ID ordering, signed values, and counter
+    saturation.
 
 The activation script requires the `XRDP_CONSOLE_GFX_PLANAR_BATCH_V1` marker
 in the candidate daemon, so an older patched generation cannot be mistaken
 for this Planar batching implementation.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-twelve patches are production compatibility and correctness changes, not
-benchmark knobs. Code
+thirteen patches are retained production-path behavior and bounded operational
+diagnostics, not benchmark knobs. Code
 `21` is deliberately used only by the direct module's profile; legacy VNC
 profiles continue using code `0`/`1`. The
 old checked-in fork contained profiling, parser-quantum, request-ahead,

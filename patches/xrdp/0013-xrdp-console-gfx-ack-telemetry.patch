@@ -1,0 +1,281 @@
+--- a/xrdp/xrdp_types.h
++++ b/xrdp/xrdp_types.h
+@@ -22,8 +22,10 @@
+ #define _XRDP_TYPES_H_
+ 
+ #define DEFAULT_STRING_LEN 255
+ #define LOG_WINDOW_CHAR_PER_LINE 60
++
++#include <stdint.h>
+ 
+ #include "xrdp_rail.h"
+ #include "xrdp_constants.h"
+ #include "fifo.h"
+@@ -405,8 +407,20 @@
+     XRDP_EGFX_H264 = 1,
+     XRDP_EGFX_RFX_PRO = 2
+ };
+ 
++struct xrdp_console_gfx_ack_telemetry
++{
++    /* Updated only on the xrdp session thread; no synchronization required. */
++    uint64_t acknowledgement_count;
++    uint64_t suspension_count;
++    uint32_t latest_queue_depth;
++    uint32_t maximum_queue_depth;
++    int latest_frame_id;
++    int latest_frames_decoded;
++    int acknowledgements_suspended;
++};
++
+ struct xrdp_mm
+ {
+     struct xrdp_wm *wm; /* owner */
+     enum mm_connect_state connect_state; /* State of connection */
+@@ -450,8 +464,9 @@
+     int console_planar_batch_log_count;
+     int console_planar_frame_id;
+     /* Drain already-bounded Console damage without a fresh-batch delay. */
+     int console_planar_immediate_continuation;
++    struct xrdp_console_gfx_ack_telemetry console_gfx_ack_telemetry;
+     int gfx_delay_autologin;
+     int mod_uses_wm_screen_for_gfx;
+     /* Whether a working h.264 library is loaded.
+      * We check this at run-time, so that we can fall-back to GFX if
+--- a/xrdp/xrdp.h
++++ b/xrdp/xrdp.h
+@@ -272,8 +272,12 @@
+ int
+ xrdp_mm_console_planar_continuation_state(int transaction_succeeded,
+                                           int progress_made,
+                                           int dirty_pending);
++void
++xrdp_mm_console_record_gfx_acknowledgement(
++    struct xrdp_console_gfx_ack_telemetry *telemetry,
++    uint32_t queue_depth, int frame_id, int frames_decoded);
+ 
+ /* xrdp_bitmap_common.c */
+ struct xrdp_bitmap *
+ xrdp_bitmap_create(int width, int height, int bpp,
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -33,8 +33,9 @@
+ #include "xrdp_sockets.h"
+ #include "xrdp_egfx.h"
+ #include "libxrdp.h"
+ #include "xrdp_channel.h"
++#include <inttypes.h>
+ #include <limits.h>
+ 
+ #if defined(XRDP_OPENH264)
+ #include "xrdp_encoder_openh264.h"
+@@ -1041,8 +1042,38 @@
+                                           int dirty_pending)
+ {
+     return transaction_succeeded && progress_made && dirty_pending;
+ }
++
++void
++xrdp_mm_console_record_gfx_acknowledgement(
++    struct xrdp_console_gfx_ack_telemetry *telemetry,
++    uint32_t queue_depth, int frame_id, int frames_decoded)
++{
++    if (telemetry->acknowledgement_count != UINT64_MAX)
++    {
++        ++telemetry->acknowledgement_count;
++    }
++    telemetry->latest_frame_id = frame_id;
++    telemetry->latest_frames_decoded = frames_decoded;
++
++    if (queue_depth == XR_SUSPEND_FRAME_ACKNOWLEDGEMENT)
++    {
++        if (telemetry->suspension_count != UINT64_MAX)
++        {
++            ++telemetry->suspension_count;
++        }
++        telemetry->acknowledgements_suspended = 1;
++        return;
++    }
++
++    telemetry->acknowledgements_suspended = 0;
++    telemetry->latest_queue_depth = queue_depth;
++    if (queue_depth > telemetry->maximum_queue_depth)
++    {
++        telemetry->maximum_queue_depth = queue_depth;
++    }
++}
+ 
+ static int
+ xrdp_mm_gfx_minimum_flush_ms(const struct xrdp_mm *self)
+ {
+@@ -1992,8 +2017,14 @@
+     struct xrdp_encoder *encoder;
+ 
+     LOG_DEVEL(LOG_LEVEL_TRACE, "xrdp_mm_egfx_frame_ack:");
+     self = (struct xrdp_mm *) user;
++    if (self->code == XRDP_CONSOLE_SESSION_CODE)
++    {
++        xrdp_mm_console_record_gfx_acknowledgement(
++            &self->console_gfx_ack_telemetry, queue_depth, frame_id,
++            frames_decoded);
++    }
+     encoder = self->encoder;
+     if (encoder == NULL)
+     {
+         if (self->code != XRDP_CONSOLE_SESSION_CODE)
+@@ -2004,9 +2035,9 @@
+     }
+     if (queue_depth == XR_SUSPEND_FRAME_ACKNOWLEDGEMENT)
+     {
+         LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_frame_ack: "
+-            "queue_depth %d frame_id %d frames_decoded %d",
++            "queue_depth %" PRIu32 " frame_id %d frames_decoded %d",
+             queue_depth, frame_id, frames_decoded);
+         if (encoder->gfx_ack_off == 0)
+         {
+             LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_frame_ack: "
+@@ -4476,13 +4507,23 @@
+     }
+     if (self->console_planar_batch_log_count < 64)
+     {
+         LOG(LOG_LEVEL_DEBUG,
+-            "XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 frame=%d starts=1 ends=%d "
+-            "rects=%d tiles=%d pixels=%d pending=%d",
+-            frame_id, end_rv == 0, batch.rectangles_sent,
+-            batch.tiles_sent, batch.pixels_sent,
+-            xrdp_region_not_empty(self->wm->screen_dirty_region));
++            "XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 frame=%d starts=1 ends=%d "
++            "rects=%d tiles=%d pixels=%d pending=%d acknowledgements=%"
++            PRIu64 " queue_depth=%" PRIu32 " maximum_queue_depth=%"
++            PRIu32 " acknowledged_frame=%d frames_decoded=%d "
++            "acknowledgements_suspended=%d suspensions=%" PRIu64,
++            frame_id, end_rv == 0, batch.rectangles_sent,
++            batch.tiles_sent, batch.pixels_sent,
++            xrdp_region_not_empty(self->wm->screen_dirty_region),
++            self->console_gfx_ack_telemetry.acknowledgement_count,
++            self->console_gfx_ack_telemetry.latest_queue_depth,
++            self->console_gfx_ack_telemetry.maximum_queue_depth,
++            self->console_gfx_ack_telemetry.latest_frame_id,
++            self->console_gfx_ack_telemetry.latest_frames_decoded,
++            self->console_gfx_ack_telemetry.acknowledgements_suspended,
++            self->console_gfx_ack_telemetry.suspension_count);
+     }
+     ++self->console_planar_batch_log_count;
+     return rv;
+ }
+--- a/tests/xrdp/test_xrdp_region.c
++++ b/tests/xrdp/test_xrdp_region.c
+@@ -42,8 +42,9 @@
+ #endif
+ 
+ #include "test_xrdp.h"
+ #include "xrdp.h"
++#include "xrdp_egfx.h"
+ #include <stdarg.h>
+ #include <stddef.h>
+ #include <stdint.h>
+ #include <setjmp.h>
+@@ -333,8 +334,88 @@
+     assert_int_equal(16, xrdp_mm_console_gfx_minimum_flush_ms(
+                              XRDP_CONSOLE_SESSION_CODE, continuation));
+ }
+ 
++static void
++test_console_gfx_acknowledgement_telemetry_tracks_queue_depth(void **state)
++{
++    struct xrdp_console_gfx_ack_telemetry telemetry = {0};
++    UNUSED(state);
++
++    xrdp_mm_console_record_gfx_acknowledgement(&telemetry, 0U, 10, 8);
++    assert_int_equal(1, telemetry.acknowledgement_count);
++    assert_int_equal(0, telemetry.latest_queue_depth);
++    assert_int_equal(0, telemetry.maximum_queue_depth);
++    assert_int_equal(10, telemetry.latest_frame_id);
++    assert_int_equal(8, telemetry.latest_frames_decoded);
++    assert_int_equal(0, telemetry.acknowledgements_suspended);
++
++    xrdp_mm_console_record_gfx_acknowledgement(&telemetry, 7U, 11, 9);
++    assert_int_equal(2, telemetry.acknowledgement_count);
++    assert_int_equal(7, telemetry.latest_queue_depth);
++    assert_int_equal(7, telemetry.maximum_queue_depth);
++
++    xrdp_mm_console_record_gfx_acknowledgement(&telemetry, 3U, 12, 10);
++    assert_int_equal(3, telemetry.acknowledgement_count);
++    assert_int_equal(3, telemetry.latest_queue_depth);
++    assert_int_equal(7, telemetry.maximum_queue_depth);
++    assert_int_equal(12, telemetry.latest_frame_id);
++    assert_int_equal(10, telemetry.latest_frames_decoded);
++
++    /* Preserve the most recently observed ACK even if frame IDs go backward. */
++    xrdp_mm_console_record_gfx_acknowledgement(&telemetry, 2U, 8, 6);
++    assert_int_equal(4, telemetry.acknowledgement_count);
++    assert_int_equal(8, telemetry.latest_frame_id);
++    assert_int_equal(6, telemetry.latest_frames_decoded);
++
++    /* Keep signed protocol values as observed instead of normalizing them. */
++    xrdp_mm_console_record_gfx_acknowledgement(&telemetry, 1U, -1, -1);
++    assert_int_equal(-1, telemetry.latest_frame_id);
++    assert_int_equal(-1, telemetry.latest_frames_decoded);
++}
++
++static void
++test_console_gfx_acknowledgement_telemetry_tracks_suspend_and_resume(
++    void **state)
++{
++    struct xrdp_console_gfx_ack_telemetry telemetry = {0};
++    UNUSED(state);
++
++    xrdp_mm_console_record_gfx_acknowledgement(&telemetry, 4U, 20, 18);
++    xrdp_mm_console_record_gfx_acknowledgement(
++        &telemetry, XR_SUSPEND_FRAME_ACKNOWLEDGEMENT, 21, 19);
++    assert_int_equal(2, telemetry.acknowledgement_count);
++    assert_int_equal(1, telemetry.suspension_count);
++    assert_int_equal(1, telemetry.acknowledgements_suspended);
++    assert_int_equal(4, telemetry.latest_queue_depth);
++    assert_int_equal(4, telemetry.maximum_queue_depth);
++    assert_int_equal(21, telemetry.latest_frame_id);
++    assert_int_equal(19, telemetry.latest_frames_decoded);
++
++    xrdp_mm_console_record_gfx_acknowledgement(
++        &telemetry, XR_SUSPEND_FRAME_ACKNOWLEDGEMENT, 22, 20);
++    assert_int_equal(3, telemetry.acknowledgement_count);
++    assert_int_equal(2, telemetry.suspension_count);
++    assert_int_equal(1, telemetry.acknowledgements_suspended);
++    assert_int_equal(4, telemetry.latest_queue_depth);
++
++    xrdp_mm_console_record_gfx_acknowledgement(&telemetry, 1U, 23, 21);
++    assert_int_equal(4, telemetry.acknowledgement_count);
++    assert_int_equal(2, telemetry.suspension_count);
++    assert_int_equal(0, telemetry.acknowledgements_suspended);
++    assert_int_equal(1, telemetry.latest_queue_depth);
++    assert_int_equal(4, telemetry.maximum_queue_depth);
++    assert_int_equal(23, telemetry.latest_frame_id);
++    assert_int_equal(21, telemetry.latest_frames_decoded);
++
++    telemetry.acknowledgement_count = UINT64_MAX;
++    telemetry.suspension_count = UINT64_MAX;
++    xrdp_mm_console_record_gfx_acknowledgement(
++        &telemetry, XR_SUSPEND_FRAME_ACKNOWLEDGEMENT, -1, -1);
++    assert_true(telemetry.acknowledgement_count == UINT64_MAX);
++    assert_true(telemetry.suspension_count == UINT64_MAX);
++}
++
+ START_TEST(execute_suite)
+ {
+     const struct CMUnitTest tests[] =
+     {
+@@ -343,9 +406,13 @@
+         cmocka_unit_test(test_xrdp_region_not_empty__happy_path),
+         cmocka_unit_test(test_console_offscreen_predicate_is_fail_closed),
+         cmocka_unit_test(test_console_stale_prefix_commits_transactionally),
+         cmocka_unit_test(test_console_invalid_display_state_retains_dirty_region),
+-        cmocka_unit_test(test_console_planar_fresh_and_continuation_pacing)
++        cmocka_unit_test(test_console_planar_fresh_and_continuation_pacing),
++        cmocka_unit_test(
++            test_console_gfx_acknowledgement_telemetry_tracks_queue_depth),
++        cmocka_unit_test(
++            test_console_gfx_acknowledgement_telemetry_tracks_suspend_and_resume)
+     };
+ 
+     ck_assert_int_eq(cmocka_run_group_tests(tests, NULL, NULL), 0);
+ }

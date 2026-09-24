@@ -285,7 +285,8 @@ def assert_client_pixel(client_display: str,
                 has_new_idle_frame = (
                     frame_match is not None and
                     int(frame_match.group(1)) > prior_batch_number and
-                    latest_summary.endswith("pending=0")
+                    re.search(r"\bpending=0(?:\s|$)", latest_summary)
+                    is not None
                 )
                 if has_new_idle_frame:
                     if latest_summary != last_idle_summary:

@@ -64,9 +64,10 @@ The series is deliberately small and applies in this order:
 | `0010-xrdp-console-batched-planar-frames.patch` | bounded Console Planar transactions | Reuses compression scratch, limits each pass to 32 dirty rectangles and 128 KiPixels, and commits dirty state only after frame end. |
 | `0011-xrdp-console-fail-safe-stale-dirty-regions.patch` | fail-safe offscreen classification and stale-prefix regression | Invalid display geometry can no longer authorize destructive dirty-region cleanup; the production scan/commit helpers are tested for a 32-stale prefix followed by visible continuation. |
 | `0012-xrdp-console-planar-fresh-continuation-pacing.patch` | fresh-versus-continuation pacing | Coalesces new Console dirty work for 16 ms, immediately continues only after a successful bounded frame makes dirty-region progress and leaves more work pending, clears continuation after failure/no progress, and leaves the legacy 40 ms cadence unchanged. |
+| `0013-xrdp-console-gfx-ack-telemetry.patch` | bounded Console RDPGFX acknowledgement telemetry | Records acknowledgement count, latest/maximum queue depth, decoded-frame progress, and suspension state before the intentional code-21 generic-encoder early return, then exposes the snapshot through the existing bounded Planar diagnostic record without changing transport or pacing behavior. |
 
-These twelve patches are production compatibility and correctness changes, not
-benchmark knobs.
+These thirteen patches are retained production-path behavior and bounded
+operational diagnostics, not benchmark knobs.
 The old
 fork's profiling records, incremental parser, request-ahead scheduling,
 progressive flush, variable RAW quantum, first-frame/cache experiments, and
@@ -74,7 +75,7 @@ experimental GFX flow-control code are intentionally not in the series.
 
 ## Classification of the old fork
 
-* **KEEP:** the twelve patches listed above; they are required by the measured
+* **KEEP:** the thirteen patches listed above; they are required by the measured
   fixed-console/direct-console product path and address concrete transport,
   parser, codec, and keyboard-layout correctness issues.
 * **TOOLING:** profiling and benchmark-only changes; these belong in the

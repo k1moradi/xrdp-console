@@ -70,6 +70,17 @@ endif()
 
 if(BUILD_TESTING)
     add_subdirectory(tests)
+    if(XRDP_CONSOLE_BUILD_XRDP)
+        add_test(NAME xrdp-upstream-unit
+            COMMAND ${CMAKE_COMMAND}
+                "-DXRDP_BUILD_DIR=${XRDP_CONSOLE_XRDP_BUILD_DIR}"
+                "-DXRDP_MAKE_PROGRAM=${XRDP_CONSOLE_MAKE_PROGRAM}"
+                "-DXRDP_CFLAGS=${XRDP_CONSOLE_XRDP_CFLAGS}"
+                -P "${CMAKE_SOURCE_DIR}/cmake/run_xrdp_tests.cmake")
+        # The pinned dependency suite is intentionally serial and should not
+        # compete with other CTest workers on the low-memory target host.
+        set_tests_properties(xrdp-upstream-unit PROPERTIES RUN_SERIAL TRUE)
+    endif()
 endif()
 
 configure_file(packaging/systemd/x11vnc-console.service.in
