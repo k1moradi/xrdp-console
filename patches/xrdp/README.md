@@ -64,22 +64,29 @@ historical fork's commit history:
     caps region inspection to 32 entries per monitor pass, and commits sent
     stripes or confirmed offscreen stale entries only after a successful frame
     end. Later visible damage remains pending for the next bounded Console
-    continuation. Fresh changes remain paced by the module's 16 ms presentation
-    scheduler. Legacy sessions keep the upstream 40 ms cadence and per-rectangle
-    transaction behavior.
+    continuation. Fresh Console damage is coalesced for 16 ms, while a
+    successfully sent bounded batch with existing dirty work continues without
+    another delay. Failed frames clear the continuation state to avoid a
+    zero-delay retry loop. Legacy sessions keep the upstream 40 ms cadence and
+    per-rectangle transaction behavior.
 11. `0011-xrdp-console-fail-safe-stale-dirty-regions.patch` makes offscreen
     cleanup fail closed when display geometry is missing or invalid, scans a
     fixed 32-rectangle snapshot through the same tested production helper, and
     commits sent/stale rectangles only after a successful frame transaction.
     Its xrdp unit regression verifies a 32-stale prefix cannot hide the visible
     33rd rectangle from the following continuation.
+12. `0012-xrdp-console-planar-fresh-continuation-pacing.patch` preserves the
+    legacy 40 ms cadence, coalesces fresh Console damage for 16 ms, and removes
+    the delay only while draining dirty work left by a successful bounded
+    transaction. The unit tests cover fresh, continuation, completed, and
+    failed transaction states.
 
 The activation script requires the `XRDP_CONSOLE_GFX_PLANAR_BATCH_V1` marker
 in the candidate daemon, so an older patched generation cannot be mistaken
 for this Planar batching implementation.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-eleven patches are production compatibility and correctness changes, not
+twelve patches are production compatibility and correctness changes, not
 benchmark knobs. Code
 `21` is deliberately used only by the direct module's profile; legacy VNC
 profiles continue using code `0`/`1`. The

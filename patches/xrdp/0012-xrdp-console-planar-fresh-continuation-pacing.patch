@@ -1,0 +1,146 @@
+--- a/xrdp/xrdp_types.h
++++ b/xrdp/xrdp_types.h
+@@ -448,6 +448,8 @@ struct xrdp_mm
+     int console_planar_frame_open;
+     int console_planar_batch_log_count;
+     int console_planar_frame_id;
++    /* Drain already-bounded Console damage without a fresh-batch delay. */
++    int console_planar_immediate_continuation;
+     int gfx_delay_autologin;
+     int mod_uses_wm_screen_for_gfx;
+     /* Whether a working h.264 library is loaded.
+--- a/xrdp/xrdp.h
++++ b/xrdp/xrdp.h
+@@ -266,5 +266,11 @@ xrdp_mm_console_commit_dirty_region(
+     const struct xrdp_rect *discarded, int discarded_count,
+     int transaction_succeeded);
++int
++xrdp_mm_console_gfx_minimum_flush_ms(int session_code,
++                                     int immediate_continuation);
++int
++xrdp_mm_console_planar_continuation_state(int transaction_succeeded,
++                                          int dirty_pending);
+ 
+ /* xrdp_bitmap_common.c */
+ struct xrdp_bitmap *
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -997,6 +997,7 @@
+ enum
+ {
+     XRDP_LEGACY_GFX_MINIMUM_FLUSH_MS = 40,
+-    XRDP_CONSOLE_GFX_MINIMUM_FLUSH_MS = 0,
++    XRDP_CONSOLE_GFX_NEW_DAMAGE_COALESCE_MS = 16,
++    XRDP_CONSOLE_GFX_CONTINUATION_MS = 0,
+     XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH = 128 * 1024
+ };
+@@ -1022,9 +1023,29 @@ struct xrdp_console_planar_batch
+ };
+ 
++int
++xrdp_mm_console_gfx_minimum_flush_ms(int session_code,
++                                     int immediate_continuation)
++{
++    if (session_code != XRDP_CONSOLE_SESSION_CODE)
++    {
++        return XRDP_LEGACY_GFX_MINIMUM_FLUSH_MS;
++    }
++
++    return immediate_continuation ? XRDP_CONSOLE_GFX_CONTINUATION_MS :
++           XRDP_CONSOLE_GFX_NEW_DAMAGE_COALESCE_MS;
++}
++
++int
++xrdp_mm_console_planar_continuation_state(int transaction_succeeded,
++                                          int dirty_pending)
++{
++    return transaction_succeeded && dirty_pending;
++}
++
+ static int
+ xrdp_mm_gfx_minimum_flush_ms(const struct xrdp_mm *self)
+ {
+-    return self->code == XRDP_CONSOLE_SESSION_CODE ?
+-           XRDP_CONSOLE_GFX_MINIMUM_FLUSH_MS :
+-           XRDP_LEGACY_GFX_MINIMUM_FLUSH_MS;
++    return xrdp_mm_console_gfx_minimum_flush_ms(
++               self->code,
++               self->console_planar_immediate_continuation);
+ }
+@@ -4332,9 +4349,10 @@ xrdp_mm_draw_dirty_console(struct xrdp_mm *self)
+         return 1;
+     }
+ 
++    self->console_planar_immediate_continuation = 0;
+     if (self->wm->screen_dirty_region == NULL ||
+             !xrdp_region_not_empty(self->wm->screen_dirty_region))
+     {
+         return 0;
+     }
+ 
+@@ -4441,7 +4460,13 @@ xrdp_mm_draw_dirty_console(struct xrdp_mm *self)
+     {
+         rv = 1;
+     }
+ 
++    self->console_planar_immediate_continuation =
++        xrdp_mm_console_planar_continuation_state(
++            rv == 0 && end_rv == 0 && commit_rv == 0,
++            self->wm->screen_dirty_region != NULL &&
++            xrdp_region_not_empty(self->wm->screen_dirty_region));
++
+     if (self->console_planar_batch_log_count == 0)
+     {
+         LOG(LOG_LEVEL_INFO, "XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 enabled");
+--- a/tests/xrdp/test_xrdp_region.c
++++ b/tests/xrdp/test_xrdp_region.c
+@@ -298,6 +298,40 @@ test_console_invalid_display_state_retains_dirty_region(void **state)
+     xrdp_region_delete(region);
+ }
+ 
++static void
++test_console_planar_fresh_and_continuation_pacing(void **state)
++{
++    int continuation;
++    UNUSED(state);
++
++    /* Legacy session pacing is invariant even if the Console flag is set. */
++    assert_int_equal(40, xrdp_mm_console_gfx_minimum_flush_ms(0, 0));
++    assert_int_equal(40, xrdp_mm_console_gfx_minimum_flush_ms(0, 1));
++
++    /* A fresh Console batch coalesces; successful pending work continues. */
++    continuation = xrdp_mm_console_planar_continuation_state(0, 0);
++    assert_int_equal(0, continuation);
++    assert_int_equal(16, xrdp_mm_console_gfx_minimum_flush_ms(
++                             XRDP_CONSOLE_SESSION_CODE, continuation));
++
++    continuation = xrdp_mm_console_planar_continuation_state(1, 1);
++    assert_int_equal(1, continuation);
++    assert_int_equal(0, xrdp_mm_console_gfx_minimum_flush_ms(
++                            XRDP_CONSOLE_SESSION_CODE, continuation));
++
++    /* Final drain clears the flag so subsequent damage coalesces again. */
++    continuation = xrdp_mm_console_planar_continuation_state(1, 0);
++    assert_int_equal(0, continuation);
++    assert_int_equal(16, xrdp_mm_console_gfx_minimum_flush_ms(
++                             XRDP_CONSOLE_SESSION_CODE, continuation));
++
++    /* Failed sends / FRAME_END cannot leave a zero-delay retry loop. */
++    continuation = xrdp_mm_console_planar_continuation_state(0, 1);
++    assert_int_equal(0, continuation);
++    assert_int_equal(16, xrdp_mm_console_gfx_minimum_flush_ms(
++                             XRDP_CONSOLE_SESSION_CODE, continuation));
++}
++
+ START_TEST(execute_suite)
+ {
+     const struct CMUnitTest tests[] =
+@@ -311,6 +345,7 @@ START_TEST(execute_suite)
+         cmocka_unit_test(test_console_offscreen_predicate_is_fail_closed),
+         cmocka_unit_test(test_console_stale_prefix_commits_transactionally),
+-        cmocka_unit_test(test_console_invalid_display_state_retains_dirty_region)
++        cmocka_unit_test(test_console_invalid_display_state_retains_dirty_region),
++        cmocka_unit_test(test_console_planar_fresh_and_continuation_pacing)
+     };
+ 
+     ck_assert_int_eq(cmocka_run_group_tests(tests, NULL, NULL), 0);
