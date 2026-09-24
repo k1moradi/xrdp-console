@@ -78,8 +78,10 @@ historical fork's commit history:
 12. `0012-xrdp-console-planar-fresh-continuation-pacing.patch` preserves the
     legacy 40 ms cadence, coalesces fresh Console damage for 16 ms, and removes
     the delay only while draining dirty work left by a successful bounded
-    transaction. The unit tests cover fresh, continuation, completed, and
-    failed transaction states.
+    transaction that made measurable dirty-region progress. Successful
+    no-progress transactions fall back to the coalescing delay to prevent a
+    zero-delay retry loop. The unit tests cover fresh, continuation, completed,
+    failed, and no-progress transaction states.
 
 The activation script requires the `XRDP_CONSOLE_GFX_PLANAR_BATCH_V1` marker
 in the candidate daemon, so an older patched generation cannot be mistaken

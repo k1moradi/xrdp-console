@@ -63,7 +63,7 @@ The series is deliberately small and applies in this order:
 | `0009-xrdp-console-preserve-gfx-dirty-regions.patch` | Console GFX Planar dirty-region preservation | Prevents sparse Console damage from becoming a large bounding-box Planar encode; legacy module codes retain their existing behavior. |
 | `0010-xrdp-console-batched-planar-frames.patch` | bounded Console Planar transactions | Reuses compression scratch, limits each pass to 32 dirty rectangles and 128 KiPixels, and commits dirty state only after frame end. |
 | `0011-xrdp-console-fail-safe-stale-dirty-regions.patch` | fail-safe offscreen classification and stale-prefix regression | Invalid display geometry can no longer authorize destructive dirty-region cleanup; the production scan/commit helpers are tested for a 32-stale prefix followed by visible continuation. |
-| `0012-xrdp-console-planar-fresh-continuation-pacing.patch` | fresh-versus-continuation pacing | Coalesces new Console dirty work for 16 ms, immediately continues only after a successful bounded frame leaves dirty work pending, clears continuation after failure, and leaves the legacy 40 ms cadence unchanged. |
+| `0012-xrdp-console-planar-fresh-continuation-pacing.patch` | fresh-versus-continuation pacing | Coalesces new Console dirty work for 16 ms, immediately continues only after a successful bounded frame makes dirty-region progress and leaves more work pending, clears continuation after failure/no progress, and leaves the legacy 40 ms cadence unchanged. |
 
 These twelve patches are production compatibility and correctness changes, not
 benchmark knobs.
