@@ -169,6 +169,27 @@ X11PointerPositionTracker::shouldForward(
            !(hasForwardedPosition_ && position == lastForwardedPosition_);
 }
 
+bool
+X11PointerPositionTracker::shouldAcceptRemoteMotion(
+    X11PointerPosition position) noexcept
+{
+    if (!localPointerAuthorityActive_)
+    {
+        return true;
+    }
+
+    if ((hasRemotePosition_ && position == remotePosition_) ||
+        position == localPointerAuthorityPosition_)
+    {
+        return false;
+    }
+
+    // A distinct coordinate is new remote activity; transfer authority back
+    // immediately without a timeout or a delayed pointer jump.
+    localPointerAuthorityActive_ = false;
+    return true;
+}
+
 void
 X11PointerPositionTracker::acknowledge(X11PointerPosition position,
                                        bool forwarded) noexcept
@@ -182,6 +203,8 @@ X11PointerPositionTracker::acknowledge(X11PointerPosition position,
     {
         lastForwardedPosition_ = position;
         hasForwardedPosition_ = true;
+        localPointerAuthorityPosition_ = position;
+        localPointerAuthorityActive_ = true;
     }
 }
 

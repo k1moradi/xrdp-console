@@ -65,8 +65,10 @@ The series is deliberately small and applies in this order:
 | `0011-xrdp-console-fail-safe-stale-dirty-regions.patch` | fail-safe offscreen classification and stale-prefix regression | Invalid display geometry can no longer authorize destructive dirty-region cleanup; the production scan/commit helpers are tested for a 32-stale prefix followed by visible continuation. |
 | `0012-xrdp-console-planar-fresh-continuation-pacing.patch` | fresh-versus-continuation pacing | Coalesces new Console dirty work for 16 ms, immediately continues only after a successful bounded frame makes dirty-region progress and leaves more work pending, clears continuation after failure/no progress, and leaves the legacy 40 ms cadence unchanged. |
 | `0013-xrdp-console-gfx-ack-telemetry.patch` | bounded Console RDPGFX acknowledgement telemetry | Records acknowledgement count, latest/maximum queue depth, decoded-frame progress, and suspension state before the intentional code-21 generic-encoder early return, then exposes the snapshot through the existing bounded Planar diagnostic record without changing transport or pacing behavior. |
+| `0014-xrdp-console-ack-profile-info.patch` | sampled ACK/queue profile visibility | Emits the first 16 Planar records and then every 256th at INFO, making telemetry visible under the production log level while bounding log volume; its counter saturates. |
+| `0015-xrdp-chansrv-strict-text-clipboard.patch` | strict text-only CLIPRDR framing | Removes bytes outside declared payload lengths, limits text format advertisement to Unicode, and flushes the X11 selection request without changing chansrv ownership. |
 
-These thirteen patches are retained production-path behavior and bounded
+These fifteen patches are retained production-path behavior and bounded
 operational diagnostics, not benchmark knobs.
 The old
 fork's profiling records, incremental parser, request-ahead scheduling,
@@ -75,7 +77,7 @@ experimental GFX flow-control code are intentionally not in the series.
 
 ## Classification of the old fork
 
-* **KEEP:** the thirteen patches listed above; they are required by the measured
+* **KEEP:** the fifteen patches listed above; they are required by the measured
   fixed-console/direct-console product path and address concrete transport,
   parser, codec, and keyboard-layout correctness issues.
 * **TOOLING:** profiling and benchmark-only changes; these belong in the

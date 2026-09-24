@@ -135,6 +135,15 @@ main()
                          position == X11PointerPosition{301, 201} &&
                          tracker.shouldForward(position),
                      "new local pointer motion was not forwarded after echo suppression");
+    tracker.acknowledge(position, true);
+    success &= check(!tracker.shouldAcceptRemoteMotion({300, 200}),
+                     "stale remote motion reclaimed local pointer authority");
+    success &= check(!tracker.shouldAcceptRemoteMotion({301, 201}),
+                     "local pointer echo reclaimed pointer authority");
+    success &= check(tracker.shouldAcceptRemoteMotion({302, 202}),
+                     "new remote motion did not reclaim pointer authority");
+    success &= check(tracker.shouldAcceptRemoteMotion({300, 200}),
+                     "remote motion remained blocked after authority transfer");
 
     xcb_disconnect(connection);
     return success ? 0 : 1;

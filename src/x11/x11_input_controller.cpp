@@ -456,7 +456,7 @@ bool
 X11InputController::handleVerticalScroll(long x, long y, long delta) noexcept
 {
     return emitScrollClicks(x, y, delta, verticalScrollRemainder_,
-                             /*positiveButton=*/5, /*negativeButton=*/4);
+                             /*positiveButton=*/4, /*negativeButton=*/5);
 }
 
 bool
@@ -464,7 +464,7 @@ X11InputController::handleHorizontalScroll(long x, long y,
                                             long delta) noexcept
 {
     return emitScrollClicks(x, y, delta, horizontalScrollRemainder_,
-                             /*positiveButton=*/6, /*negativeButton=*/7);
+                             /*positiveButton=*/7, /*negativeButton=*/6);
 }
 
 bool

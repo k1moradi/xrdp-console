@@ -1,0 +1,43 @@
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -1000,5 +1000,7 @@
+     XRDP_LEGACY_GFX_MINIMUM_FLUSH_MS = 40,
+     XRDP_CONSOLE_GFX_NEW_DAMAGE_COALESCE_MS = 16,
+     XRDP_CONSOLE_GFX_CONTINUATION_MS = 0,
+-    XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH = 128 * 1024
++    XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH = 128 * 1024,
++    XRDP_CONSOLE_GFX_PROFILE_INITIAL_BATCHES = 16,
++    XRDP_CONSOLE_GFX_PROFILE_PERIOD_BATCHES = 256
+ };
+@@ -4510,10 +4512,18 @@ xrdp_mm_draw_dirty_console(struct xrdp_mm *self)
+     if (self->console_planar_batch_log_count == 0)
+     {
+         LOG(LOG_LEVEL_INFO, "XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 enabled");
+     }
+-    if (self->console_planar_batch_log_count < 64)
++    const int profile_log_level =
++        (self->console_planar_batch_log_count <
++             XRDP_CONSOLE_GFX_PROFILE_INITIAL_BATCHES ||
++         self->console_planar_batch_log_count %
++             XRDP_CONSOLE_GFX_PROFILE_PERIOD_BATCHES == 0)
++            ? LOG_LEVEL_INFO
++            : (self->console_planar_batch_log_count < 64
++                   ? LOG_LEVEL_DEBUG : -1);
++    if (profile_log_level >= 0)
+     {
+-        LOG(LOG_LEVEL_DEBUG,
++        LOG(profile_log_level,
+             "XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 frame=%d starts=1 ends=%d "
+             "rects=%d tiles=%d pixels=%d pending=%d acknowledgements=%"
+             PRIu64 " queue_depth=%" PRIu32 " maximum_queue_depth=%"
+@@ -4530,6 +4540,9 @@ xrdp_mm_draw_dirty_console(struct xrdp_mm *self)
+             self->console_gfx_ack_telemetry.acknowledgements_suspended,
+             self->console_gfx_ack_telemetry.suspension_count);
+     }
+-    ++self->console_planar_batch_log_count;
++    if (self->console_planar_batch_log_count != INT_MAX)
++    {
++        ++self->console_planar_batch_log_count;
++    }
+     return rv;
+ }

@@ -1135,6 +1135,15 @@ ModuleContext::event(int message, long param1, long param2, long param3,
             return 0;
         }
     }
+    if (message == WM_MOUSEMOVE && impl_->pointerPositionTracker != nullptr &&
+        !impl_->pointerPositionTracker->shouldAcceptRemoteMotion(
+            {static_cast<std::int32_t>(param1),
+             static_cast<std::int32_t>(param2)}))
+    {
+        // A physical-console move was just reflected to the client. Do not
+        // let its stale absolute-motion echo snap the X pointer back.
+        return 0;
+    }
     const bool handled = impl_->inputController->handle(
         message, param1, param2, param3, param4);
     if (handled && is_pointer_message(message) &&

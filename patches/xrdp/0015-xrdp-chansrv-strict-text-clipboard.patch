@@ -1,0 +1,70 @@
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -429,8 +429,7 @@
+         out_uint16_le(s, CB_CAPSTYPE_GENERAL); /* capabilitySetType */
+         out_uint16_le(s, 12); /* lengthCapability */
+         out_uint32_le(s, g_cliprdr_version); /* version */
+         out_uint32_le(s, g_cliprdr_flags); /* generalFlags */
+-        out_uint32_le(s, 0); /* extra 4 bytes ? */
+         s_mark_end(s);
+         size = (int)(s->end - s->data);
+         LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_init: data out, sending "
+@@ -638,15 +637,10 @@
+                 clipboard_out_utf8_as_utf16_le(s, "");
+                 break;
+             case XRDP_CB_TEXT:
+                 LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_send_format_announce: XRDP_CB_TEXT");
+-                /* canned response for "bitmap" */
+-                out_uint32_le(s, 0x0000000d);
+-                clipboard_out_utf8_as_utf16_le(s, "");
+-                out_uint32_le(s, 0x00000010);
+-                clipboard_out_utf8_as_utf16_le(s, "");
+-                out_uint32_le(s, 0x00000001);
+-                clipboard_out_utf8_as_utf16_le(s, "");
+-                out_uint32_le(s, 0x00000007);
++                /* Advertise only lossless Unicode text. Strict clients can
++                 * reject a redundant list of synthesized legacy formats. */
++                out_uint32_le(s, CF_UNICODETEXT);
+                 clipboard_out_utf8_as_utf16_le(s, "");
+                 break;
+             default:
+@@ -684,13 +678,7 @@
+             case XRDP_CB_TEXT:
+                 LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_send_format_announce: XRDP_CB_TEXT");
+-                /* canned response for "bitmap" */
+-                out_uint32_le(s, 0x0000000d);
+-                out_uint8p(s, windows_native_format, sizeof(windows_native_format));
+-                out_uint32_le(s, 0x00000010);
+-                out_uint8p(s, windows_native_format, sizeof(windows_native_format));
+-                out_uint32_le(s, 0x00000001);
+-                out_uint8p(s, windows_native_format, sizeof(windows_native_format));
+-                out_uint32_le(s, 0x00000007);
++                /* Keep the legacy fixed-name PDU Unicode-only as well. */
++                out_uint32_le(s, CF_UNICODETEXT);
+                 out_uint8p(s, windows_native_format, sizeof(windows_native_format));
+                 break;
+             default:
+@@ -705,7 +693,6 @@
+     holdp[1] = (size >> 8) & 0xff;
+     holdp[2] = (size >> 16) & 0xff;
+     holdp[3] = (size >> 24) & 0xff;
+-    out_uint32_le(s, 0);
+     s_mark_end(s);
+     size = (int)(s->end - s->data);
+     LOG_DEVEL_HEXDUMP(LOG_LEVEL_TRACE, "clipboard data:", s->data, size);
+@@ -762,7 +749,6 @@
+     out_uint32_le(s, num_words * 2 + 2); /* length */
+     out_utf8_as_utf16_le(s, data, data_size);
+     out_uint16_le(s, 0); /* nil for string */
+-    out_uint32_le(s, 0);
+     s_mark_end(s);
+     size = (int)(s->end - s->data);
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_send_data_response_for_text: data out, "
+@@ -1565,6 +1551,7 @@
+     {
+         /* window is closed */
+         XConvertSelection(g_display, g_clipboard_atom, g_targets_atom,
+                           g_clip_property_atom, g_wnd, lxevent->timestamp);
++        XFlush(g_display);
+     }
+     return 0;

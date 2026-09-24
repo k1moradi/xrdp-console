@@ -6,6 +6,7 @@
 
 #include <xcb/xcb.h>
 
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -312,6 +313,8 @@ struct ScrollEvents
     int downPresses{};
     int leftPresses{};
     int rightPresses{};
+    std::array<int, 4> pressOrder{};
+    std::size_t pressCount{};
 };
 
 bool
@@ -332,6 +335,13 @@ wait_for_scroll_events(xcb_connection_t *connection, xcb_window_t window,
                     const xcb_button_press_event_t *>(event);
                 if (button->event == window)
                 {
+                    if (button->detail >= 4 && button->detail <= 7 &&
+                        observed.pressCount < observed.pressOrder.size())
+                    {
+                        observed.pressOrder[observed.pressCount] =
+                            static_cast<int>(button->detail);
+                        ++observed.pressCount;
+                    }
                     switch (button->detail)
                     {
                         case 4:
@@ -605,7 +615,10 @@ run() noexcept
         scrollReceived = scrollReceived && scrollEvents.upPresses == 1 &&
                          scrollEvents.downPresses == 1 &&
                          scrollEvents.leftPresses == 1 &&
-                         scrollEvents.rightPresses == 1;
+                         scrollEvents.rightPresses == 1 &&
+                         scrollEvents.pressCount == 4 &&
+                         scrollEvents.pressOrder ==
+                             std::array<int, 4>{4, 5, 7, 6};
         if (!scrollReceived)
         {
             std::fprintf(stderr,

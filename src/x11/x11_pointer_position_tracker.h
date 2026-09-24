@@ -40,6 +40,8 @@ public:
         X11PointerPosition &position) const noexcept;
     [[nodiscard]] bool shouldForward(
         X11PointerPosition position) const noexcept;
+    [[nodiscard]] bool shouldAcceptRemoteMotion(
+        X11PointerPosition position) noexcept;
     void acknowledge(X11PointerPosition position, bool forwarded) noexcept;
 
 private:
@@ -52,8 +54,12 @@ private:
     X11PointerPosition pendingPosition_{};
     X11PointerPosition remotePosition_{};
     X11PointerPosition lastForwardedPosition_{};
+    // A locally forwarded movement temporarily owns the root pointer. Ignore
+    // stale RDP motion echoes until a distinct remote motion reclaims it.
+    X11PointerPosition localPointerAuthorityPosition_{};
     bool hasPendingPosition_{false};
     bool hasRemotePosition_{false};
     bool hasForwardedPosition_{false};
+    bool localPointerAuthorityActive_{false};
     const char *failureReason_{"not initialized"};
 };

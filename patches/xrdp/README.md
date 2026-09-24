@@ -92,12 +92,23 @@ historical fork's commit history:
     repeated suspension/resume, frame-ID ordering, signed values, and counter
     saturation.
 
+14. `0014-xrdp-console-ack-profile-info.patch` raises the bounded Planar batch
+    diagnostic to INFO for the first 16 batches and then every 256 batches,
+    so production `LogLevel=INFO` captures the ACK/queue telemetry without
+    logging every graphics transaction. At DEBUG, batches 17–63 remain
+    available for integration-test drain assertions. Its sample counter
+    saturates at `INT_MAX` rather than overflowing.
+15. `0015-xrdp-chansrv-strict-text-clipboard.patch` corrects CLIPRDR payload
+    lengths, announces only `CF_UNICODETEXT` for text in both format-list
+    encodings, and flushes the X11 selection conversion request. Clipboard
+    ownership remains in the existing chansrv process.
+
 The activation script requires the `XRDP_CONSOLE_GFX_PLANAR_BATCH_V1` marker
 in the candidate daemon, so an older patched generation cannot be mistaken
 for this Planar batching implementation.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-thirteen patches are retained production-path behavior and bounded operational
+fifteen patches are retained production-path behavior and bounded operational
 diagnostics, not benchmark knobs. Code
 `21` is deliberately used only by the direct module's profile; legacy VNC
 profiles continue using code `0`/`1`. The

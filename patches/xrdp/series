@@ -11,3 +11,5 @@
 0011-xrdp-console-fail-safe-stale-dirty-regions.patch
 0012-xrdp-console-planar-fresh-continuation-pacing.patch
 0013-xrdp-console-gfx-ack-telemetry.patch
+0014-xrdp-console-ack-profile-info.patch
+0015-xrdp-chansrv-strict-text-clipboard.patch
