@@ -185,6 +185,25 @@ test_overlapping_damage_can_reexpand_consumed_front() noexcept
                : 1;
 }
 
+int
+test_intersection_is_strict_and_bounded() noexcept
+{
+    constexpr PixelSize bounds{100, 80};
+    DamageRegion region;
+    region.add({10, 10, 20, 20}, bounds);
+    region.add({60, 40, 10, 10}, bounds);
+
+    if (!region.intersects({15, 15, 1, 1}) ||
+        !region.intersects({55, 35, 10, 10}) ||
+        region.intersects({30, 10, 5, 5}) ||
+        region.intersects({0, 0, 0, 10}) ||
+        region.intersects({0, 0, 10, 0}))
+    {
+        return 1;
+    }
+    return 0;
+}
+
 } // namespace
 
 int
@@ -208,6 +227,10 @@ main()
         success = false;
     }
     if (test_overlapping_damage_can_reexpand_consumed_front() != 0)
+    {
+        success = false;
+    }
+    if (test_intersection_is_strict_and_bounded() != 0)
     {
         success = false;
     }

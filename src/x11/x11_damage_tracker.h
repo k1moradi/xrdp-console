@@ -31,6 +31,8 @@ public:
     void handle(const xcb_generic_event_t &event) noexcept;
 
     [[nodiscard]] bool hasPendingDamage() const noexcept;
+    [[nodiscard]] bool pendingDamageIntersects(
+        Rectangle rectangle) const noexcept;
 
     // Clear the accumulated server-side delta and publish bounded event
     // rectangles into damageRegion at the presentation boundary.

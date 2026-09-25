@@ -222,6 +222,18 @@ if(TARGET xrdp-console)
     add_test(NAME remote-fx-scheduler-unit
         COMMAND remote-fx-scheduler-unit)
 
+    add_executable(clipboard-selection-retry-policy-unit
+        test_clipboard_retry_policy.c)
+    set_target_properties(clipboard-selection-retry-policy-unit PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS OFF)
+    target_include_directories(clipboard-selection-retry-policy-unit PRIVATE
+        ${XRDP_CONSOLE_XRDP_SOURCE_DIR}/sesman/chansrv)
+    add_dependencies(clipboard-selection-retry-policy-unit xrdp_upstream)
+    add_test(NAME clipboard-selection-retry-policy-unit
+        COMMAND clipboard-selection-retry-policy-unit)
+
     add_executable(classic-graphics-scheduler-unit
         test_classic_graphics_scheduler.cpp)
     set_target_properties(classic-graphics-scheduler-unit PROPERTIES
@@ -232,6 +244,17 @@ if(TARGET xrdp-console)
         ${CMAKE_SOURCE_DIR}/src)
     add_test(NAME classic-graphics-scheduler-unit
         COMMAND classic-graphics-scheduler-unit)
+
+    add_executable(interaction-priority-unit
+        test_interaction_priority.cpp)
+    set_target_properties(interaction-priority-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(interaction-priority-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME interaction-priority-unit
+        COMMAND interaction-priority-unit)
 
     add_executable(x11-capture-arena-unit
         test_x11_capture_arena.cpp)

@@ -18,6 +18,8 @@ public:
 
     [[nodiscard]] std::span<const Rectangle> rectangles() const noexcept;
 
+    [[nodiscard]] bool intersects(Rectangle rectangle) const noexcept;
+
     [[nodiscard]] bool front(Rectangle &rectangle) const noexcept;
     [[nodiscard]] bool consume_front(Rectangle rectangle) noexcept;
     void remove_front() noexcept;

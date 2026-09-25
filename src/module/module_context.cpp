@@ -21,6 +21,7 @@ extern "C" {
 }
 
 #include "../core/damage_region.h"
+#include "../core/interaction_priority.h"
 #include "../core/letterbox_regions.h"
 #include "../core/paint_quantum.h"
 #include "../core/presentation_scaler.h"
@@ -425,6 +426,10 @@ struct PendingPresentation
     Rectangle presentationRectangle{};
     FramebufferView sourcePixels{};
     std::uint32_t nextPresentationRow{};
+    // Ordinary captures own DamageRegion::front(); priority captures only
+    // borrow current pixels and leave the ordinary region authoritative.
+    bool consumeDamageRegion{true};
+    bool interactionPriority{false};
 
     [[nodiscard]] bool active() const noexcept
     {
@@ -441,6 +446,8 @@ struct PendingPresentation
         presentationRectangle = {};
         sourcePixels = {};
         nextPresentationRow = 0;
+        consumeDamageRegion = true;
+        interactionPriority = false;
     }
 };
 
@@ -512,6 +519,7 @@ struct ModuleContext::Impl
     PresentationTransform presentationTransform{};
     PresentationScaler presentationScaler{};
     DamageRegion damageRegion{};
+    InteractionPriorityState interactionPriority{};
     // sourcePixels is a non-owning view into X11SharedMemoryCapture's
     // persistent XShm arena. While this item is active, no subsequent
     // capture() call may overwrite that arena.
@@ -918,6 +926,7 @@ ModuleContext::connect() noexcept
         impl_->clipboard.reset();
         impl_->x11Connection.reset();
         impl_->damageRegion.clear();
+        impl_->interactionPriority = {};
         impl_->state.sourceGeometry = {};
         impl_->presentationTransform = {};
         impl_->presentationScaler = {};
@@ -987,6 +996,7 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     }
 
     impl_->pendingPresentation.clear();
+    clearInteractionPriority(impl_->interactionPriority);
     impl_->pendingRfx.clear();
     impl_->rfxLetterboxFill.clear();
     impl_->state.presentationGeometry = presentationGeometry;
@@ -1028,6 +1038,7 @@ ModuleContext::invalidate_presentation(int width, int height) noexcept
         return 1;
     }
     impl_->pendingPresentation.clear();
+    clearInteractionPriority(impl_->interactionPriority);
     impl_->pendingRfx.clear();
     impl_->rfxLetterboxFill.clear();
     if (!impl_->preparePresentationInvalidation())
@@ -1058,6 +1069,7 @@ ModuleContext::suppress_output(bool suppress, int left, int top, int right,
 
     impl_->outputSuppressed = suppress;
     impl_->pendingPresentation.clear();
+    clearInteractionPriority(impl_->interactionPriority);
     impl_->pendingRfx.clear();
     impl_->rfxLetterboxFill.clear();
     if (impl_->state.sourceGeometry.widthPixels != 0 &&
@@ -1153,6 +1165,37 @@ ModuleContext::event(int message, long param1, long param2, long param3,
             {static_cast<std::int32_t>(param1),
              static_cast<std::int32_t>(param2)});
     }
+    if (handled && is_pointer_message(message))
+    {
+        const std::int32_t sourceCoordinateX =
+            static_cast<std::int32_t>(param1);
+        const std::int32_t sourceCoordinateY =
+            static_cast<std::int32_t>(param2);
+        if (message == WM_LBUTTONDOWN)
+        {
+            noteInteractionFocus(
+                impl_->interactionPriority, sourceCoordinateX,
+                sourceCoordinateY, impl_->state.sourceGeometry);
+        }
+        else if (message == WM_MOUSEMOVE ||
+                 is_pointer_release_message(message))
+        {
+            noteInteractionPointer(
+                impl_->interactionPriority, sourceCoordinateX,
+                sourceCoordinateY, impl_->state.sourceGeometry, false);
+        }
+        else
+        {
+            noteInteractionPointer(
+                impl_->interactionPriority, sourceCoordinateX,
+                sourceCoordinateY, impl_->state.sourceGeometry, true);
+        }
+    }
+    else if (handled && message == WM_KEYDOWN)
+    {
+        static_cast<void>(requestFocusedInteraction(
+            impl_->interactionPriority, impl_->state.sourceGeometry));
+    }
     return handled ? 0 : 1;
 }
 
@@ -1179,6 +1222,7 @@ ModuleContext::end() noexcept
     impl_->clipboard.reset();
     impl_->x11Connection.reset();
     impl_->damageRegion.clear();
+    impl_->interactionPriority = {};
     impl_->presentationTransform = {};
     impl_->presentationScaler = {};
     impl_->fullPresentationInvalidation = false;
@@ -1299,13 +1343,18 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
     const bool classicAvailable =
         impl_->graphicsTransport == GraphicsTransport::ClassicBitmap &&
         impl_->rdpUpdateSink.available();
+    const bool priorityDamagePending =
+        impl_->interactionPriority.pending &&
+        impl_->damageTracker->pendingDamageIntersects(
+            impl_->interactionPriority.rectangle);
     const ClassicWorkClass classicWorkClass = classifyClassicWork(
         impl_->pendingPresentation.active(),
         !impl_->damageRegion.rectangles().empty(),
-        impl_->damageTracker->hasPendingDamage());
+        impl_->damageTracker->hasPendingDamage(),
+        priorityDamagePending);
     const bool classicContinuation =
         classicAvailable &&
-        classicWorkClass == ClassicWorkClass::ImmediateContinuation;
+        shouldServiceClassicWorkImmediately(classicWorkClass);
 
     if (timeout != nullptr && !impl_->outputSuppressed)
     {
@@ -1771,6 +1820,9 @@ ModuleContext::check_wait_objs() noexcept
                     return 1;
                 }
                 forwarded = true;
+                noteInteractionPointer(
+                    impl_->interactionPriority, sourcePosition.x,
+                    sourcePosition.y, impl_->state.sourceGeometry, false);
             }
             impl_->pointerPositionTracker->acknowledge(sourcePosition,
                                                        forwarded);
@@ -1822,16 +1874,21 @@ ModuleContext::check_wait_objs() noexcept
         return 0;
     }
 
+    const bool priorityDamagePending =
+        impl_->interactionPriority.pending &&
+        impl_->damageTracker->pendingDamageIntersects(
+            impl_->interactionPriority.rectangle);
     const ClassicWorkClass classicWorkClass = classifyClassicWork(
         impl_->pendingPresentation.active(),
         !impl_->damageRegion.rectangles().empty(),
-        impl_->damageTracker->hasPendingDamage());
+        impl_->damageTracker->hasPendingDamage(),
+        priorityDamagePending);
     const auto now = Impl::Clock::now();
     if (!impl_->presentationDeadlineArmed)
     {
         impl_->armPresentationImmediately();
     }
-    if (classicWorkClass != ClassicWorkClass::ImmediateContinuation &&
+    if (!shouldServiceClassicWorkImmediately(classicWorkClass) &&
         now < impl_->presentationDeadline)
     {
         impl_->profile.maybeLog();
@@ -1855,7 +1912,50 @@ ModuleContext::check_wait_objs() noexcept
                 previousSnapshotPixels);
     }
 
-    if (impl_->damageRegion.rectangles().empty() &&
+    const bool priorityDamageReady =
+        classicWorkClass == ClassicWorkClass::PriorityDamage &&
+        impl_->interactionPriority.pending &&
+        impl_->damageRegion.intersects(impl_->interactionPriority.rectangle);
+    if (priorityDamageReady)
+    {
+        // DamageRegion still owns the old source rectangle. Release the
+        // borrowed view before the priority capture reuses persistent XShm.
+        impl_->pendingPresentation.clear();
+
+        Rectangle presentationRectangle{};
+        const Rectangle sourceRectangle = impl_->interactionPriority.rectangle;
+        const RectangleMapResult mapping =
+            impl_->presentationTransform.mapSourceRectangle(
+                sourceRectangle, presentationRectangle);
+        if (mapping == RectangleMapResult::Invalid)
+        {
+            return 1;
+        }
+        if (mapping == RectangleMapResult::Empty)
+        {
+            clearInteractionPriority(impl_->interactionPriority);
+        }
+        else
+        {
+            const FramebufferView pixels =
+                impl_->sharedMemoryCapture->capture(sourceRectangle);
+            if (!pixels.valid())
+            {
+                return 1;
+            }
+            impl_->profile.noteCapture(sourceRectangle);
+            impl_->pendingPresentation.sourceRectangle = sourceRectangle;
+            impl_->pendingPresentation.presentationRectangle =
+                presentationRectangle;
+            impl_->pendingPresentation.sourcePixels = pixels;
+            impl_->pendingPresentation.nextPresentationRow = 0;
+            impl_->pendingPresentation.consumeDamageRegion = false;
+            impl_->pendingPresentation.interactionPriority = true;
+        }
+    }
+
+    if (!impl_->pendingPresentation.active() &&
+        impl_->damageRegion.rectangles().empty() &&
         !impl_->fullPresentationInvalidation)
     {
         impl_->disarmPresentation();
@@ -1868,12 +1968,15 @@ ModuleContext::check_wait_objs() noexcept
         return 1;
     }
 
+    const InteractionPriorityState priorityBeforePresentation =
+        impl_->interactionPriority;
     const DamageRegion damageBeforePresentation = impl_->damageRegion;
     const PendingPresentation pendingBeforePresentation =
         impl_->pendingPresentation;
     const bool pendingWasActive = impl_->pendingPresentation.active();
     bool success = true;
     bool filledPresentationBackground = false;
+    bool completedInteractionPriority = false;
     const bool fillAvailable = impl_->rdpUpdateSink.fillAvailable();
     if (impl_->fullPresentationInvalidation && fillAvailable)
     {
@@ -2048,12 +2151,16 @@ ModuleContext::check_wait_objs() noexcept
             pending.presentationRectangle.heightPixels)
         {
             const Rectangle completedSource = pending.sourceRectangle;
+            const bool consumeDamageRegion = pending.consumeDamageRegion;
+            const bool interactionPriority = pending.interactionPriority;
             pending.clear();
-            if (!impl_->damageRegion.consume_front(completedSource))
+            if (consumeDamageRegion &&
+                !impl_->damageRegion.consume_front(completedSource))
             {
                 success = false;
                 break;
             }
+            completedInteractionPriority = interactionPriority;
             if (pendingWasActive)
             {
                 // Do not capture a second source rectangle while the current
@@ -2076,6 +2183,11 @@ ModuleContext::check_wait_objs() noexcept
         // no source rectangle is lost and no stale XShm view is retained.
         impl_->damageRegion = damageBeforePresentation;
         impl_->pendingPresentation = pendingBeforePresentation;
+        impl_->interactionPriority = priorityBeforePresentation;
+    }
+    if (success && completedInteractionPriority)
+    {
+        clearInteractionPriority(impl_->interactionPriority);
     }
     if (success && (filledPresentationBackground || !fillAvailable))
     {
@@ -2083,12 +2195,16 @@ ModuleContext::check_wait_objs() noexcept
     }
     if (success)
     {
+        const bool remainingPriorityDamage =
+            impl_->interactionPriority.pending &&
+            impl_->damageTracker->pendingDamageIntersects(
+                impl_->interactionPriority.rectangle);
         const ClassicWorkClass remainingWorkClass = classifyClassicWork(
             impl_->pendingPresentation.active(),
             !impl_->damageRegion.rectangles().empty(),
-            impl_->damageTracker->hasPendingDamage());
-        if (remainingWorkClass ==
-            ClassicWorkClass::ImmediateContinuation)
+            impl_->damageTracker->hasPendingDamage(),
+            remainingPriorityDamage);
+        if (shouldServiceClassicWorkImmediately(remainingWorkClass))
         {
             // Continue a frozen local snapshot at once. The next xrdp loop
             // still services transport before this bounded graphics quantum.

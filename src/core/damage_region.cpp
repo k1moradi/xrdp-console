@@ -257,6 +257,24 @@ DamageRegion::rectangles() const noexcept
 }
 
 bool
+DamageRegion::intersects(Rectangle rectangle) const noexcept
+{
+    if (rectangle.widthPixels == 0 || rectangle.heightPixels == 0)
+    {
+        return false;
+    }
+    for (std::size_t rectangleIndex = 0; rectangleIndex < count_;
+         ++rectangleIndex)
+    {
+        if (strictly_overlaps(rectangles_[rectangleIndex], rectangle))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool
 DamageRegion::front(Rectangle &rectangle) const noexcept
 {
     if (count_ == 0)

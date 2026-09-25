@@ -24,6 +24,7 @@ struct Case
     bool pendingPresentation;
     bool snapshottedDamage;
     bool unsnapshottedDamage;
+    bool priorityDamagePending;
     ClassicWorkClass expected;
     const char *description;
 };
@@ -31,21 +32,37 @@ struct Case
 bool
 work_states_are_classified()
 {
-    constexpr std::array<Case, 8> cases{{
-        {false, false, false, ClassicWorkClass::Idle, "idle state"},
-        {false, false, true, ClassicWorkClass::NewDamage,
+    constexpr std::array<Case, 16> cases{{
+        {false, false, false, false, ClassicWorkClass::Idle, "idle state"},
+        {false, false, true, false, ClassicWorkClass::NewDamage,
          "fresh XDamage waits for coalescing cadence"},
-        {true, false, false, ClassicWorkClass::ImmediateContinuation,
+        {true, false, false, false, ClassicWorkClass::ImmediateContinuation,
          "borrowed capture continues immediately"},
-        {false, true, false, ClassicWorkClass::ImmediateContinuation,
+        {false, true, false, false, ClassicWorkClass::ImmediateContinuation,
          "local snapshot continues immediately"},
-        {true, false, true, ClassicWorkClass::ImmediateContinuation,
-         "pending capture outranks fresh XDamage"},
-        {false, true, true, ClassicWorkClass::ImmediateContinuation,
-         "frozen local region outranks newly arrived XDamage"},
-        {true, true, true, ClassicWorkClass::ImmediateContinuation,
-         "all local continuation states remain immediate"},
-        {false, false, false, ClassicWorkClass::Idle,
+        {true, false, true, false, ClassicWorkClass::ImmediateContinuation,
+         "ordinary pending capture outranks unrelated fresh XDamage"},
+        {false, true, true, false, ClassicWorkClass::ImmediateContinuation,
+         "ordinary frozen region outranks unrelated fresh XDamage"},
+        {true, true, true, false, ClassicWorkClass::ImmediateContinuation,
+         "ordinary continuation remains immediate"},
+        {false, false, false, true, ClassicWorkClass::Idle,
+         "priority flag without fresh XDamage remains idle"},
+        {false, false, true, true, ClassicWorkClass::PriorityDamage,
+         "intersecting priority damage is immediate"},
+        {true, false, true, true, ClassicWorkClass::PriorityDamage,
+         "priority damage can preempt a borrowed capture"},
+        {false, true, true, true, ClassicWorkClass::PriorityDamage,
+         "priority damage can preempt a frozen region"},
+        {true, true, true, true, ClassicWorkClass::PriorityDamage,
+         "priority damage outranks older local work"},
+        {true, false, false, true, ClassicWorkClass::ImmediateContinuation,
+         "priority cannot preempt without fresh XDamage"},
+        {false, true, false, true, ClassicWorkClass::ImmediateContinuation,
+         "priority preserves frozen work without fresh XDamage"},
+        {true, true, false, true, ClassicWorkClass::ImmediateContinuation,
+         "priority preserves continuation without fresh XDamage"},
+        {false, false, false, false, ClassicWorkClass::Idle,
          "drained snapshot returns to idle"},
     }};
 
@@ -54,14 +71,23 @@ work_states_are_classified()
     {
         const ClassicWorkClass actual = classifyClassicWork(
             testCase.pendingPresentation, testCase.snapshottedDamage,
-            testCase.unsnapshottedDamage);
+            testCase.unsnapshottedDamage,
+            testCase.priorityDamagePending);
         if (!check(actual == testCase.expected, testCase.description))
         {
             success = false;
         }
         if (!check(shouldSnapshotClassicDamage(actual) ==
-                       (testCase.expected == ClassicWorkClass::NewDamage),
-                   "only fresh unsnapshotted damage may be snapshotted"))
+                       (testCase.expected == ClassicWorkClass::NewDamage ||
+                        testCase.expected == ClassicWorkClass::PriorityDamage),
+                   "only new or urgent unsnapshotted damage may be snapshotted"))
+        {
+            success = false;
+        }
+        if (!check(shouldServiceClassicWorkImmediately(actual) ==
+                       (actual == ClassicWorkClass::ImmediateContinuation ||
+                        actual == ClassicWorkClass::PriorityDamage),
+                   "immediate service classification changed"))
         {
             success = false;
         }

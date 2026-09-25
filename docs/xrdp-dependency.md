@@ -67,8 +67,10 @@ The series is deliberately small and applies in this order:
 | `0013-xrdp-console-gfx-ack-telemetry.patch` | bounded Console RDPGFX acknowledgement telemetry | Records acknowledgement count, latest/maximum queue depth, decoded-frame progress, and suspension state before the intentional code-21 generic-encoder early return, then exposes the snapshot through the existing bounded Planar diagnostic record without changing transport or pacing behavior. |
 | `0014-xrdp-console-ack-profile-info.patch` | sampled ACK/queue profile visibility | Emits the first 16 Planar records and then every 256th at INFO, making telemetry visible under the production log level while bounding log volume; its counter saturates. |
 | `0015-xrdp-chansrv-strict-text-clipboard.patch` | strict text-only CLIPRDR framing | Removes bytes outside declared payload lengths, limits text format advertisement to Unicode, and flushes the X11 selection request without changing chansrv ownership. |
+| `0016-xrdp-console-interaction-priority-backpressure.patch` | current-input priority and ACK-aware background coalescing | Sends a bounded focus/pointer hotspot before ordinary Console Planar dirty work and raises only background flush cadence to 100 ms when a normal ACK reports at least 256 KiB of unprocessed graphics. ACK suspension disables the throttle; transport and codec selection stay unchanged. |
+| `0017-xrdp-chansrv-bounded-text-selection-retry.patch` | bounded text-selection recovery | Retries explicit X11 `TARGETS`/Unicode conversion or property-read failures at most twice, 50 ms apart; a silent owner fails after 2 s. Generation/attempt tokens reject stale timers and late text responses. File/image paths and chansrv CLIPRDR ownership are unchanged. |
 
-These fifteen patches are retained production-path behavior and bounded
+These seventeen patches are retained production-path behavior and bounded
 operational diagnostics, not benchmark knobs.
 The old
 fork's profiling records, incremental parser, request-ahead scheduling,
@@ -77,7 +79,7 @@ experimental GFX flow-control code are intentionally not in the series.
 
 ## Classification of the old fork
 
-* **KEEP:** the fifteen patches listed above; they are required by the measured
+* **KEEP:** the seventeen patches listed above; they are required by the measured
   fixed-console/direct-console product path and address concrete transport,
   parser, codec, and keyboard-layout correctness issues.
 * **TOOLING:** profiling and benchmark-only changes; these belong in the

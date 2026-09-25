@@ -1,0 +1,489 @@
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -175,8 +175,9 @@
+ #include "chansrv_config.h"
+ #include "clipboard.h"
+ #include "clipboard_file.h"
+ #include "clipboard_common.h"
++#include "clipboard_retry_policy.h"
+ #include "xcommon.h"
+ #include "chansrv_fuse.h"
+ #include "ms-rdpeclip.h"
+ #include "xrdp_constants.h"
+@@ -243,8 +244,25 @@
+ /* Format ID assigned to "FileGroupDescriptorW" by the client */
+ static int g_file_group_descriptor_format_id = -1;
+ 
+ static char g_last_atom_name[256] = "";
++
++struct clipboard_selection_retry
++{
++    struct clipboard_retry_policy policy;
++    Atom target;
++    Time time;
++    int data_response_expected;
++    int retry_timeout_pending;
++};
++
++struct clipboard_selection_retry_timeout
++{
++    uint64_t generation;
++    unsigned int attempt;
++};
++
++static struct clipboard_selection_retry g_selection_retry;
+ 
+ /*
+  * Values for the named formats we send to the client in
+  * a Format List PDU
+@@ -483,8 +500,13 @@
+ int
+ clipboard_deinit(void)
+ {
+     LOG_DEVEL(LOG_LEVEL_INFO, "clipboard_deinit:");
++    clipboard_retry_policy_cancel(&g_selection_retry.policy);
++    g_selection_retry.target = None;
++    g_selection_retry.time = CurrentTime;
++    g_selection_retry.data_response_expected = 0;
++    g_selection_retry.retry_timeout_pending = 0;
+     if (g_wnd != 0)
+     {
+         XDestroyWindow(g_display, g_wnd);
+         g_wnd = 0;
+@@ -1023,8 +1045,203 @@
+     rv = send_channel_data(g_cliprdr_chan_id, s->data, size);
+     free_stream(s);
+     return rv;
+ }
++
++static void
++clipboard_finish_selection_conversion(Atom target)
++{
++    if (clipboard_retry_policy_active(&g_selection_retry.policy) &&
++            target == g_selection_retry.target)
++    {
++        clipboard_retry_policy_reset(&g_selection_retry.policy);
++        g_selection_retry.target = None;
++        g_selection_retry.time = CurrentTime;
++        g_selection_retry.data_response_expected = 0;
++        g_selection_retry.retry_timeout_pending = 0;
++    }
++}
++
++static void
++clipboard_fail_selection_conversion(Atom target)
++{
++    if (!clipboard_retry_policy_active(&g_selection_retry.policy) ||
++            target != g_selection_retry.target)
++    {
++        return;
++    }
++
++    LOG(LOG_LEVEL_ERROR,
++        "XRDP_CONSOLE_CLIPBOARD_RETRY exhausted target=%s attempts=%u",
++        get_atom_text(target), g_selection_retry.policy.attempt);
++    if (g_selection_retry.data_response_expected)
++    {
++        clipboard_send_data_response_failed();
++    }
++    clipboard_finish_selection_conversion(target);
++}
++
++static int
++clipboard_schedule_selection_retry(void);
++static int
++clipboard_schedule_selection_response_timeout(void);
++
++static void
++clipboard_selection_retry_timeout(void *data)
++{
++    struct clipboard_selection_retry_timeout *timeout_context;
++    uint64_t generation;
++    unsigned int attempt;
++
++    timeout_context = (struct clipboard_selection_retry_timeout *) data;
++    if (timeout_context == NULL)
++    {
++        return;
++    }
++    generation = timeout_context->generation;
++    attempt = timeout_context->attempt;
++    g_free(timeout_context);
++
++    if (!g_clip_up || g_wnd == 0 ||
++            !clipboard_retry_policy_attempt_matches(
++                &g_selection_retry.policy, generation, attempt))
++    {
++        return;
++    }
++    g_selection_retry.retry_timeout_pending = 0;
++    if (!clipboard_retry_policy_can_retry(&g_selection_retry.policy))
++    {
++        clipboard_fail_selection_conversion(g_selection_retry.target);
++        return;
++    }
++    if (!clipboard_retry_policy_advance(&g_selection_retry.policy))
++    {
++        clipboard_fail_selection_conversion(g_selection_retry.target);
++        return;
++    }
++
++    LOG(LOG_LEVEL_INFO,
++        "XRDP_CONSOLE_CLIPBOARD_RETRY retry target=%s attempt=%u",
++        get_atom_text(g_selection_retry.target),
++        g_selection_retry.policy.attempt);
++    XConvertSelection(g_display, g_clipboard_atom, g_selection_retry.target,
++                      g_clip_property_atom, g_wnd, g_selection_retry.time);
++    XFlush(g_display);
++    if (!clipboard_schedule_selection_response_timeout())
++    {
++        clipboard_fail_selection_conversion(g_selection_retry.target);
++    }
++}
++
++static int
++clipboard_schedule_selection_retry(void)
++{
++    struct clipboard_selection_retry_timeout *timeout_context;
++
++    if (!clipboard_retry_policy_active(&g_selection_retry.policy) ||
++            g_selection_retry.retry_timeout_pending ||
++            !clipboard_retry_policy_can_retry(&g_selection_retry.policy))
++    {
++        return 0;
++    }
++    timeout_context = g_new0(struct clipboard_selection_retry_timeout, 1);
++    if (timeout_context == NULL)
++    {
++        return 0;
++    }
++    timeout_context->generation = g_selection_retry.policy.generation;
++    timeout_context->attempt = g_selection_retry.policy.attempt;
++    if (add_timeout(CLIPBOARD_SELECTION_RETRY_DELAY_MS,
++                    clipboard_selection_retry_timeout, timeout_context) != 0)
++    {
++        g_free(timeout_context);
++        return 0;
++    }
++    g_selection_retry.retry_timeout_pending = 1;
++    return 1;
++}
++
++static void
++clipboard_selection_response_timeout(void *data)
++{
++    struct clipboard_selection_retry_timeout *timeout_context;
++    uint64_t generation;
++    unsigned int attempt;
++
++    timeout_context = (struct clipboard_selection_retry_timeout *) data;
++    if (timeout_context == NULL)
++    {
++        return;
++    }
++    generation = timeout_context->generation;
++    attempt = timeout_context->attempt;
++    g_free(timeout_context);
++
++    if (!g_clip_up || g_wnd == 0 ||
++            !clipboard_retry_policy_attempt_matches(
++                &g_selection_retry.policy, generation, attempt))
++    {
++        return;
++    }
++
++    LOG(LOG_LEVEL_ERROR,
++        "XRDP_CONSOLE_CLIPBOARD_RETRY response_timeout target=%s attempt=%u",
++        get_atom_text(g_selection_retry.target), attempt);
++    clipboard_fail_selection_conversion(g_selection_retry.target);
++}
++
++static int
++clipboard_schedule_selection_response_timeout(void)
++{
++    struct clipboard_selection_retry_timeout *timeout_context;
++
++    if (!clipboard_retry_policy_active(&g_selection_retry.policy))
++    {
++        return 0;
++    }
++    timeout_context = g_new0(struct clipboard_selection_retry_timeout, 1);
++    if (timeout_context == NULL)
++    {
++        return 0;
++    }
++    timeout_context->generation = g_selection_retry.policy.generation;
++    timeout_context->attempt = g_selection_retry.policy.attempt;
++    if (add_timeout(CLIPBOARD_SELECTION_RESPONSE_TIMEOUT_MS,
++                    clipboard_selection_response_timeout,
++                    timeout_context) != 0)
++    {
++        g_free(timeout_context);
++        return 0;
++    }
++    return 1;
++}
++
++static void
++clipboard_begin_selection_conversion(Atom target, Time time,
++                                     int data_response_expected)
++{
++    if (clipboard_retry_policy_active(&g_selection_retry.policy))
++    {
++        if (g_selection_retry.data_response_expected)
++        {
++            clipboard_send_data_response_failed();
++        }
++        clipboard_retry_policy_cancel(&g_selection_retry.policy);
++    }
++
++    clipboard_retry_policy_begin(&g_selection_retry.policy);
++    g_selection_retry.target = target;
++    g_selection_retry.time = time;
++    g_selection_retry.data_response_expected = data_response_expected;
++    g_selection_retry.retry_timeout_pending = 0;
++    XConvertSelection(g_display, g_clipboard_atom, target,
++                      g_clip_property_atom, g_wnd, time);
++    XFlush(g_display);
++    if (!clipboard_schedule_selection_response_timeout())
++    {
++        clipboard_fail_selection_conversion(target);
++    }
++}
+ 
+ /*****************************************************************************/
+ /* sent from server to client
+  * sent by recipient of CB_FORMAT_LIST; used to request data for one
+@@ -1085,10 +1302,10 @@
+             {
+                 LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_data_request: CF_UNICODETEXT, "
+                           "calling XConvertSelection to g_utf8_atom");
+                 g_clip_s2c.xrdp_clip_type = XRDP_CB_TEXT;
+-                XConvertSelection(g_display, g_clipboard_atom, g_utf8_atom,
+-                                  g_clip_property_atom, g_wnd, CurrentTime);
++                clipboard_begin_selection_conversion(
++                    g_utf8_atom, CurrentTime, 1);
+             }
+             break;
+         default:
+             LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_data_request: unknown type %d",
+@@ -1550,11 +1767,10 @@
+     g_got_selection = 0;
+     if (lxevent->owner != 0) /* nil owner comes when selection */
+     {
+         /* window is closed */
+-        XConvertSelection(g_display, g_clipboard_atom, g_targets_atom,
+-                          g_clip_property_atom, g_wnd, lxevent->timestamp);
+-        XFlush(g_display);
++        clipboard_begin_selection_conversion(
++            g_targets_atom, lxevent->timestamp, 0);
+     }
+     return 0;
+ }
+ 
+@@ -1701,14 +1917,45 @@
+     data = 0;
+     type = 0;
+     lxevent = (XSelectionEvent *)xevent;
+ 
++    if (clipboard_retry_policy_active(&g_selection_retry.policy) &&
++            (lxevent->requestor != g_wnd ||
++             lxevent->selection != g_clipboard_atom ||
++             lxevent->target != g_selection_retry.target))
++    {
++        LOG_DEVEL(LOG_LEVEL_DEBUG,
++                  "clipboard_event_selection_notify: ignoring stale or "
++                  "unrelated conversion response");
++        return 0;
++    }
++    if ((lxevent->target == g_utf8_atom ||
++         lxevent->target == g_targets_atom) &&
++            !clipboard_retry_policy_active(&g_selection_retry.policy))
++    {
++        LOG_DEVEL(LOG_LEVEL_DEBUG,
++                  "clipboard_event_selection_notify: ignoring stale text "
++                  "conversion response");
++        return 0;
++    }
+     if (lxevent->property == None)
+     {
+-        LOG_DEVEL(LOG_LEVEL_ERROR, "clipboard_event_selection_notify: clip could "
+-                  "not be converted");
+-        rv = 1;
++        if (clipboard_retry_policy_active(&g_selection_retry.policy) &&
++                lxevent->target == g_selection_retry.target)
++        {
++            LOG_DEVEL(LOG_LEVEL_DEBUG,
++                      "clipboard_event_selection_notify: conversion failed; "
++                      "scheduling bounded retry");
++            if (!clipboard_schedule_selection_retry())
++            {
++                clipboard_fail_selection_conversion(lxevent->target);
++            }
++            return 0;
++        }
++        LOG_DEVEL(LOG_LEVEL_ERROR,
++                  "clipboard_event_selection_notify: clip could not be converted");
++        rv = 1;
+     }
+ 
+     if (rv == 0)
+     {
+         LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_notify: wnd 0x%lx prop %s",
+@@ -1716,14 +1963,31 @@
+                   get_atom_text(lxevent->property));
+         rv = clipboard_get_window_property(lxevent->requestor, lxevent->property,
+                                            &type, &fmt,
+                                            &n_items, &data, &data_size);
+         if (rv != 0)
+         {
+-            LOG_DEVEL(LOG_LEVEL_ERROR, "clipboard_event_selection_notify: "
+-                      "clipboard_get_window_property failed error %d", rv);
++            g_free(data);
++            if (clipboard_retry_policy_active(&g_selection_retry.policy) &&
++                    lxevent->target == g_selection_retry.target)
++            {
++                LOG_DEVEL(LOG_LEVEL_DEBUG,
++                          "clipboard_event_selection_notify: property read "
++                          "failed error %d; scheduling bounded retry", rv);
++                if (!clipboard_schedule_selection_retry())
++                {
++                    clipboard_fail_selection_conversion(lxevent->target);
++                }
++            }
++            else
++            {
++                LOG_DEVEL(LOG_LEVEL_ERROR,
++                          "clipboard_event_selection_notify: "
++                          "clipboard_get_window_property failed error %d", rv);
++            }
+             return 0;
+         }
++        clipboard_finish_selection_conversion(lxevent->target);
+         //LOG_DEVEL_HEXDUMP(LOG_LEVEL_TRACE, "", data, data_size);
+         XDeleteProperty(g_display, lxevent->requestor, lxevent->property);
+         if (type == g_incr_atom)
+         {
+--- a/sesman/chansrv/Makefile.am
++++ b/sesman/chansrv/Makefile.am
+@@ -58,8 +58,9 @@
+   clipboard.c \
+   clipboard.h \
+   clipboard_common.h \
++  clipboard_retry_policy.h \
+   clipboard_file.c \
+   clipboard_file.h \
+   devredir.c \
+   devredir.h \
+   irp.c \
+--- a/sesman/chansrv/Makefile.in
++++ b/sesman/chansrv/Makefile.in
+@@ -136,1 +136,1 @@
+-	clipboard.c clipboard.h clipboard_common.h clipboard_file.c \
++	clipboard.c clipboard.h clipboard_common.h clipboard_retry_policy.h clipboard_file.c \
+@@ -424,1 +424,1 @@
+-	clipboard.c clipboard.h clipboard_common.h clipboard_file.c \
++	clipboard.c clipboard.h clipboard_common.h clipboard_retry_policy.h clipboard_file.c \
+--- /dev/null
++++ b/sesman/chansrv/clipboard_retry_policy.h
+@@ -0,0 +1,100 @@
++#ifndef CLIPBOARD_RETRY_POLICY_H
++#define CLIPBOARD_RETRY_POLICY_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++enum
++{
++    CLIPBOARD_SELECTION_MAX_ATTEMPTS = 3,
++    CLIPBOARD_SELECTION_RETRY_DELAY_MS = 50,
++    CLIPBOARD_SELECTION_RESPONSE_TIMEOUT_MS = 2000
++};
++
++struct clipboard_retry_policy
++{
++    uint64_t generation;
++    unsigned int attempt;
++};
++
++static inline uint64_t
++clipboard_retry_policy_next_generation(uint64_t generation)
++{
++    return generation == UINT64_MAX ? 1U : generation + 1U;
++}
++
++static inline uint64_t
++clipboard_retry_policy_begin(struct clipboard_retry_policy *policy)
++{
++    if (policy == NULL)
++    {
++        return 0;
++    }
++    policy->generation =
++        clipboard_retry_policy_next_generation(policy->generation);
++    policy->attempt = 1;
++    return policy->generation;
++}
++
++static inline int
++clipboard_retry_policy_active(const struct clipboard_retry_policy *policy)
++{
++    return policy != NULL && policy->attempt != 0;
++}
++
++static inline int
++clipboard_retry_policy_generation_matches(
++    const struct clipboard_retry_policy *policy, uint64_t generation)
++{
++    return clipboard_retry_policy_active(policy) &&
++           generation != 0 && policy->generation == generation;
++}
++
++static inline int
++clipboard_retry_policy_attempt_matches(
++    const struct clipboard_retry_policy *policy,
++    uint64_t generation, unsigned int attempt)
++{
++    return clipboard_retry_policy_generation_matches(policy, generation) &&
++           attempt != 0 && policy->attempt == attempt;
++}
++
++static inline int
++clipboard_retry_policy_can_retry(const struct clipboard_retry_policy *policy)
++{
++    return clipboard_retry_policy_active(policy) &&
++           policy->attempt < CLIPBOARD_SELECTION_MAX_ATTEMPTS;
++}
++
++static inline int
++clipboard_retry_policy_advance(struct clipboard_retry_policy *policy)
++{
++    if (!clipboard_retry_policy_can_retry(policy))
++    {
++        return 0;
++    }
++    ++policy->attempt;
++    return 1;
++}
++
++static inline void
++clipboard_retry_policy_reset(struct clipboard_retry_policy *policy)
++{
++    if (policy != NULL)
++    {
++        policy->attempt = 0;
++    }
++}
++
++static inline void
++clipboard_retry_policy_cancel(struct clipboard_retry_policy *policy)
++{
++    if (policy != NULL)
++    {
++        policy->generation =
++            clipboard_retry_policy_next_generation(policy->generation);
++        policy->attempt = 0;
++    }
++}
++
++#endif /* CLIPBOARD_RETRY_POLICY_H */

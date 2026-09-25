@@ -7,12 +7,18 @@ enum class ClassicWorkClass
     Idle,
     NewDamage,
     ImmediateContinuation,
+    PriorityDamage,
 };
 
 [[nodiscard]] constexpr ClassicWorkClass
 classifyClassicWork(bool pendingPresentation, bool snapshottedDamage,
-                    bool unsnapshottedDamage) noexcept
+                    bool unsnapshottedDamage,
+                    bool priorityDamagePending) noexcept
 {
+    if (priorityDamagePending && unsnapshottedDamage)
+    {
+        return ClassicWorkClass::PriorityDamage;
+    }
     if (pendingPresentation || snapshottedDamage)
     {
         return ClassicWorkClass::ImmediateContinuation;
@@ -27,5 +33,13 @@ classifyClassicWork(bool pendingPresentation, bool snapshottedDamage,
 [[nodiscard]] constexpr bool
 shouldSnapshotClassicDamage(ClassicWorkClass workClass) noexcept
 {
-    return workClass == ClassicWorkClass::NewDamage;
+    return workClass == ClassicWorkClass::NewDamage ||
+           workClass == ClassicWorkClass::PriorityDamage;
+}
+
+[[nodiscard]] constexpr bool
+shouldServiceClassicWorkImmediately(ClassicWorkClass workClass) noexcept
+{
+    return workClass == ClassicWorkClass::ImmediateContinuation ||
+           workClass == ClassicWorkClass::PriorityDamage;
 }

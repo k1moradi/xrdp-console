@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <poll.h>
 
 namespace
@@ -115,6 +116,30 @@ drain_damage_events_through_barrier(xcb_connection_t *connection,
 }
 
 bool
+discard_initial_damage(xcb_connection_t *connection,
+                       X11DamageTracker &tracker) noexcept
+{
+    constexpr int maximumDrainAttempts = 4;
+    for (int attempt = 0; attempt < maximumDrainAttempts; ++attempt)
+    {
+        if (!drain_damage_events_through_barrier(connection, tracker))
+        {
+            return false;
+        }
+        if (!tracker.hasPendingDamage())
+        {
+            return true;
+        }
+        DamageRegion initialDamage;
+        if (!tracker.snapshot(initialDamage))
+        {
+            return false;
+        }
+    }
+    return !tracker.hasPendingDamage();
+}
+
+bool
 root_damage_preserves_disjoint_rectangles(xcb_connection_t *connection,
                                            xcb_window_t root,
                                            xcb_window_t child,
@@ -132,28 +157,9 @@ root_damage_preserves_disjoint_rectangles(xcb_connection_t *connection,
     }
 
     // Window creation/map damage may still be in flight when this root-level
-    // tracker is installed. Synchronize and discard that baseline before the
-    // controlled sparse update, otherwise the baseline rectangles would be
-    // included in the controlled delta snapshot.
-    for (int attempt = 0; attempt < 4; ++attempt)
-    {
-        if (!drain_damage_events_through_barrier(connection, tracker))
-        {
-            std::fprintf(stderr, "root XDamage synchronization failed\n");
-            return false;
-        }
-        if (!tracker.hasPendingDamage())
-        {
-            break;
-        }
-        DamageRegion baseline;
-        if (!tracker.snapshot(baseline))
-        {
-            std::fprintf(stderr, "root XDamage baseline snapshot failed\n");
-            return false;
-        }
-    }
-    if (tracker.hasPendingDamage())
+    // tracker is installed. Synchronize and discard it before the controlled
+    // sparse update so it cannot contaminate the measured damage.
+    if (!discard_initial_damage(connection, tracker))
     {
         std::fprintf(stderr, "root XDamage baseline did not settle\n");
         return false;
@@ -206,13 +212,11 @@ run() noexcept
 {
     int screenNumber = -1;
     xcb_connection_t *connection = xcb_connect(nullptr, &screenNumber);
+    std::unique_ptr<xcb_connection_t, decltype(&xcb_disconnect)>
+        connectionOwner(connection, &xcb_disconnect);
     if (connection == nullptr || xcb_connection_has_error(connection) != 0)
     {
         std::fprintf(stderr, "could not connect to the authenticated X server\n");
-        if (connection != nullptr)
-        {
-            xcb_disconnect(connection);
-        }
         return 1;
     }
 
@@ -224,7 +228,6 @@ run() noexcept
     }
     if (screens.rem <= 0 || screens.data == nullptr)
     {
-        xcb_disconnect(connection);
         return 1;
     }
     const xcb_screen_t *screen = screens.data;
@@ -233,7 +236,6 @@ run() noexcept
     X11DamageTracker invalidTracker(*connection, XCB_NONE, bounds);
     if (invalidTracker.valid() || invalidTracker.failureReason() == nullptr)
     {
-        xcb_disconnect(connection);
         return 1;
     }
 
@@ -250,7 +252,6 @@ run() noexcept
                        "map window") ||
         xcb_flush(connection) <= 0)
     {
-        xcb_disconnect(connection);
         return 1;
     }
 
@@ -264,7 +265,6 @@ run() noexcept
                              : "unknown error");
             xcb_destroy_window(connection, window);
             xcb_flush(connection);
-            xcb_disconnect(connection);
             return 1;
         }
 
@@ -279,7 +279,6 @@ run() noexcept
                              : "unknown error");
             xcb_destroy_window(connection, window);
             xcb_flush(connection);
-            xcb_disconnect(connection);
             return 1;
         }
 
@@ -293,7 +292,15 @@ run() noexcept
         {
             xcb_destroy_window(connection, window);
             xcb_flush(connection);
-            xcb_disconnect(connection);
+            return 1;
+        }
+
+        if (!discard_initial_damage(connection, tracker))
+        {
+            std::fprintf(stderr, "window XDamage baseline did not settle\n");
+            xcb_free_gc(connection, graphicsContext);
+            xcb_destroy_window(connection, window);
+            xcb_flush(connection);
             return 1;
         }
 
@@ -306,7 +313,6 @@ run() noexcept
             xcb_free_gc(connection, graphicsContext);
             xcb_destroy_window(connection, window);
             xcb_flush(connection);
-            xcb_disconnect(connection);
             return 1;
         }
 
@@ -314,15 +320,62 @@ run() noexcept
         const xcb_rectangle_t firstRectangle{2, 3, 20, 15};
         xcb_poly_fill_rectangle(connection, window, graphicsContext, 1,
                                 &firstRectangle);
-        if (xcb_flush(connection) <= 0 ||
-            !wait_for_damage(connection, tracker, 1) ||
-            !drain_damage_events_through_barrier(connection, tracker) ||
-            !tracker.snapshot(region))
+        if (xcb_flush(connection) <= 0)
         {
+            std::fprintf(stderr, "first XDamage draw flush failed\n");
             xcb_free_gc(connection, graphicsContext);
             xcb_destroy_window(connection, window);
             xcb_flush(connection);
-            xcb_disconnect(connection);
+            return 1;
+        }
+        if (!wait_for_damage(connection, tracker, 1))
+        {
+            std::fprintf(stderr, "first XDamage notification did not arrive\n");
+            xcb_free_gc(connection, graphicsContext);
+            xcb_destroy_window(connection, window);
+            xcb_flush(connection);
+            return 1;
+        }
+        if (!drain_damage_events_through_barrier(connection, tracker))
+        {
+            std::fprintf(stderr, "first XDamage event barrier failed\n");
+            xcb_free_gc(connection, graphicsContext);
+            xcb_destroy_window(connection, window);
+            xcb_flush(connection);
+            return 1;
+        }
+        if (!tracker.pendingDamageIntersects({2, 3, 20, 15}))
+        {
+            std::fprintf(stderr, "pending XDamage missed the drawn rectangle\n");
+            xcb_free_gc(connection, graphicsContext);
+            xcb_destroy_window(connection, window);
+            xcb_flush(connection);
+            return 1;
+        }
+        if (tracker.pendingDamageIntersects({80, 80, 10, 10}))
+        {
+            std::fprintf(stderr, "pending XDamage intersected unrelated area\n");
+            xcb_free_gc(connection, graphicsContext);
+            xcb_destroy_window(connection, window);
+            xcb_flush(connection);
+            return 1;
+        }
+        if (!tracker.snapshot(region))
+        {
+            std::fprintf(stderr, "first XDamage snapshot failed\n");
+            xcb_free_gc(connection, graphicsContext);
+            xcb_destroy_window(connection, window);
+            xcb_flush(connection);
+            return 1;
+        }
+
+        if (tracker.pendingDamageIntersects({2, 3, 20, 15}))
+        {
+            std::fprintf(stderr,
+                         "XDamage snapshot left stale pending intersection\n");
+            xcb_free_gc(connection, graphicsContext);
+            xcb_destroy_window(connection, window);
+            xcb_flush(connection);
             return 1;
         }
 
@@ -337,7 +390,6 @@ run() noexcept
             xcb_free_gc(connection, graphicsContext);
             xcb_destroy_window(connection, window);
             xcb_flush(connection);
-            xcb_disconnect(connection);
             return 1;
         }
 
@@ -353,7 +405,6 @@ run() noexcept
             xcb_free_gc(connection, graphicsContext);
             xcb_destroy_window(connection, window);
             xcb_flush(connection);
-            xcb_disconnect(connection);
             return 1;
         }
         const FramebufferView maximumCapture =
@@ -367,7 +418,6 @@ run() noexcept
             xcb_free_gc(connection, graphicsContext);
             xcb_destroy_window(connection, window);
             xcb_flush(connection);
-            xcb_disconnect(connection);
             return 1;
         }
 
@@ -383,7 +433,6 @@ run() noexcept
             xcb_free_gc(connection, graphicsContext);
             xcb_destroy_window(connection, window);
             xcb_flush(connection);
-            xcb_disconnect(connection);
             return 1;
         }
 
@@ -449,7 +498,6 @@ run() noexcept
         xcb_free_gc(connection, rootGraphicsContext);
         xcb_destroy_window(connection, window);
         xcb_flush(connection);
-        xcb_disconnect(connection);
         return 1;
     }
     xcb_free_gc(connection, rootGraphicsContext);
@@ -457,7 +505,6 @@ run() noexcept
     xcb_destroy_window(connection, window);
     const bool flushed = xcb_flush(connection) > 0;
     const bool healthy = xcb_connection_has_error(connection) == 0;
-    xcb_disconnect(connection);
     return flushed && healthy ? 0 : 1;
 }
 

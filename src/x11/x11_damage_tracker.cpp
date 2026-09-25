@@ -193,6 +193,13 @@ X11DamageTracker::hasPendingDamage() const noexcept
 }
 
 bool
+X11DamageTracker::pendingDamageIntersects(Rectangle rectangle) const noexcept
+{
+    return valid() && pendingAcknowledgement_ &&
+           pendingDamageRegion_.intersects(rectangle);
+}
+
+bool
 X11DamageTracker::snapshot(DamageRegion &damageRegion) noexcept
 {
     if (!valid())

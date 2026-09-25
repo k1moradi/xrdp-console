@@ -102,13 +102,35 @@ historical fork's commit history:
     lengths, announces only `CF_UNICODETEXT` for text in both format-list
     encodings, and flushes the X11 selection conversion request. Clipboard
     ownership remains in the existing chansrv process.
+16. `0016-xrdp-console-interaction-priority-backpressure.patch` gives Console
+    input a bounded 384x256 current-pixel priority window and uses the existing
+    transactional Planar commit path to send changed pixels intersecting that
+    window before ordinary dirty work. Keyboard priority stays anchored to the
+    last focus click; scroll/click priority follows the current pointer. When a
+    normal RDPGFX ACK reports at least 256 KiB of unprocessed graphics bytes,
+    ordinary background drainage is coalesced to a 100 ms cadence; interaction
+    pixels bypass that delay. `SUSPEND_FRAME_ACKNOWLEDGEMENT` disables this
+    ACK-based throttle, as required by the RDPGFX acknowledgement contract.
+    Transport and codec selection are unchanged.
+17. `0017-xrdp-chansrv-bounded-text-selection-retry.patch` tries the existing
+    chansrv-owned X11 `TARGETS` and Unicode text selection conversions at most
+    three times total (initial attempt plus up to two retries) after explicit
+    X11 conversion/property failures, with 50 ms spacing before each retry.
+    A conversion with no response fails after 2 s rather than hanging the
+    client request. Generation and attempt tokens make delayed timeout callbacks
+    harmless after a newer copy operation or teardown, and an exhausted client
+    text request receives an explicit CLIPRDR failure. The patch remains
+    text-only; file/image clipboard paths keep their upstream behavior. The
+    generation/attempt policy is covered by the first-party
+    `clipboard-selection-retry-policy-unit` CTest rather than extending the
+    upstream Automake test graph.
 
 The activation script requires the `XRDP_CONSOLE_GFX_PLANAR_BATCH_V1` marker
 in the candidate daemon, so an older patched generation cannot be mistaken
 for this Planar batching implementation.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-fifteen patches are retained production-path behavior and bounded operational
+seventeen patches are retained production-path behavior and bounded operational
 diagnostics, not benchmark knobs. Code
 `21` is deliberately used only by the direct module's profile; legacy VNC
 profiles continue using code `0`/`1`. The

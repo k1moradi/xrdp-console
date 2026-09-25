@@ -1,0 +1,798 @@
+--- a/xrdp/xrdp_types.h
++++ b/xrdp/xrdp_types.h
+@@ -419,8 +419,26 @@
+     int latest_frames_decoded;
+     int acknowledgements_suspended;
+ };
+ 
++/* Console-only interaction priority is session-thread-owned and holds no
++ * resources. A request is cleared only after its intersecting pixels have
++ * been committed to an RDPGFX frame. */
++struct xrdp_console_interaction_priority
++{
++    struct xrdp_rect dirty;
++    int pointer_x;
++    int pointer_y;
++    int focus_x;
++    int focus_y;
++    int request_x;
++    int request_y;
++    int pointer_valid;
++    int focus_valid;
++    int request_valid;
++    int dirty_valid;
++};
++
+ struct xrdp_mm
+ {
+     struct xrdp_wm *wm; /* owner */
+     enum mm_connect_state connect_state; /* State of connection */
+@@ -465,8 +483,9 @@
+     int console_planar_frame_id;
+     /* Drain already-bounded Console damage without a fresh-batch delay. */
+     int console_planar_immediate_continuation;
+     struct xrdp_console_gfx_ack_telemetry console_gfx_ack_telemetry;
++    struct xrdp_console_interaction_priority console_interaction_priority;
+     int gfx_delay_autologin;
+     int mod_uses_wm_screen_for_gfx;
+     /* Whether a working h.264 library is loaded.
+      * We check this at run-time, so that we can fall-back to GFX if
+--- a/xrdp/xrdp.h
++++ b/xrdp/xrdp.h
+@@ -265,8 +265,16 @@
+     struct xrdp_region *region,
+     const struct xrdp_rect *committed, int committed_count,
+     const struct xrdp_rect *discarded, int discarded_count,
+     int transaction_succeeded);
++enum
++{
++    XRDP_CONSOLE_INTERACTION_PRIORITY_WIDTH_PIXELS = 384,
++    XRDP_CONSOLE_INTERACTION_PRIORITY_HEIGHT_PIXELS = 256,
++    XRDP_CONSOLE_GFX_CLIENT_QUEUE_HIGH_WATER_BYTES = 256 * 1024,
++    XRDP_CONSOLE_GFX_BACKPRESSURE_FLUSH_MS = 100
++};
++
+ int
+ xrdp_mm_console_gfx_minimum_flush_ms(int session_code,
+                                      int immediate_continuation);
+ int
+@@ -276,8 +284,39 @@
+ void
+ xrdp_mm_console_record_gfx_acknowledgement(
+     struct xrdp_console_gfx_ack_telemetry *telemetry,
+     uint32_t queue_depth, int frame_id, int frames_decoded);
++int
++xrdp_mm_console_gfx_backpressure_active(
++    const struct xrdp_console_gfx_ack_telemetry *telemetry);
++int
++xrdp_mm_console_gfx_effective_flush_ms(
++    int session_code, int immediate_continuation,
++    int backpressure_active, int interaction_priority_pending);
++void
++xrdp_mm_console_set_interaction_anchor(
++    struct xrdp_console_interaction_priority *priority, int x, int y);
++void
++xrdp_mm_console_set_focus_interaction(
++    struct xrdp_console_interaction_priority *priority, int x, int y);
++void
++xrdp_mm_console_request_pointer_interaction(
++    struct xrdp_console_interaction_priority *priority, int x, int y);
++int
++xrdp_mm_console_request_focus_interaction(
++    struct xrdp_console_interaction_priority *priority);
++int
++xrdp_mm_console_record_interaction_damage(
++    struct xrdp_console_interaction_priority *priority,
++    int screen_width, int screen_height,
++    int x, int y, int width, int height);
++int
++xrdp_mm_console_get_interaction_dirty_rect(
++    const struct xrdp_console_interaction_priority *priority,
++    struct xrdp_rect *rect);
++void
++xrdp_mm_console_clear_interaction_dirty(
++    struct xrdp_console_interaction_priority *priority);
+ 
+ /* xrdp_bitmap_common.c */
+ struct xrdp_bitmap *
+ xrdp_bitmap_create(int width, int height, int bpp,
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -1045,8 +1045,246 @@
+ {
+     return transaction_succeeded && progress_made && dirty_pending;
+ }
+ 
++static int
++xrdp_mm_console_interaction_bounds(
++    const struct xrdp_console_interaction_priority *priority,
++    int screen_width, int screen_height, struct xrdp_rect *rect)
++{
++    int width;
++    int height;
++    int64_t maximum_left;
++    int64_t maximum_top;
++    int64_t requested_left;
++    int64_t requested_top;
++
++    if (priority == NULL || rect == NULL || !priority->request_valid ||
++            screen_width <= 0 || screen_height <= 0)
++    {
++        return 0;
++    }
++
++    width = MIN(screen_width, XRDP_CONSOLE_INTERACTION_PRIORITY_WIDTH_PIXELS);
++    height = MIN(screen_height,
++                 XRDP_CONSOLE_INTERACTION_PRIORITY_HEIGHT_PIXELS);
++    maximum_left = (int64_t) screen_width - width;
++    maximum_top = (int64_t) screen_height - height;
++    requested_left = (int64_t) priority->request_x - width / 2;
++    requested_top = (int64_t) priority->request_y - height / 2;
++    rect->left = (int) MAX((int64_t) 0,
++                           MIN(maximum_left, requested_left));
++    rect->top = (int) MAX((int64_t) 0,
++                          MIN(maximum_top, requested_top));
++    rect->right = rect->left + width;
++    rect->bottom = rect->top + height;
++    return 1;
++}
++
++void
++xrdp_mm_console_set_interaction_anchor(
++    struct xrdp_console_interaction_priority *priority, int x, int y)
++{
++    if (priority != NULL)
++    {
++        priority->pointer_x = x;
++        priority->pointer_y = y;
++        priority->pointer_valid = 1;
++    }
++}
++
++static void
++xrdp_mm_console_begin_interaction_request(
++    struct xrdp_console_interaction_priority *priority, int x, int y)
++{
++    if (priority == NULL)
++    {
++        return;
++    }
++
++    /* Repeated typing/scrolling at the same anchor must not erase pixels
++     * already marked urgent. Moving the anchor intentionally supersedes the
++     * older priority marker; its pixels remain in the authoritative dirty
++     * region and will be drained as ordinary work. */
++    if (!priority->request_valid || priority->request_x != x ||
++            priority->request_y != y)
++    {
++        priority->dirty_valid = 0;
++    }
++    priority->request_x = x;
++    priority->request_y = y;
++    priority->request_valid = 1;
++}
++
++void
++xrdp_mm_console_set_focus_interaction(
++    struct xrdp_console_interaction_priority *priority, int x, int y)
++{
++    if (priority == NULL)
++    {
++        return;
++    }
++    priority->pointer_x = x;
++    priority->pointer_y = y;
++    priority->pointer_valid = 1;
++    priority->focus_x = x;
++    priority->focus_y = y;
++    priority->focus_valid = 1;
++    xrdp_mm_console_begin_interaction_request(priority, x, y);
++}
++
++void
++xrdp_mm_console_request_pointer_interaction(
++    struct xrdp_console_interaction_priority *priority, int x, int y)
++{
++    if (priority == NULL)
++    {
++        return;
++    }
++    priority->pointer_x = x;
++    priority->pointer_y = y;
++    priority->pointer_valid = 1;
++    xrdp_mm_console_begin_interaction_request(priority, x, y);
++}
++
++int
++xrdp_mm_console_request_focus_interaction(
++    struct xrdp_console_interaction_priority *priority)
++{
++    int request_x;
++    int request_y;
++
++    if (priority == NULL)
++    {
++        return 0;
++    }
++    if (priority->focus_valid)
++    {
++        request_x = priority->focus_x;
++        request_y = priority->focus_y;
++    }
++    else if (priority->pointer_valid)
++    {
++        request_x = priority->pointer_x;
++        request_y = priority->pointer_y;
++    }
++    else
++    {
++        return 0;
++    }
++    xrdp_mm_console_begin_interaction_request(priority, request_x, request_y);
++    return 1;
++}
++
++int
++xrdp_mm_console_record_interaction_damage(
++    struct xrdp_console_interaction_priority *priority,
++    int screen_width, int screen_height,
++    int x, int y, int width, int height)
++{
++    struct xrdp_rect interaction;
++    struct xrdp_rect damaged;
++    int64_t damaged_right;
++    int64_t damaged_bottom;
++
++    if (priority == NULL || width <= 0 || height <= 0 ||
++            !xrdp_mm_console_interaction_bounds(
++                priority, screen_width, screen_height, &interaction))
++    {
++        return 0;
++    }
++
++    damaged_right = (int64_t) x + width;
++    damaged_bottom = (int64_t) y + height;
++    damaged.left = (int) MAX((int64_t) 0, (int64_t) x);
++    damaged.top = (int) MAX((int64_t) 0, (int64_t) y);
++    damaged.right = (int) MAX((int64_t) 0,
++        MIN((int64_t) screen_width, damaged_right));
++    damaged.bottom = (int) MAX((int64_t) 0,
++        MIN((int64_t) screen_height, damaged_bottom));
++    damaged.left = MAX(damaged.left, interaction.left);
++    damaged.top = MAX(damaged.top, interaction.top);
++    damaged.right = MIN(damaged.right, interaction.right);
++    damaged.bottom = MIN(damaged.bottom, interaction.bottom);
++    if (damaged.left >= damaged.right || damaged.top >= damaged.bottom)
++    {
++        return 0;
++    }
++
++    if (!priority->dirty_valid)
++    {
++        priority->dirty = damaged;
++        priority->dirty_valid = 1;
++    }
++    else
++    {
++        priority->dirty.left = MIN(priority->dirty.left, damaged.left);
++        priority->dirty.top = MIN(priority->dirty.top, damaged.top);
++        priority->dirty.right = MAX(priority->dirty.right, damaged.right);
++        priority->dirty.bottom = MAX(priority->dirty.bottom, damaged.bottom);
++    }
++    return 1;
++}
++
++int
++xrdp_mm_console_get_interaction_dirty_rect(
++    const struct xrdp_console_interaction_priority *priority,
++    struct xrdp_rect *rect)
++{
++    if (priority == NULL || rect == NULL || !priority->dirty_valid)
++    {
++        return 0;
++    }
++    *rect = priority->dirty;
++    return 1;
++}
++
++void
++xrdp_mm_console_clear_interaction_dirty(
++    struct xrdp_console_interaction_priority *priority)
++{
++    if (priority != NULL)
++    {
++        priority->dirty_valid = 0;
++        priority->request_valid = 0;
++    }
++}
++
++int
++xrdp_mm_console_gfx_backpressure_active(
++    const struct xrdp_console_gfx_ack_telemetry *telemetry)
++{
++    return telemetry != NULL && telemetry->acknowledgement_count != 0 &&
++           !telemetry->acknowledgements_suspended &&
++           telemetry->latest_queue_depth >=
++               XRDP_CONSOLE_GFX_CLIENT_QUEUE_HIGH_WATER_BYTES;
++}
++
++int
++xrdp_mm_console_gfx_effective_flush_ms(
++    int session_code, int immediate_continuation,
++    int backpressure_active, int interaction_priority_pending)
++{
++    int minimum_flush_ms;
++
++    minimum_flush_ms = xrdp_mm_console_gfx_minimum_flush_ms(
++                           session_code, immediate_continuation);
++    if (session_code != XRDP_CONSOLE_SESSION_CODE)
++    {
++        return minimum_flush_ms;
++    }
++    if (interaction_priority_pending)
++    {
++        return XRDP_CONSOLE_GFX_CONTINUATION_MS;
++    }
++    if (backpressure_active)
++    {
++        return MAX(minimum_flush_ms,
++                   XRDP_CONSOLE_GFX_BACKPRESSURE_FLUSH_MS);
++    }
++    return minimum_flush_ms;
++}
++
+ void
+ xrdp_mm_console_record_gfx_acknowledgement(
+     struct xrdp_console_gfx_ack_telemetry *telemetry,
+     uint32_t queue_depth, int frame_id, int frames_decoded)
+@@ -1078,11 +1316,13 @@
+ 
+ static int
+ xrdp_mm_gfx_minimum_flush_ms(const struct xrdp_mm *self)
+ {
+-    return xrdp_mm_console_gfx_minimum_flush_ms(
+-               self->code,
+-               self->console_planar_immediate_continuation);
++    return xrdp_mm_console_gfx_effective_flush_ms(
++               self->code, self->console_planar_immediate_continuation,
++               xrdp_mm_console_gfx_backpressure_active(
++                   &self->console_gfx_ack_telemetry),
++               self->console_interaction_priority.dirty_valid);
+ }
+ 
+ static void
+ xrdp_mm_console_planar_scratch_delete(struct xrdp_mm *self)
+@@ -4377,21 +4617,82 @@
+ 
+ }
+ 
+ /*****************************************************************************/
++static int
++xrdp_mm_console_send_priority_rect(
++    struct xrdp_mm *self, struct xrdp_bitmap *bitmap,
++    const struct xrdp_rect *priority_rect,
++    const struct xrdp_rect *clip_rect, int surface_id, int x, int y)
++{
++    struct xrdp_console_planar_batch *batch;
++    struct xrdp_rect clipped;
++    int width;
++    int height;
++    int pixels;
++    int result;
++
++    if (self == NULL || bitmap == NULL || priority_rect == NULL)
++    {
++        return 1;
++    }
++    batch = self->console_planar_batch;
++    if (!self->console_planar_frame_open || batch == NULL ||
++            batch->committed_count >=
++                XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH)
++    {
++        return 1;
++    }
++
++    clipped = *priority_rect;
++    if (clip_rect != NULL)
++    {
++        clipped.left = MAX(clipped.left, clip_rect->left);
++        clipped.top = MAX(clipped.top, clip_rect->top);
++        clipped.right = MIN(clipped.right, clip_rect->right);
++        clipped.bottom = MIN(clipped.bottom, clip_rect->bottom);
++    }
++    width = clipped.right - clipped.left;
++    height = clipped.bottom - clipped.top;
++    if (width <= 0 || height <= 0)
++    {
++        return 0;
++    }
++    pixels = width * height;
++    if (pixels > XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH -
++                     batch->pixels_sent)
++    {
++        return 1;
++    }
++
++    result = xrdp_mm_egfx_send_planar_bitmap(
++                 self, bitmap, &clipped, surface_id, x, y);
++    if (result != 0)
++    {
++        return result;
++    }
++    batch->committed[batch->committed_count++] = clipped;
++    batch->pixels_sent += pixels;
++    ++batch->rectangles_sent;
++    return 0;
++}
++
+ static int
+ xrdp_mm_draw_dirty_console(struct xrdp_mm *self)
+ {
+     struct xrdp_console_planar_batch batch = {0};
+     struct xrdp_rect monitor_rect;
+     struct xrdp_rect full_screen;
++    struct xrdp_rect interaction_dirty;
+     struct monitor_info *monitor;
+     unsigned int monitor_count;
+     unsigned int monitor_index;
+     int frame_id;
+     int rv = 0;
+     int end_rv;
+     int commit_rv = 0;
++    int interaction_dirty_pending;
++    int backpressure_active;
+ 
+     if (self == NULL || self->wm == NULL || self->wm->screen == NULL ||
+             self->wm->client_info == NULL || self->egfx == NULL)
+     {
+@@ -4404,8 +4705,14 @@
+     {
+         return 0;
+     }
+ 
++    interaction_dirty_pending =
++        xrdp_mm_console_get_interaction_dirty_rect(
++            &self->console_interaction_priority, &interaction_dirty);
++    backpressure_active = xrdp_mm_console_gfx_backpressure_active(
++        &self->console_gfx_ack_telemetry);
++
+     if (xrdp_mm_console_planar_scratch(self) == NULL)
+     {
+         return 1;
+     }
+@@ -4434,25 +4741,60 @@
+     self->console_planar_batch = &batch;
+     self->console_planar_frame_open = 1;
+ 
+     monitor_count = self->wm->client_info->display_sizes.monitorCount;
+-    if (monitor_count == 0 ||
+-            !xrdp_mm_console_display_layout_is_valid(
+-                self->wm->screen->width, self->wm->screen->height,
+-                monitor_count,
+-                self->wm->client_info->display_sizes.minfo_wm))
++    if (interaction_dirty_pending)
+     {
+-        full_screen.left = 0;
+-        full_screen.top = 0;
+-        full_screen.right = self->wm->screen->width;
+-        full_screen.bottom = self->wm->screen->height;
+-        rv = xrdp_mm_egfx_send_planar_region(
+-                 self, self->wm->screen, self->wm->screen_dirty_region,
+-                 &full_screen, monitor_count == 0,
+-                 self->egfx->surface_id, 0, 0);
++        if (monitor_count == 0 ||
++                !xrdp_mm_console_display_layout_is_valid(
++                    self->wm->screen->width, self->wm->screen->height,
++                    monitor_count,
++                    self->wm->client_info->display_sizes.minfo_wm))
++        {
++            full_screen.left = 0;
++            full_screen.top = 0;
++            full_screen.right = self->wm->screen->width;
++            full_screen.bottom = self->wm->screen->height;
++            rv = xrdp_mm_console_send_priority_rect(
++                     self, self->wm->screen, &interaction_dirty,
++                     &full_screen, self->egfx->surface_id, 0, 0);
++        }
++        else
++        {
++            for (monitor_index = 0;
++                 monitor_index < monitor_count && rv == 0;
++                 ++monitor_index)
++            {
++                monitor = self->wm->client_info->display_sizes.minfo_wm +
++                          monitor_index;
++                monitor_rect.left = monitor->left;
++                monitor_rect.top = monitor->top;
++                monitor_rect.right = monitor->right + 1;
++                monitor_rect.bottom = monitor->bottom + 1;
++                rv = xrdp_mm_console_send_priority_rect(
++                         self, self->wm->screen, &interaction_dirty,
++                         &monitor_rect, monitor_index, monitor->left,
++                         monitor->top);
++            }
++        }
+     }
+-    else
++    else if (monitor_count == 0 ||
++             !xrdp_mm_console_display_layout_is_valid(
++                 self->wm->screen->width, self->wm->screen->height,
++                 monitor_count,
++                 self->wm->client_info->display_sizes.minfo_wm))
+     {
++        full_screen.left = 0;
++        full_screen.top = 0;
++        full_screen.right = self->wm->screen->width;
++        full_screen.bottom = self->wm->screen->height;
++        rv = xrdp_mm_egfx_send_planar_region(
++                 self, self->wm->screen, self->wm->screen_dirty_region,
++                 &full_screen, monitor_count == 0,
++                 self->egfx->surface_id, 0, 0);
++    }
++    else
++    {
+         for (monitor_index = 0;
+              monitor_index < monitor_count &&
+                  batch.committed_count <
+                      XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH &&
+@@ -4502,2 +4844,10 @@
+         rv = 1;
+     }
++
++    if (interaction_dirty_pending && rv == 0 && end_rv == 0 &&
++            commit_rv == 0 && batch.committed_count > 0)
++    {
++        xrdp_mm_console_clear_interaction_dirty(
++            &self->console_interaction_priority);
++    }
++
+@@ -4530,2 +4879,3 @@
+             PRIu32 " acknowledged_frame=%d frames_decoded=%d "
+-            "acknowledgements_suspended=%d suspensions=%" PRIu64,
++            "acknowledgements_suspended=%d suspensions=%" PRIu64 " "
++            "backpressure=%d priority=%d",
+@@ -4540,2 +4890,3 @@
+             self->console_gfx_ack_telemetry.acknowledgements_suspended,
+-            self->console_gfx_ack_telemetry.suspension_count);
++            self->console_gfx_ack_telemetry.suspension_count,
++            backpressure_active, interaction_dirty_pending);
+@@ -4917,2 +4917,16 @@
+ /*****************************************************************************/
++static void
++xrdp_mm_console_record_painted_interaction(
++    struct xrdp_wm *wm, int x, int y, int width, int height)
++{
++    if (wm != NULL && wm->screen != NULL && wm->mm != NULL &&
++            wm->mm->code == XRDP_CONSOLE_SESSION_CODE)
++    {
++        xrdp_mm_console_record_interaction_damage(
++            &wm->mm->console_interaction_priority,
++            wm->screen->width, wm->screen->height,
++            x, y, width, height);
++    }
++}
++
+ int
+@@ -4933,4 +4946,5 @@
+     b = xrdp_bitmap_create_with_data(width, height, wm->screen->bpp, data, wm);
+     xrdp_painter_copy(p, b, wm->target_surface, x, y, cx, cy, srcx, srcy);
++    xrdp_mm_console_record_painted_interaction(wm, x, y, cx, cy);
+     xrdp_bitmap_delete(b);
+     return 0;
+@@ -4955,4 +4969,5 @@
+     b = xrdp_bitmap_create_with_data(width, height, bpp, data, wm);
+     xrdp_painter_copy(p, b, wm->target_surface, x, y, cx, cy, srcx, srcy);
++    xrdp_mm_console_record_painted_interaction(wm, x, y, cx, cy);
+     xrdp_bitmap_delete(b);
+     return 0;
+@@ -5231,3 +5246,8 @@
+     wm = (struct xrdp_wm *)(mod->wm);
++    if (wm->mm != NULL && wm->mm->code == XRDP_CONSOLE_SESSION_CODE)
++    {
++        xrdp_mm_console_set_interaction_anchor(
++            &wm->mm->console_interaction_priority, x, y);
++    }
+     xrdp_wm_send_pointer_position(wm, x, y);
+     return 0;
+--- a/xrdp/xrdp_wm.c
++++ b/xrdp/xrdp_wm.c
+@@ -1201,8 +1201,14 @@
+     }
+ 
+     self->mouse_x = x;
+     self->mouse_y = y;
++
++    if (self->mm != NULL && self->mm->code == XRDP_CONSOLE_SESSION_CODE)
++    {
++        xrdp_mm_console_set_interaction_anchor(
++            &self->mm->console_interaction_priority, x, y);
++    }
+ 
+     if (self->dragging)
+     {
+         xrdp_painter_begin_update(self->painter);
+@@ -1303,8 +1309,16 @@
+ int
+ xrdp_wm_mouse_touch(struct xrdp_wm *self, int gesture, int param)
+ {
+     LOG(LOG_LEVEL_DEBUG, "mouse touch event gesture %d param %d", gesture, param);
++
++    if (self != NULL && self->mm != NULL &&
++            self->mm->code == XRDP_CONSOLE_SESSION_CODE)
++    {
++        xrdp_mm_console_request_pointer_interaction(
++            &self->mm->console_interaction_priority,
++            self->mouse_x, self->mouse_y);
++    }
+ 
+     switch (gesture)
+     {
+         case TOUCH_TWO_FINGERS_UP:
+@@ -1358,8 +1372,24 @@
+     {
+         y = self->screen->height;
+     }
+ 
++    if (self->mm != NULL && self->mm->code == XRDP_CONSOLE_SESSION_CODE)
++    {
++        xrdp_mm_console_set_interaction_anchor(
++            &self->mm->console_interaction_priority, x, y);
++        if (down && but >= 1 && but <= 3)
++        {
++            xrdp_mm_console_set_focus_interaction(
++                &self->mm->console_interaction_priority, x, y);
++        }
++        else if (down && but >= 4)
++        {
++            xrdp_mm_console_request_pointer_interaction(
++                &self->mm->console_interaction_priority, x, y);
++        }
++    }
++
+     if (self->dragging && but == 1 && !down && self->dragging_window != 0)
+     {
+         /* if done dragging */
+         self->draggingx = x;
+@@ -1629,8 +1659,14 @@
+     else /* key down */
+     {
+         self->keys[scan_code] = 1 | device_flags;
+         msg = WM_KEYDOWN;
++
++        if (self->mm != NULL && self->mm->code == XRDP_CONSOLE_SESSION_CODE)
++        {
++            xrdp_mm_console_request_focus_interaction(
++                &self->mm->console_interaction_priority);
++        }
+ 
+         switch (scan_code)
+         {
+             case 58:
+--- a/tests/xrdp/test_xrdp_region.c
++++ b/tests/xrdp/test_xrdp_region.c
+@@ -414,8 +414,112 @@
+     assert_true(telemetry.acknowledgement_count == UINT64_MAX);
+     assert_true(telemetry.suspension_count == UINT64_MAX);
+ }
+ 
++static void
++test_console_gfx_backpressure_policy(void **state)
++{
++    struct xrdp_console_gfx_ack_telemetry telemetry = {0};
++    UNUSED(state);
++
++    assert_int_equal(0, xrdp_mm_console_gfx_backpressure_active(NULL));
++    assert_int_equal(0, xrdp_mm_console_gfx_backpressure_active(&telemetry));
++    assert_int_equal(16, xrdp_mm_console_gfx_effective_flush_ms(
++                             XRDP_CONSOLE_SESSION_CODE, 0, 0, 0));
++    assert_int_equal(0, xrdp_mm_console_gfx_effective_flush_ms(
++                            XRDP_CONSOLE_SESSION_CODE, 1, 0, 0));
++    assert_int_equal(40, xrdp_mm_console_gfx_effective_flush_ms(
++                             0, 1, 1, 1));
++
++    xrdp_mm_console_record_gfx_acknowledgement(
++        &telemetry, XRDP_CONSOLE_GFX_CLIENT_QUEUE_HIGH_WATER_BYTES - 1U,
++        1, 1);
++    assert_int_equal(0, xrdp_mm_console_gfx_backpressure_active(&telemetry));
++
++    xrdp_mm_console_record_gfx_acknowledgement(
++        &telemetry, XRDP_CONSOLE_GFX_CLIENT_QUEUE_HIGH_WATER_BYTES,
++        2, 2);
++    assert_int_equal(1, xrdp_mm_console_gfx_backpressure_active(&telemetry));
++    assert_int_equal(XRDP_CONSOLE_GFX_BACKPRESSURE_FLUSH_MS,
++        xrdp_mm_console_gfx_effective_flush_ms(
++            XRDP_CONSOLE_SESSION_CODE, 1, 1, 0));
++    assert_int_equal(0, xrdp_mm_console_gfx_effective_flush_ms(
++                            XRDP_CONSOLE_SESSION_CODE, 0, 1, 1));
++
++    xrdp_mm_console_record_gfx_acknowledgement(
++        &telemetry, XR_SUSPEND_FRAME_ACKNOWLEDGEMENT, 3, 3);
++    assert_int_equal(0, xrdp_mm_console_gfx_backpressure_active(&telemetry));
++
++    xrdp_mm_console_record_gfx_acknowledgement(&telemetry, 0U, 4, 4);
++    assert_int_equal(0, xrdp_mm_console_gfx_backpressure_active(&telemetry));
++}
++
++static void
++test_console_interaction_priority_state(void **state)
++{
++    struct xrdp_console_interaction_priority priority = {0};
++    struct xrdp_rect dirty = {0};
++    UNUSED(state);
++
++    assert_int_equal(0, xrdp_mm_console_request_focus_interaction(NULL));
++    assert_int_equal(0,
++        xrdp_mm_console_request_focus_interaction(&priority));
++    assert_int_equal(0, xrdp_mm_console_record_interaction_damage(
++        &priority, 1366, 768, 0, 0, 100, 100));
++
++    xrdp_mm_console_set_interaction_anchor(&priority, 800, 500);
++    assert_int_equal(1,
++        xrdp_mm_console_request_focus_interaction(&priority));
++    assert_int_equal(1, xrdp_mm_console_record_interaction_damage(
++        &priority, 1366, 768, 700, 400, 200, 200));
++    assert_int_equal(1,
++        xrdp_mm_console_get_interaction_dirty_rect(&priority, &dirty));
++    assert_int_equal(700, dirty.left);
++    assert_int_equal(400, dirty.top);
++    assert_int_equal(900, dirty.right);
++    assert_int_equal(600, dirty.bottom);
++
++    assert_int_equal(1,
++        xrdp_mm_console_request_focus_interaction(&priority));
++    assert_int_equal(1,
++        xrdp_mm_console_get_interaction_dirty_rect(&priority, &dirty));
++
++    xrdp_mm_console_set_focus_interaction(&priority, 100, 100);
++    assert_int_equal(0,
++        xrdp_mm_console_get_interaction_dirty_rect(&priority, &dirty));
++    xrdp_mm_console_set_interaction_anchor(&priority, 1200, 700);
++    assert_int_equal(1,
++        xrdp_mm_console_request_focus_interaction(&priority));
++    assert_int_equal(0, xrdp_mm_console_record_interaction_damage(
++        &priority, 1366, 768, 1100, 600, 200, 150));
++    assert_int_equal(1, xrdp_mm_console_record_interaction_damage(
++        &priority, 1366, 768, -20, -20, 180, 180));
++    assert_int_equal(1,
++        xrdp_mm_console_get_interaction_dirty_rect(&priority, &dirty));
++    assert_int_equal(0, dirty.left);
++    assert_int_equal(0, dirty.top);
++    assert_int_equal(160, dirty.right);
++    assert_int_equal(160, dirty.bottom);
++
++    xrdp_mm_console_request_pointer_interaction(&priority, 1365, 767);
++    assert_int_equal(0,
++        xrdp_mm_console_get_interaction_dirty_rect(&priority, &dirty));
++    assert_int_equal(1, xrdp_mm_console_record_interaction_damage(
++        &priority, 1366, 768, 900, 500, 466, 268));
++    assert_int_equal(1,
++        xrdp_mm_console_get_interaction_dirty_rect(&priority, &dirty));
++    assert_int_equal(982, dirty.left);
++    assert_int_equal(512, dirty.top);
++    assert_int_equal(1366, dirty.right);
++    assert_int_equal(768, dirty.bottom);
++
++    xrdp_mm_console_clear_interaction_dirty(&priority);
++    assert_int_equal(0,
++        xrdp_mm_console_get_interaction_dirty_rect(&priority, &dirty));
++    assert_int_equal(0, xrdp_mm_console_record_interaction_damage(
++        &priority, 1366, 768, 982, 512, 384, 256));
++}
++
+ START_TEST(execute_suite)
+ {
+     const struct CMUnitTest tests[] =
+     {
+@@ -428,9 +532,11 @@
+         cmocka_unit_test(test_console_planar_fresh_and_continuation_pacing),
+         cmocka_unit_test(
+             test_console_gfx_acknowledgement_telemetry_tracks_queue_depth),
+         cmocka_unit_test(
+-            test_console_gfx_acknowledgement_telemetry_tracks_suspend_and_resume)
++            test_console_gfx_acknowledgement_telemetry_tracks_suspend_and_resume),
++        cmocka_unit_test(test_console_gfx_backpressure_policy),
++        cmocka_unit_test(test_console_interaction_priority_state),
+     };
+ 
+     ck_assert_int_eq(cmocka_run_group_tests(tests, NULL, NULL), 0);
+ }
