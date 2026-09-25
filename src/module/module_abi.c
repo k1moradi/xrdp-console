@@ -3,9 +3,12 @@
 #include <config_ac.h>
 
 #include <limits.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 #include "xrdp.h"
+#include "xrdp_egfx.h"
+#include "os_calls.h"
 
 #include "module_abi.h"
 #include "../rdp/rfx_capability_policy.h"
@@ -28,6 +31,7 @@ int xrdp_console_context_get_wait_objs(void *context, tbus *read_objects,
                                        int *read_count, tbus *write_objects,
                                        int *write_count, int *timeout);
 int xrdp_console_context_check_wait_objs(void *context);
+int xrdp_console_context_frame_ack(void *context, int flags, int frame_id);
 
 struct xrdp_console_module
 {
@@ -130,9 +134,10 @@ module_check_wait_objs(struct xrdp_mod *abi)
 static int
 module_frame_ack(struct xrdp_mod *abi, int flags, int frame_id)
 {
-    (void)flags;
-    (void)frame_id;
-    return context_from_abi(abi) == NULL ? 1 : 0;
+    void *context = context_from_abi(abi);
+    return context == NULL
+               ? 1
+               : xrdp_console_context_frame_ack(context, flags, frame_id);
 }
 
 static int
@@ -408,6 +413,81 @@ xrdp_console_module_get_graphics_capabilities(
         }
     }
     return 0;
+}
+
+int
+xrdp_console_module_h264_encoder_available(
+    const xrdp_console_module *module)
+{
+    const struct xrdp_wm *wm;
+
+    if (module == NULL || module->abi.wm == 0 ||
+        module->abi.server_egfx_cmd == NULL)
+    {
+        return 0;
+    }
+
+    wm = (const struct xrdp_wm *)module->abi.wm;
+    if (wm->mm == NULL || wm->client_info == NULL)
+    {
+        return 0;
+    }
+
+    return wm->client_info->gfx != 0 &&
+           wm->client_info->capture_code == CC_GFX_A2 &&
+           wm->mm->egfx != NULL &&
+           wm->mm->egfx_up != 0 &&
+           wm->mm->egfx_flags == XRDP_EGFX_H264 &&
+           wm->mm->encoder != NULL;
+}
+
+int
+xrdp_console_module_h264_surface_id(const xrdp_console_module *module)
+{
+    const struct xrdp_wm *wm;
+    int monitor_count;
+    int surface_id;
+
+    if (!xrdp_console_module_h264_encoder_available(module))
+    {
+        return -1;
+    }
+
+    wm = (const struct xrdp_wm *)module->abi.wm;
+    monitor_count = wm->client_info->display_sizes.monitorCount;
+    if (monitor_count > 1)
+    {
+        return -1;
+    }
+
+    surface_id = monitor_count == 1 ? 0 : wm->mm->egfx->surface_id;
+    return surface_id >= 0 && surface_id <= UINT16_MAX ? surface_id : -1;
+}
+
+int
+xrdp_console_module_submit_h264_gfx(
+    xrdp_console_module *module, char *command, int command_bytes,
+    void *mapped_data, int mapped_data_bytes)
+{
+    /*
+     * Ownership is consume-on-call, so all error paths have the same mapping
+     * lifetime. server_egfx_cmd() takes responsibility for accepted mappings.
+     */
+    if (mapped_data == NULL || mapped_data_bytes <= 0)
+    {
+        return 1;
+    }
+
+    if (command == NULL || command_bytes <= 0 ||
+        !xrdp_console_module_h264_encoder_available(module))
+    {
+        g_munmap(mapped_data, (size_t)mapped_data_bytes);
+        return 1;
+    }
+
+    return module->abi.server_egfx_cmd(
+        &module->abi, command, command_bytes,
+        (char *)mapped_data, mapped_data_bytes);
 }
 
 int

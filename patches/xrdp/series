@@ -16,3 +16,5 @@
 0016-xrdp-console-interaction-priority-backpressure.patch
 0017-xrdp-chansrv-bounded-text-selection-retry.patch
 0018-xrdp-chansrv-retry-silent-text-selection-timeout.patch
+0019-xrdp-console-h264-async-encoder.patch
+0020-xrdp-console-adaptive-gfx-pacing.patch

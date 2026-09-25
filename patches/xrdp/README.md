@@ -32,8 +32,9 @@ historical fork's commit history:
    ahead of synchronous direct-X11 graphics work without changing legacy
    VNC/Xorg scheduling.
 4. `0004-xrdp-console-own-rfx-encoder.patch` prevents pinned xrdp from
-   creating its asynchronous generic encoder for module code `21`, leaving
-   synchronous RemoteFX ownership at the first-party module boundary.
+   creating its asynchronous generic encoder for module code `21` by default,
+   leaving synchronous RemoteFX/Planar ownership at the first-party module
+   boundary. Patch 19 selectively restores it for negotiated GFX H.264 only.
 5. `0005-librfxcodec-unaligned-stream-access.patch` replaces potentially
    misaligned 16/32-bit typed loads and stores in the x86 RemoteFX stream
    macros with fixed-size `memcpy()` operations. This removes C undefined
@@ -131,13 +132,26 @@ historical fork's commit history:
     one client request into a multi-second-per-attempt stall. Intermediate
     timeout events stay DEBUG-only; only exhausted conversion failure is
     logged at production error level.
+19. `0019-xrdp-console-h264-async-encoder.patch` selectively retains or
+    creates xrdp's asynchronous generic encoder for Console code `21` only
+    when GFX is enabled and H.264 was negotiated. Console Planar and
+    Progressive RemoteFX remain first-party/synchronous. The policy is shared
+    by initial GFX negotiation, post-login cleanup, and dynamic-resize encoder
+    recreation and is covered by the upstream xrdp C unit suite.
+20. `0020-xrdp-console-adaptive-gfx-pacing.patch` replaces the Console
+    Planar fallback's single 256 KiB backpressure threshold with four
+    ACK-driven pacing levels. Queue growth promotes immediately; recovery
+    requires three ACKs below lower exit thresholds before relaxing one level.
+    The resulting background cadence is 16/33/66/100 ms while current
+    interaction-priority work still bypasses background pacing. ACK suspension
+    preserves the current level but drops the stale queue-trend baseline.
 
 The activation script requires the `XRDP_CONSOLE_GFX_PLANAR_BATCH_V1` marker
 in the candidate daemon, so an older patched generation cannot be mistaken
 for this Planar batching implementation.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-eighteen patches are retained production-path behavior and bounded operational
+twenty patches are retained production-path behavior and bounded operational
 diagnostics, not benchmark knobs. Code
 `21` is deliberately used only by the direct module's profile; legacy VNC
 profiles continue using code `0`/`1`. The

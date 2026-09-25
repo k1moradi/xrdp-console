@@ -23,11 +23,15 @@ extern "C" {
 #include "../core/damage_region.h"
 #include "../core/interaction_priority.h"
 #include "../core/letterbox_regions.h"
+#include "../core/mapped_buffer.h"
+#include "../core/tile_fingerprint_map.h"
 #include "../core/paint_quantum.h"
 #include "../core/presentation_scaler.h"
 #include "../core/presentation_transform.h"
 #include "../clipboard/clipboard_controller.h"
 #include "../rdp/classic_graphics_scheduler.h"
+#include "../rdp/gfx_avc420_frame.h"
+#include "../rdp/h264_latest_frame.h"
 #include "../rdp/rdp_update_sink.h"
 #include "../rdp/rfx_encoder.h"
 #include "../rdp/remote_fx_scheduler.h"
@@ -404,6 +408,10 @@ constexpr std::uint64_t kMaximumPaintPixelsPerService = 128U * 1024U;
 // input. This is separate from the source/XShm capture budget above.
 constexpr std::uint64_t kMaximumPresentationPixelsPerService =
     128U * 1024U;
+constexpr std::size_t kMaximumH264Selections =
+    (UINT16_MAX + GenerationTileMap::kTileHeightPixels - 1U) /
+    GenerationTileMap::kTileHeightPixels;
+constexpr std::size_t kMaximumH264CommandBytes = 32U * 1024U;
 constexpr auto kMinimumPresentationInterval = std::chrono::milliseconds{16};
 
 struct ModuleState
@@ -455,6 +463,7 @@ enum class GraphicsTransport
 {
     ClassicBitmap,
     RemoteFx,
+    H264Gfx,
 };
 
 struct PendingRfxChunk
@@ -531,6 +540,7 @@ struct ModuleContext::Impl
     PendingRfxFill rfxLetterboxFill{};
     std::unique_ptr<RfxEncoder> rfxEncoder{};
     RfxSurfaceSink rfxSurfaceSink{nullptr};
+    xrdp_console::rdp::H264LatestFrameState h264Frame{};
     GraphicsTransport graphicsTransport{GraphicsTransport::ClassicBitmap};
     std::array<std::uint32_t, PresentationScaler::kScratchPixelCapacity>
         rfxFillPixels{};
@@ -565,6 +575,17 @@ struct ModuleContext::Impl
         if (graphicsTransport == GraphicsTransport::ClassicBitmap)
         {
             fullPresentationInvalidation = true;
+            return true;
+        }
+        if (graphicsTransport == GraphicsTransport::H264Gfx)
+        {
+            if (!h264Frame.valid())
+            {
+                fullPresentationInvalidation = false;
+                return false;
+            }
+            h264Frame.invalidateAll();
+            fullPresentationInvalidation = false;
             return true;
         }
 
@@ -770,16 +791,33 @@ ModuleContext::connect() noexcept
         {
             selectedGfxMode = "rfx-progressive";
         }
+
+        xrdp_console::rdp::H264LatestFrameState h264Frame;
+        if (negotiatedGraphics.selected_gfx_mode == XRDP_CONSOLE_GFX_H264 &&
+            xrdp_console::rdp::h264DirectGeometrySupported(
+                sourceGeometry, impl_->state.presentationGeometry) &&
+            xrdp_console_module_h264_encoder_available(impl_->module) != 0 &&
+            xrdp_console_module_h264_surface_id(impl_->module) >= 0 &&
+            h264Frame.configure(impl_->state.presentationGeometry))
+        {
+            graphicsTransport = GraphicsTransport::H264Gfx;
+            rfxEncoder.reset();
+        }
+
         const char *firstPartyTransport =
-            graphicsTransport == GraphicsTransport::RemoteFx
-                ? "standard-rfx"
-                : "classic-bitmap";
-        const char *actualOutputPath =
-            negotiatedGraphics.gfx_enabled != 0
-                ? "gfx-planar"
+            graphicsTransport == GraphicsTransport::H264Gfx
+                ? "async-h264"
                 : (graphicsTransport == GraphicsTransport::RemoteFx
-                       ? "standard-rfx"
-                       : "legacy-bitmap");
+                ? "standard-rfx"
+                : "classic-bitmap");
+        const char *actualOutputPath =
+            graphicsTransport == GraphicsTransport::H264Gfx
+                ? "gfx-h264-avc420"
+                : (negotiatedGraphics.gfx_enabled != 0
+                       ? "gfx-planar"
+                       : (graphicsTransport == GraphicsTransport::RemoteFx
+                              ? "standard-rfx"
+                              : "legacy-bitmap"));
 
         auto damageTracker = std::make_unique<X11DamageTracker>(
             *connection->nativeConnection(), connection->rootWindow(),
@@ -873,12 +911,17 @@ ModuleContext::connect() noexcept
         impl_->state.sourceGeometry = sourceGeometry;
         impl_->presentationTransform = presentationTransform;
         impl_->presentationScaler = std::move(presentationScaler);
+        impl_->h264Frame = std::move(h264Frame);
         impl_->damageRegion.clear();
-        // XDamage reports changes, not the initial contents. Seed a complete
-        // frame so a newly connected RDP client receives a usable desktop.
-        impl_->damageRegion.add(
-            {0, 0, sourceGeometry.widthPixels, sourceGeometry.heightPixels},
-            sourceGeometry);
+        // XDamage reports changes, not the initial contents. The H.264 state
+        // owns its generation-tagged full baseline; fallback paths retain the
+        // original DamageRegion seed.
+        if (graphicsTransport != GraphicsTransport::H264Gfx)
+        {
+            impl_->damageRegion.add(
+                {0, 0, sourceGeometry.widthPixels, sourceGeometry.heightPixels},
+                sourceGeometry);
+        }
         impl_->armPresentationImmediately();
         impl_->x11Connection = std::move(connection);
         impl_->damageTracker = std::move(damageTracker);
@@ -916,6 +959,7 @@ ModuleContext::connect() noexcept
         impl_->pendingPresentation.clear();
         impl_->pendingRfx.clear();
         impl_->rfxEncoder.reset();
+        impl_->h264Frame.reset();
         impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
         impl_->rfxLetterboxFill.clear();
         impl_->sharedMemoryCapture.reset();
@@ -942,7 +986,6 @@ int
 ModuleContext::resize_presentation(int width, int height, int num_monitors,
                                    const struct monitor_info *monitors) noexcept
 {
-    (void)num_monitors;
     (void)monitors;
     if (!valid() || width <= 0 || height <= 0)
     {
@@ -995,6 +1038,20 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
         rfxEncoder.reset();
     }
 
+    xrdp_console::rdp::H264LatestFrameState h264Frame;
+    struct xrdp_console_graphics_capabilities negotiatedGraphics{};
+    if (num_monitors >= 0 && num_monitors <= 1 &&
+        xrdp_console_module_get_graphics_capabilities(
+            impl_->module, &negotiatedGraphics) == 0 &&
+        negotiatedGraphics.selected_gfx_mode == XRDP_CONSOLE_GFX_H264 &&
+        xrdp_console::rdp::h264DirectGeometrySupported(
+            impl_->state.sourceGeometry, presentationGeometry) &&
+        h264Frame.configure(presentationGeometry))
+    {
+        graphicsTransport = GraphicsTransport::H264Gfx;
+        rfxEncoder.reset();
+    }
+
     impl_->pendingPresentation.clear();
     clearInteractionPriority(impl_->interactionPriority);
     impl_->pendingRfx.clear();
@@ -1003,16 +1060,20 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     impl_->presentationTransform = transform;
     impl_->presentationScaler = std::move(scaler);
     impl_->rfxEncoder = std::move(rfxEncoder);
+    impl_->h264Frame = std::move(h264Frame);
     impl_->graphicsTransport = graphicsTransport;
     if (graphicsTransport == GraphicsTransport::RemoteFx)
     {
         impl_->rfxLetterboxFill.regions = letterboxRegions;
     }
     impl_->damageRegion.clear();
-    impl_->damageRegion.add(
-        {0, 0, impl_->state.sourceGeometry.widthPixels,
-         impl_->state.sourceGeometry.heightPixels},
-        impl_->state.sourceGeometry);
+    if (graphicsTransport != GraphicsTransport::H264Gfx)
+    {
+        impl_->damageRegion.add(
+            {0, 0, impl_->state.sourceGeometry.widthPixels,
+             impl_->state.sourceGeometry.heightPixels},
+            impl_->state.sourceGeometry);
+    }
     impl_->fullPresentationInvalidation =
         graphicsTransport == GraphicsTransport::ClassicBitmap ||
         impl_->rfxLetterboxFill.active();
@@ -1046,10 +1107,13 @@ ModuleContext::invalidate_presentation(int width, int height) noexcept
         return 1;
     }
     impl_->damageRegion.clear();
-    impl_->damageRegion.add(
-        {0, 0, impl_->state.sourceGeometry.widthPixels,
-         impl_->state.sourceGeometry.heightPixels},
-        impl_->state.sourceGeometry);
+    if (impl_->graphicsTransport != GraphicsTransport::H264Gfx)
+    {
+        impl_->damageRegion.add(
+            {0, 0, impl_->state.sourceGeometry.widthPixels,
+             impl_->state.sourceGeometry.heightPixels},
+            impl_->state.sourceGeometry);
+    }
     impl_->armPresentationImmediately();
     return 0;
 }
@@ -1079,10 +1143,13 @@ ModuleContext::suppress_output(bool suppress, int left, int top, int right,
         // Collapse it to one complete redraw for the next resume instead of
         // allowing a stale rectangle queue to consume the service loop.
         impl_->damageRegion.clear();
-        impl_->damageRegion.add(
-            {0, 0, impl_->state.sourceGeometry.widthPixels,
-             impl_->state.sourceGeometry.heightPixels},
-            impl_->state.sourceGeometry);
+        if (impl_->graphicsTransport != GraphicsTransport::H264Gfx)
+        {
+            impl_->damageRegion.add(
+                {0, 0, impl_->state.sourceGeometry.widthPixels,
+                 impl_->state.sourceGeometry.heightPixels},
+                impl_->state.sourceGeometry);
+        }
         if (!impl_->preparePresentationInvalidation())
         {
             return 1;
@@ -1200,6 +1267,32 @@ ModuleContext::event(int message, long param1, long param2, long param3,
 }
 
 int
+ModuleContext::frame_ack(int flags, int frame_id) noexcept
+{
+    (void)flags;
+    if (!valid())
+    {
+        return 1;
+    }
+    if (impl_->graphicsTransport != GraphicsTransport::H264Gfx)
+    {
+        return 0;
+    }
+
+    if (impl_->h264Frame.releaseSubmission(frame_id) &&
+        !impl_->outputSuppressed &&
+        (impl_->h264Frame.capturePending() ||
+         impl_->h264Frame.transmissionPending() ||
+         impl_->h264Frame.baselineSubmissionPending() ||
+         (impl_->damageTracker != nullptr &&
+          impl_->damageTracker->hasPendingDamage())))
+    {
+        impl_->armPresentationImmediately();
+    }
+    return 0;
+}
+
+int
 ModuleContext::end() noexcept
 {
     if (!valid())
@@ -1213,6 +1306,7 @@ ModuleContext::end() noexcept
     impl_->pendingRfx.clear();
     impl_->rfxLetterboxFill.clear();
     impl_->rfxEncoder.reset();
+    impl_->h264Frame.reset();
     impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
     impl_->sharedMemoryCapture.reset();
     impl_->cursorTracker.reset();
@@ -1337,6 +1431,18 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
         ++(*read_count);
     }
 
+    const bool h264Configured =
+        impl_->graphicsTransport == GraphicsTransport::H264Gfx &&
+        impl_->h264Frame.valid();
+    const bool h264SubmissionPending =
+        h264Configured && !impl_->h264Frame.frameInFlight() &&
+        (impl_->h264Frame.baselineSubmissionPending() ||
+         impl_->h264Frame.transmissionPending());
+    const bool h264Continuation =
+        h264Configured &&
+        (impl_->h264Frame.capturePending() ||
+         (h264SubmissionPending &&
+          xrdp_console_module_h264_encoder_available(impl_->module) != 0));
     const bool remoteFxAvailable =
         impl_->graphicsTransport == GraphicsTransport::RemoteFx &&
         impl_->rfxEncoder != nullptr && impl_->rfxSurfaceSink.available();
@@ -1364,8 +1470,8 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
              impl_->pendingPresentation.active() ||
              impl_->rfxLetterboxFill.active() ||
              !impl_->damageRegion.rectangles().empty());
-        if (impl_->x11EventBudgetPending || remoteFxContinuation ||
-            classicContinuation)
+        if (impl_->x11EventBudgetPending || h264Continuation ||
+            remoteFxContinuation || classicContinuation)
         {
             // XCB may own more events in its private queue after the socket is
             // no longer readable. Keep draining those in bounded slices. A
@@ -1373,8 +1479,10 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
             // invocation is intentionally the largest synchronous unit.
             *timeout = 0;
         }
-        else if ((remoteFxAvailable || classicAvailable) &&
+        else if ((h264Configured || remoteFxAvailable || classicAvailable) &&
                  (impl_->damageTracker->hasPendingDamage() ||
+                  impl_->h264Frame.capturePending() ||
+                  h264SubmissionPending ||
                   !impl_->damageRegion.rectangles().empty() ||
                   impl_->fullPresentationInvalidation ||
                   impl_->pendingPresentation.active()))
@@ -1734,6 +1842,270 @@ ModuleContext::check_remote_fx() noexcept
 }
 
 int
+ModuleContext::check_h264_gfx() noexcept
+{
+    using xrdp_console::MappedBuffer;
+    using xrdp_console::fingerprintBgraRectangle;
+    using xrdp_console::rdp::GfxAvc420Command;
+    using xrdp_console::rdp::buildGfxAvc420Command;
+    using xrdp_console::rdp::limitTileSelectionPixels;
+    using xrdp_console::rdp::updateNv12RectangleFromBgraRegion_709FullRange;
+
+    if (!valid() || !impl_->h264Frame.valid() ||
+        impl_->damageTracker == nullptr || !impl_->damageTracker->valid() ||
+        impl_->sharedMemoryCapture == nullptr ||
+        !impl_->sharedMemoryCapture->valid())
+    {
+        return 1;
+    }
+
+    const auto finish = [this]() noexcept {
+        const bool submissionPending =
+            !impl_->h264Frame.frameInFlight() &&
+            (impl_->h264Frame.baselineSubmissionPending() ||
+             impl_->h264Frame.transmissionPending());
+        if (impl_->h264Frame.capturePending())
+        {
+            impl_->armPresentationImmediately();
+        }
+        else if (submissionPending &&
+                 xrdp_console_module_h264_encoder_available(impl_->module) != 0)
+        {
+            impl_->armPresentationImmediately();
+        }
+        else if (submissionPending || impl_->damageTracker->hasPendingDamage())
+        {
+            impl_->armNextPresentation(Impl::Clock::now());
+        }
+        else
+        {
+            // New state which arrives while an asynchronous frame is active
+            // is woken by X11. Once captured, mod_frame_ack releases the
+            // producer slot and arms the next submission.
+            impl_->disarmPresentation();
+        }
+        impl_->profile.maybeLog();
+        return 0;
+    };
+
+    if (impl_->damageTracker->hasPendingDamage())
+    {
+        const std::uint64_t previousSnapshotRectangles =
+            impl_->damageTracker->snapshotRectangleCount();
+        const std::uint64_t previousSnapshotPixels =
+            impl_->damageTracker->snapshotPixelCount();
+        impl_->damageRegion.clear();
+        if (!impl_->damageTracker->snapshot(impl_->damageRegion))
+        {
+            return 1;
+        }
+        for (const Rectangle rectangle : impl_->damageRegion.rectangles())
+        {
+            impl_->h264Frame.markDamage(rectangle);
+        }
+        impl_->damageRegion.clear();
+        impl_->profile.noteSnapshot(
+            impl_->damageTracker->snapshotRectangleCount() -
+                previousSnapshotRectangles,
+            impl_->damageTracker->snapshotPixelCount() -
+                previousSnapshotPixels);
+    }
+
+    std::array<GenerationTileMap::Selection, 1> captureSelections{};
+    std::size_t captureCount = 0;
+    if (impl_->interactionPriority.pending)
+    {
+        captureCount = impl_->h264Frame.collectCaptureSelectionsIntersecting(
+            impl_->interactionPriority.rectangle, captureSelections);
+    }
+    if (captureCount == 0)
+    {
+        captureCount =
+            impl_->h264Frame.collectCaptureSelections(captureSelections);
+    }
+    if (captureCount != 0)
+    {
+        const GenerationTileMap::Selection selection =
+            limitTileSelectionPixels(captureSelections[0],
+                                     kMaximumPaintPixelsPerService);
+        if (!selection.valid())
+        {
+            return 1;
+        }
+        const FramebufferView pixels =
+            impl_->sharedMemoryCapture->capture(selection.rectangle);
+        if (!pixels.valid())
+        {
+            return 1;
+        }
+
+        for (std::uint32_t offset = 0;
+             offset < selection.rectangle.widthPixels;
+             offset += GenerationTileMap::kTileWidthPixels)
+        {
+            const std::uint32_t tileWidth = std::min(
+                GenerationTileMap::kTileWidthPixels,
+                selection.rectangle.widthPixels - offset);
+            const Rectangle tile{
+                selection.rectangle.x + static_cast<std::int32_t>(offset),
+                selection.rectangle.y, tileWidth,
+                selection.rectangle.heightPixels};
+            const Rectangle localTile{
+                static_cast<std::int32_t>(offset), 0, tileWidth,
+                selection.rectangle.heightPixels};
+            const auto fingerprint =
+                fingerprintBgraRectangle(pixels, localTile);
+            const GenerationTileMap::Selection tileSelection{
+                tile, selection.generation};
+            if (!fingerprint.valid)
+            {
+                return 1;
+            }
+
+            if (impl_->h264Frame.capturedTileChanged(
+                    tile, fingerprint.value))
+            {
+                if (!updateNv12RectangleFromBgraRegion_709FullRange(
+                        pixels, localTile, tile,
+                        impl_->h264Frame.geometry(),
+                        impl_->h264Frame.frameBytes()) ||
+                    !impl_->h264Frame.commitCapturedChanged(
+                        tileSelection, fingerprint.value))
+                {
+                    return 1;
+                }
+            }
+            else if (!impl_->h264Frame.commitCapturedUnchanged(
+                         tileSelection, fingerprint.value))
+            {
+                return 1;
+            }
+        }
+        impl_->profile.noteCapture(selection.rectangle);
+    }
+
+    const std::uint32_t frameId = impl_->h264Frame.nextFrameId();
+    if (frameId == 0)
+    {
+        return finish();
+    }
+    if (xrdp_console_module_h264_encoder_available(impl_->module) == 0)
+    {
+        return finish();
+    }
+    const int surfaceId = xrdp_console_module_h264_surface_id(impl_->module);
+    if (surfaceId < 0 || surfaceId > UINT16_MAX)
+    {
+        return 1;
+    }
+
+    std::array<GenerationTileMap::Selection, kMaximumH264Selections>
+        transmissionSelections{};
+    std::size_t transmissionCount = 0;
+    if (impl_->h264Frame.baselineSubmissionPending())
+    {
+        transmissionSelections[0] = {
+            {0, 0, impl_->h264Frame.geometry().widthPixels,
+             impl_->h264Frame.geometry().heightPixels},
+            UINT64_MAX,
+        };
+        transmissionCount = 1;
+    }
+    else if (impl_->interactionPriority.pending)
+    {
+        transmissionCount =
+            impl_->h264Frame.collectReadyTransmissionSelectionsIntersecting(
+                impl_->interactionPriority.rectangle,
+                transmissionSelections);
+    }
+    if (transmissionCount == 0 &&
+        !impl_->h264Frame.baselineSubmissionPending())
+    {
+        transmissionCount = impl_->h264Frame.collectReadyTransmissionSelections(
+            transmissionSelections);
+    }
+    if (transmissionCount == 0)
+    {
+        return finish();
+    }
+
+    std::array<Rectangle, kMaximumH264Selections> rectangles{};
+    for (std::size_t index = 0; index < transmissionCount; ++index)
+    {
+        const Rectangle rectangle = transmissionSelections[index].rectangle;
+        if (xrdp_console::rdp::alignAvc420Rectangle(
+                rectangle, impl_->h264Frame.geometry()) != rectangle)
+        {
+            return 1;
+        }
+        rectangles[index] = rectangle;
+    }
+
+    std::array<std::byte, kMaximumH264CommandBytes> commandBytes{};
+    const std::span<const Rectangle> rectangleSpan(
+        rectangles.data(), transmissionCount);
+    const GfxAvc420Command command{
+        static_cast<std::uint16_t>(surfaceId),
+        frameId,
+        0,
+        impl_->h264Frame.geometry(),
+        rectangleSpan,
+        rectangleSpan,
+    };
+    const std::size_t encodedCommandBytes =
+        buildGfxAvc420Command(command, commandBytes);
+    if (encodedCommandBytes == 0 || encodedCommandBytes > INT_MAX)
+    {
+        return 1;
+    }
+
+    MappedBuffer frame =
+        MappedBuffer::allocate(impl_->h264Frame.frameBytes().size());
+    if (!frame.valid() || frame.sizeBytes() > static_cast<std::size_t>(INT_MAX))
+    {
+        return 1;
+    }
+    std::memcpy(frame.bytes().data(), impl_->h264Frame.frameBytes().data(),
+                frame.sizeBytes());
+    const MappedBuffer::ReleasedMapping released = frame.release();
+    const int submitResult = xrdp_console_module_submit_h264_gfx(
+        impl_->module, reinterpret_cast<char *>(commandBytes.data()),
+        static_cast<int>(encodedCommandBytes), released.data,
+        static_cast<int>(released.sizeBytes));
+    if (submitResult != 0)
+    {
+        return 1;
+    }
+    if (!impl_->h264Frame.noteSubmitted(
+            frameId,
+            std::span<const GenerationTileMap::Selection>(
+                transmissionSelections.data(), transmissionCount)))
+    {
+        // The mmap is now owned by xrdp and may already be encoding. Fail
+        // closed rather than opening a second producer slot with inconsistent
+        // generation bookkeeping.
+        return 1;
+    }
+
+    if (impl_->interactionPriority.pending)
+    {
+        std::array<GenerationTileMap::Selection, 1> remaining{};
+        const bool captureStillPending =
+            impl_->h264Frame.collectCaptureSelectionsIntersecting(
+                impl_->interactionPriority.rectangle, remaining) != 0;
+        const bool transmissionStillPending =
+            impl_->h264Frame.collectReadyTransmissionSelectionsIntersecting(
+                impl_->interactionPriority.rectangle, remaining) != 0;
+        if (!captureStillPending && !transmissionStillPending)
+        {
+            clearInteractionPriority(impl_->interactionPriority);
+        }
+    }
+    impl_->profile.notePresentationBatch();
+    return finish();
+}
+
+int
 ModuleContext::check_wait_objs() noexcept
 {
     if (!valid())
@@ -1856,6 +2228,10 @@ ModuleContext::check_wait_objs() noexcept
         impl_->cursorTracker->acknowledge();
     }
 
+    if (impl_->graphicsTransport == GraphicsTransport::H264Gfx)
+    {
+        return check_h264_gfx();
+    }
     if (impl_->graphicsTransport == GraphicsTransport::RemoteFx)
     {
         return check_remote_fx();
@@ -2282,6 +2658,15 @@ xrdp_console_context_event(void *context, int message, long param1,
                ? 1
                : module_context->event(message, param1, param2, param3,
                                        param4);
+}
+
+extern "C" int
+xrdp_console_context_frame_ack(void *context, int flags, int frame_id)
+{
+    auto *module_context = static_cast<ModuleContext *>(context);
+    return module_context == nullptr
+               ? 1
+               : module_context->frame_ack(flags, frame_id);
 }
 
 extern "C" int

@@ -1,0 +1,135 @@
+diff --git a/xrdp/xrdp.h b/xrdp/xrdp.h
+--- a/xrdp/xrdp.h
++++ b/xrdp/xrdp.h
+@@ -286,5 +286,8 @@ xrdp_mm_console_gfx_effective_flush_ms(
+     int session_code, int immediate_continuation,
+     int backpressure_active, int interaction_priority_pending);
++int
++xrdp_mm_console_generic_encoder_allowed(
++    int session_code, int gfx_enabled, enum xrdp_egfx_flags egfx_flags);
+ void
+ xrdp_mm_console_set_interaction_anchor(
+     struct xrdp_console_interaction_priority *priority, int x, int y);
+diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -1338,6 +1338,18 @@ xrdp_mm_console_gfx_effective_flush_ms(
+     return minimum_flush_ms;
+ }
+ 
++int
++xrdp_mm_console_generic_encoder_allowed(
++    int session_code, int gfx_enabled, enum xrdp_egfx_flags egfx_flags)
++{
++    if (session_code != XRDP_CONSOLE_SESSION_CODE)
++    {
++        return 1;
++    }
++
++    return gfx_enabled && egfx_flags == XRDP_EGFX_H264;
++}
++
+ void
+ xrdp_mm_console_record_gfx_acknowledgement(
+     struct xrdp_console_gfx_ack_telemetry *telemetry,
+@@ -1746,6 +1758,8 @@ xrdp_mm_egfx_caps_advertise(void *user, int num_caps,
+         self->egfx_up = 1;
+         xrdp_mm_egfx_create_surfaces(self);
+-        if (self->code != XRDP_CONSOLE_SESSION_CODE)
++        if (xrdp_mm_console_generic_encoder_allowed(
++                self->code, self->wm->client_info->gfx,
++                self->egfx_flags))
+         {
+             self->encoder = xrdp_encoder_create(self);
+         }
+@@ -1773,6 +1788,8 @@ xrdp_mm_egfx_caps_advertise(void *user, int num_caps,
+         self->wm->client_info->gfx = 0;
+         xrdp_encoder_delete(self->encoder);
+-        if (self->code != XRDP_CONSOLE_SESSION_CODE)
++        if (xrdp_mm_console_generic_encoder_allowed(
++                self->code, self->wm->client_info->gfx,
++                self->egfx_flags))
+         {
+             self->encoder = xrdp_encoder_create(self);
+         }
+@@ -2753,9 +2771,11 @@ process_display_control_monitor_layout_data(struct xrdp_wm *wm)
+         case WMRZ_ENCODER_CREATE:
+             if (mm->egfx_up)
+             {
+                 xrdp_mm_egfx_create_surfaces(mm);
+             }
+-            if (mm->code != XRDP_CONSOLE_SESSION_CODE)
++            if (xrdp_mm_console_generic_encoder_allowed(
++                    mm->code, mm->wm->client_info->gfx,
++                    mm->egfx_flags))
+             {
+                 mm->encoder = xrdp_encoder_create(mm);
+             }
+@@ -3591,10 +3612,16 @@ xrdp_mm_connect(struct xrdp_mm *self)
+ 
+-    /* The first-party console owns its synchronous RemoteFX encoder. The
+-     * generic xrdp encoder was created before the module code was parsed. */
+-    if (self->code == XRDP_CONSOLE_SESSION_CODE && self->encoder != NULL)
++    /*
++     * GFX capabilities can be negotiated before the module code is parsed.
++     * Console owns synchronous RemoteFX/Planar output, but negotiated H.264
++     * deliberately retains xrdp's asynchronous encoder.
++     */
++    if (self->encoder != NULL &&
++            !xrdp_mm_console_generic_encoder_allowed(
++                self->code, self->wm->client_info->gfx,
++                self->egfx_flags))
+     {
+         LOG(LOG_LEVEL_INFO,
+-            "xrdp-console: disabling xrdp generic encoder thread");
++            "xrdp-console: disabling non-H264 generic encoder thread");
+         xrdp_encoder_delete(self->encoder);
+         self->encoder = NULL;
+     }
+diff --git a/tests/xrdp/test_xrdp_region.c b/tests/xrdp/test_xrdp_region.c
+--- a/tests/xrdp/test_xrdp_region.c
++++ b/tests/xrdp/test_xrdp_region.c
+@@ -518,6 +518,33 @@ test_console_interaction_priority_state(void **state)
+         &priority, 1366, 768, 982, 512, 384, 256));
+ }
+ 
++static void
++test_console_generic_encoder_policy(void **state)
++{
++    UNUSED(state);
++
++    /* Legacy session codes keep upstream encoder selection unchanged. */
++    assert_int_equal(1, xrdp_mm_console_generic_encoder_allowed(
++                            0, 0, 0));
++    assert_int_equal(1, xrdp_mm_console_generic_encoder_allowed(
++                            1, 0, XRDP_EGFX_RFX_PRO));
++
++    /* Console must not revive the encoder for classic, Planar, or Pro-RFX. */
++    assert_int_equal(0, xrdp_mm_console_generic_encoder_allowed(
++                            XRDP_CONSOLE_SESSION_CODE, 0, 0));
++    assert_int_equal(0, xrdp_mm_console_generic_encoder_allowed(
++                            XRDP_CONSOLE_SESSION_CODE, 1,
++                            XRDP_EGFX_RFX_PRO));
++    assert_int_equal(0, xrdp_mm_console_generic_encoder_allowed(
++                            XRDP_CONSOLE_SESSION_CODE, 0,
++                            XRDP_EGFX_H264));
++
++    /* Negotiated Console H.264 is the only generic-encoder exception. */
++    assert_int_equal(1, xrdp_mm_console_generic_encoder_allowed(
++                            XRDP_CONSOLE_SESSION_CODE, 1,
++                            XRDP_EGFX_H264));
++}
++
+ START_TEST(execute_suite)
+ {
+     const struct CMUnitTest tests[] =
+@@ -535,7 +560,8 @@ START_TEST(execute_suite)
+         cmocka_unit_test(
+             test_console_gfx_acknowledgement_telemetry_tracks_suspend_and_resume),
+         cmocka_unit_test(test_console_gfx_backpressure_policy),
+-        cmocka_unit_test(test_console_interaction_priority_state),
++        cmocka_unit_test(test_console_interaction_priority_state),
++        cmocka_unit_test(test_console_generic_encoder_policy),
+     };
+ 
+     ck_assert_int_eq(cmocka_run_group_tests(tests, NULL, NULL), 0);

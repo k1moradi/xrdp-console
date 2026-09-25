@@ -1,0 +1,401 @@
+diff --git a/xrdp/xrdp_types.h b/xrdp/xrdp_types.h
+--- a/xrdp/xrdp_types.h
++++ b/xrdp/xrdp_types.h
+@@ -419,6 +419,23 @@ struct xrdp_console_gfx_ack_telemetry
+     int acknowledgements_suspended;
+ };
+ 
++enum xrdp_console_gfx_pacing_level
++{
++    XRDP_CONSOLE_GFX_PACING_INTERACTIVE = 0,
++    XRDP_CONSOLE_GFX_PACING_BALANCED = 1,
++    XRDP_CONSOLE_GFX_PACING_CONGESTED = 2,
++    XRDP_CONSOLE_GFX_PACING_SEVERE = 3
++};
++
++struct xrdp_console_gfx_pacing_state
++{
++    uint64_t observed_acknowledgement_count;
++    uint32_t previous_queue_depth;
++    unsigned int recovery_acknowledgement_count;
++    int previous_queue_valid;
++    enum xrdp_console_gfx_pacing_level level;
++};
++
+ /* Console-only interaction priority is session-thread-owned and holds no
+  * resources. A request is cleared only after its intersecting pixels have
+  * been committed to an RDPGFX frame. */
+@@ -483,6 +501,7 @@ struct xrdp_mm
+     /* Drain already-bounded Console damage without a fresh-batch delay. */
+     int console_planar_immediate_continuation;
+     struct xrdp_console_gfx_ack_telemetry console_gfx_ack_telemetry;
++    struct xrdp_console_gfx_pacing_state console_gfx_pacing;
+     struct xrdp_console_interaction_priority console_interaction_priority;
+     int gfx_delay_autologin;
+     int mod_uses_wm_screen_for_gfx;
+diff --git a/xrdp/xrdp.h b/xrdp/xrdp.h
+--- a/xrdp/xrdp.h
++++ b/xrdp/xrdp.h
+@@ -271,7 +271,17 @@ enum
+     XRDP_CONSOLE_INTERACTION_PRIORITY_WIDTH_PIXELS = 384,
+     XRDP_CONSOLE_INTERACTION_PRIORITY_HEIGHT_PIXELS = 256,
+     XRDP_CONSOLE_GFX_CLIENT_QUEUE_HIGH_WATER_BYTES = 256 * 1024,
+-    XRDP_CONSOLE_GFX_BACKPRESSURE_FLUSH_MS = 100
++    XRDP_CONSOLE_GFX_BACKPRESSURE_FLUSH_MS = 100,
++    XRDP_CONSOLE_GFX_PACING_BALANCED_ENTER_BYTES = 128 * 1024,
++    XRDP_CONSOLE_GFX_PACING_CONGESTED_ENTER_BYTES = 256 * 1024,
++    XRDP_CONSOLE_GFX_PACING_SEVERE_ENTER_BYTES = 512 * 1024,
++    XRDP_CONSOLE_GFX_PACING_BALANCED_EXIT_BYTES = 64 * 1024,
++    XRDP_CONSOLE_GFX_PACING_CONGESTED_EXIT_BYTES = 160 * 1024,
++    XRDP_CONSOLE_GFX_PACING_SEVERE_EXIT_BYTES = 320 * 1024,
++    XRDP_CONSOLE_GFX_PACING_RAPID_RISE_BYTES = 64 * 1024,
++    XRDP_CONSOLE_GFX_PACING_RECOVERY_ACKNOWLEDGEMENTS = 3,
++    XRDP_CONSOLE_GFX_PACING_BALANCED_FLUSH_MS = 33,
++    XRDP_CONSOLE_GFX_PACING_CONGESTED_FLUSH_MS = 66
+ };
+ 
+ int
+@@ -291,5 +302,14 @@ xrdp_mm_console_gfx_effective_flush_ms(
+     int session_code, int immediate_continuation,
+     int backpressure_active, int interaction_priority_pending);
++void
++xrdp_mm_console_update_gfx_pacing(
++    struct xrdp_console_gfx_pacing_state *pacing,
++    const struct xrdp_console_gfx_ack_telemetry *telemetry);
++int
++xrdp_mm_console_gfx_adaptive_flush_ms(
++    int session_code, int immediate_continuation,
++    int interaction_priority_pending,
++    const struct xrdp_console_gfx_pacing_state *pacing);
+ int
+ xrdp_mm_console_generic_encoder_allowed(
+     int session_code, int gfx_enabled, enum xrdp_egfx_flags egfx_flags);
+diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -1338,6 +1338,156 @@ xrdp_mm_console_gfx_effective_flush_ms(
+     return minimum_flush_ms;
+ }
+ 
++static enum xrdp_console_gfx_pacing_level
++xrdp_mm_console_gfx_pacing_level_for_queue(uint32_t queue_depth)
++{
++    if (queue_depth >= XRDP_CONSOLE_GFX_PACING_SEVERE_ENTER_BYTES)
++    {
++        return XRDP_CONSOLE_GFX_PACING_SEVERE;
++    }
++    if (queue_depth >= XRDP_CONSOLE_GFX_PACING_CONGESTED_ENTER_BYTES)
++    {
++        return XRDP_CONSOLE_GFX_PACING_CONGESTED;
++    }
++    if (queue_depth >= XRDP_CONSOLE_GFX_PACING_BALANCED_ENTER_BYTES)
++    {
++        return XRDP_CONSOLE_GFX_PACING_BALANCED;
++    }
++    return XRDP_CONSOLE_GFX_PACING_INTERACTIVE;
++}
++
++static uint32_t
++xrdp_mm_console_gfx_pacing_exit_threshold(
++    enum xrdp_console_gfx_pacing_level level)
++{
++    switch (level)
++    {
++        case XRDP_CONSOLE_GFX_PACING_SEVERE:
++            return XRDP_CONSOLE_GFX_PACING_SEVERE_EXIT_BYTES;
++        case XRDP_CONSOLE_GFX_PACING_CONGESTED:
++            return XRDP_CONSOLE_GFX_PACING_CONGESTED_EXIT_BYTES;
++        case XRDP_CONSOLE_GFX_PACING_BALANCED:
++            return XRDP_CONSOLE_GFX_PACING_BALANCED_EXIT_BYTES;
++        default:
++            return 0;
++    }
++}
++
++void
++xrdp_mm_console_update_gfx_pacing(
++    struct xrdp_console_gfx_pacing_state *pacing,
++    const struct xrdp_console_gfx_ack_telemetry *telemetry)
++{
++    enum xrdp_console_gfx_pacing_level target;
++    uint32_t queue_depth;
++
++    if (pacing == NULL || telemetry == NULL ||
++            telemetry->acknowledgement_count == 0 ||
++            telemetry->acknowledgement_count ==
++                pacing->observed_acknowledgement_count)
++    {
++        return;
++    }
++
++    pacing->observed_acknowledgement_count =
++        telemetry->acknowledgement_count;
++    if (telemetry->acknowledgements_suspended)
++    {
++        /* Queue depth is unavailable while ACKs are suspended. Keep the last
++         * known pacing level, but do not compare a future normal ACK against
++         * a stale pre-suspension queue sample. */
++        pacing->previous_queue_valid = 0;
++        pacing->recovery_acknowledgement_count = 0;
++        return;
++    }
++
++    queue_depth = telemetry->latest_queue_depth;
++    target = xrdp_mm_console_gfx_pacing_level_for_queue(queue_depth);
++
++    if (pacing->previous_queue_valid &&
++            queue_depth > pacing->previous_queue_depth &&
++            queue_depth - pacing->previous_queue_depth >=
++                XRDP_CONSOLE_GFX_PACING_RAPID_RISE_BYTES &&
++            target <= pacing->level &&
++            pacing->level < XRDP_CONSOLE_GFX_PACING_SEVERE)
++    {
++        /* A rapidly growing queue below the next absolute threshold is still
++         * pressure. Promote one level now instead of waiting another ACK. */
++        target = pacing->level + 1;
++    }
++    pacing->previous_queue_depth = queue_depth;
++    pacing->previous_queue_valid = 1;
++
++    if (target > pacing->level)
++    {
++        pacing->level = target;
++        pacing->recovery_acknowledgement_count = 0;
++        return;
++    }
++
++    if (pacing->level == XRDP_CONSOLE_GFX_PACING_INTERACTIVE)
++    {
++        pacing->recovery_acknowledgement_count = 0;
++        return;
++    }
++
++    if (queue_depth <
++            xrdp_mm_console_gfx_pacing_exit_threshold(pacing->level))
++    {
++        if (++pacing->recovery_acknowledgement_count >=
++                XRDP_CONSOLE_GFX_PACING_RECOVERY_ACKNOWLEDGEMENTS)
++        {
++            pacing->level--;
++            pacing->recovery_acknowledgement_count = 0;
++        }
++    }
++    else
++    {
++        pacing->recovery_acknowledgement_count = 0;
++    }
++}
++
++int
++xrdp_mm_console_gfx_adaptive_flush_ms(
++    int session_code, int immediate_continuation,
++    int interaction_priority_pending,
++    const struct xrdp_console_gfx_pacing_state *pacing)
++{
++    int minimum_flush_ms;
++    int pacing_floor_ms = 0;
++
++    minimum_flush_ms = xrdp_mm_console_gfx_minimum_flush_ms(
++                           session_code, immediate_continuation);
++    if (session_code != XRDP_CONSOLE_SESSION_CODE)
++    {
++        return minimum_flush_ms;
++    }
++    if (interaction_priority_pending)
++    {
++        return XRDP_CONSOLE_GFX_CONTINUATION_MS;
++    }
++    if (pacing != NULL)
++    {
++        switch (pacing->level)
++        {
++            case XRDP_CONSOLE_GFX_PACING_BALANCED:
++                pacing_floor_ms =
++                    XRDP_CONSOLE_GFX_PACING_BALANCED_FLUSH_MS;
++                break;
++            case XRDP_CONSOLE_GFX_PACING_CONGESTED:
++                pacing_floor_ms =
++                    XRDP_CONSOLE_GFX_PACING_CONGESTED_FLUSH_MS;
++                break;
++            case XRDP_CONSOLE_GFX_PACING_SEVERE:
++                pacing_floor_ms = XRDP_CONSOLE_GFX_BACKPRESSURE_FLUSH_MS;
++                break;
++            default:
++                break;
++        }
++    }
++    return MAX(minimum_flush_ms, pacing_floor_ms);
++}
++
+ int
+ xrdp_mm_console_generic_encoder_allowed(
+     int session_code, int gfx_enabled, enum xrdp_egfx_flags egfx_flags)
+@@ -1330,10 +1480,9 @@ static int
+ xrdp_mm_gfx_minimum_flush_ms(const struct xrdp_mm *self)
+ {
+-    return xrdp_mm_console_gfx_effective_flush_ms(
+-               self->code, self->console_planar_immediate_continuation,
+-               xrdp_mm_console_gfx_backpressure_active(
+-                   &self->console_gfx_ack_telemetry),
++    return xrdp_mm_console_gfx_adaptive_flush_ms(
++               self->code, self->console_planar_immediate_continuation,
+-               self->console_interaction_priority.dirty_valid);
++               self->console_interaction_priority.dirty_valid,
++               &self->console_gfx_pacing);
+ }
+ 
+ static void
+@@ -2250,6 +2366,9 @@ xrdp_mm_egfx_frame_ack(void *user, uint32_t queue_depth, int frame_id,
+         xrdp_mm_console_record_gfx_acknowledgement(
+             &self->console_gfx_ack_telemetry, queue_depth, frame_id,
+             frames_decoded);
++        xrdp_mm_console_update_gfx_pacing(
++            &self->console_gfx_pacing,
++            &self->console_gfx_ack_telemetry);
+     }
+     encoder = self->encoder;
+     if (encoder == NULL)
+diff --git a/tests/xrdp/test_xrdp_region.c b/tests/xrdp/test_xrdp_region.c
+--- a/tests/xrdp/test_xrdp_region.c
++++ b/tests/xrdp/test_xrdp_region.c
+@@ -551,6 +551,127 @@ test_console_generic_encoder_policy(void **state)
+                             XRDP_EGFX_H264));
+ }
+ 
++static void
++test_console_gfx_adaptive_pacing_promotes_immediately(void **state)
++{
++    struct xrdp_console_gfx_ack_telemetry telemetry = {0};
++    struct xrdp_console_gfx_pacing_state pacing = {0};
++    UNUSED(state);
++
++    assert_int_equal(16, xrdp_mm_console_gfx_adaptive_flush_ms(
++                             XRDP_CONSOLE_SESSION_CODE, 0, 0, &pacing));
++    assert_int_equal(0, xrdp_mm_console_gfx_adaptive_flush_ms(
++                            XRDP_CONSOLE_SESSION_CODE, 1, 0, &pacing));
++    assert_int_equal(40, xrdp_mm_console_gfx_adaptive_flush_ms(
++                             0, 1, 1, &pacing));
++
++    telemetry.acknowledgement_count = 1;
++    telemetry.latest_queue_depth =
++        XRDP_CONSOLE_GFX_PACING_BALANCED_ENTER_BYTES - 1U;
++    xrdp_mm_console_update_gfx_pacing(&pacing, &telemetry);
++    assert_int_equal(XRDP_CONSOLE_GFX_PACING_INTERACTIVE, pacing.level);
++
++    ++telemetry.acknowledgement_count;
++    telemetry.latest_queue_depth =
++        XRDP_CONSOLE_GFX_PACING_BALANCED_ENTER_BYTES;
++    xrdp_mm_console_update_gfx_pacing(&pacing, &telemetry);
++    assert_int_equal(XRDP_CONSOLE_GFX_PACING_BALANCED, pacing.level);
++    assert_int_equal(XRDP_CONSOLE_GFX_PACING_BALANCED_FLUSH_MS,
++        xrdp_mm_console_gfx_adaptive_flush_ms(
++            XRDP_CONSOLE_SESSION_CODE, 1, 0, &pacing));
++
++    ++telemetry.acknowledgement_count;
++    telemetry.latest_queue_depth = 300U * 1024U;
++    xrdp_mm_console_update_gfx_pacing(&pacing, &telemetry);
++    assert_int_equal(XRDP_CONSOLE_GFX_PACING_CONGESTED, pacing.level);
++
++    ++telemetry.acknowledgement_count;
++    telemetry.latest_queue_depth = 600U * 1024U;
++    xrdp_mm_console_update_gfx_pacing(&pacing, &telemetry);
++    assert_int_equal(XRDP_CONSOLE_GFX_PACING_SEVERE, pacing.level);
++    assert_int_equal(XRDP_CONSOLE_GFX_BACKPRESSURE_FLUSH_MS,
++        xrdp_mm_console_gfx_adaptive_flush_ms(
++            XRDP_CONSOLE_SESSION_CODE, 0, 0, &pacing));
++
++    /* Current interaction still bypasses background congestion pacing. */
++    assert_int_equal(0, xrdp_mm_console_gfx_adaptive_flush_ms(
++                            XRDP_CONSOLE_SESSION_CODE, 0, 1, &pacing));
++}
++
++static void
++test_console_gfx_adaptive_pacing_recovers_with_hysteresis(void **state)
++{
++    struct xrdp_console_gfx_ack_telemetry telemetry = {0};
++    struct xrdp_console_gfx_pacing_state pacing = {
++        .level = XRDP_CONSOLE_GFX_PACING_SEVERE
++    };
++    unsigned int index;
++    UNUSED(state);
++
++    for (index = 0;
++         index < XRDP_CONSOLE_GFX_PACING_RECOVERY_ACKNOWLEDGEMENTS - 1U;
++         ++index)
++    {
++        ++telemetry.acknowledgement_count;
++        telemetry.latest_queue_depth = 300U * 1024U;
++        xrdp_mm_console_update_gfx_pacing(&pacing, &telemetry);
++        assert_int_equal(XRDP_CONSOLE_GFX_PACING_SEVERE, pacing.level);
++    }
++    ++telemetry.acknowledgement_count;
++    telemetry.latest_queue_depth = 300U * 1024U;
++    xrdp_mm_console_update_gfx_pacing(&pacing, &telemetry);
++    assert_int_equal(XRDP_CONSOLE_GFX_PACING_CONGESTED, pacing.level);
++
++    for (index = 0;
++         index < XRDP_CONSOLE_GFX_PACING_RECOVERY_ACKNOWLEDGEMENTS;
++         ++index)
++    {
++        ++telemetry.acknowledgement_count;
++        telemetry.latest_queue_depth = 100U * 1024U;
++        xrdp_mm_console_update_gfx_pacing(&pacing, &telemetry);
++    }
++    assert_int_equal(XRDP_CONSOLE_GFX_PACING_BALANCED, pacing.level);
++
++    for (index = 0;
++         index < XRDP_CONSOLE_GFX_PACING_RECOVERY_ACKNOWLEDGEMENTS;
++         ++index)
++    {
++        ++telemetry.acknowledgement_count;
++        telemetry.latest_queue_depth = 32U * 1024U;
++        xrdp_mm_console_update_gfx_pacing(&pacing, &telemetry);
++    }
++    assert_int_equal(XRDP_CONSOLE_GFX_PACING_INTERACTIVE, pacing.level);
++}
++
++static void
++test_console_gfx_adaptive_pacing_handles_rise_suspend_and_duplicates(
++    void **state)
++{
++    struct xrdp_console_gfx_ack_telemetry telemetry = {0};
++    struct xrdp_console_gfx_pacing_state pacing = {0};
++    UNUSED(state);
++
++    telemetry.acknowledgement_count = 1;
++    telemetry.latest_queue_depth = 16U * 1024U;
++    xrdp_mm_console_update_gfx_pacing(&pacing, &telemetry);
++    ++telemetry.acknowledgement_count;
++    telemetry.latest_queue_depth = 96U * 1024U;
++    xrdp_mm_console_update_gfx_pacing(&pacing, &telemetry);
++    assert_int_equal(XRDP_CONSOLE_GFX_PACING_BALANCED, pacing.level);
++
++    /* Duplicate observation is ignored. */
++    telemetry.latest_queue_depth = 600U * 1024U;
++    xrdp_mm_console_update_gfx_pacing(&pacing, &telemetry);
++    assert_int_equal(XRDP_CONSOLE_GFX_PACING_BALANCED, pacing.level);
++
++    ++telemetry.acknowledgement_count;
++    telemetry.acknowledgements_suspended = 1;
++    xrdp_mm_console_update_gfx_pacing(&pacing, &telemetry);
++    assert_int_equal(XRDP_CONSOLE_GFX_PACING_BALANCED, pacing.level);
++    assert_int_equal(0, pacing.previous_queue_valid);
++    assert_int_equal(0, pacing.recovery_acknowledgement_count);
++}
++
+ START_TEST(execute_suite)
+ {
+     const struct CMUnitTest tests[] =
+@@ -561,6 +663,12 @@ START_TEST(execute_suite)
+         cmocka_unit_test(test_console_gfx_backpressure_policy),
+         cmocka_unit_test(test_console_interaction_priority_state),
+         cmocka_unit_test(test_console_generic_encoder_policy),
++        cmocka_unit_test(
++            test_console_gfx_adaptive_pacing_promotes_immediately),
++        cmocka_unit_test(
++            test_console_gfx_adaptive_pacing_recovers_with_hysteresis),
++        cmocka_unit_test(
++            test_console_gfx_adaptive_pacing_handles_rise_suspend_and_duplicates),
+     };
+ 
+     ck_assert_int_eq(cmocka_run_group_tests(tests, NULL, NULL), 0);

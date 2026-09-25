@@ -55,7 +55,7 @@ The series is deliberately small and applies in this order:
 | `0001-xrdp-resize-state-and-failure-recovery.patch` | VNC resize state and error recovery | Prevents the fixed-console session from losing its graphics state after a client resize or failed update. |
 | `0002-xrdp-fixed-console-vnc-path.patch` | fixed geometry, direct bitmap path, end-to-end update error propagation, and first-party capability code `21` | Keeps the physical X11 framebuffer authoritative, makes update failures visible to the session, and gives the direct module an explicit complete-framebuffer/smooth-scroll classification. |
 | `0003-xrdp-console-input-priority.patch` | console-only transport priority | Drains a bounded burst of queued RDP input and disconnects before direct-X11 backend work, then performs one transport check afterward, while preserving the legacy service order for other module codes. |
-| `0004-xrdp-console-own-rfx-encoder.patch` | first-party synchronous RFX ownership | Prevents the asynchronous generic encoder thread from retaining pixel buffers owned by the direct module. |
+| `0004-xrdp-console-own-rfx-encoder.patch` | first-party synchronous RFX/Planar ownership | Prevents the asynchronous generic encoder thread from retaining direct-module pixel buffers by default; patch 19 selectively restores the generic encoder for negotiated GFX H.264, whose submissions use transferred mmap ownership. |
 | `0005-librfxcodec-unaligned-stream-access.patch` | defined unaligned RFX stream access | Removes UBSan-confirmed misaligned typed loads/stores in the x86 stream macros while preserving wire bytes. |
 | `0006-xrdp-unaligned-stream-access.patch` | defined unaligned xrdp stream access | Removes UBSan-confirmed potentially misaligned typed loads/stores from `common/parse.h` and unchecked UTF-16 stream helpers in `common/parse.c` while preserving little-endian wire bytes. |
 | `0007-xrdp-keyboard-layout-hex-conversion.patch` | defined keyboard-layout parsing | Replaces two `g_htoi()` calls with the existing `g_atoix()` parser after UBSan found invalid 32-bit shifts for normal `0x`-prefixed keyboard-layout IDs. Custom bare hexadecimal values such as `409` now parse as decimal; the distributed configuration uses the supported `0x00000409` form. |
@@ -67,11 +67,13 @@ The series is deliberately small and applies in this order:
 | `0013-xrdp-console-gfx-ack-telemetry.patch` | bounded Console RDPGFX acknowledgement telemetry | Records acknowledgement count, latest/maximum queue depth, decoded-frame progress, and suspension state before the intentional code-21 generic-encoder early return, then exposes the snapshot through the existing bounded Planar diagnostic record without changing transport or pacing behavior. |
 | `0014-xrdp-console-ack-profile-info.patch` | sampled ACK/queue profile visibility | Emits the first 16 Planar records and then every 256th at INFO, making telemetry visible under the production log level while bounding log volume; its counter saturates. |
 | `0015-xrdp-chansrv-strict-text-clipboard.patch` | strict text-only CLIPRDR framing | Removes bytes outside declared payload lengths, limits text format advertisement to Unicode, and flushes the X11 selection request without changing chansrv ownership. |
-| `0016-xrdp-console-interaction-priority-backpressure.patch` | current-input priority and ACK-aware background coalescing | Sends a bounded focus/pointer hotspot before ordinary Console Planar dirty work and raises only background flush cadence to 100 ms when a normal ACK reports at least 256 KiB of unprocessed graphics. ACK suspension disables the throttle; transport and codec selection stay unchanged. |
+| `0016-xrdp-console-interaction-priority-backpressure.patch` | current-input priority and initial ACK-aware background coalescing | Sends a bounded focus/pointer hotspot before ordinary Console Planar dirty work and introduces queue-depth telemetry/backpressure. Patch 20 supersedes its binary scheduling threshold with adaptive hysteretic pacing. |
 | `0017-xrdp-chansrv-bounded-text-selection-retry.patch` | bounded text-selection recovery | Retries explicit X11 `TARGETS`/Unicode conversion or property-read failures at most twice, 50 ms apart; a silent owner fails after 2 s. Generation/attempt tokens reject stale timeout callbacks. File/image paths and chansrv CLIPRDR ownership are unchanged. |
 | `0018-xrdp-chansrv-retry-silent-text-selection-timeout.patch` | bounded silent-owner recovery | Makes a no-response text selection attempt retryable while preserving an approximately 2 s total request budget across three attempts and the two 50 ms retry delays. Intermediate timeout diagnostics remain DEBUG-only; exhausted conversion failure remains explicit. |
+| `0019-xrdp-console-h264-async-encoder.patch` | Console-only async H.264 encoder opt-in | Reuses xrdp's existing RDPGFX H.264 worker only when Console code `21` has negotiated GFX H.264; classic/Planar/Progressive-RFX Console output keeps the existing first-party ownership boundary. |
+| `0020-xrdp-console-adaptive-gfx-pacing.patch` | hysteretic client-pressure pacing | Replaces the Planar fallback's binary 256 KiB throttle with 16/33/66/100 ms ACK-driven levels, immediate promotion on queue pressure/rapid growth, and three-ACK hysteretic recovery while preserving zero-delay interaction-priority work. |
 
-These eighteen patches are retained production-path behavior and bounded
+These twenty patches are retained production-path behavior and bounded
 operational diagnostics, not benchmark knobs.
 The old
 fork's profiling records, incremental parser, request-ahead scheduling,
@@ -80,7 +82,7 @@ experimental GFX flow-control code are intentionally not in the series.
 
 ## Classification of the old fork
 
-* **KEEP:** the seventeen patches listed above; they are required by the measured
+* **KEEP:** the twenty patches listed above; they are required by the measured
   fixed-console/direct-console product path and address concrete transport,
   parser, codec, and keyboard-layout correctness issues.
 * **TOOLING:** profiling and benchmark-only changes; these belong in the

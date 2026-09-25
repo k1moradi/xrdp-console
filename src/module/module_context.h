@@ -48,6 +48,7 @@ public:
                         int bottom) noexcept;
     int event(int message, long param1, long param2, long param3,
               long param4) noexcept;
+    int frame_ack(int flags, int frame_id) noexcept;
     int end() noexcept;
     int set_parameter(const char *name, const char *value) noexcept;
     int get_wait_objs(tbus *read_objects, int *read_count,
@@ -56,6 +57,7 @@ public:
     int check_wait_objs() noexcept;
 
 private:
+    int check_h264_gfx() noexcept;
     int check_remote_fx() noexcept;
 
     struct Impl;

@@ -63,6 +63,34 @@ int xrdp_console_module_send_rfx_surface(
 int xrdp_console_module_get_graphics_capabilities(
     const xrdp_console_module *module,
     struct xrdp_console_graphics_capabilities *capabilities);
+
+/**
+ * Return non-zero only when xrdp has a live asynchronous RDPGFX H.264
+ * encoder suitable for XR_RDPGFX_CMDID_WIRETOSURFACE_1 AVC420 submissions.
+ */
+int xrdp_console_module_h264_encoder_available(
+    const xrdp_console_module *module);
+
+/* Return the single H.264 GFX surface id, or -1 for unsupported topology. */
+int xrdp_console_module_h264_surface_id(
+    const xrdp_console_module *module);
+
+/**
+ * Submit an RDPGFX command bundle to xrdp's asynchronous encoder.
+ *
+ * command is borrowed for this call only; xrdp copies it before returning.
+ *
+ * mapped_data must name an mmap-compatible mapping. Ownership of mapped_data
+ * transfers to this function on every call when mapped_data_bytes > 0:
+ * preflight rejection unmaps it here, while an accepted server_egfx_cmd()
+ * call transfers it to xrdp, which unmaps it after encoder completion (or on
+ * its own enqueue failure path). The caller must never reuse or unmap the
+ * mapping after calling this function.
+ */
+int xrdp_console_module_submit_h264_gfx(
+    xrdp_console_module *module, char *command, int command_bytes,
+    void *mapped_data, int mapped_data_bytes);
+
 int xrdp_console_module_pointer_callback_ready(
     const xrdp_console_module *module);
 int xrdp_console_module_server_set_pointer_large(

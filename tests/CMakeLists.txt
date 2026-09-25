@@ -144,6 +144,18 @@ if(TARGET xrdp-console)
         ${CMAKE_SOURCE_DIR}/src)
     add_test(NAME damage-region-unit COMMAND damage-region-unit)
 
+    add_executable(generation-tile-map-unit
+        test_generation_tile_map.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/generation_tile_map.cpp)
+    set_target_properties(generation-tile-map-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(generation-tile-map-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME generation-tile-map-unit
+        COMMAND generation-tile-map-unit)
+
     add_executable(paint-quantum-unit
         test_paint_quantum.cpp
         ${CMAKE_SOURCE_DIR}/src/core/damage_region.cpp)
@@ -244,6 +256,82 @@ if(TARGET xrdp-console)
         ${CMAKE_SOURCE_DIR}/src)
     add_test(NAME classic-graphics-scheduler-unit
         COMMAND classic-graphics-scheduler-unit)
+
+    add_executable(gfx-avc420-frame-unit
+        test_gfx_avc420_frame.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/gfx_avc420_frame.cpp)
+    set_target_properties(gfx-avc420-frame-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(gfx-avc420-frame-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME gfx-avc420-frame-unit
+        COMMAND gfx-avc420-frame-unit)
+
+    add_executable(mapped-buffer-unit
+        test_mapped_buffer.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/mapped_buffer.cpp)
+    set_target_properties(mapped-buffer-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(mapped-buffer-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME mapped-buffer-unit
+        COMMAND mapped-buffer-unit)
+
+    add_executable(h264-latest-frame-unit
+        test_h264_latest_frame.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/generation_tile_map.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/tile_fingerprint_map.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/gfx_avc420_frame.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/h264_latest_frame.cpp)
+    set_target_properties(h264-latest-frame-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(h264-latest-frame-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME h264-latest-frame-unit
+        COMMAND h264-latest-frame-unit)
+
+    add_executable(tile-fingerprint-map-unit
+        test_tile_fingerprint_map.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/tile_fingerprint_map.cpp)
+    set_target_properties(tile-fingerprint-map-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(tile-fingerprint-map-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME tile-fingerprint-map-unit
+        COMMAND tile-fingerprint-map-unit)
+
+    add_executable(optimization-pipeline-unit
+        test_optimization_pipeline.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/generation_tile_map.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/tile_fingerprint_map.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/mapped_buffer.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/gfx_avc420_frame.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/h264_latest_frame.cpp)
+    set_target_properties(optimization-pipeline-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(optimization-pipeline-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME optimization-pipeline-unit
+        COMMAND optimization-pipeline-unit)
+
+    add_test(NAME optimization-xrdp-patch-series
+        COMMAND ${CMAKE_COMMAND}
+            -DXRDP_CONSOLE_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/check_optimization_patch_series.cmake)
+    set_tests_properties(
+        optimization-pipeline-unit
+        optimization-xrdp-patch-series
+        PROPERTIES LABELS optimization)
 
     add_executable(interaction-priority-unit
         test_interaction_priority.cpp)
