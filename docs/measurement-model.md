@@ -70,7 +70,13 @@ For opt-in direct-module pipeline attribution, pass
 partial window. Its counters distinguish Damage wake-ups and the server-region
 snapshot from captured and successfully painted area, and report presentation
 batches, `server_paint_rect()` calls, and the uncompressed bytes handed to
-xrdp. Profiling is disabled by default. `damage_wakeups` is the delta-region
+xrdp. In H.264 mode, the same record additionally reports synchronous XShm
+capture call count/total/max time, scale-plus-NV12 conversion attempt
+count/total/max time and successfully converted pixels, full-frame
+copy-plus-submit time, and submit-to-frame-ack wait. The
+acknowledgement wait includes asynchronous server encoding, transport, and
+client decode/acknowledgement; it is not a direct client-display timestamp.
+Profiling is disabled by default. `damage_wakeups` is the delta-region
 notification count; `damage_snapshot_pixels` sums the bounded delta rectangles
 after local coalescing, so overlapping rectangles can make it exceed unique
 changed-pixel area.

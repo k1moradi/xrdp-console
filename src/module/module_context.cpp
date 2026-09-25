@@ -167,6 +167,51 @@ public:
         counters_.capturedPixels += area(rectangle);
     }
 
+    void noteH264Capture(std::chrono::steady_clock::duration elapsed) noexcept
+    {
+        if (enabled_)
+        {
+            noteDuration(counters_.h264CaptureCalls,
+                         counters_.h264CaptureUs,
+                         counters_.h264CaptureMaxUs, elapsed);
+        }
+    }
+
+    void noteH264Conversion(std::chrono::steady_clock::duration elapsed,
+                            std::uint64_t pixels,
+                            bool succeeded) noexcept
+    {
+        if (enabled_)
+        {
+            noteDuration(counters_.h264ConversionCalls,
+                         counters_.h264ConversionUs,
+                         counters_.h264ConversionMaxUs, elapsed);
+            if (succeeded)
+            {
+                counters_.h264ConvertedPixels += pixels;
+            }
+        }
+    }
+
+    void noteH264Submit(std::chrono::steady_clock::duration elapsed) noexcept
+    {
+        if (enabled_)
+        {
+            noteDuration(counters_.h264SubmitCalls,
+                         counters_.h264SubmitUs,
+                         counters_.h264SubmitMaxUs, elapsed);
+        }
+    }
+
+    void noteH264Ack(std::chrono::steady_clock::duration elapsed) noexcept
+    {
+        if (enabled_)
+        {
+            noteDuration(counters_.h264AckCalls, counters_.h264AckWaitUs,
+                         counters_.h264AckWaitMaxUs, elapsed);
+        }
+    }
+
     void noteSnapshot(std::uint64_t rectangles,
                       std::uint64_t pixels) noexcept
     {
@@ -248,6 +293,19 @@ private:
         std::uint64_t paintCalls{};
         std::uint64_t uncompressedBytes{};
         std::uint64_t presentationBatches{};
+        std::uint64_t h264CaptureCalls{};
+        std::uint64_t h264CaptureUs{};
+        std::uint64_t h264CaptureMaxUs{};
+        std::uint64_t h264ConversionCalls{};
+        std::uint64_t h264ConversionUs{};
+        std::uint64_t h264ConversionMaxUs{};
+        std::uint64_t h264ConvertedPixels{};
+        std::uint64_t h264SubmitCalls{};
+        std::uint64_t h264SubmitUs{};
+        std::uint64_t h264SubmitMaxUs{};
+        std::uint64_t h264AckCalls{};
+        std::uint64_t h264AckWaitUs{};
+        std::uint64_t h264AckWaitMaxUs{};
     };
 
     static bool profileEnabled() noexcept
@@ -273,7 +331,25 @@ private:
                counters_.coalescedPixels != 0 ||
                counters_.capturedPixels != 0 || counters_.paintCalls != 0 ||
                counters_.uncompressedBytes != 0 ||
-               counters_.presentationBatches != 0;
+               counters_.presentationBatches != 0 ||
+               counters_.h264CaptureCalls != 0 ||
+               counters_.h264ConversionCalls != 0 ||
+               counters_.h264SubmitCalls != 0 ||
+               counters_.h264AckCalls != 0;
+    }
+
+    static void noteDuration(std::uint64_t &calls, std::uint64_t &totalUs,
+                             std::uint64_t &maximumUs,
+                             std::chrono::steady_clock::duration elapsed) noexcept
+    {
+        const auto elapsedUs = std::chrono::duration_cast<Microseconds>(elapsed);
+        const std::uint64_t value = elapsedUs.count() > 0
+                                        ? static_cast<std::uint64_t>(
+                                              elapsedUs.count())
+                                        : 0;
+        ++calls;
+        totalUs += value;
+        maximumUs = std::max(maximumUs, value);
     }
 
     static double perSecond(std::uint64_t value,
@@ -293,6 +369,13 @@ private:
             "coalesced_rectangles=%llu coalesced_pixels=%llu "
             "captured_pixels=%llu paint_calls=%llu "
             "uncompressed_bytes=%llu presentation_batches=%llu "
+            "h264_capture_calls=%llu h264_capture_us=%llu "
+            "h264_capture_max_us=%llu h264_conversion_calls=%llu "
+            "h264_conversion_us=%llu h264_conversion_max_us=%llu "
+            "h264_converted_pixels=%llu h264_submit_calls=%llu "
+            "h264_submit_us=%llu h264_submit_max_us=%llu "
+            "h264_ack_calls=%llu h264_ack_wait_us=%llu "
+            "h264_ack_wait_max_us=%llu "
             "reported_damage_pixels_per_s=%.0f "
             "damage_snapshot_pixels_per_s=%.0f captured_pixels_per_s=%.0f "
             "paint_calls_per_s=%.0f uncompressed_bytes_per_s=%.0f",
@@ -307,6 +390,19 @@ private:
             static_cast<unsigned long long>(counters_.paintCalls),
             static_cast<unsigned long long>(counters_.uncompressedBytes),
             static_cast<unsigned long long>(counters_.presentationBatches),
+            static_cast<unsigned long long>(counters_.h264CaptureCalls),
+            static_cast<unsigned long long>(counters_.h264CaptureUs),
+            static_cast<unsigned long long>(counters_.h264CaptureMaxUs),
+            static_cast<unsigned long long>(counters_.h264ConversionCalls),
+            static_cast<unsigned long long>(counters_.h264ConversionUs),
+            static_cast<unsigned long long>(counters_.h264ConversionMaxUs),
+            static_cast<unsigned long long>(counters_.h264ConvertedPixels),
+            static_cast<unsigned long long>(counters_.h264SubmitCalls),
+            static_cast<unsigned long long>(counters_.h264SubmitUs),
+            static_cast<unsigned long long>(counters_.h264SubmitMaxUs),
+            static_cast<unsigned long long>(counters_.h264AckCalls),
+            static_cast<unsigned long long>(counters_.h264AckWaitUs),
+            static_cast<unsigned long long>(counters_.h264AckWaitMaxUs),
             perSecond(counters_.damagedPixels, window),
             perSecond(counters_.snapshotPixels, window),
             perSecond(counters_.capturedPixels, window),
@@ -569,6 +665,8 @@ struct ModuleContext::Impl
     std::unique_ptr<RfxEncoder> rfxEncoder{};
     RfxSurfaceSink rfxSurfaceSink{nullptr};
     xrdp_console::rdp::H264LatestFrameState h264Frame{};
+    std::uint32_t h264SubmittedFrameId{};
+    Clock::time_point h264SubmittedAt{};
     // A non-owning sourcePixels view pins the XShm arena until all bounded
     // scaled output rows for this source tile have been written to NV12.
     PendingH264Tile pendingH264Tile{};
@@ -1010,6 +1108,8 @@ ModuleContext::connect() noexcept
         impl_->presentationTransform = presentationTransform;
         impl_->presentationScaler = std::move(presentationScaler);
         impl_->h264Frame = std::move(h264Frame);
+        impl_->h264SubmittedFrameId = 0;
+        impl_->h264SubmittedAt = {};
         impl_->damageRegion.clear();
         // XDamage reports changes, not the initial contents. The H.264 state
         // owns its generation-tagged full baseline; fallback paths retain the
@@ -1059,6 +1159,8 @@ ModuleContext::connect() noexcept
         impl_->pendingRfx.clear();
         impl_->rfxEncoder.reset();
         impl_->h264Frame.reset();
+        impl_->h264SubmittedFrameId = 0;
+        impl_->h264SubmittedAt = {};
         impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
         impl_->rfxLetterboxFill.clear();
         impl_->sharedMemoryCapture.reset();
@@ -1218,6 +1320,8 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     impl_->presentationScaler = std::move(scaler);
     impl_->rfxEncoder = std::move(rfxEncoder);
     impl_->h264Frame = std::move(h264Frame);
+    impl_->h264SubmittedFrameId = 0;
+    impl_->h264SubmittedAt = {};
     impl_->graphicsTransport = graphicsTransport;
     if (graphicsTransport == GraphicsTransport::RemoteFx)
     {
@@ -1438,15 +1542,28 @@ ModuleContext::frame_ack(int flags, int frame_id) noexcept
         return 0;
     }
 
-    if (impl_->h264Frame.releaseSubmission(frame_id) &&
-        !impl_->outputSuppressed &&
-        (impl_->h264Frame.capturePending() ||
-         impl_->h264Frame.transmissionPending() ||
-         impl_->h264Frame.baselineSubmissionPending() ||
-         (impl_->damageTracker != nullptr &&
-          impl_->damageTracker->hasPendingDamage())))
+    if (impl_->h264Frame.releaseSubmission(frame_id))
     {
-        impl_->armPresentationImmediately();
+        if (impl_->profile.enabled() &&
+            impl_->h264SubmittedFrameId ==
+                static_cast<std::uint32_t>(frame_id) &&
+            impl_->h264SubmittedAt != Impl::Clock::time_point{})
+        {
+            impl_->profile.noteH264Ack(
+                Impl::Clock::now() - impl_->h264SubmittedAt);
+        }
+        impl_->h264SubmittedFrameId = 0;
+        impl_->h264SubmittedAt = {};
+
+        if (!impl_->outputSuppressed &&
+            (impl_->h264Frame.capturePending() ||
+             impl_->h264Frame.transmissionPending() ||
+             impl_->h264Frame.baselineSubmissionPending() ||
+             (impl_->damageTracker != nullptr &&
+              impl_->damageTracker->hasPendingDamage())))
+        {
+            impl_->armPresentationImmediately();
+        }
     }
     return 0;
 }
@@ -1467,6 +1584,8 @@ ModuleContext::end() noexcept
     impl_->rfxLetterboxFill.clear();
     impl_->rfxEncoder.reset();
     impl_->h264Frame.reset();
+    impl_->h264SubmittedFrameId = 0;
+    impl_->h264SubmittedAt = {};
     impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
     impl_->sharedMemoryCapture.reset();
     impl_->cursorTracker.reset();
@@ -2155,8 +2274,17 @@ ModuleContext::check_h264_gfx() noexcept
             {
                 return 1;
             }
+            const bool profileH264Timing = impl_->profile.enabled();
+            const auto captureStarted = profileH264Timing
+                                            ? std::chrono::steady_clock::now()
+                                            : std::chrono::steady_clock::time_point{};
             const FramebufferView pixels =
                 impl_->sharedMemoryCapture->capture(captureRectangle);
+            if (profileH264Timing)
+            {
+                impl_->profile.noteH264Capture(
+                    std::chrono::steady_clock::now() - captureStarted);
+            }
             if (!pixels.valid())
             {
                 return 1;
@@ -2233,6 +2361,10 @@ ModuleContext::check_h264_gfx() noexcept
             return 1;
         }
 
+        const bool profileH264Timing = impl_->profile.enabled();
+        const auto conversionStarted = profileH264Timing
+                                           ? std::chrono::steady_clock::now()
+                                           : std::chrono::steady_clock::time_point{};
         const FramebufferView scaled =
             impl_->presentationScaler.scaleRows(
                 pending.sourcePixels, pending.captureRectangle,
@@ -2244,10 +2376,18 @@ ModuleContext::check_h264_gfx() noexcept
             width,
             rows,
         };
-        if (!scaled.valid() ||
-            !updateNv12Rectangle_709FullRange(
-                scaled, destination, impl_->h264Frame.geometry(),
-                impl_->h264Frame.frameBytes()))
+        const bool converted =
+            scaled.valid() && updateNv12Rectangle_709FullRange(
+                                  scaled, destination,
+                                  impl_->h264Frame.geometry(),
+                                  impl_->h264Frame.frameBytes());
+        if (profileH264Timing)
+        {
+            impl_->profile.noteH264Conversion(
+                std::chrono::steady_clock::now() - conversionStarted,
+                static_cast<std::uint64_t>(width) * rows, converted);
+        }
+        if (!converted)
         {
             return 1;
         }
@@ -2401,6 +2541,10 @@ ModuleContext::check_h264_gfx() noexcept
         return 1;
     }
 
+    const bool profileH264Timing = impl_->profile.enabled();
+    const auto submitStarted = profileH264Timing
+                                   ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
     MappedBuffer frame =
         MappedBuffer::allocate(impl_->h264Frame.frameBytes().size());
     if (!frame.valid() || frame.sizeBytes() > static_cast<std::size_t>(INT_MAX))
@@ -2414,6 +2558,11 @@ ModuleContext::check_h264_gfx() noexcept
         impl_->module, reinterpret_cast<char *>(commandBytes.data()),
         static_cast<int>(encodedCommandBytes + commandPrefixBytes), released.data,
         static_cast<int>(released.sizeBytes));
+    if (profileH264Timing)
+    {
+        impl_->profile.noteH264Submit(
+            std::chrono::steady_clock::now() - submitStarted);
+    }
     if (submitResult != 0)
     {
         return 1;
@@ -2427,6 +2576,11 @@ ModuleContext::check_h264_gfx() noexcept
         // closed rather than opening a second producer slot with inconsistent
         // generation bookkeeping.
         return 1;
+    }
+    if (profileH264Timing)
+    {
+        impl_->h264SubmittedFrameId = frameId;
+        impl_->h264SubmittedAt = std::chrono::steady_clock::now();
     }
 
     if (impl_->interactionPriority.pending)
