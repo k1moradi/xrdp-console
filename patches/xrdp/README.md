@@ -99,10 +99,12 @@ historical fork's commit history:
     logging every graphics transaction. At DEBUG, batches 17–63 remain
     available for integration-test drain assertions. Its sample counter
     saturates at `INT_MAX` rather than overflowing.
-15. `0015-xrdp-chansrv-strict-text-clipboard.patch` corrects CLIPRDR payload
-    lengths, announces only `CF_UNICODETEXT` for text in both format-list
-    encodings, and flushes the X11 selection conversion request. Clipboard
-    ownership remains in the existing chansrv process.
+15. `0015-xrdp-chansrv-strict-text-clipboard.patch` announces only
+    `CF_UNICODETEXT` for text in both format-list encodings, preserves xrdp's
+    four-byte CLIPRDR compatibility padding in capabilities, format
+    announcements, and Unicode text responses, and flushes the X11 selection
+    conversion request. Clipboard ownership remains in the existing chansrv
+    process.
 16. `0016-xrdp-console-interaction-priority-backpressure.patch` gives Console
     input a bounded 384x256 current-pixel priority window and uses the existing
     transactional Planar commit path to send changed pixels intersecting that

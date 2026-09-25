@@ -373,6 +373,62 @@ gfxAvc420CommandBytes(std::size_t dirtyRectangleCount,
 }
 
 std::size_t
+gfxSolidFillCommandBytes(std::size_t rectangleCount) noexcept
+{
+    if (rectangleCount == 0 || rectangleCount > UINT16_MAX ||
+        rectangleCount >
+            (std::numeric_limits<std::size_t>::max() - 16U) / 8U)
+    {
+        return 0;
+    }
+    return 16U + rectangleCount * 8U;
+}
+
+std::size_t
+buildGfxSolidFillCommand(const GfxSolidFillCommand &command,
+                         std::span<std::byte> output) noexcept
+{
+    const std::size_t totalBytes =
+        gfxSolidFillCommandBytes(command.rectangles.size());
+    if (totalBytes == 0 || output.size() < totalBytes)
+    {
+        return 0;
+    }
+    for (const Rectangle rectangle : command.rectangles)
+    {
+        if (rectangle.x < 0 || rectangle.y < 0 ||
+            rectangle.widthPixels == 0 || rectangle.heightPixels == 0 ||
+            static_cast<std::uint64_t>(rectangle.x) +
+                    rectangle.widthPixels > UINT16_MAX ||
+            static_cast<std::uint64_t>(rectangle.y) +
+                    rectangle.heightPixels > UINT16_MAX)
+        {
+            return 0;
+        }
+    }
+
+    LittleEndianWriter writer(output.first(totalBytes));
+    bool success = writer.u16(0x0004) && writer.u16(0) &&
+                   writer.u32(static_cast<std::uint32_t>(totalBytes)) &&
+                   writer.u16(command.surfaceId) && writer.u32(command.pixel) &&
+                   writer.u16(static_cast<std::uint16_t>(
+                       command.rectangles.size()));
+    for (const Rectangle rectangle : command.rectangles)
+    {
+        success = success &&
+            writer.u16(static_cast<std::uint16_t>(rectangle.x)) &&
+            writer.u16(static_cast<std::uint16_t>(rectangle.y)) &&
+            writer.u16(static_cast<std::uint16_t>(
+                static_cast<std::uint64_t>(rectangle.x) +
+                rectangle.widthPixels)) &&
+            writer.u16(static_cast<std::uint16_t>(
+                static_cast<std::uint64_t>(rectangle.y) +
+                rectangle.heightPixels));
+    }
+    return success && writer.position() == totalBytes ? totalBytes : 0;
+}
+
+std::size_t
 buildGfxAvc420Command(const GfxAvc420Command &command,
                       std::span<std::byte> output) noexcept
 {

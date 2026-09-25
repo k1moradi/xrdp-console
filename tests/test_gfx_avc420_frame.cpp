@@ -148,6 +148,38 @@ bool command_rejects_invalid_input()
     return success;
 }
 
+bool solid_fill_command_matches_xrdp_encoder_contract()
+{
+    constexpr std::array<Rectangle, 1> rectangles{{{1512, 0, 1, 948}}};
+    std::array<std::byte, 32> bytes{};
+    const std::size_t written = buildGfxSolidFillCommand(
+        GfxSolidFillCommand{7, 0, rectangles}, bytes);
+    const std::span<const std::byte> view(bytes.data(), written);
+    bool success = true;
+    success &= check(written == 24, "SOLIDFILL command byte count changed");
+    success &= check(readU16(view, 0) == 0x0004 && readU16(view, 2) == 0 &&
+                         readU32(view, 4) == written,
+                     "SOLIDFILL internal command header is invalid");
+    success &= check(readU16(view, 8) == 7 && readU32(view, 10) == 0 &&
+                         readU16(view, 14) == 1,
+                     "SOLIDFILL surface/color/count layout changed");
+    success &= check(readU16(view, 16) == 1512 &&
+                         readU16(view, 18) == 0 &&
+                         readU16(view, 20) == 1513 &&
+                         readU16(view, 22) == 948,
+                     "SOLIDFILL rectangle edges were serialized incorrectly");
+
+    constexpr std::array<Rectangle, 1> invalid{{{65535, 0, 1, 2}}};
+    success &= check(buildGfxSolidFillCommand(
+                         GfxSolidFillCommand{7, 0, invalid}, bytes) == 0,
+                     "SOLIDFILL rectangle overflowing u16 bounds was accepted");
+    success &= check(buildGfxSolidFillCommand(
+                         GfxSolidFillCommand{7, 0, rectangles},
+                         std::span<std::byte>(bytes.data(), 23)) == 0,
+                     "undersized SOLIDFILL output buffer was accepted");
+    return success;
+}
+
 } // namespace
 
 int main()
@@ -158,5 +190,6 @@ int main()
     success &= rectangle_alignment_matches_avc420_requirements();
     success &= command_layout_matches_xrdp_encoder_contract();
     success &= command_rejects_invalid_input();
+    success &= solid_fill_command_matches_xrdp_encoder_contract();
     return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

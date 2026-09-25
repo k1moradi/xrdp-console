@@ -13,6 +13,13 @@ set(PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/test_memory_pressure.py)
 
 if(TARGET xrdp-console)
+    add_test(NAME xrdp-clipboard-padding-source-contract
+        COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_padding.py
+        "${XRDP_CONSOLE_XRDP_SOURCE_DIR}")
+    set_tests_properties(xrdp-clipboard-padding-source-contract PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
     list(APPEND PYTHON_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/test_module_lifecycle.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_clipboard.py
@@ -20,6 +27,7 @@ if(TARGET xrdp-console)
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_damage.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_input.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_pointer_position.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_padding.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py)
 endif()
 
@@ -285,6 +293,7 @@ if(TARGET xrdp-console)
         test_h264_latest_frame.cpp
         ${CMAKE_SOURCE_DIR}/src/core/generation_tile_map.cpp
         ${CMAKE_SOURCE_DIR}/src/core/tile_fingerprint_map.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/presentation_scaler.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/gfx_avc420_frame.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/h264_latest_frame.cpp)
     set_target_properties(h264-latest-frame-unit PROPERTIES
@@ -552,6 +561,20 @@ if(TARGET xrdp-console)
         set_tests_properties(xrdp-loader-gfx-planar-scaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 30)
+        add_test(NAME xrdp-loader-gfx-h264-odd-scaled-smoke
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11vnc-latency-stimulus>
+            1512 949 --gfx-h264)
+        set_tests_properties(xrdp-loader-gfx-h264-odd-scaled-smoke PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            SKIP_RETURN_CODE 77
+            TIMEOUT 40)
         add_test(NAME xrdp-loader-rfx-smoke
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
@@ -597,6 +620,7 @@ if(TARGET xrdp-console)
             xrdp-loader-downscaled-smoke
             xrdp-loader-gfx-planar-smoke
             xrdp-loader-gfx-planar-scaled-smoke
+            xrdp-loader-gfx-h264-odd-scaled-smoke
             xrdp-loader-rfx-smoke
             xrdp-loader-rfx-scaled-smoke
             xrdp-loader-rfx-downscaled-smoke

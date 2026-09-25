@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "rdp/h264_latest_frame.h"
+#include "core/presentation_scaler.h"
 
 #include <array>
 #include <climits>
@@ -8,6 +9,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <span>
+#include <utility>
 
 namespace
 {
@@ -32,9 +34,9 @@ bool baseline_requires_every_tile_then_submits_full_frame()
     success &= check(state.configure({128, 64}), "configuration failed");
     success &= check(h264DirectGeometrySupported({128, 64}, {128, 64}),
                      "identity even geometry was rejected");
-    success &= check(!h264DirectGeometrySupported({127, 64}, {127, 64}) &&
-                         !h264DirectGeometrySupported({128, 64}, {64, 64}),
-                     "unsupported H264 geometry was accepted");
+    success &= check(h264DirectGeometrySupported({127, 64}, {127, 64}) &&
+                         h264DirectGeometrySupported({128, 64}, {64, 64}),
+                     "odd or scaled H264 geometry was rejected");
 
     success &= check(state.collectCaptureSelections(selections) == 1,
                      "initial capture did not form one run");
@@ -410,6 +412,184 @@ bool grouped_capture_can_convert_only_changed_subtile()
     return success;
 }
 
+bool odd_presentation_uses_even_coded_viewport_and_black_fringe()
+{
+    H264PresentationPlan plan{};
+    bool success = true;
+    success &= check(makeH264PresentationPlan(
+                         {1366, 768}, {1512, 949}, plan),
+                     "1366x768 to odd 1512x949 H264 plan failed");
+    success &= check(plan.frameGeometry == PixelSize{1512, 948},
+                     "odd surface did not use an even 1512x948 codec frame");
+    success &= check(plan.viewport == Rectangle{0, 50, 1512, 850},
+                     "H264 aspect-fit viewport or even offset is incorrect");
+
+    H264LatestFrameState state;
+    success &= check(state.configure({1366, 768}, {1512, 949},
+                                     plan.frameGeometry, plan.viewport),
+                     "scaled H264 frame state configuration failed");
+    success &= check(state.frameBytes().size() ==
+                         nv12FrameBytes({1512, 948}),
+                     "scaled H264 NV12 frame has wrong size");
+    const std::size_t lumaBytes =
+        static_cast<std::size_t>(1512U) * 948U;
+    success &= check(state.frameBytes()[0] == std::byte{0} &&
+                         state.frameBytes()[lumaBytes] == std::byte{128},
+                     "unwritten H264 frame is not full-range black");
+    return success;
+}
+
+bool scaled_capture_maps_to_global_nv12_pixels()
+{
+    const std::array<std::uint32_t, 8> sourcePixels{{
+        0xff0000ffU, 0xff00ff00U, 0xffff0000U, 0xffffffffU,
+        0xff00ffffU, 0xffff00ffU, 0xffffff00U, 0xff202020U,
+    }};
+    const FramebufferView source{
+        std::as_bytes(std::span<const std::uint32_t>(sourcePixels)),
+        4, 2, 4U * sizeof(std::uint32_t)};
+    const Rectangle sourceRectangle{0, 0, 4, 2};
+    const Rectangle frameRectangle{0, 0, 8, 4};
+
+    PresentationScaler scaler;
+    H264LatestFrameState state;
+    bool success = true;
+    success &= check(scaler.configure({4, 2}, {8, 5}, {0, 0, 8, 4}),
+                     "small scaled presentation scaler setup failed");
+    success &= check(state.configure({4, 2}, {8, 5}, {8, 4},
+                                     {0, 0, 8, 4}),
+                     "small scaled H264 state setup failed");
+
+    std::array<std::uint32_t, 32> expected{};
+    for (std::uint32_t y = 0; y < 4; ++y)
+    {
+        for (std::uint32_t x = 0; x < 8; ++x)
+        {
+            expected[y * 8U + x] =
+                sourcePixels[(y / 2U) * 4U + (x / 2U)];
+        }
+    }
+
+    for (const auto [firstRow, rowCount] :
+         std::array<std::pair<std::uint32_t, std::uint32_t>, 2>{{
+             {0, 2}, {2, 2}}})
+    {
+        const FramebufferView scaled = scaler.scaleRows(
+            source, sourceRectangle, frameRectangle, firstRow, rowCount);
+        success &= check(scaled.valid(), "scaled row chunk was rejected");
+        if (!scaled.valid())
+        {
+            continue;
+        }
+        const auto *values = reinterpret_cast<const std::uint32_t *>(
+            scaled.pixels.data());
+        for (std::uint32_t row = 0; row < rowCount; ++row)
+        {
+            for (std::uint32_t x = 0; x < 8; ++x)
+            {
+                success &= check(
+                    values[row * 8U + x] ==
+                        expected[(firstRow + row) * 8U + x],
+                    "scaled row chunk differs from global nearest mapping");
+            }
+        }
+        const Rectangle destination{
+            0, static_cast<std::int32_t>(firstRow), 8, rowCount};
+        success &= check(updateNv12Rectangle_709FullRange(
+                             scaled, destination, state.geometry(),
+                             state.frameBytes()),
+                         "scaled rows did not update the NV12 frame");
+    }
+
+    std::array<GenerationTileMap::Selection, 2> selections{};
+    success &= check(state.collectCaptureSelections(selections) == 1,
+                     "scaled source baseline selection missing");
+    Rectangle mapped{};
+    success &= check(state.mapSourceRectangle(sourceRectangle, mapped) &&
+                         mapped == frameRectangle,
+                     "source tile mapped to the wrong presentation region");
+    success &= check(state.commitCaptured(selections[0]) &&
+                         state.baselineReady() && state.nextFrameId() == 1,
+                     "scaled baseline was not gated on complete source capture");
+    return success;
+}
+
+bool downscaled_unrepresented_source_interval_is_empty_not_invalid()
+{
+    H264LatestFrameState state;
+    bool success = check(state.configure({4, 4}, {2, 2}, {2, 2},
+                                         {0, 0, 2, 2}),
+                         "downscaled H264 state configuration failed");
+    Rectangle mapped{};
+    success &= check(state.mapSourceRectangle({1, 1, 1, 1}, mapped),
+                     "valid downscaled source interval was rejected");
+    success &= check(mapped == Rectangle{},
+                     "unrepresented source interval produced output pixels");
+    return success;
+}
+
+bool oversized_nv12_frame_is_rejected_before_allocation()
+{
+    H264LatestFrameState state;
+    bool success = check(state.configure({64, 64}),
+                         "bounded-frame preservation setup failed");
+    const PixelSize oldGeometry = state.geometry();
+    success &= check(!state.configure({8192, 8192}, {8192, 8192},
+                                      {8192, 8192},
+                                      {0, 0, 8192, 8192}),
+                     "H264 state accepted NV12 storage above its memory budget");
+    success &= check(state.valid() && state.geometry() == oldGeometry,
+                     "rejected oversized frame corrupted prior valid state");
+    return success;
+}
+
+bool scaled_newer_source_damage_blocks_stale_frame_tile()
+{
+    H264LatestFrameState state;
+    std::array<GenerationTileMap::Selection, 4> selections{};
+    bool success = check(state.configure({128, 64}, {256, 129}, {256, 128},
+                                         {0, 0, 256, 128}),
+                         "scaled generation state configuration failed");
+    while (state.capturePending())
+    {
+        const std::size_t count = state.collectCaptureSelections(selections);
+        success &= check(count != 0 && state.commitCaptured(selections[0]),
+                         "scaled baseline source tile was not committed");
+        if (count == 0)
+        {
+            break;
+        }
+    }
+    const GenerationTileMap::Selection baseline{
+        {0, 0, 256, 128}, UINT64_MAX};
+    success &= check(state.noteSubmitted(1, std::span(&baseline, 1)) &&
+                         state.releaseSubmission(1),
+                     "scaled baseline frame was not submitted/released");
+
+    state.markDamage({3, 3, 1, 1});
+    success &= check(state.collectCaptureSelections(selections) == 1,
+                     "scaled incremental source damage was not selected");
+    const auto older = selections[0];
+    Rectangle mapped{};
+    success &= check(state.mapSourceRectangle(older.rectangle, mapped) &&
+                         mapped.widthPixels != 0 && mapped.heightPixels != 0,
+                     "scaled source tile did not map to presentation damage");
+    mapped = alignAvc420Rectangle(mapped, state.geometry());
+    success &= check(state.commitCapturedChanged(older, 0x111ULL, mapped),
+                     "scaled older generation failed to commit");
+
+    state.markDamage({4, 4, 1, 1});
+    success &= check(state.collectReadyTransmissionSelections(selections) == 0,
+                     "stale scaled frame tile escaped ahead of newer source damage");
+    success &= check(state.collectCaptureSelections(selections) == 1 &&
+                         state.commitCapturedChanged(
+                             selections[0], 0x222ULL, mapped),
+                     "newest scaled source generation failed to commit");
+    success &= check(state.collectReadyTransmissionSelections(selections) != 0,
+                     "newest scaled frame tile never became transmissible");
+    return success;
+}
+
 } // namespace
 
 int main()
@@ -427,5 +607,10 @@ int main()
     success &= changed_fingerprint_commits_only_after_submission();
     success &= full_invalidation_forgets_fingerprint_baseline();
     success &= grouped_capture_can_convert_only_changed_subtile();
+    success &= odd_presentation_uses_even_coded_viewport_and_black_fringe();
+    success &= scaled_capture_maps_to_global_nv12_pixels();
+    success &= downscaled_unrepresented_source_interval_is_empty_not_invalid();
+    success &= oversized_nv12_frame_is_rejected_before_allocation();
+    success &= scaled_newer_source_damage_blocks_stale_frame_tile();
     return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -84,7 +84,8 @@ def wait_for_listener(process: subprocess.Popen[object], port: int,
 
 
 def wait_for_log(process: subprocess.Popen[object], log: Path, marker: str,
-                 timeout: float, diagnostics: Path | None = None) -> None:
+                 timeout: float, diagnostics: Path | None = None,
+                 client_diagnostics: Path | None = None) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if marker in read_text(log):
@@ -95,6 +96,8 @@ def wait_for_log(process: subprocess.Popen[object], log: Path, marker: str,
     details = read_text(log)
     if diagnostics is not None:
         details += f"\n[xrdp stdout]\n{read_text(diagnostics)}"
+    if client_diagnostics is not None:
+        details += f"\n[FreeRDP client]\n{read_text(client_diagnostics)}"
     raise AssertionError(f"xrdp did not report {marker!r}:\n{details}")
 
 
@@ -194,7 +197,8 @@ def assert_client_pixel(client_display: str,
                         assert_sparse_planar_batch: bool = False,
                         scaled_presentation: bool = False,
                         presentation_width: int = 1024,
-                        presentation_height: int = 768) -> None:
+                        presentation_height: int = 768,
+                        client_log_path: Path | None = None) -> None:
     """Draw a known source color and require it in the FreeRDP framebuffer."""
     window = find_window(client_display, window_title, 8.0)
     probe: subprocess.Popen[object] | None = None
@@ -243,7 +247,9 @@ def assert_client_pixel(client_display: str,
                     raise AssertionError(
                         "pixel probe exited before the client-visible pixel "
                         f"assertion completed (status={probe.poll()}):\n"
-                        f"{xrdp_log_excerpt(log_path)}"
+                        f"{xrdp_log_excerpt(log_path)}\n"
+                        f"[FreeRDP client]\n"
+                        f"{read_text(client_log_path) if client_log_path else ''}"
                     ) from error
                 line = read_line(
                     probe.stdout, min(0.5, deadline - time.monotonic()))
@@ -263,7 +269,9 @@ def assert_client_pixel(client_display: str,
                     return last_pixel
             raise AssertionError(
                 "known source pixel did not reach the FreeRDP framebuffer: "
-                f"last={last_pixel!r}\n{xrdp_log_excerpt(log_path)}"
+                f"last={last_pixel!r}\n{xrdp_log_excerpt(log_path)}\n"
+                f"[FreeRDP client]\n"
+                f"{read_text(client_log_path) if client_log_path else ''}"
             )
 
         wait_for_pixel(expected_red)
@@ -445,22 +453,26 @@ def main() -> int:
     arguments = list(sys.argv[1:])
     rfx_mode = False
     gfx_planar_mode = False
-    mode_options = [option for option in ("--rfx", "--gfx-planar")
+    gfx_h264_mode = False
+    mode_options = [option for option in (
+        "--rfx", "--gfx-planar", "--gfx-h264")
                     if option in arguments]
     if mode_options:
         if (len(mode_options) != 1 or arguments[-1] != mode_options[0] or
                 arguments.count(mode_options[0]) != 1):
             raise SystemExit(
-                "--rfx or --gfx-planar must be the final, sole loader-smoke option")
+                "--rfx, --gfx-planar, or --gfx-h264 must be the final, "
+                "sole loader-smoke option")
         arguments.pop()
         rfx_mode = mode_options[0] == "--rfx"
         gfx_planar_mode = mode_options[0] == "--gfx-planar"
+        gfx_h264_mode = mode_options[0] == "--gfx-h264"
 
     if len(arguments) not in (6, 8):
         raise SystemExit(
             f"usage: {sys.argv[0]} MODULE XRDP INSTALL_ROOT FREERDP "
             "PIXEL_PROBE STIMULUS [PRESENTATION_WIDTH PRESENTATION_HEIGHT] "
-            "[--rfx|--gfx-planar]"
+            "[--rfx|--gfx-planar|--gfx-h264]"
         )
 
     presentation_width = 1024
@@ -482,6 +494,25 @@ def main() -> int:
     freerdp_path = Path(arguments[3]).resolve()
     pixel_probe = Path(arguments[4]).resolve()
     stimulus_path = Path(arguments[5]).resolve()
+    if gfx_h264_mode:
+        client_build = subprocess.run(
+            [str(freerdp_path), "/buildconfig"],
+            capture_output=True,
+            check=False,
+            timeout=5.0,
+        )
+        client_features = (
+            client_build.stdout.decode(errors="replace") +
+            client_build.stderr.decode(errors="replace"))
+        if (client_build.returncode != 0 or
+                "WITH_GFX_H264=ON" not in client_features or
+                not any(feature in client_features for feature in (
+                    "WITH_OPENH264=ON", "WITH_FFMPEG=ON",
+                    "WITH_VIDEO_FFMPEG=ON"))):
+            print(
+                "SKIP: selected FreeRDP client has no H.264 GFX decoder",
+                file=sys.stderr)
+            return 77
     probe_x, probe_y = presentation_probe_point(
         presentation_width, presentation_height)
     window_title = f"xrdp-console-loader-{os.getpid()}"
@@ -505,8 +536,9 @@ def main() -> int:
         module_name = f"libxrdp_console_loader_{os.getpid()}.so"
         module_link = module_dir / module_name
         module_link.symlink_to(module_path)
-        fastpath_option = "use_fastpath=both\n" if rfx_mode else ""
-        drdynvc_enabled = "true" if gfx_planar_mode else "false"
+        fastpath_option = (
+            "use_fastpath=both\n" if rfx_mode or gfx_h264_mode else "")
+        drdynvc_enabled = "true" if gfx_planar_mode or gfx_h264_mode else "false"
 
         config_path.write_text(
             f"""[Globals]
@@ -594,6 +626,8 @@ password=smoke
                     client_command.extend(["+rfx", "-gfx"])
                 elif gfx_planar_mode:
                     client_command.append("/gfx")
+                elif gfx_h264_mode:
+                    client_command.append("/gfx:AVC420:on")
                 else:
                     client_command.append("-gfx")
                 with client_log_path.open("w", encoding="utf-8") as client_log:
@@ -605,13 +639,15 @@ password=smoke
                         start_new_session=True,
                     )
                     marker = f"loaded module '{module_name}' ok"
-                    wait_for_log(server, log_path, marker, 12.0, stdout_path)
+                    wait_for_log(server, log_path, marker, 12.0, stdout_path,
+                                 client_log_path)
                     wait_for_log(
                         server,
                         log_path,
                         "xrdp-console: build revision=",
                         4.0,
                         stdout_path,
+                        client_log_path,
                     )
                     if re.search(
                             r"xrdp-console: build revision="
@@ -626,6 +662,7 @@ password=smoke
                         "status from xrdp_mm_connect() : 0",
                         4.0,
                         stdout_path,
+                        client_log_path,
                     )
                     if rfx_mode:
                         wait_for_log(
@@ -634,6 +671,7 @@ password=smoke
                             "actual_output=standard-rfx",
                             4.0,
                             stdout_path,
+                            client_log_path,
                         )
                     if gfx_planar_mode:
                         wait_for_log(
@@ -642,6 +680,24 @@ password=smoke
                             "actual_output=gfx-planar",
                             4.0,
                             stdout_path,
+                            client_log_path,
+                        )
+                    if gfx_h264_mode:
+                        wait_for_log(
+                            server,
+                            log_path,
+                            "actual_output=gfx-h264-avc420",
+                            8.0,
+                            stdout_path,
+                            client_log_path,
+                        )
+                        wait_for_log(
+                            server,
+                            log_path,
+                            "xrdp-console: H264 presentation plan",
+                            4.0,
+                            stdout_path,
+                            client_log_path,
                         )
                     assert_client_pixel(
                         os.environ["DISPLAY"], stimulus, window_title,
@@ -652,7 +708,8 @@ password=smoke
                             presentation_width != 1024 or
                             presentation_height != 768),
                         presentation_width=presentation_width,
-                        presentation_height=presentation_height)
+                        presentation_height=presentation_height,
+                        client_log_path=client_log_path)
         finally:
             stop_process(client)
             stop_process(server)

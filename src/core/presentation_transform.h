@@ -28,6 +28,8 @@ class PresentationTransform final
 public:
     [[nodiscard]] bool configure(PixelSize source,
                                   PixelSize presentation) noexcept;
+    [[nodiscard]] bool configure(PixelSize source, PixelSize presentation,
+                                  Rectangle viewport) noexcept;
 
     [[nodiscard]] bool valid() const noexcept;
 

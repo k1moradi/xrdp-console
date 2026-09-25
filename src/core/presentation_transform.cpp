@@ -74,7 +74,7 @@ PresentationTransform::configure(PixelSize source,
 
     sourceGeometry_ = source;
     presentationGeometry_ = presentation;
-    viewport_ = {
+    const Rectangle viewport{
         static_cast<std::int32_t>((presentation.widthPixels - viewportWidth) /
                                   2U),
         static_cast<std::int32_t>((presentation.heightPixels - viewportHeight) /
@@ -82,6 +82,28 @@ PresentationTransform::configure(PixelSize source,
         viewportWidth,
         viewportHeight,
     };
+    return configure(source, presentation, viewport);
+}
+
+bool
+PresentationTransform::configure(PixelSize source, PixelSize presentation,
+                                 Rectangle viewport) noexcept
+{
+    if (source.widthPixels == 0 || source.heightPixels == 0 ||
+        presentation.widthPixels == 0 || presentation.heightPixels == 0 ||
+        viewport.x < 0 || viewport.y < 0 || viewport.widthPixels == 0 ||
+        viewport.heightPixels == 0 ||
+        static_cast<std::uint64_t>(viewport.x) + viewport.widthPixels >
+            presentation.widthPixels ||
+        static_cast<std::uint64_t>(viewport.y) + viewport.heightPixels >
+            presentation.heightPixels)
+    {
+        return false;
+    }
+
+    sourceGeometry_ = source;
+    presentationGeometry_ = presentation;
+    viewport_ = viewport;
     return true;
 }
 
@@ -92,7 +114,12 @@ PresentationTransform::valid() const noexcept
            sourceGeometry_.heightPixels != 0 &&
            presentationGeometry_.widthPixels != 0 &&
            presentationGeometry_.heightPixels != 0 &&
-           viewport_.widthPixels != 0 && viewport_.heightPixels != 0;
+           viewport_.x >= 0 && viewport_.y >= 0 &&
+           viewport_.widthPixels != 0 && viewport_.heightPixels != 0 &&
+           static_cast<std::uint64_t>(viewport_.x) + viewport_.widthPixels <=
+               presentationGeometry_.widthPixels &&
+           static_cast<std::uint64_t>(viewport_.y) + viewport_.heightPixels <=
+               presentationGeometry_.heightPixels;
 }
 
 PixelSize

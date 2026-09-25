@@ -14,17 +14,46 @@
 namespace xrdp_console::rdp
 {
 
+struct H264PresentationPlan final
+{
+    PixelSize frameGeometry{};
+    Rectangle viewport{};
+};
+
+[[nodiscard]] bool makeH264PresentationPlan(
+    PixelSize source, PixelSize presentation,
+    H264PresentationPlan &plan) noexcept;
+
 [[nodiscard]] bool h264DirectGeometrySupported(
     PixelSize source, PixelSize presentation) noexcept;
 
 class H264LatestFrameState final
 {
 public:
+    static constexpr std::size_t kMaximumFrameBytes = 64U * 1024U * 1024U;
+
     [[nodiscard]] bool configure(PixelSize geometry) noexcept;
+    [[nodiscard]] bool configure(PixelSize sourceGeometry,
+                                 PixelSize presentationGeometry,
+                                 PixelSize frameGeometry,
+                                 Rectangle viewport) noexcept;
     void reset() noexcept;
 
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] PixelSize geometry() const noexcept;
+    [[nodiscard]] PixelSize sourceGeometry() const noexcept;
+    [[nodiscard]] PixelSize presentationGeometry() const noexcept;
+    [[nodiscard]] Rectangle viewport() const noexcept;
+
+    [[nodiscard]] bool mapSourceRectangle(
+        Rectangle sourceRectangle,
+        Rectangle &frameRectangle) const noexcept;
+    [[nodiscard]] bool mapFrameRectangleToSource(
+        Rectangle frameRectangle,
+        Rectangle &sourceRectangle) const noexcept;
+    [[nodiscard]] bool sourceCaptureForFrameRectangle(
+        Rectangle frameRectangle,
+        Rectangle &sourceRectangle) const noexcept;
 
     void markDamage(Rectangle rectangle) noexcept;
     void invalidateAll() noexcept;
@@ -63,6 +92,13 @@ public:
     [[nodiscard]] bool commitCapturedChanged(
         const GenerationTileMap::Selection &selection,
         std::uint64_t fingerprint) noexcept;
+    [[nodiscard]] bool commitCapturedChanged(
+        const GenerationTileMap::Selection &selection,
+        std::uint64_t fingerprint,
+        Rectangle frameRectangle) noexcept;
+    [[nodiscard]] bool commitCapturedInvisible(
+        const GenerationTileMap::Selection &selection,
+        std::uint64_t fingerprint) noexcept;
 
     [[nodiscard]] std::span<std::byte> frameBytes() noexcept;
     [[nodiscard]] std::span<const std::byte> frameBytes() const noexcept;
@@ -78,6 +114,9 @@ public:
     [[nodiscard]] bool releaseSubmission(int frameId) noexcept;
 
 private:
+    PixelSize sourceGeometry_{};
+    PixelSize presentationGeometry_{};
+    Rectangle viewport_{};
     PixelSize geometry_{};
     GenerationTileMap captureDamage_{};
     GenerationTileMap initializationDamage_{};

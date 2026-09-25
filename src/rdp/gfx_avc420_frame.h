@@ -29,6 +29,13 @@ struct GfxAvc420Command final
     std::span<const Rectangle> encodeRectangles{};
 };
 
+struct GfxSolidFillCommand final
+{
+    std::uint16_t surfaceId{};
+    std::uint32_t pixel{};
+    std::span<const Rectangle> rectangles{};
+};
+
 [[nodiscard]] std::size_t nv12FrameBytes(PixelSize geometry) noexcept;
 
 // Match xorgxrdp's a8r8g8b8_to_nv12_709fr_box() reference conversion.
@@ -59,6 +66,13 @@ struct GfxAvc420Command final
 [[nodiscard]] std::size_t gfxAvc420CommandBytes(
     std::size_t dirtyRectangleCount,
     std::size_t encodeRectangleCount) noexcept;
+
+[[nodiscard]] std::size_t gfxSolidFillCommandBytes(
+    std::size_t rectangleCount) noexcept;
+
+[[nodiscard]] std::size_t buildGfxSolidFillCommand(
+    const GfxSolidFillCommand &command,
+    std::span<std::byte> output) noexcept;
 
 // Build STARTFRAME + WIRETOSURFACE_1(AVC420) + ENDFRAME in the format consumed
 // by xrdp's server_egfx_cmd()/gfx_wiretosurface1() path. Returns zero on
