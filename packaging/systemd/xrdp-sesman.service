@@ -1,0 +1,17 @@
+[Unit]
+Description=xrdp session manager (xrdp-console)
+Documentation=man:xrdp-sesman(8) man:sesman.ini(5)
+After=network.target
+StopWhenUnneeded=true
+BindsTo=xrdp.service
+
+[Service]
+Type=exec
+EnvironmentFile=-/etc/sysconfig/xrdp
+EnvironmentFile=-/etc/default/xrdp
+EnvironmentFile=-/etc/default/xrdp-console
+ExecStart=/opt/xrdp-console/sbin/xrdp-sesman --nodaemon --config /etc/xrdp/sesman.ini
+ExecReload=/bin/kill -HUP $MAINPID
+
+[Install]
+WantedBy=multi-user.target

@@ -68,9 +68,10 @@ The series is deliberately small and applies in this order:
 | `0014-xrdp-console-ack-profile-info.patch` | sampled ACK/queue profile visibility | Emits the first 16 Planar records and then every 256th at INFO, making telemetry visible under the production log level while bounding log volume; its counter saturates. |
 | `0015-xrdp-chansrv-strict-text-clipboard.patch` | strict text-only CLIPRDR framing | Removes bytes outside declared payload lengths, limits text format advertisement to Unicode, and flushes the X11 selection request without changing chansrv ownership. |
 | `0016-xrdp-console-interaction-priority-backpressure.patch` | current-input priority and ACK-aware background coalescing | Sends a bounded focus/pointer hotspot before ordinary Console Planar dirty work and raises only background flush cadence to 100 ms when a normal ACK reports at least 256 KiB of unprocessed graphics. ACK suspension disables the throttle; transport and codec selection stay unchanged. |
-| `0017-xrdp-chansrv-bounded-text-selection-retry.patch` | bounded text-selection recovery | Retries explicit X11 `TARGETS`/Unicode conversion or property-read failures at most twice, 50 ms apart; a silent owner fails after 2 s. Generation/attempt tokens reject stale timers and late text responses. File/image paths and chansrv CLIPRDR ownership are unchanged. |
+| `0017-xrdp-chansrv-bounded-text-selection-retry.patch` | bounded text-selection recovery | Retries explicit X11 `TARGETS`/Unicode conversion or property-read failures at most twice, 50 ms apart; a silent owner fails after 2 s. Generation/attempt tokens reject stale timeout callbacks. File/image paths and chansrv CLIPRDR ownership are unchanged. |
+| `0018-xrdp-chansrv-retry-silent-text-selection-timeout.patch` | bounded silent-owner recovery | Makes a no-response text selection attempt retryable while preserving an approximately 2 s total request budget across three attempts and the two 50 ms retry delays. Intermediate timeout diagnostics remain DEBUG-only; exhausted conversion failure remains explicit. |
 
-These seventeen patches are retained production-path behavior and bounded
+These eighteen patches are retained production-path behavior and bounded
 operational diagnostics, not benchmark knobs.
 The old
 fork's profiling records, incremental parser, request-ahead scheduling,

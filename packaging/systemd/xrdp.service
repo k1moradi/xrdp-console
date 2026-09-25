@@ -1,0 +1,17 @@
+[Unit]
+Description=xrdp daemon (xrdp-console)
+Documentation=man:xrdp(8) man:xrdp.ini(5)
+Requires=xrdp-sesman.service
+After=network-online.target xrdp-sesman.service
+
+[Service]
+Type=exec
+EnvironmentFile=-/etc/sysconfig/xrdp
+EnvironmentFile=-/etc/default/xrdp
+EnvironmentFile=-/etc/default/xrdp-console
+ExecStart=/opt/xrdp-console/sbin/xrdp --nodaemon --config /etc/xrdp/xrdp.ini
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

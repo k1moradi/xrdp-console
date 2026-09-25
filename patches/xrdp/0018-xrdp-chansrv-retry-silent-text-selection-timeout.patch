@@ -1,0 +1,45 @@
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -1176,8 +1176,16 @@ clipboard_selection_response_timeout(void *data)
+         return;
+     }
+ 
+-    LOG(LOG_LEVEL_ERROR,
+-        "XRDP_CONSOLE_CLIPBOARD_RETRY response_timeout target=%s attempt=%u",
+-        get_atom_text(g_selection_retry.target), attempt);
++    if (clipboard_retry_policy_can_retry(&g_selection_retry.policy))
++    {
++        LOG_DEVEL(LOG_LEVEL_DEBUG,
++                  "XRDP_CONSOLE_CLIPBOARD_RETRY response timeout; "
++                  "scheduling bounded retry target=%s attempt=%u",
++                  get_atom_text(g_selection_retry.target), attempt);
++        if (clipboard_schedule_selection_retry())
++        {
++            return;
++        }
++    }
+     clipboard_fail_selection_conversion(g_selection_retry.target);
+ }
+--- a/sesman/chansrv/clipboard_retry_policy.h
++++ b/sesman/chansrv/clipboard_retry_policy.h
+@@ -8,8 +8,19 @@
+ enum
+ {
+     CLIPBOARD_SELECTION_MAX_ATTEMPTS = 3,
+     CLIPBOARD_SELECTION_RETRY_DELAY_MS = 50,
+-    CLIPBOARD_SELECTION_RESPONSE_TIMEOUT_MS = 2000
++    /*
++     * Keep the complete silent-owner recovery bounded to about two seconds,
++     * including the delay before each retry. Dividing the remaining budget
++     * across all attempts prevents retrying a silent owner from turning one
++     * request into a six-second stall.
++     */
++    CLIPBOARD_SELECTION_TOTAL_RESPONSE_TIMEOUT_MS = 2000,
++    CLIPBOARD_SELECTION_RESPONSE_TIMEOUT_MS =
++        (CLIPBOARD_SELECTION_TOTAL_RESPONSE_TIMEOUT_MS -
++         (CLIPBOARD_SELECTION_MAX_ATTEMPTS - 1) *
++             CLIPBOARD_SELECTION_RETRY_DELAY_MS) /
++        CLIPBOARD_SELECTION_MAX_ATTEMPTS
+ };
+ 
+ struct clipboard_retry_policy

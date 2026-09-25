@@ -111,6 +111,10 @@ install(FILES README.md LICENSE NOTICE THIRD_PARTY.md
 install(DIRECTORY docs/ DESTINATION ${CMAKE_INSTALL_DOCDIR}/docs)
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/x11vnc-console.service
     DESTINATION ${XRDP_CONSOLE_DATA_DIR}/systemd)
+install(FILES
+    packaging/systemd/xrdp.service
+    packaging/systemd/xrdp-sesman.service
+    DESTINATION ${XRDP_CONSOLE_DATA_DIR}/systemd)
 install(FILES packaging/systemd/x11vnc-console-clean-shutdown.conf
     DESTINATION ${XRDP_CONSOLE_DATA_DIR}/systemd)
 install(PROGRAMS ${CMAKE_CURRENT_BINARY_DIR}/x11vnc-console

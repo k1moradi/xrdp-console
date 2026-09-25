@@ -22,14 +22,26 @@ main(void)
     struct clipboard_retry_policy policy = {0};
     uint64_t first_generation;
     uint64_t second_generation;
+    unsigned int maximum_silent_owner_delay_ms;
     int success = 1;
 
     success &= check(CLIPBOARD_SELECTION_MAX_ATTEMPTS == 3,
                      "retry attempt bound changed");
     success &= check(CLIPBOARD_SELECTION_RETRY_DELAY_MS == 50,
                      "retry delay changed");
-    success &= check(CLIPBOARD_SELECTION_RESPONSE_TIMEOUT_MS == 2000,
-                     "selection response timeout changed");
+    success &= check(CLIPBOARD_SELECTION_TOTAL_RESPONSE_TIMEOUT_MS == 2000,
+                     "total selection response budget changed");
+    success &= check(CLIPBOARD_SELECTION_RESPONSE_TIMEOUT_MS > 0,
+                     "per-attempt selection timeout is not positive");
+    maximum_silent_owner_delay_ms =
+        CLIPBOARD_SELECTION_MAX_ATTEMPTS *
+            CLIPBOARD_SELECTION_RESPONSE_TIMEOUT_MS +
+        (CLIPBOARD_SELECTION_MAX_ATTEMPTS - 1) *
+            CLIPBOARD_SELECTION_RETRY_DELAY_MS;
+    success &= check(
+        maximum_silent_owner_delay_ms <=
+            CLIPBOARD_SELECTION_TOTAL_RESPONSE_TIMEOUT_MS,
+        "silent-owner retries exceed the bounded response budget");
     success &= check(clipboard_retry_policy_begin(NULL) == 0,
                      "null policy unexpectedly began");
     clipboard_retry_policy_reset(NULL);

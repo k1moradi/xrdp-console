@@ -124,13 +124,20 @@ historical fork's commit history:
     generation/attempt policy is covered by the first-party
     `clipboard-selection-retry-policy-unit` CTest rather than extending the
     upstream Automake test graph.
+18. `0018-xrdp-chansrv-retry-silent-text-selection-timeout.patch` also treats
+    a silent X11 owner as a retryable text-selection failure. It divides the
+    existing roughly two-second response budget across the three bounded
+    attempts, including the two 50 ms retry delays, so recovery does not turn
+    one client request into a multi-second-per-attempt stall. Intermediate
+    timeout events stay DEBUG-only; only exhausted conversion failure is
+    logged at production error level.
 
 The activation script requires the `XRDP_CONSOLE_GFX_PLANAR_BATCH_V1` marker
 in the candidate daemon, so an older patched generation cannot be mistaken
 for this Planar batching implementation.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-seventeen patches are retained production-path behavior and bounded operational
+eighteen patches are retained production-path behavior and bounded operational
 diagnostics, not benchmark knobs. Code
 `21` is deliberately used only by the direct module's profile; legacy VNC
 profiles continue using code `0`/`1`. The
