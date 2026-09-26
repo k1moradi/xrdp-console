@@ -277,6 +277,82 @@ if(TARGET xrdp-console)
     add_test(NAME gfx-avc420-frame-unit
         COMMAND gfx-avc420-frame-unit)
 
+    add_executable(gfx-surface-copy-unit
+        test_gfx_surface_copy.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/gfx_surface_copy.cpp)
+    set_target_properties(gfx-surface-copy-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(gfx-surface-copy-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME gfx-surface-copy-unit
+        COMMAND gfx-surface-copy-unit)
+    set_tests_properties(gfx-surface-copy-unit PROPERTIES
+        LABELS optimization)
+
+    add_executable(scroll-copy-plan-unit
+        test_scroll_copy_plan.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/scroll_copy_plan.cpp)
+    set_target_properties(scroll-copy-plan-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(scroll-copy-plan-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME scroll-copy-plan-unit
+        COMMAND scroll-copy-plan-unit)
+    set_tests_properties(scroll-copy-plan-unit PROPERTIES
+        LABELS optimization)
+
+    add_executable(vertical-motion-verifier-unit
+        test_vertical_motion_verifier.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/scroll_copy_plan.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/vertical_motion_verifier.cpp)
+    set_target_properties(vertical-motion-verifier-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(vertical-motion-verifier-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME vertical-motion-verifier-unit
+        COMMAND vertical-motion-verifier-unit)
+    set_tests_properties(vertical-motion-verifier-unit PROPERTIES
+        LABELS optimization)
+
+    add_executable(vertical-motion-discovery-unit
+        test_vertical_motion_discovery.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/scroll_copy_plan.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/vertical_motion_discovery.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/vertical_motion_verifier.cpp)
+    set_target_properties(vertical-motion-discovery-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(vertical-motion-discovery-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME vertical-motion-discovery-unit
+        COMMAND vertical-motion-discovery-unit)
+    set_tests_properties(vertical-motion-discovery-unit PROPERTIES
+        LABELS optimization)
+
+    add_executable(scroll-motion-observer-unit
+        test_scroll_motion_observer.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/scroll_copy_plan.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/vertical_motion_verifier.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/vertical_motion_discovery.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/scroll_motion_observer.cpp)
+    set_target_properties(scroll-motion-observer-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(scroll-motion-observer-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME scroll-motion-observer-unit
+        COMMAND scroll-motion-observer-unit)
+    set_tests_properties(scroll-motion-observer-unit PROPERTIES
+        LABELS optimization)
+
     add_executable(mapped-buffer-unit
         test_mapped_buffer.cpp
         ${CMAKE_SOURCE_DIR}/src/core/mapped_buffer.cpp)

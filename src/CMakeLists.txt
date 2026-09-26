@@ -48,8 +48,18 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         rdp/classic_graphics_scheduler.h
         rdp/gfx_avc420_frame.cpp
         rdp/gfx_avc420_frame.h
+        rdp/gfx_surface_copy.cpp
+        rdp/gfx_surface_copy.h
         rdp/h264_latest_frame.cpp
         rdp/h264_latest_frame.h
+        rdp/scroll_copy_plan.cpp
+        rdp/scroll_copy_plan.h
+        rdp/vertical_motion_discovery.cpp
+        rdp/vertical_motion_discovery.h
+        rdp/scroll_motion_observer.cpp
+        rdp/scroll_motion_observer.h
+        rdp/vertical_motion_verifier.cpp
+        rdp/vertical_motion_verifier.h
         rdp/rdp_update_sink.cpp
         rdp/rdp_update_sink.h
         x11/x11_damage_tracker.cpp

@@ -32,6 +32,7 @@ extern "C" {
 #include "../rdp/classic_graphics_scheduler.h"
 #include "../rdp/gfx_avc420_frame.h"
 #include "../rdp/h264_latest_frame.h"
+#include "../rdp/scroll_motion_observer.h"
 #include "../rdp/rdp_update_sink.h"
 #include "../rdp/rfx_encoder.h"
 #include "../rdp/remote_fx_scheduler.h"
@@ -665,6 +666,7 @@ struct ModuleContext::Impl
     std::unique_ptr<RfxEncoder> rfxEncoder{};
     RfxSurfaceSink rfxSurfaceSink{nullptr};
     xrdp_console::rdp::H264LatestFrameState h264Frame{};
+    xrdp_console::rdp::ScrollMotionObserver scrollMotionObserver{};
     std::uint32_t h264SubmittedFrameId{};
     Clock::time_point h264SubmittedAt{};
     // A non-owning sourcePixels view pins the XShm arena until all bounded
@@ -714,6 +716,7 @@ struct ModuleContext::Impl
                 fullPresentationInvalidation = false;
                 return false;
             }
+            scrollMotionObserver.invalidateBaseline();
             h264Frame.invalidateAll();
             fullPresentationInvalidation = false;
             return true;
@@ -1108,6 +1111,17 @@ ModuleContext::connect() noexcept
         impl_->presentationTransform = presentationTransform;
         impl_->presentationScaler = std::move(presentationScaler);
         impl_->h264Frame = std::move(h264Frame);
+        impl_->scrollMotionObserver.reset();
+        if (graphicsTransport == GraphicsTransport::H264Gfx &&
+            !impl_->scrollMotionObserver.configure(sourceGeometry))
+        {
+            // This diagnostic feature is optional; do not affect H.264.
+            log_message(LOG_LEVEL_WARNING,
+                        "xrdp-console: scroll motion observation disabled "
+                        "for source=%ux%u",
+                        sourceGeometry.widthPixels,
+                        sourceGeometry.heightPixels);
+        }
         impl_->h264SubmittedFrameId = 0;
         impl_->h264SubmittedAt = {};
         impl_->damageRegion.clear();
@@ -1159,6 +1173,7 @@ ModuleContext::connect() noexcept
         impl_->pendingRfx.clear();
         impl_->rfxEncoder.reset();
         impl_->h264Frame.reset();
+        impl_->scrollMotionObserver.reset();
         impl_->h264SubmittedFrameId = 0;
         impl_->h264SubmittedAt = {};
         impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
@@ -1320,6 +1335,16 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     impl_->presentationScaler = std::move(scaler);
     impl_->rfxEncoder = std::move(rfxEncoder);
     impl_->h264Frame = std::move(h264Frame);
+    impl_->scrollMotionObserver.reset();
+    if (graphicsTransport == GraphicsTransport::H264Gfx &&
+        !impl_->scrollMotionObserver.configure(impl_->state.sourceGeometry))
+    {
+        log_message(LOG_LEVEL_WARNING,
+                    "xrdp-console: scroll motion observation disabled after "
+                    "resize for source=%ux%u",
+                    impl_->state.sourceGeometry.widthPixels,
+                    impl_->state.sourceGeometry.heightPixels);
+    }
     impl_->h264SubmittedFrameId = 0;
     impl_->h264SubmittedAt = {};
     impl_->graphicsTransport = graphicsTransport;
@@ -1584,6 +1609,7 @@ ModuleContext::end() noexcept
     impl_->rfxLetterboxFill.clear();
     impl_->rfxEncoder.reset();
     impl_->h264Frame.reset();
+    impl_->scrollMotionObserver.reset();
     impl_->h264SubmittedFrameId = 0;
     impl_->h264SubmittedAt = {};
     impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
@@ -2303,6 +2329,16 @@ ModuleContext::check_h264_gfx() noexcept
             }
             impl_->profile.noteCapture(captureRectangle);
 
+            if (impl_->scrollMotionObserver.valid() &&
+                !impl_->scrollMotionObserver.stageCapture(
+                    pixels, captureRectangle))
+            {
+                log_message(LOG_LEVEL_WARNING,
+                            "xrdp-console: disabling scroll motion "
+                            "observation after source-shadow update failure");
+                impl_->scrollMotionObserver.reset();
+            }
+
             if (mappedFrameRectangle.widthPixels == 0 ||
                 mappedFrameRectangle.heightPixels == 0)
             {
@@ -2402,6 +2438,45 @@ ModuleContext::check_h264_gfx() noexcept
                 return 1;
             }
             pending.clear();
+        }
+    }
+
+    if (impl_->scrollMotionObserver.valid() &&
+        impl_->scrollMotionObserver.episodeActive() &&
+        !impl_->pendingH264Tile.active() &&
+        !impl_->h264Frame.capturePending() &&
+        !impl_->damageTracker->hasPendingDamage())
+    {
+        const PixelSize source = impl_->h264Frame.sourceGeometry();
+        const auto observation = impl_->scrollMotionObserver.completeEpisode(
+            {0, 0, source.widthPixels, source.heightPixels});
+        if (observation.verified())
+        {
+            log_message(
+                LOG_LEVEL_INFO,
+                "XRDP_CONSOLE_SCROLL_OBSERVE verified dy=%d "
+                "captured_pixels=%llu reusable_pixels=%llu "
+                "exposed_pixels=%llu candidates=%u quality_bp=%u",
+                observation.displacementY,
+                static_cast<unsigned long long>(observation.capturedPixels),
+                static_cast<unsigned long long>(observation.reusablePixels),
+                static_cast<unsigned long long>(observation.exposedPixels),
+                observation.discovery.candidatesEvaluated,
+                observation.discovery.bestQualityBasisPoints);
+        }
+        else if (observation.kind ==
+                 xrdp_console::rdp::ScrollMotionObservationKind::Ambiguous)
+        {
+            log_message(
+                LOG_LEVEL_DEBUG,
+                "XRDP_CONSOLE_SCROLL_OBSERVE ambiguous "
+                "captured_pixels=%llu candidates=%u verified_candidates=%u "
+                "best_quality_bp=%u runner_up_quality_bp=%u",
+                static_cast<unsigned long long>(observation.capturedPixels),
+                observation.discovery.candidatesEvaluated,
+                observation.discovery.verifiedCandidates,
+                observation.discovery.bestQualityBasisPoints,
+                observation.discovery.runnerUpQualityBasisPoints);
         }
     }
 
