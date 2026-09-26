@@ -97,6 +97,17 @@ public:
                u16(static_cast<std::uint16_t>(value >> 16U));
     }
 
+    [[nodiscard]] bool bytes(std::span<const std::byte> value) noexcept
+    {
+        if (value.size() > output_.size() - position_)
+        {
+            return false;
+        }
+        std::copy(value.begin(), value.end(), output_.begin() + position_);
+        position_ += value.size();
+        return true;
+    }
+
     [[nodiscard]] bool rectangle(Rectangle value) noexcept
     {
         return u16(static_cast<std::uint16_t>(value.x)) &&
@@ -432,9 +443,16 @@ std::size_t
 buildGfxAvc420Command(const GfxAvc420Command &command,
                       std::span<std::byte> output) noexcept
 {
-    const std::size_t totalBytes = gfxAvc420CommandBytes(
+    const std::size_t baseBytes = gfxAvc420CommandBytes(
         command.dirtyRectangles.size(), command.encodeRectangles.size());
-    if (totalBytes == 0 || output.size() < totalBytes ||
+    if (baseBytes == 0 ||
+        command.preWireCommands.size() >
+            std::numeric_limits<std::size_t>::max() - baseBytes)
+    {
+        return 0;
+    }
+    const std::size_t totalBytes = baseBytes + command.preWireCommands.size();
+    if (output.size() < totalBytes ||
         command.frameGeometry.widthPixels == 0 ||
         command.frameGeometry.heightPixels == 0 ||
         command.frameGeometry.widthPixels > UINT16_MAX ||
@@ -470,6 +488,7 @@ buildGfxAvc420Command(const GfxAvc420Command &command,
         writer.u16(kGfxStartFrameCommand) && writer.u16(0) &&
         writer.u32(kStartFrameBytes) && writer.u32(command.frameId) &&
         writer.u32(0) &&
+        writer.bytes(command.preWireCommands) &&
         writer.u16(kGfxWireToSurface1Command) && writer.u16(0) &&
         writer.u32(static_cast<std::uint32_t>(wireBytes)) &&
         writer.u16(command.surfaceId) && writer.u16(kGfxAvc420CodecId) &&

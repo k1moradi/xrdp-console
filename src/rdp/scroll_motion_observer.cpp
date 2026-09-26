@@ -13,6 +13,14 @@ namespace
 {
 constexpr std::size_t kBytesPerPixel = 4U;
 
+[[nodiscard]] std::uint64_t
+nextSequence(std::uint64_t current) noexcept
+{
+    return current == std::numeric_limits<std::uint64_t>::max()
+               ? 1U
+               : current + 1U;
+}
+
 [[nodiscard]] bool
 rectangleFits(Rectangle rectangle, PixelSize geometry) noexcept
 {
@@ -75,6 +83,8 @@ ScrollMotionObserver::configure(PixelSize geometry,
     geometry_ = geometry;
     config_ = config;
     capturedPixels_ = 0;
+    baselineSequence_ = 0;
+    baselinePresented_ = false;
     baselineValid_ = false;
     episodeActive_ = false;
     stats_ = {};
@@ -89,6 +99,8 @@ ScrollMotionObserver::reset() noexcept
     std::vector<std::byte>{}.swap(previous_);
     std::vector<std::byte>{}.swap(working_);
     capturedPixels_ = 0;
+    baselineSequence_ = 0;
+    baselinePresented_ = false;
     baselineValid_ = false;
     episodeActive_ = false;
     stats_ = {};
@@ -98,6 +110,8 @@ void
 ScrollMotionObserver::invalidateBaseline() noexcept
 {
     baselineValid_ = false;
+    baselineSequence_ = 0;
+    baselinePresented_ = false;
     episodeActive_ = false;
     capturedPixels_ = 0;
 }
@@ -132,6 +146,29 @@ PixelSize
 ScrollMotionObserver::geometry() const noexcept
 {
     return geometry_;
+}
+
+std::uint64_t
+ScrollMotionObserver::baselineSequence() const noexcept
+{
+    return baselineValid_ ? baselineSequence_ : 0;
+}
+
+bool
+ScrollMotionObserver::baselinePresented() const noexcept
+{
+    return baselineValid_ && baselinePresented_;
+}
+
+bool
+ScrollMotionObserver::markBaselinePresented(std::uint64_t sequence) noexcept
+{
+    if (!baselineValid_ || sequence == 0 || sequence != baselineSequence_)
+    {
+        return false;
+    }
+    baselinePresented_ = true;
+    return true;
 }
 
 bool
@@ -220,10 +257,13 @@ ScrollMotionObserver::workingView() const noexcept
 ScrollMotionObservation
 ScrollMotionObserver::completeEpisode(
     Rectangle viewport,
-    std::span<const std::int32_t> preferredDisplacements) noexcept
+    std::span<const std::int32_t> preferredDisplacements,
+    std::span<ExactScrollCopyRun> exactCopyRuns) noexcept
 {
     ScrollMotionObservation observation{};
     observation.capturedPixels = capturedPixels_;
+    observation.sourceBaselinePresented =
+        baselineValid_ && baselinePresented_;
     if (!valid() || !episodeActive_ || !rectangleFits(viewport, geometry_))
     {
         return observation;
@@ -234,6 +274,9 @@ ScrollMotionObserver::completeEpisode(
     {
         std::swap(previous_, working_);
         baselineValid_ = true;
+        baselineSequence_ = nextSequence(baselineSequence_);
+        baselinePresented_ = false;
+        observation.baselineSequence = baselineSequence_;
         episodeActive_ = false;
         capturedPixels_ = 0;
         observation.kind = ScrollMotionObservationKind::BaselineSeeded;
@@ -248,6 +291,9 @@ ScrollMotionObserver::completeEpisode(
     if (capturedPixels_ < minimumPixels)
     {
         std::swap(previous_, working_);
+        baselineSequence_ = nextSequence(baselineSequence_);
+        baselinePresented_ = false;
+        observation.baselineSequence = baselineSequence_;
         episodeActive_ = false;
         capturedPixels_ = 0;
         observation.kind = ScrollMotionObservationKind::InsufficientDamage;
@@ -271,6 +317,17 @@ ScrollMotionObserver::completeEpisode(
             observation.exposedPixels = pixelCount(plan.exposedRectangle);
             ++stats_.verified;
             stats_.reusablePixels += observation.reusablePixels;
+            if (observation.sourceBaselinePresented &&
+                !exactCopyRuns.empty())
+            {
+                const ExactScrollReuseResult exact =
+                    classifyExactVerticalScrollReuse(
+                        previousView(), workingView(), viewport,
+                        observation.displacementY, exactCopyRuns);
+                observation.exactCopyRunCount = exact.runCount;
+                observation.exactReusablePixels = exact.reusablePixels;
+                observation.exactCopyRunOverflow = exact.overflow;
+            }
         }
         else
         {
@@ -289,6 +346,9 @@ ScrollMotionObserver::completeEpisode(
     }
 
     std::swap(previous_, working_);
+    baselineSequence_ = nextSequence(baselineSequence_);
+    baselinePresented_ = false;
+    observation.baselineSequence = baselineSequence_;
     episodeActive_ = false;
     capturedPixels_ = 0;
     return observation;

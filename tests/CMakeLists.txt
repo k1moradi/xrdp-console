@@ -111,6 +111,21 @@ add_test(NAME proxy-backpressure-unit
 set_tests_properties(proxy-backpressure-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+add_executable(client-scaled-output-plan-unit
+    test_client_scaled_output_plan.cpp
+    ${CMAKE_SOURCE_DIR}/src/core/presentation_transform.cpp
+    ${CMAKE_SOURCE_DIR}/src/rdp/client_scaled_output_plan.cpp)
+set_target_properties(client-scaled-output-plan-unit PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF)
+target_include_directories(client-scaled-output-plan-unit PRIVATE
+    ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME client-scaled-output-plan-unit
+    COMMAND client-scaled-output-plan-unit)
+set_tests_properties(client-scaled-output-plan-unit PROPERTIES
+    LABELS optimization)
+
 add_executable(scaled-output-capability-policy-unit
     test_scaled_output_capability_policy.c
     ${CMAKE_SOURCE_DIR}/src/rdp/scaled_output_capability_policy.c)
@@ -122,6 +137,35 @@ target_include_directories(scaled-output-capability-policy-unit PRIVATE
     ${CMAKE_SOURCE_DIR}/src/rdp)
 add_test(NAME scaled-output-capability-policy-unit
     COMMAND scaled-output-capability-policy-unit)
+
+add_executable(gfx-bitmap-cache-observer-unit
+    test_gfx_bitmap_cache_observer.cpp
+    ${CMAKE_SOURCE_DIR}/src/rdp/gfx_bitmap_cache_observer.cpp)
+set_target_properties(gfx-bitmap-cache-observer-unit PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF)
+target_include_directories(gfx-bitmap-cache-observer-unit PRIVATE
+    ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(gfx-bitmap-cache-observer-unit PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME gfx-bitmap-cache-observer-unit
+    COMMAND gfx-bitmap-cache-observer-unit)
+
+add_executable(verified-bitmap-cache16-unit
+    test_verified_bitmap_cache16.cpp
+    ${CMAKE_SOURCE_DIR}/src/rdp/verified_bitmap_cache16.cpp
+    ${CMAKE_SOURCE_DIR}/src/rdp/gfx_bitmap_cache_commands.cpp)
+set_target_properties(verified-bitmap-cache16-unit PROPERTIES
+    CXX_STANDARD 23
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF)
+target_include_directories(verified-bitmap-cache16-unit PRIVATE
+    ${CMAKE_SOURCE_DIR}/src)
+target_compile_options(verified-bitmap-cache16-unit PRIVATE
+    -Wall -Wextra -Wpedantic -Werror)
+add_test(NAME verified-bitmap-cache16-unit
+    COMMAND verified-bitmap-cache16-unit)
 
 add_test(NAME systemd-unit
     COMMAND ${Python3_EXECUTABLE} -B
@@ -380,6 +424,7 @@ if(TARGET xrdp-console)
     add_executable(scroll-motion-observer-unit
         test_scroll_motion_observer.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/scroll_copy_plan.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/scroll_reuse_classifier.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/vertical_motion_verifier.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/vertical_motion_discovery.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/scroll_motion_observer.cpp)

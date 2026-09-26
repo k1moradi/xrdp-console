@@ -578,6 +578,92 @@ H264LatestFrameState::collectReadyTransmissionSelections(
 }
 
 std::size_t
+H264LatestFrameState::collectReadyTransmissionSelectionsExcluding(
+    std::span<const GenerationTileMap::Selection> selections,
+    std::span<const Rectangle> exclusions,
+    std::span<GenerationTileMap::Selection> output) const noexcept
+{
+    if (selections.empty() || output.empty())
+    {
+        return 0;
+    }
+    if (exclusions.empty())
+    {
+        const std::size_t count = std::min(selections.size(), output.size());
+        std::copy_n(selections.begin(), count, output.begin());
+        return count;
+    }
+    std::size_t outputCount = 0;
+
+    const auto excluded = [&exclusions](Rectangle tile) noexcept {
+        const std::uint64_t tileRight =
+            static_cast<std::uint64_t>(tile.x) + tile.widthPixels;
+        const std::uint64_t tileBottom =
+            static_cast<std::uint64_t>(tile.y) + tile.heightPixels;
+        for (const Rectangle rectangle : exclusions)
+        {
+            if (rectangle.x >= 0 && rectangle.y >= 0 &&
+                tile.x >= rectangle.x && tile.y >= rectangle.y &&
+                tileRight <= static_cast<std::uint64_t>(rectangle.x) +
+                                 rectangle.widthPixels &&
+                tileBottom <= static_cast<std::uint64_t>(rectangle.y) +
+                                  rectangle.heightPixels)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    for (std::size_t index = 0;
+         index < selections.size() && outputCount < output.size(); ++index)
+    {
+        const auto &run = selections[index];
+        std::uint32_t offset = 0;
+        std::uint32_t keptOffset = 0;
+        std::uint32_t keptWidth = 0;
+        while (offset < run.rectangle.widthPixels)
+        {
+            const std::uint32_t width = std::min(
+                GenerationTileMap::kTileWidthPixels,
+                run.rectangle.widthPixels - offset);
+            const Rectangle tile{
+                run.rectangle.x + static_cast<std::int32_t>(offset),
+                run.rectangle.y, width, run.rectangle.heightPixels};
+            if (!excluded(tile))
+            {
+                if (keptWidth == 0)
+                {
+                    keptOffset = offset;
+                }
+                keptWidth += width;
+            }
+            else if (keptWidth != 0)
+            {
+                output[outputCount++] = {
+                    {run.rectangle.x + static_cast<std::int32_t>(keptOffset),
+                     run.rectangle.y, keptWidth, run.rectangle.heightPixels},
+                    run.generation};
+                keptWidth = 0;
+                if (outputCount == output.size())
+                {
+                    return outputCount;
+                }
+            }
+            offset += width;
+        }
+        if (keptWidth != 0 && outputCount < output.size())
+        {
+            output[outputCount++] = {
+                {run.rectangle.x + static_cast<std::int32_t>(keptOffset),
+                 run.rectangle.y, keptWidth, run.rectangle.heightPixels},
+                run.generation};
+        }
+    }
+    return outputCount;
+}
+
+std::size_t
 H264LatestFrameState::collectReadyTransmissionSelectionsIntersecting(
     Rectangle clip,
     std::span<GenerationTileMap::Selection> output) const noexcept
@@ -652,6 +738,29 @@ forEachTile(Rectangle rectangle, PixelSize geometry, Callback callback) noexcept
         }
     }
     return true;
+}
+
+[[nodiscard]] bool
+completeTileRegion(Rectangle rectangle, PixelSize geometry) noexcept
+{
+    if (rectangle.x < 0 || rectangle.y < 0 ||
+        rectangle.widthPixels == 0 || rectangle.heightPixels == 0 ||
+        static_cast<std::uint32_t>(rectangle.x) %
+                GenerationTileMap::kTileWidthPixels != 0 ||
+        static_cast<std::uint32_t>(rectangle.y) %
+                GenerationTileMap::kTileHeightPixels != 0)
+    {
+        return false;
+    }
+    const std::uint64_t right =
+        static_cast<std::uint64_t>(rectangle.x) + rectangle.widthPixels;
+    const std::uint64_t bottom =
+        static_cast<std::uint64_t>(rectangle.y) + rectangle.heightPixels;
+    return right <= geometry.widthPixels && bottom <= geometry.heightPixels &&
+           (right == geometry.widthPixels ||
+            right % GenerationTileMap::kTileWidthPixels == 0) &&
+           (bottom == geometry.heightPixels ||
+            bottom % GenerationTileMap::kTileHeightPixels == 0);
 }
 
 } // namespace
@@ -860,6 +969,15 @@ H264LatestFrameState::noteSubmitted(
     std::uint32_t frameId,
     std::span<const GenerationTileMap::Selection> selections) noexcept
 {
+    return noteSubmitted(frameId, selections, {});
+}
+
+bool
+H264LatestFrameState::noteSubmitted(
+    std::uint32_t frameId,
+    std::span<const GenerationTileMap::Selection> selections,
+    std::span<const Rectangle> clientCopiedRectangles) noexcept
+{
     if (!valid() || frameInFlight_ || frameId == 0 ||
         frameId != nextFrameId_ || frameId > static_cast<std::uint32_t>(INT_MAX) ||
         selections.empty())
@@ -874,6 +992,15 @@ H264LatestFrameState::noteSubmitted(
     {
         return false;
     }
+    const bool identitySurface =
+        sourceGeometry_ == geometry_ &&
+        viewport_ ==
+            Rectangle{0, 0, geometry_.widthPixels, geometry_.heightPixels};
+    if (!clientCopiedRectangles.empty() &&
+        (baselineFrame || !identitySurface))
+    {
+        return false;
+    }
     for (const GenerationTileMap::Selection &selection : selections)
     {
         if (!selection.valid())
@@ -881,6 +1008,29 @@ H264LatestFrameState::noteSubmitted(
             return false;
         }
     }
+    for (const Rectangle rectangle : clientCopiedRectangles)
+    {
+        if (!completeTileRegion(rectangle, sourceGeometry_))
+        {
+            return false;
+        }
+    }
+
+    const auto promotePendingFingerprints =
+        [this](Rectangle sourceRectangle) noexcept {
+            return forEachTile(
+                sourceRectangle, sourceGeometry_,
+                [this](Rectangle tile) noexcept {
+                    std::uint64_t fingerprint = 0;
+                    if (!pendingFingerprints_.load(tile, fingerprint))
+                    {
+                        return true;
+                    }
+                    return committedFingerprints_.store(tile, fingerprint) &&
+                           pendingFingerprints_.clear(tile);
+                });
+        };
+
     for (const GenerationTileMap::Selection &selection : selections)
     {
         if (!transmissionDamage_.commit(selection))
@@ -896,17 +1046,22 @@ H264LatestFrameState::noteSubmitted(
         {
             return false;
         }
-        if (!forEachTile(sourceRectangle, sourceGeometry_,
-                         [this](Rectangle tile) noexcept {
-                             std::uint64_t fingerprint = 0;
-                             if (!pendingFingerprints_.load(tile, fingerprint))
-                             {
-                                 return true;
-                             }
-                             return committedFingerprints_.store(
-                                        tile, fingerprint) &&
-                                    pendingFingerprints_.clear(tile);
-                         }))
+        if (!promotePendingFingerprints(sourceRectangle))
+        {
+            captureDamage_.markFull();
+            transmissionDamage_.markFull();
+            committedFingerprints_.reset();
+            pendingFingerprints_.reset();
+            baselineSubmitted_ = false;
+            return false;
+        }
+    }
+    for (const Rectangle rectangle : clientCopiedRectangles)
+    {
+        const GenerationTileMap::Selection copied{
+            rectangle, std::numeric_limits<std::uint64_t>::max()};
+        if (!transmissionDamage_.commit(copied) ||
+            !promotePendingFingerprints(rectangle))
         {
             captureDamage_.markFull();
             transmissionDamage_.markFull();

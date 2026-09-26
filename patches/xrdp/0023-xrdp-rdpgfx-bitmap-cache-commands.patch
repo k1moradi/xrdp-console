@@ -1,0 +1,377 @@
+diff --git a/tests/xrdp/test_xrdp_egfx.c b/tests/xrdp/test_xrdp_egfx.c
+index b052f47..1fbf082 100644
+--- a/tests/xrdp/test_xrdp_egfx.c
++++ b/tests/xrdp/test_xrdp_egfx.c
+@@ -4,10 +4,160 @@
+ 
+ #include "log.h"
+ #include "os_calls.h"
++#include <stdint.h>
+ #include <stdlib.h>
+ #include "xrdp_egfx.h"
+ #include "test_xrdp.h"
+ 
++START_TEST(test_xrdp_egfx_surface_to_cache__wire_layout)
++{
++    struct xrdp_egfx_bulk *bulk = g_new0(struct xrdp_egfx_bulk, 1);
++    const struct xrdp_egfx_rect rect = {11, 22, 75, 86};
++    struct stream *s;
++    unsigned char descriptor;
++    unsigned char bulk_header;
++    unsigned short command_id;
++    unsigned short flags;
++    unsigned int pdu_length;
++    unsigned short surface_id;
++    uint64_t cache_key;
++    unsigned short cache_slot;
++    unsigned short left;
++    unsigned short top;
++    unsigned short right;
++    unsigned short bottom;
++
++    s = xrdp_egfx_surface_to_cache(
++            bulk, 0x1234, UINT64_C(0x1122334455667788), 0x5678, &rect);
++    ck_assert_ptr_nonnull(s);
++    ck_assert_int_eq(30, (int) (s->end - s->data));
++
++    s->p = s->data;
++    in_uint8(s, descriptor);
++    in_uint8(s, bulk_header);
++    in_uint16_le(s, command_id);
++    in_uint16_le(s, flags);
++    in_uint32_le(s, pdu_length);
++    in_uint16_le(s, surface_id);
++    in_uint64_le(s, cache_key);
++    in_uint16_le(s, cache_slot);
++    in_uint16_le(s, left);
++    in_uint16_le(s, top);
++    in_uint16_le(s, right);
++    in_uint16_le(s, bottom);
++
++    ck_assert_int_eq(0xE0, descriptor);
++    ck_assert_int_eq(0x04, bulk_header);
++    ck_assert_int_eq(XR_RDPGFX_CMDID_SURFACETOCACHE, command_id);
++    ck_assert_int_eq(0, flags);
++    ck_assert_int_eq(28, pdu_length);
++    ck_assert_int_eq(0x1234, surface_id);
++    ck_assert_msg(cache_key == UINT64_C(0x1122334455667788),
++                  "cache key byte order mismatch");
++    ck_assert_int_eq(0x5678, cache_slot);
++    ck_assert_int_eq(11, left);
++    ck_assert_int_eq(22, top);
++    ck_assert_int_eq(75, right);
++    ck_assert_int_eq(86, bottom);
++    ck_assert_ptr_eq(s->p, s->end);
++
++    free_stream(s);
++    g_free(bulk);
++}
++END_TEST
++
++START_TEST(test_xrdp_egfx_cache_to_surface__wire_layout)
++{
++    struct xrdp_egfx_bulk *bulk = g_new0(struct xrdp_egfx_bulk, 1);
++    const struct xrdp_egfx_point points[2] = {{7, 9}, {101, 203}};
++    struct stream *s;
++    unsigned char descriptor;
++    unsigned char bulk_header;
++    unsigned short command_id;
++    unsigned short flags;
++    unsigned int pdu_length;
++    unsigned short cache_slot;
++    unsigned short surface_id;
++    unsigned short point_count;
++    unsigned short x0;
++    unsigned short y0;
++    unsigned short x1;
++    unsigned short y1;
++
++    s = xrdp_egfx_cache_to_surface(
++            bulk, 0x2468, 0x1357, 2, points);
++    ck_assert_ptr_nonnull(s);
++    ck_assert_int_eq(24, (int) (s->end - s->data));
++
++    s->p = s->data;
++    in_uint8(s, descriptor);
++    in_uint8(s, bulk_header);
++    in_uint16_le(s, command_id);
++    in_uint16_le(s, flags);
++    in_uint32_le(s, pdu_length);
++    in_uint16_le(s, cache_slot);
++    in_uint16_le(s, surface_id);
++    in_uint16_le(s, point_count);
++    in_uint16_le(s, x0);
++    in_uint16_le(s, y0);
++    in_uint16_le(s, x1);
++    in_uint16_le(s, y1);
++
++    ck_assert_int_eq(0xE0, descriptor);
++    ck_assert_int_eq(0x04, bulk_header);
++    ck_assert_int_eq(XR_RDPGFX_CMDID_CACHETOSURFACE, command_id);
++    ck_assert_int_eq(0, flags);
++    ck_assert_int_eq(22, pdu_length);
++    ck_assert_int_eq(0x2468, cache_slot);
++    ck_assert_int_eq(0x1357, surface_id);
++    ck_assert_int_eq(2, point_count);
++    ck_assert_int_eq(7, x0);
++    ck_assert_int_eq(9, y0);
++    ck_assert_int_eq(101, x1);
++    ck_assert_int_eq(203, y1);
++    ck_assert_ptr_eq(s->p, s->end);
++
++    free_stream(s);
++    g_free(bulk);
++}
++END_TEST
++
++START_TEST(test_xrdp_egfx_evict_cache_entry__wire_layout)
++{
++    struct xrdp_egfx_bulk *bulk = g_new0(struct xrdp_egfx_bulk, 1);
++    struct stream *s;
++    unsigned char descriptor;
++    unsigned char bulk_header;
++    unsigned short command_id;
++    unsigned short flags;
++    unsigned int pdu_length;
++    unsigned short cache_slot;
++
++    s = xrdp_egfx_evict_cache_entry(bulk, 0xABCD);
++    ck_assert_ptr_nonnull(s);
++    ck_assert_int_eq(12, (int) (s->end - s->data));
++
++    s->p = s->data;
++    in_uint8(s, descriptor);
++    in_uint8(s, bulk_header);
++    in_uint16_le(s, command_id);
++    in_uint16_le(s, flags);
++    in_uint32_le(s, pdu_length);
++    in_uint16_le(s, cache_slot);
++
++    ck_assert_int_eq(0xE0, descriptor);
++    ck_assert_int_eq(0x04, bulk_header);
++    ck_assert_int_eq(XR_RDPGFX_CMDID_EVICTCACHEENTRY, command_id);
++    ck_assert_int_eq(0, flags);
++    ck_assert_int_eq(10, pdu_length);
++    ck_assert_int_eq(0xABCD, cache_slot);
++    ck_assert_ptr_eq(s->p, s->end);
++
++    free_stream(s);
++    g_free(bulk);
++}
++END_TEST
++
+ START_TEST(test_xrdp_egfx_send_create_surface__happy_path)
+ {
+     struct xrdp_egfx_bulk *bulk = g_new0(struct xrdp_egfx_bulk, 1);
+@@ -124,8 +274,14 @@ make_suite_egfx_base_functions(void)
+     tc_process_monitors = tcase_create("xrdp_egfx_base_functions");
+     tcase_add_test(tc_process_monitors,
+                    test_xrdp_egfx_send_create_surface__happy_path);
+     tcase_add_test(tc_process_monitors,
+                    test_xrdp_egfx_map_surface_scaled__wire_layout);
++    tcase_add_test(tc_process_monitors,
++                   test_xrdp_egfx_surface_to_cache__wire_layout);
++    tcase_add_test(tc_process_monitors,
++                   test_xrdp_egfx_cache_to_surface__wire_layout);
++    tcase_add_test(tc_process_monitors,
++                   test_xrdp_egfx_evict_cache_entry__wire_layout);
+ 
+     suite_add_tcase(s, tc_process_monitors);
+ 
+diff --git a/xrdp/xrdp_egfx.c b/xrdp/xrdp_egfx.c
+index 4039993..9543eee 100644
+--- a/xrdp/xrdp_egfx.c
++++ b/xrdp/xrdp_egfx.c
+@@ -19,6 +19,162 @@ xrdp_egfx_send_surface_to_surface(struct xrdp_egfx *egfx, int src_surface_id,
+     return error;
+ }
+ 
++
++/******************************************************************************/
++struct stream *
++xrdp_egfx_surface_to_cache(struct xrdp_egfx_bulk *bulk, int surface_id,
++                           uint64_t cache_key, int cache_slot,
++                           const struct xrdp_egfx_rect *src_rect)
++{
++    int bytes;
++    struct stream *s;
++
++    LOG(LOG_LEVEL_TRACE, "xrdp_egfx_surface_to_cache:");
++    make_stream(s);
++    init_stream(s, 1024);
++    /* RDP_SEGMENTED_DATA */
++    out_uint8(s, 0xE0); /* descriptor = SINGLE */
++    /* RDP8_BULK_ENCODED_DATA */
++    out_uint8(s, PACKET_COMPR_TYPE_RDP8); /* header */
++    /* RDPGFX_HEADER */
++    out_uint16_le(s, XR_RDPGFX_CMDID_SURFACETOCACHE); /* cmdId */
++    out_uint16_le(s, 0); /* flags = 0 */
++    s_push_layer(s, iso_hdr, 4); /* pduLength, set later */
++    out_uint16_le(s, surface_id);
++    out_uint64_le(s, cache_key);
++    out_uint16_le(s, cache_slot);
++    out_uint16_le(s, src_rect->x1);
++    out_uint16_le(s, src_rect->y1);
++    out_uint16_le(s, src_rect->x2);
++    out_uint16_le(s, src_rect->y2);
++    s_mark_end(s);
++    bytes = (int) ((s->end - s->iso_hdr) + 4);
++    s_pop_layer(s, iso_hdr);
++    out_uint32_le(s, bytes);
++    return s;
++}
++
++/******************************************************************************/
++int
++xrdp_egfx_send_surface_to_cache(struct xrdp_egfx *egfx, int surface_id,
++                                uint64_t cache_key, int cache_slot,
++                                const struct xrdp_egfx_rect *src_rect)
++{
++    int error;
++    struct stream *s;
++
++    LOG(LOG_LEVEL_TRACE, "xrdp_egfx_send_surface_to_cache:");
++    s = xrdp_egfx_surface_to_cache(
++            egfx->bulk, surface_id, cache_key, cache_slot, src_rect);
++    error = xrdp_egfx_send_s(egfx, s);
++    LOG(LOG_LEVEL_DEBUG,
++        "xrdp_egfx_send_surface_to_cache: xrdp_egfx_send_s error %d",
++        error);
++    free_stream(s);
++    return error;
++}
++
++/******************************************************************************/
++struct stream *
++xrdp_egfx_cache_to_surface(struct xrdp_egfx_bulk *bulk, int cache_slot,
++                           int surface_id, int num_dst_points,
++                           const struct xrdp_egfx_point *dst_points)
++{
++    int bytes;
++    int index;
++    struct stream *s;
++
++    LOG(LOG_LEVEL_TRACE, "xrdp_egfx_cache_to_surface:");
++    make_stream(s);
++    init_stream(s, 1024 + num_dst_points * 4);
++    /* RDP_SEGMENTED_DATA */
++    out_uint8(s, 0xE0); /* descriptor = SINGLE */
++    /* RDP8_BULK_ENCODED_DATA */
++    out_uint8(s, PACKET_COMPR_TYPE_RDP8); /* header */
++    /* RDPGFX_HEADER */
++    out_uint16_le(s, XR_RDPGFX_CMDID_CACHETOSURFACE); /* cmdId */
++    out_uint16_le(s, 0); /* flags = 0 */
++    s_push_layer(s, iso_hdr, 4); /* pduLength, set later */
++    out_uint16_le(s, cache_slot);
++    out_uint16_le(s, surface_id);
++    out_uint16_le(s, num_dst_points);
++    for (index = 0; index < num_dst_points; ++index)
++    {
++        out_uint16_le(s, dst_points[index].x);
++        out_uint16_le(s, dst_points[index].y);
++    }
++    s_mark_end(s);
++    bytes = (int) ((s->end - s->iso_hdr) + 4);
++    s_pop_layer(s, iso_hdr);
++    out_uint32_le(s, bytes);
++    return s;
++}
++
++/******************************************************************************/
++int
++xrdp_egfx_send_cache_to_surface(
++    struct xrdp_egfx *egfx, int cache_slot, int surface_id,
++    int num_dst_points, const struct xrdp_egfx_point *dst_points)
++{
++    int error;
++    struct stream *s;
++
++    LOG(LOG_LEVEL_TRACE, "xrdp_egfx_send_cache_to_surface:");
++    s = xrdp_egfx_cache_to_surface(
++            egfx->bulk, cache_slot, surface_id,
++            num_dst_points, dst_points);
++    error = xrdp_egfx_send_s(egfx, s);
++    LOG(LOG_LEVEL_DEBUG,
++        "xrdp_egfx_send_cache_to_surface: xrdp_egfx_send_s error %d",
++        error);
++    free_stream(s);
++    return error;
++}
++
++/******************************************************************************/
++struct stream *
++xrdp_egfx_evict_cache_entry(struct xrdp_egfx_bulk *bulk, int cache_slot)
++{
++    int bytes;
++    struct stream *s;
++
++    LOG(LOG_LEVEL_TRACE, "xrdp_egfx_evict_cache_entry:");
++    make_stream(s);
++    init_stream(s, 1024);
++    /* RDP_SEGMENTED_DATA */
++    out_uint8(s, 0xE0); /* descriptor = SINGLE */
++    /* RDP8_BULK_ENCODED_DATA */
++    out_uint8(s, PACKET_COMPR_TYPE_RDP8); /* header */
++    /* RDPGFX_HEADER */
++    out_uint16_le(s, XR_RDPGFX_CMDID_EVICTCACHEENTRY); /* cmdId */
++    out_uint16_le(s, 0); /* flags = 0 */
++    s_push_layer(s, iso_hdr, 4); /* pduLength, set later */
++    out_uint16_le(s, cache_slot);
++    s_mark_end(s);
++    bytes = (int) ((s->end - s->iso_hdr) + 4);
++    s_pop_layer(s, iso_hdr);
++    out_uint32_le(s, bytes);
++    return s;
++}
++
++/******************************************************************************/
++int
++xrdp_egfx_send_evict_cache_entry(
++    struct xrdp_egfx *egfx, int cache_slot)
++{
++    int error;
++    struct stream *s;
++
++    LOG(LOG_LEVEL_TRACE, "xrdp_egfx_send_evict_cache_entry:");
++    s = xrdp_egfx_evict_cache_entry(egfx->bulk, cache_slot);
++    error = xrdp_egfx_send_s(egfx, s);
++    LOG(LOG_LEVEL_DEBUG,
++        "xrdp_egfx_send_evict_cache_entry: xrdp_egfx_send_s error %d",
++        error);
++    free_stream(s);
++    return error;
++}
++
+ /******************************************************************************/
+ struct stream *
+ xrdp_egfx_frame_start(struct xrdp_egfx_bulk *bulk, int frame_id, int timestamp)
+diff --git a/xrdp/xrdp_egfx.h b/xrdp/xrdp_egfx.h
+index 40071f2..bb47393 100644
+--- a/xrdp/xrdp_egfx.h
++++ b/xrdp/xrdp_egfx.h
+@@ -5,4 +5,25 @@ xrdp_egfx_send_surface_to_surface(struct xrdp_egfx *egfx, int src_surface_id,
+                                   int num_dst_points,
+                                   const struct xrdp_egfx_point *dst_points);
+ struct stream *
++xrdp_egfx_surface_to_cache(struct xrdp_egfx_bulk *bulk, int surface_id,
++                           uint64_t cache_key, int cache_slot,
++                           const struct xrdp_egfx_rect *src_rect);
++int
++xrdp_egfx_send_surface_to_cache(struct xrdp_egfx *egfx, int surface_id,
++                                uint64_t cache_key, int cache_slot,
++                                const struct xrdp_egfx_rect *src_rect);
++struct stream *
++xrdp_egfx_cache_to_surface(struct xrdp_egfx_bulk *bulk, int cache_slot,
++                           int surface_id, int num_dst_points,
++                           const struct xrdp_egfx_point *dst_points);
++int
++xrdp_egfx_send_cache_to_surface(
++    struct xrdp_egfx *egfx, int cache_slot, int surface_id,
++    int num_dst_points, const struct xrdp_egfx_point *dst_points);
++struct stream *
++xrdp_egfx_evict_cache_entry(struct xrdp_egfx_bulk *bulk, int cache_slot);
++int
++xrdp_egfx_send_evict_cache_entry(
++    struct xrdp_egfx *egfx, int cache_slot);
++struct stream *
+ xrdp_egfx_frame_start(struct xrdp_egfx_bulk *bulk, int frame_id, int timestamp);

@@ -320,7 +320,13 @@ def main() -> int:
     stdin_closed = False
     try:
         module_path = pathlib.Path(sys.argv[1])
-        library = ctypes.CDLL(str(module_path))
+        # The module resolves xrdp-owned GFX callbacks from the running xrdp
+        # executable. This standalone lifecycle test does not exercise GFX,
+        # so keep those host symbols lazy; loader smoke tests cover them in the
+        # real xrdp process where the callbacks are exported.
+        library = ctypes.CDLL(
+            str(module_path), mode=os.RTLD_LOCAL | os.RTLD_LAZY
+        )
         init = library.mod_init
         init.argtypes = []
         init.restype = ctypes.c_ssize_t

@@ -22,6 +22,12 @@ int xrdp_console_gfx_scaled_output_protocol_eligible(
     uint32_t selected_version,
     uint32_t selected_flags);
 
+/* Validate one single-surface MAP_SURFACE_TO_SCALED_OUTPUT geometry request. */
+int xrdp_console_gfx_scaled_output_mapping_valid(
+    int surface_id, int expected_surface_id,
+    int output_x, int output_y, int target_width, int target_height,
+    uint32_t output_width, uint32_t output_height);
+
 #ifdef __cplusplus
 }
 #endif

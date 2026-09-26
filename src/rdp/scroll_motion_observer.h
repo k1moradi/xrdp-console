@@ -10,6 +10,7 @@
 #include "../core/framebuffer_view.h"
 #include "../core/geometry.h"
 #include "scroll_copy_plan.h"
+#include "scroll_reuse_classifier.h"
 #include "vertical_motion_discovery.h"
 
 namespace xrdp_console::rdp
@@ -42,6 +43,11 @@ struct ScrollMotionObservation final
     std::uint64_t reusablePixels{};
     std::uint64_t exposedPixels{};
     VerticalMotionDiscoveryResult discovery{};
+    std::size_t exactCopyRunCount{};
+    std::uint64_t exactReusablePixels{};
+    std::uint64_t baselineSequence{};
+    bool sourceBaselinePresented{};
+    bool exactCopyRunOverflow{};
 
     [[nodiscard]] bool verified() const noexcept
     {
@@ -79,13 +85,17 @@ public:
     [[nodiscard]] bool valid() const noexcept;
     [[nodiscard]] bool episodeActive() const noexcept;
     [[nodiscard]] PixelSize geometry() const noexcept;
+    [[nodiscard]] std::uint64_t baselineSequence() const noexcept;
+    [[nodiscard]] bool baselinePresented() const noexcept;
+    [[nodiscard]] bool markBaselinePresented(std::uint64_t sequence) noexcept;
 
     [[nodiscard]] bool stageCapture(FramebufferView capture,
                                     Rectangle destination) noexcept;
 
     [[nodiscard]] ScrollMotionObservation completeEpisode(
         Rectangle viewport,
-        std::span<const std::int32_t> preferredDisplacements = {}) noexcept;
+        std::span<const std::int32_t> preferredDisplacements = {},
+        std::span<ExactScrollCopyRun> exactCopyRuns = {}) noexcept;
 
     [[nodiscard]] const ScrollMotionObserverStats &stats() const noexcept;
 
@@ -99,6 +109,8 @@ private:
     std::vector<std::byte> previous_{};
     std::vector<std::byte> working_{};
     std::uint64_t capturedPixels_{};
+    std::uint64_t baselineSequence_{};
+    bool baselinePresented_{};
     bool baselineValid_{};
     bool episodeActive_{};
     ScrollMotionObserverStats stats_{};

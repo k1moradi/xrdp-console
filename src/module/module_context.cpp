@@ -30,10 +30,15 @@ extern "C" {
 #include "../core/presentation_transform.h"
 #include "../clipboard/clipboard_controller.h"
 #include "../rdp/classic_graphics_scheduler.h"
+#include "../rdp/client_scaled_output_plan.h"
 #include "../rdp/gfx_avc420_frame.h"
+#include "../rdp/gfx_bitmap_cache_commands.h"
+#include "../rdp/gfx_bitmap_cache_observer.h"
 #include "../rdp/h264_interaction_scheduler.h"
 #include "../rdp/h264_latest_frame.h"
 #include "../rdp/scroll_motion_observer.h"
+#include "../rdp/scroll_reuse_classifier.h"
+#include "../rdp/verified_bitmap_cache16.h"
 #include "../rdp/rdp_update_sink.h"
 #include "../rdp/rfx_encoder.h"
 #include "../rdp/remote_fx_scheduler.h"
@@ -127,6 +132,226 @@ copy_text(char *destination, std::size_t capacity, const char *value) noexcept
     destination[copied] = '\0';
 }
 
+[[nodiscard]] bool
+bitmapCacheObservationRequested() noexcept
+{
+    const char *value = std::getenv("XRDP_CONSOLE_CLIENT_CACHE_OBSERVE");
+    return value != nullptr && value[0] == '1' && value[1] == '\0';
+}
+
+[[nodiscard]] bool
+h264BitmapCacheIdentityGeometry(
+    const xrdp_console::rdp::H264LatestFrameState &frame) noexcept
+{
+    const PixelSize source = frame.sourceGeometry();
+    return source.widthPixels != 0 && source.heightPixels != 0 &&
+           source == frame.geometry() &&
+           frame.viewport() ==
+               Rectangle{0, 0, source.widthPixels, source.heightPixels};
+}
+
+[[nodiscard]] bool
+selectionContainsRectangle(
+    const GenerationTileMap::Selection &selection,
+    Rectangle rectangle) noexcept
+{
+    if (!selection.valid() || selection.rectangle.x < 0 ||
+        selection.rectangle.y < 0 || rectangle.x < 0 || rectangle.y < 0 ||
+        rectangle.x < selection.rectangle.x ||
+        rectangle.y < selection.rectangle.y || rectangle.widthPixels == 0 ||
+        rectangle.heightPixels == 0)
+    {
+        return false;
+    }
+    const std::uint64_t selectionRight =
+        static_cast<std::uint64_t>(selection.rectangle.x) +
+        selection.rectangle.widthPixels;
+    const std::uint64_t selectionBottom =
+        static_cast<std::uint64_t>(selection.rectangle.y) +
+        selection.rectangle.heightPixels;
+    const std::uint64_t rectangleRight =
+        static_cast<std::uint64_t>(rectangle.x) + rectangle.widthPixels;
+    const std::uint64_t rectangleBottom =
+        static_cast<std::uint64_t>(rectangle.y) + rectangle.heightPixels;
+    return rectangleRight <= selectionRight &&
+           rectangleBottom <= selectionBottom;
+}
+
+constexpr std::uint32_t kMinimumClientScrollQualityBasisPoints = 9500U;
+constexpr std::size_t kCacheToSurfaceCommandBytes = 18U;
+constexpr std::size_t kEvictCacheEntryCommandBytes = 10U;
+constexpr std::size_t kSurfaceToCacheCommandBytes = 28U;
+
+void
+logClientScaledOutputDryRun(
+    xrdp_console_module *module, PixelSize source, PixelSize presentation,
+    const xrdp_console::rdp::H264PresentationPlan &currentPlan,
+    const xrdp_console_graphics_capabilities &capabilities,
+    const char *event) noexcept
+{
+    using xrdp_console::rdp::ClientScaledOutputDryRunPlan;
+    using xrdp_console::rdp::ClientScaledOutputPlanStatus;
+
+    ClientScaledOutputDryRunPlan plan{};
+    const ClientScaledOutputPlanStatus planStatus =
+        xrdp_console::rdp::makeClientScaledOutputDryRunPlan(
+            source, presentation, currentPlan.frameGeometry,
+            xrdp_console::rdp::H264LatestFrameState::kMaximumFrameBytes,
+            plan);
+    const char *reason =
+        xrdp_console::rdp::clientScaledOutputPlanStatusName(planStatus);
+    int eligible = 0;
+
+    struct xrdp_console_scaled_output_mapping mapping{};
+    if (planStatus == ClientScaledOutputPlanStatus::Eligible)
+    {
+        if (capabilities.rdpgfx_scaled_output_protocol_eligible == 0)
+        {
+            reason = "client-capability-unavailable";
+        }
+        else
+        {
+            mapping.surface_id =
+                xrdp_console_module_h264_surface_id(module);
+            mapping.output_x = plan.outputViewport.x;
+            mapping.output_y = plan.outputViewport.y;
+            mapping.target_width =
+                static_cast<int>(plan.outputViewport.widthPixels);
+            mapping.target_height =
+                static_cast<int>(plan.outputViewport.heightPixels);
+            if (mapping.surface_id < 0)
+            {
+                reason = "surface-unavailable";
+            }
+            else if (xrdp_console_module_scaled_output_mapping_available(
+                         module, &mapping) == 0)
+            {
+                reason = "module-preflight-rejected";
+            }
+            else
+            {
+                eligible = 1;
+                reason = "eligible";
+            }
+        }
+    }
+
+    log_message(
+        LOG_LEVEL_INFO,
+        "XRDP_CONSOLE_CLIENT_SCALE_DRY_RUN event=%s eligible=%d reason=%s "
+        "source=%ux%u presentation=%ux%u current_coded=%ux%u "
+        "current_coded_pixels=%llu proposed_coded=%ux%u "
+        "proposed_coded_pixels=%llu reduction_bp=%u "
+        "output_map=%d,%d %ux%u",
+        event, eligible, reason, source.widthPixels, source.heightPixels,
+        presentation.widthPixels, presentation.heightPixels,
+        currentPlan.frameGeometry.widthPixels,
+        currentPlan.frameGeometry.heightPixels,
+        static_cast<unsigned long long>(plan.currentCodedPixels),
+        plan.nativeFrameGeometry.widthPixels,
+        plan.nativeFrameGeometry.heightPixels,
+        static_cast<unsigned long long>(plan.proposedCodedPixels),
+        plan.reductionBasisPoints, plan.outputViewport.x, plan.outputViewport.y,
+        plan.outputViewport.widthPixels, plan.outputViewport.heightPixels);
+}
+
+enum class ClientScaledOutputLiveState
+{
+    NotActivated,
+    Activated,
+    SurfaceUnusable,
+};
+
+struct ClientScaledOutputLiveSetup final
+{
+    ClientScaledOutputLiveState state{ClientScaledOutputLiveState::NotActivated};
+    xrdp_console::rdp::H264LatestFrameState frame{};
+    PresentationTransform transform{};
+    PresentationScaler scaler{};
+};
+
+ClientScaledOutputLiveSetup
+tryActivateClientScaledOutput(
+    xrdp_console_module *module, PixelSize source, PixelSize presentation,
+    const xrdp_console::rdp::H264PresentationPlan &currentPlan,
+    const xrdp_console_graphics_capabilities &capabilities,
+    const char *event) noexcept
+{
+    ClientScaledOutputLiveSetup result{};
+    if (!xrdp_console::rdp::clientScaledOutputActivationRequested(
+            std::getenv("XRDP_CONSOLE_CLIENT_SCALE")))
+    {
+        return result;
+    }
+
+    xrdp_console::rdp::ClientScaledOutputDryRunPlan plan{};
+    const auto planStatus =
+        xrdp_console::rdp::makeClientScaledOutputDryRunPlan(
+            source, presentation, currentPlan.frameGeometry,
+            xrdp_console::rdp::H264LatestFrameState::kMaximumFrameBytes,
+            plan);
+    struct xrdp_console_scaled_output_mapping mapping{};
+    mapping.surface_id = xrdp_console_module_h264_surface_id(module);
+    mapping.output_x = plan.outputViewport.x;
+    mapping.output_y = plan.outputViewport.y;
+    mapping.target_width = static_cast<int>(plan.outputViewport.widthPixels);
+    mapping.target_height = static_cast<int>(plan.outputViewport.heightPixels);
+    const Rectangle nativeViewport{
+        0, 0, source.widthPixels, source.heightPixels};
+
+    if (planStatus !=
+            xrdp_console::rdp::ClientScaledOutputPlanStatus::Eligible ||
+        capabilities.rdpgfx_scaled_output_protocol_eligible == 0 ||
+        mapping.surface_id < 0 ||
+        xrdp_console_module_scaled_output_mapping_available(
+            module, &mapping) == 0 ||
+        !result.frame.configure(source, source, source, nativeViewport) ||
+        !result.transform.configure(source, presentation, plan.outputViewport) ||
+        !result.scaler.configure(source, source, nativeViewport))
+    {
+        log_message(
+            LOG_LEVEL_INFO,
+            "XRDP_CONSOLE_CLIENT_SCALE_LIVE event=%s result=fallback-safe "
+            "reason=preflight-rejected",
+            event);
+        return result;
+    }
+
+    const int activation =
+        xrdp_console_module_activate_native_scaled_h264_surface(
+            module, static_cast<int>(source.widthPixels),
+            static_cast<int>(source.heightPixels), &mapping);
+    if (activation == XRDP_CONSOLE_SCALED_OUTPUT_ACTIVE)
+    {
+        result.state = ClientScaledOutputLiveState::Activated;
+        log_message(
+            LOG_LEVEL_INFO,
+            "XRDP_CONSOLE_CLIENT_SCALE_LIVE event=%s result=active "
+            "coded=%ux%u output_map=%d,%d %dx%d reduction_bp=%u",
+            event, source.widthPixels, source.heightPixels, mapping.output_x,
+            mapping.output_y, mapping.target_width, mapping.target_height,
+            plan.reductionBasisPoints);
+    }
+    else if (activation == XRDP_CONSOLE_SCALED_OUTPUT_SURFACE_UNUSABLE)
+    {
+        result.state = ClientScaledOutputLiveState::SurfaceUnusable;
+        log_message(
+            LOG_LEVEL_ERROR,
+            "XRDP_CONSOLE_CLIENT_SCALE_LIVE event=%s "
+            "result=surface-unusable",
+            event);
+    }
+    else
+    {
+        log_message(
+            LOG_LEVEL_WARNING,
+            "XRDP_CONSOLE_CLIENT_SCALE_LIVE event=%s "
+            "result=fallback-safe reason=surface-activation-failed",
+            event);
+    }
+    return result;
+}
+
 class RuntimeProfile final
 {
 public:
@@ -211,6 +436,57 @@ public:
         {
             noteDuration(counters_.h264AckCalls, counters_.h264AckWaitUs,
                          counters_.h264AckWaitMaxUs, elapsed);
+        }
+    }
+
+    void noteBitmapCacheObservation(
+        const xrdp_console::rdp::BitmapCacheReuseObservation &observation)
+        noexcept
+    {
+        if (!enabled_ ||
+            observation.kind ==
+                xrdp_console::rdp::BitmapCacheReuseObservationKind::Invalid)
+        {
+            return;
+        }
+        ++counters_.bitmapCacheSamples;
+        if (observation.reusable())
+        {
+            ++counters_.bitmapCacheReuseCandidates;
+            counters_.bitmapCacheCandidatePixels +=
+                static_cast<std::uint64_t>(
+                    observation.currentRectangle.widthPixels) *
+                observation.currentRectangle.heightPixels;
+            counters_.bitmapCacheCandidateBytes += observation.bitmapBytes;
+        }
+    }
+
+    void noteBitmapCacheLiveHit(Rectangle rectangle) noexcept
+    {
+        if (enabled_)
+        {
+            ++counters_.bitmapCacheLiveHits;
+            counters_.bitmapCacheSuppressedPixels += area(rectangle);
+        }
+    }
+
+    void noteBitmapCacheAdmission(bool evicted) noexcept
+    {
+        if (enabled_)
+        {
+            ++counters_.bitmapCacheAdmissions;
+            if (evicted)
+            {
+                ++counters_.bitmapCacheEvictions;
+            }
+        }
+    }
+
+    void noteBitmapCacheFallback() noexcept
+    {
+        if (enabled_)
+        {
+            ++counters_.bitmapCacheFallbacks;
         }
     }
 
@@ -308,6 +584,15 @@ private:
         std::uint64_t h264AckCalls{};
         std::uint64_t h264AckWaitUs{};
         std::uint64_t h264AckWaitMaxUs{};
+        std::uint64_t bitmapCacheSamples{};
+        std::uint64_t bitmapCacheReuseCandidates{};
+        std::uint64_t bitmapCacheCandidatePixels{};
+        std::uint64_t bitmapCacheCandidateBytes{};
+        std::uint64_t bitmapCacheLiveHits{};
+        std::uint64_t bitmapCacheSuppressedPixels{};
+        std::uint64_t bitmapCacheAdmissions{};
+        std::uint64_t bitmapCacheEvictions{};
+        std::uint64_t bitmapCacheFallbacks{};
     };
 
     static bool profileEnabled() noexcept
@@ -337,7 +622,11 @@ private:
                counters_.h264CaptureCalls != 0 ||
                counters_.h264ConversionCalls != 0 ||
                counters_.h264SubmitCalls != 0 ||
-               counters_.h264AckCalls != 0;
+               counters_.h264AckCalls != 0 ||
+               counters_.bitmapCacheSamples != 0 ||
+               counters_.bitmapCacheLiveHits != 0 ||
+               counters_.bitmapCacheAdmissions != 0 ||
+               counters_.bitmapCacheFallbacks != 0;
     }
 
     static void noteDuration(std::uint64_t &calls, std::uint64_t &totalUs,
@@ -378,6 +667,12 @@ private:
             "h264_submit_us=%llu h264_submit_max_us=%llu "
             "h264_ack_calls=%llu h264_ack_wait_us=%llu "
             "h264_ack_wait_max_us=%llu "
+            "bitmap_cache_samples=%llu bitmap_cache_reuse_candidates=%llu "
+            "bitmap_cache_candidate_pixels=%llu "
+            "bitmap_cache_candidate_bytes=%llu "
+            "bitmap_cache_live_hits=%llu bitmap_cache_suppressed_pixels=%llu "
+            "bitmap_cache_admissions=%llu bitmap_cache_evictions=%llu "
+            "bitmap_cache_fallbacks=%llu "
             "reported_damage_pixels_per_s=%.0f "
             "damage_snapshot_pixels_per_s=%.0f captured_pixels_per_s=%.0f "
             "paint_calls_per_s=%.0f uncompressed_bytes_per_s=%.0f",
@@ -405,6 +700,19 @@ private:
             static_cast<unsigned long long>(counters_.h264AckCalls),
             static_cast<unsigned long long>(counters_.h264AckWaitUs),
             static_cast<unsigned long long>(counters_.h264AckWaitMaxUs),
+            static_cast<unsigned long long>(counters_.bitmapCacheSamples),
+            static_cast<unsigned long long>(
+                counters_.bitmapCacheReuseCandidates),
+            static_cast<unsigned long long>(
+                counters_.bitmapCacheCandidatePixels),
+            static_cast<unsigned long long>(
+                counters_.bitmapCacheCandidateBytes),
+            static_cast<unsigned long long>(counters_.bitmapCacheLiveHits),
+            static_cast<unsigned long long>(
+                counters_.bitmapCacheSuppressedPixels),
+            static_cast<unsigned long long>(counters_.bitmapCacheAdmissions),
+            static_cast<unsigned long long>(counters_.bitmapCacheEvictions),
+            static_cast<unsigned long long>(counters_.bitmapCacheFallbacks),
             perSecond(counters_.damagedPixels, window),
             perSecond(counters_.snapshotPixels, window),
             perSecond(counters_.capturedPixels, window),
@@ -585,6 +893,23 @@ struct PendingH264Tile final
     }
 };
 
+struct PendingBitmapCacheHit final
+{
+    GenerationTileMap::Selection selection{};
+    std::uint16_t cacheSlot{};
+
+    [[nodiscard]] bool active() const noexcept
+    {
+        return selection.valid() && cacheSlot != 0;
+    }
+
+    void clear() noexcept
+    {
+        selection = {};
+        cacheSlot = 0;
+    }
+};
+
 enum class GraphicsTransport
 {
     ClassicBitmap,
@@ -668,8 +993,12 @@ struct ModuleContext::Impl
     RfxSurfaceSink rfxSurfaceSink{nullptr};
     xrdp_console::rdp::H264LatestFrameState h264Frame{};
     xrdp_console::rdp::ScrollMotionObserver scrollMotionObserver{};
+    xrdp_console::rdp::BitmapCacheReuseObserver bitmapCacheObserver{};
+    xrdp_console::rdp::VerifiedBitmapCache16 verifiedBitmapCache{};
+    PendingBitmapCacheHit pendingBitmapCacheHit{};
     std::uint32_t h264SubmittedFrameId{};
     Clock::time_point h264SubmittedAt{};
+    std::uint64_t h264SubmittedScrollBaselineSequence{};
     // A non-owning sourcePixels view pins the XShm arena until all bounded
     // scaled output rows for this source tile have been written to NV12.
     PendingH264Tile pendingH264Tile{};
@@ -682,6 +1011,7 @@ struct ModuleContext::Impl
     bool outputSuppressed{false};
     bool x11EventBudgetPending{false};
     bool presentationDeadlineArmed{false};
+    bool clientScaledOutputResizeRearmPending{false};
     Clock::time_point presentationDeadline{};
 
     void armPresentationImmediately() noexcept
@@ -712,12 +1042,15 @@ struct ModuleContext::Impl
         }
         if (graphicsTransport == GraphicsTransport::H264Gfx)
         {
+            verifiedBitmapCache.disable();
+            pendingBitmapCacheHit.clear();
             if (!h264Frame.valid())
             {
                 fullPresentationInvalidation = false;
                 return false;
             }
             scrollMotionObserver.invalidateBaseline();
+            h264SubmittedScrollBaselineSequence = 0;
             h264Frame.invalidateAll();
             fullPresentationInvalidation = false;
             return true;
@@ -949,21 +1282,52 @@ ModuleContext::connect() noexcept
                     sourceGeometry, impl_->state.presentationGeometry,
                     h264Plan.viewport))
             {
-                presentationTransform = std::move(h264Transform);
-                presentationScaler = std::move(h264Scaler);
-                graphicsTransport = GraphicsTransport::H264Gfx;
-                rfxEncoder.reset();
-                log_message(
-                    LOG_LEVEL_INFO,
-                    "xrdp-console: H264 presentation plan surface=%ux%u "
-                    "coded=%ux%u viewport=%d,%d %ux%u",
-                    impl_->state.presentationGeometry.widthPixels,
-                    impl_->state.presentationGeometry.heightPixels,
-                    h264Plan.frameGeometry.widthPixels,
-                    h264Plan.frameGeometry.heightPixels,
-                    h264Plan.viewport.x, h264Plan.viewport.y,
-                    h264Plan.viewport.widthPixels,
-                    h264Plan.viewport.heightPixels);
+                logClientScaledOutputDryRun(
+                    impl_->module, sourceGeometry,
+                    impl_->state.presentationGeometry, h264Plan,
+                    negotiatedGraphics, "connect");
+                ClientScaledOutputLiveSetup live =
+                    tryActivateClientScaledOutput(
+                        impl_->module, sourceGeometry,
+                        impl_->state.presentationGeometry, h264Plan,
+                        negotiatedGraphics, "connect");
+                if (live.state == ClientScaledOutputLiveState::SurfaceUnusable)
+                {
+                    h264Frame.reset();
+                    graphicsTransport = GraphicsTransport::ClassicBitmap;
+                    rfxEncoder.reset();
+                    log_message(
+                        LOG_LEVEL_ERROR,
+                        "xrdp-console: client-scaled H264 surface became "
+                        "unusable; falling back to GFX Planar");
+                }
+                else
+                {
+                    if (live.state == ClientScaledOutputLiveState::Activated)
+                    {
+                        h264Frame = std::move(live.frame);
+                        h264Transform = std::move(live.transform);
+                        h264Scaler = std::move(live.scaler);
+                    }
+                    presentationTransform = std::move(h264Transform);
+                    presentationScaler = std::move(h264Scaler);
+                    graphicsTransport = GraphicsTransport::H264Gfx;
+                    rfxEncoder.reset();
+                    if (live.state != ClientScaledOutputLiveState::Activated)
+                    {
+                        log_message(
+                            LOG_LEVEL_INFO,
+                            "xrdp-console: H264 presentation plan "
+                            "surface=%ux%u coded=%ux%u viewport=%d,%d %ux%u",
+                            impl_->state.presentationGeometry.widthPixels,
+                            impl_->state.presentationGeometry.heightPixels,
+                            h264Plan.frameGeometry.widthPixels,
+                            h264Plan.frameGeometry.heightPixels,
+                            h264Plan.viewport.x, h264Plan.viewport.y,
+                            h264Plan.viewport.widthPixels,
+                            h264Plan.viewport.heightPixels);
+                    }
+                }
             }
             else
             {
@@ -1113,6 +1477,55 @@ ModuleContext::connect() noexcept
         impl_->presentationScaler = std::move(presentationScaler);
         impl_->h264Frame = std::move(h264Frame);
         impl_->scrollMotionObserver.reset();
+        impl_->h264SubmittedScrollBaselineSequence = 0;
+        impl_->bitmapCacheObserver.reset();
+        if (graphicsTransport == GraphicsTransport::H264Gfx &&
+            bitmapCacheObservationRequested())
+        {
+            const auto limits = xrdp_console::rdp::gfxBitmapCacheLimits(
+                static_cast<std::uint32_t>(
+                    negotiatedGraphics.selected_gfx_cap_version),
+                static_cast<std::uint32_t>(
+                    negotiatedGraphics.selected_gfx_cap_flags));
+            const bool enabled = impl_->bitmapCacheObserver.configure(limits);
+            log_message(
+                LOG_LEVEL_INFO,
+                "XRDP_CONSOLE_CACHE_OBSERVE enabled=%d "
+                "protocol_supported=%d capacity_known=%d "
+                "maximum_bytes=%llu maximum_slots=%u",
+                enabled ? 1 : 0, limits.protocolSupported ? 1 : 0,
+                limits.capacityKnown ? 1 : 0,
+                static_cast<unsigned long long>(limits.maximumBytes),
+                limits.maximumSlots);
+        }
+        impl_->verifiedBitmapCache.disable();
+        impl_->pendingBitmapCacheHit.clear();
+        if (graphicsTransport == GraphicsTransport::H264Gfx &&
+            xrdp_console::rdp::verifiedBitmapCacheRequested(
+                std::getenv("XRDP_CONSOLE_CLIENT_CACHE")))
+        {
+            const auto limits = xrdp_console::rdp::gfxBitmapCacheLimits(
+                static_cast<std::uint32_t>(
+                    negotiatedGraphics.selected_gfx_cap_version),
+                static_cast<std::uint32_t>(
+                    negotiatedGraphics.selected_gfx_cap_flags));
+            const bool identity =
+                h264BitmapCacheIdentityGeometry(impl_->h264Frame);
+            const bool enabled = identity && limits.capacityKnown &&
+                impl_->verifiedBitmapCache.configure(
+                    limits.maximumBytes, limits.maximumSlots);
+            log_message(
+                LOG_LEVEL_INFO,
+                "XRDP_CONSOLE_CLIENT_CACHE event=connect enabled=%d "
+                "identity=%d protocol_supported=%d capacity_known=%d "
+                "slots=16 verify_bytes=%llu",
+                enabled ? 1 : 0, identity ? 1 : 0,
+                limits.protocolSupported ? 1 : 0,
+                limits.capacityKnown ? 1 : 0,
+                static_cast<unsigned long long>(
+                    xrdp_console::rdp::VerifiedBitmapCache16::kSlotCount *
+                    xrdp_console::rdp::VerifiedBitmapCache16::kMaximumBitmapBytes));
+        }
         if (graphicsTransport == GraphicsTransport::H264Gfx &&
             !impl_->scrollMotionObserver.configure(sourceGeometry))
         {
@@ -1189,6 +1602,10 @@ ModuleContext::connect() noexcept
         impl_->rfxEncoder.reset();
         impl_->h264Frame.reset();
         impl_->scrollMotionObserver.reset();
+        impl_->bitmapCacheObserver.reset();
+        impl_->verifiedBitmapCache.disable();
+        impl_->pendingBitmapCacheHit.clear();
+        impl_->h264SubmittedScrollBaselineSequence = 0;
         impl_->h264SubmittedFrameId = 0;
         impl_->h264SubmittedAt = {};
         impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
@@ -1220,6 +1637,15 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     (void)monitors;
     if (!valid() || width <= 0 || height <= 0)
     {
+        return 1;
+    }
+    impl_->clientScaledOutputResizeRearmPending = false;
+    if (xrdp_console_module_clear_scaled_output_aux_surfaces(
+            impl_->module) != 0)
+    {
+        log_message(LOG_LEVEL_ERROR,
+                    "xrdp-console: failed to clear client-scaled output "
+                    "margin surfaces before resize");
         return 1;
     }
 
@@ -1283,7 +1709,6 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
             xrdp_console::rdp::makeH264PresentationPlan(
                 impl_->state.sourceGeometry, presentationGeometry, h264Plan);
         if (h264GeometrySupported &&
-            xrdp_console_module_h264_encoder_available(impl_->module) != 0 &&
             xrdp_console_module_h264_surface_id(impl_->module) >= 0 &&
             h264Frame.configure(
                 impl_->state.sourceGeometry, presentationGeometry,
@@ -1307,6 +1732,10 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
                 h264Plan.frameGeometry.heightPixels, h264Plan.viewport.x,
                 h264Plan.viewport.y, h264Plan.viewport.widthPixels,
                 h264Plan.viewport.heightPixels);
+            logClientScaledOutputDryRun(
+                impl_->module, impl_->state.sourceGeometry,
+                presentationGeometry, h264Plan, negotiatedGraphics,
+                "resize");
         }
         else
         {
@@ -1317,9 +1746,6 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
             }
             const char *reason = !h264GeometrySupported
                                      ? "unsupported presentation geometry"
-                                 : xrdp_console_module_h264_encoder_available(
-                                       impl_->module) == 0
-                                     ? "xrdp H.264 encoder unavailable"
                                      : "H.264 surface or state setup failed";
             log_message(
                 LOG_LEVEL_WARNING,
@@ -1351,6 +1777,10 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     impl_->rfxEncoder = std::move(rfxEncoder);
     impl_->h264Frame = std::move(h264Frame);
     impl_->scrollMotionObserver.reset();
+    impl_->bitmapCacheObserver.reset();
+    impl_->verifiedBitmapCache.disable();
+    impl_->pendingBitmapCacheHit.clear();
+    impl_->h264SubmittedScrollBaselineSequence = 0;
     if (graphicsTransport == GraphicsTransport::H264Gfx &&
         !impl_->scrollMotionObserver.configure(impl_->state.sourceGeometry))
     {
@@ -1360,9 +1790,37 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
                     impl_->state.sourceGeometry.widthPixels,
                     impl_->state.sourceGeometry.heightPixels);
     }
+    if (graphicsTransport == GraphicsTransport::H264Gfx &&
+        bitmapCacheObservationRequested())
+    {
+        const auto limits = xrdp_console::rdp::gfxBitmapCacheLimits(
+            static_cast<std::uint32_t>(
+                negotiatedGraphics.selected_gfx_cap_version),
+            static_cast<std::uint32_t>(
+                negotiatedGraphics.selected_gfx_cap_flags));
+        const bool enabled = impl_->bitmapCacheObserver.configure(limits);
+        log_message(
+            LOG_LEVEL_INFO,
+            "XRDP_CONSOLE_CACHE_OBSERVE event=resize enabled=%d "
+            "protocol_supported=%d capacity_known=%d "
+            "maximum_bytes=%llu maximum_slots=%u",
+            enabled ? 1 : 0, limits.protocolSupported ? 1 : 0,
+            limits.capacityKnown ? 1 : 0,
+            static_cast<unsigned long long>(limits.maximumBytes),
+            limits.maximumSlots);
+    }
     impl_->h264SubmittedFrameId = 0;
     impl_->h264SubmittedAt = {};
     impl_->graphicsTransport = graphicsTransport;
+    impl_->clientScaledOutputResizeRearmPending =
+        graphicsTransport == GraphicsTransport::H264Gfx &&
+        xrdp_console::rdp::clientScaledOutputActivationRequested(
+            std::getenv("XRDP_CONSOLE_CLIENT_SCALE"));
+    if (impl_->clientScaledOutputResizeRearmPending)
+    {
+        log_message(LOG_LEVEL_INFO,
+                    "XRDP_CONSOLE_CLIENT_SCALE_LIVE event=resize result=staged");
+    }
     if (graphicsTransport == GraphicsTransport::RemoteFx)
     {
         impl_->rfxLetterboxFill.regions = letterboxRegions;
@@ -1439,6 +1897,61 @@ ModuleContext::suppress_output(bool suppress, int left, int top, int right,
     clearInteractionPriority(impl_->interactionPriority);
     impl_->pendingRfx.clear();
     impl_->rfxLetterboxFill.clear();
+
+    if (xrdp_console::rdp::shouldAttemptClientScaledOutputResizeRearm(
+            impl_->clientScaledOutputResizeRearmPending,
+            impl_->graphicsTransport == GraphicsTransport::H264Gfx,
+            suppress))
+    {
+        impl_->clientScaledOutputResizeRearmPending = false;
+        xrdp_console::rdp::H264PresentationPlan currentPlan{};
+        struct xrdp_console_graphics_capabilities negotiatedGraphics{};
+        const bool prerequisitesReady =
+            xrdp_console::rdp::makeH264PresentationPlan(
+                impl_->state.sourceGeometry,
+                impl_->state.presentationGeometry, currentPlan) &&
+            xrdp_console_module_get_graphics_capabilities(
+                impl_->module, &negotiatedGraphics) == 0 &&
+            xrdp_console_module_h264_encoder_available(impl_->module) != 0;
+        if (!prerequisitesReady)
+        {
+            log_message(
+                LOG_LEVEL_WARNING,
+                "XRDP_CONSOLE_CLIENT_SCALE_LIVE event=resize-resume "
+                "result=fallback-safe reason=post-resize-prerequisite-unavailable");
+        }
+        else
+        {
+            ClientScaledOutputLiveSetup live = tryActivateClientScaledOutput(
+                impl_->module, impl_->state.sourceGeometry,
+                impl_->state.presentationGeometry, currentPlan,
+                negotiatedGraphics, "resize-resume");
+            if (live.state == ClientScaledOutputLiveState::Activated)
+            {
+                impl_->h264Frame = std::move(live.frame);
+                impl_->presentationTransform = std::move(live.transform);
+                impl_->presentationScaler = std::move(live.scaler);
+                impl_->h264SubmittedFrameId = 0;
+                impl_->h264SubmittedAt = {};
+                log_message(
+                    LOG_LEVEL_INFO,
+                    "xrdp-console: client-scaled H264 re-armed after resize");
+            }
+            else if (live.state ==
+                     ClientScaledOutputLiveState::SurfaceUnusable)
+            {
+                impl_->h264Frame.reset();
+                impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
+                impl_->h264SubmittedFrameId = 0;
+                impl_->h264SubmittedAt = {};
+                log_message(
+                    LOG_LEVEL_ERROR,
+                    "xrdp-console: client-scaled H264 surface unusable after "
+                    "resize; falling back to xrdp GFX output");
+            }
+        }
+    }
+
     if (impl_->state.sourceGeometry.widthPixels != 0 &&
         impl_->state.sourceGeometry.heightPixels != 0)
     {
@@ -1591,6 +2104,7 @@ ModuleContext::frame_ack(int flags, int frame_id) noexcept
 
     if (impl_->h264Frame.releaseSubmission(frame_id))
     {
+        impl_->verifiedBitmapCache.acknowledge(frame_id);
         if (impl_->profile.enabled() &&
             impl_->h264SubmittedFrameId ==
                 static_cast<std::uint32_t>(frame_id) &&
@@ -1622,6 +2136,9 @@ ModuleContext::end() noexcept
     {
         return 1;
     }
+    (void)xrdp_console_module_clear_scaled_output_aux_surfaces(
+        impl_->module);
+    impl_->clientScaledOutputResizeRearmPending = false;
     impl_->profile.flush();
     // X11DisplayConnection destroys the xrdp wait object before disconnecting
     // XCB. Reset it before changing the lifecycle state.
@@ -1632,8 +2149,12 @@ ModuleContext::end() noexcept
     impl_->rfxEncoder.reset();
     impl_->h264Frame.reset();
     impl_->scrollMotionObserver.reset();
+    impl_->bitmapCacheObserver.reset();
+    impl_->verifiedBitmapCache.disable();
+    impl_->pendingBitmapCacheHit.clear();
     impl_->h264SubmittedFrameId = 0;
     impl_->h264SubmittedAt = {};
+    impl_->h264SubmittedScrollBaselineSequence = 0;
     impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
     impl_->sharedMemoryCapture.reset();
     impl_->cursorTracker.reset();
@@ -2175,8 +2696,10 @@ ModuleContext::check_h264_gfx() noexcept
     using xrdp_console::fingerprintBgraRectangle;
     using xrdp_console::rdp::GfxAvc420Command;
     using xrdp_console::rdp::GfxSolidFillCommand;
+    using xrdp_console::rdp::GfxSurfaceToSurfaceCommand;
     using xrdp_console::rdp::buildGfxAvc420Command;
     using xrdp_console::rdp::buildGfxSolidFillCommand;
+    using xrdp_console::rdp::buildGfxSurfaceToSurfaceCommand;
     using xrdp_console::rdp::updateNv12Rectangle_709FullRange;
 
     if (!valid() || !impl_->h264Frame.valid() ||
@@ -2185,6 +2708,14 @@ ModuleContext::check_h264_gfx() noexcept
         !impl_->sharedMemoryCapture->valid())
     {
         return 1;
+    }
+
+    if (!impl_->h264Frame.frameInFlight() &&
+        impl_->h264SubmittedScrollBaselineSequence != 0)
+    {
+        static_cast<void>(impl_->scrollMotionObserver.markBaselinePresented(
+            impl_->h264SubmittedScrollBaselineSequence));
+        impl_->h264SubmittedScrollBaselineSequence = 0;
     }
 
     const auto finish = [this]() noexcept {
@@ -2360,6 +2891,43 @@ ModuleContext::check_h264_gfx() noexcept
             {
                 return 1;
             }
+            if (impl_->bitmapCacheObserver.valid())
+            {
+                impl_->profile.noteBitmapCacheObservation(
+                    impl_->bitmapCacheObserver.note(
+                        sourceTile, fingerprint.value));
+            }
+            const bool tileChanged =
+                impl_->h264Frame.capturedTileChanged(
+                    sourceTile, fingerprint.value);
+            impl_->verifiedBitmapCache.discardSeedFor(sourceTile);
+            if (impl_->pendingBitmapCacheHit.active() &&
+                impl_->pendingBitmapCacheHit.selection.rectangle == sourceTile)
+            {
+                impl_->pendingBitmapCacheHit.clear();
+            }
+            if (tileChanged && impl_->verifiedBitmapCache.valid() &&
+                h264BitmapCacheIdentityGeometry(impl_->h264Frame) &&
+                mappedFrameRectangle == sourceTile)
+            {
+                const std::uint16_t cacheSlot =
+                    impl_->verifiedBitmapCache.findVerified(
+                        fingerprint.value, pixels, localTile);
+                if (cacheSlot != 0)
+                {
+                    // Only one cache-to-surface action is admitted per logical
+                    // frame. Replacing a different pending candidate merely
+                    // falls back to H.264 for that older tile.
+                    impl_->pendingBitmapCacheHit = {
+                        tileSelection, cacheSlot};
+                }
+                else
+                {
+                    static_cast<void>(impl_->verifiedBitmapCache.stageSeed(
+                        sourceTile, tileSelection.generation,
+                        fingerprint.value, pixels, localTile));
+                }
+            }
             impl_->profile.noteCapture(captureRectangle);
 
             if (impl_->scrollMotionObserver.valid() &&
@@ -2376,8 +2944,7 @@ ModuleContext::check_h264_gfx() noexcept
                 mappedFrameRectangle.heightPixels == 0)
             {
                 const bool committed =
-                    impl_->h264Frame.capturedTileChanged(
-                        sourceTile, fingerprint.value)
+                    tileChanged
                     ? impl_->h264Frame.commitCapturedInvisible(
                           tileSelection, fingerprint.value)
                     : impl_->h264Frame.commitCapturedUnchanged(
@@ -2387,8 +2954,7 @@ ModuleContext::check_h264_gfx() noexcept
                     return 1;
                 }
             }
-            else if (!impl_->h264Frame.capturedTileChanged(
-                         sourceTile, fingerprint.value))
+            else if (!tileChanged)
             {
                 if (!impl_->h264Frame.commitCapturedUnchanged(
                         tileSelection, fingerprint.value))
@@ -2474,6 +3040,12 @@ ModuleContext::check_h264_gfx() noexcept
         }
     }
 
+    std::array<xrdp_console::rdp::ExactScrollCopyRun,
+               xrdp_console::rdp::kMaximumExactScrollCopyRuns>
+        exactScrollCopyRuns{};
+    std::size_t exactScrollCopyRunCount = 0;
+    std::uint64_t exactScrollCopyPixels = 0;
+    std::int32_t scrollCopyDisplacementY = 0;
     if (impl_->scrollMotionObserver.valid() &&
         impl_->scrollMotionObserver.episodeActive() &&
         !impl_->pendingH264Tile.active() &&
@@ -2481,21 +3053,51 @@ ModuleContext::check_h264_gfx() noexcept
         !impl_->damageTracker->hasPendingDamage())
     {
         const PixelSize source = impl_->h264Frame.sourceGeometry();
+        const bool identitySurface =
+            source == impl_->h264Frame.geometry() &&
+            impl_->h264Frame.viewport() ==
+                Rectangle{0, 0, source.widthPixels, source.heightPixels};
+        const bool copyCandidate =
+            xrdp_console::rdp::clientScrollCopyRequested(
+                std::getenv("XRDP_CONSOLE_CLIENT_SCROLL")) &&
+            identitySurface &&
+            impl_->scrollMotionObserver.baselinePresented() &&
+            impl_->h264Frame.baselineReady() &&
+            !impl_->h264Frame.baselineSubmissionPending() &&
+            !impl_->h264Frame.frameInFlight();
+        const std::span<xrdp_console::rdp::ExactScrollCopyRun> copyOutput =
+            copyCandidate
+                ? std::span(exactScrollCopyRuns)
+                : std::span<xrdp_console::rdp::ExactScrollCopyRun>{};
         const auto observation = impl_->scrollMotionObserver.completeEpisode(
-            {0, 0, source.widthPixels, source.heightPixels});
+            {0, 0, source.widthPixels, source.heightPixels}, {}, copyOutput);
         if (observation.verified())
         {
+            if (!observation.exactCopyRunOverflow &&
+                observation.discovery.bestQualityBasisPoints >=
+                    kMinimumClientScrollQualityBasisPoints)
+            {
+                exactScrollCopyRunCount = observation.exactCopyRunCount;
+                exactScrollCopyPixels = observation.exactReusablePixels;
+                scrollCopyDisplacementY = observation.displacementY;
+            }
             log_message(
                 LOG_LEVEL_INFO,
                 "XRDP_CONSOLE_SCROLL_OBSERVE verified dy=%d "
                 "captured_pixels=%llu reusable_pixels=%llu "
-                "exposed_pixels=%llu candidates=%u quality_bp=%u",
+                "exposed_pixels=%llu candidates=%u quality_bp=%u "
+                "exact_copy_runs=%llu exact_copy_pixels=%llu overflow=%u",
                 observation.displacementY,
                 static_cast<unsigned long long>(observation.capturedPixels),
                 static_cast<unsigned long long>(observation.reusablePixels),
                 static_cast<unsigned long long>(observation.exposedPixels),
                 observation.discovery.candidatesEvaluated,
-                observation.discovery.bestQualityBasisPoints);
+                observation.discovery.bestQualityBasisPoints,
+                static_cast<unsigned long long>(
+                    observation.exactCopyRunCount),
+                static_cast<unsigned long long>(
+                    observation.exactReusablePixels),
+                observation.exactCopyRunOverflow ? 1U : 0U);
         }
         else if (observation.kind ==
                  xrdp_console::rdp::ScrollMotionObservationKind::Ambiguous)
@@ -2570,10 +3172,265 @@ ModuleContext::check_h264_gfx() noexcept
         return finish();
     }
 
-    std::array<Rectangle, kMaximumH264Selections> rectangles{};
-    for (std::size_t index = 0; index < transmissionCount; ++index)
+    std::array<std::byte, kMaximumH264CommandBytes> preWireCommands{};
+    std::array<Rectangle,
+               xrdp_console::rdp::kMaximumExactScrollCopyRuns>
+        clientCopiedRectangles{};
+    std::size_t preWireCommandBytes = 0;
+    std::size_t clientCopiedRectangleCount = 0;
+    bool useScrollCopy = false;
+
+    /*
+     * The current interaction scheduler is authoritative. Scroll reuse may
+     * only remove complete copied tiles from the selections it already chose.
+     */
+    const auto authoritativeSelections = transmissionSelections;
+    const std::size_t authoritativeCount = transmissionCount;
+    if (exactScrollCopyRunCount != 0 &&
+        !impl_->h264Frame.baselineSubmissionPending())
     {
-        const Rectangle rectangle = transmissionSelections[index].rectangle;
+        const auto selectionContains = [](
+            const GenerationTileMap::Selection &selection,
+            Rectangle rectangle) noexcept {
+            if (!selection.valid() ||
+                rectangle.x < selection.rectangle.x ||
+                rectangle.y < selection.rectangle.y ||
+                rectangle.widthPixels == 0 || rectangle.heightPixels == 0)
+            {
+                return false;
+            }
+            const std::uint64_t selectionRight =
+                static_cast<std::uint64_t>(selection.rectangle.x) +
+                selection.rectangle.widthPixels;
+            const std::uint64_t selectionBottom =
+                static_cast<std::uint64_t>(selection.rectangle.y) +
+                selection.rectangle.heightPixels;
+            const std::uint64_t rectangleRight =
+                static_cast<std::uint64_t>(rectangle.x) +
+                rectangle.widthPixels;
+            const std::uint64_t rectangleBottom =
+                static_cast<std::uint64_t>(rectangle.y) +
+                rectangle.heightPixels;
+            return rectangleRight <= selectionRight &&
+                   rectangleBottom <= selectionBottom;
+        };
+
+        for (std::size_t runIndex = 0;
+             runIndex < exactScrollCopyRunCount; ++runIndex)
+        {
+            const auto &run = exactScrollCopyRuns[runIndex];
+            const Rectangle destination = run.destinationRectangle();
+            bool schedulerSelected = false;
+            for (std::size_t selectionIndex = 0;
+                 selectionIndex < authoritativeCount; ++selectionIndex)
+            {
+                if (selectionContains(
+                        authoritativeSelections[selectionIndex], destination))
+                {
+                    schedulerSelected = true;
+                    break;
+                }
+            }
+            if (!schedulerSelected)
+            {
+                continue;
+            }
+
+            const xrdp_console::rdp::GfxPoint point = run.destinationPoint;
+            const std::size_t bytes = buildGfxSurfaceToSurfaceCommand(
+                GfxSurfaceToSurfaceCommand{
+                    static_cast<std::uint16_t>(surfaceId),
+                    static_cast<std::uint16_t>(surfaceId),
+                    run.sourceRectangle,
+                    std::span<const xrdp_console::rdp::GfxPoint>(&point, 1)},
+                std::span<std::byte>(preWireCommands)
+                    .subspan(preWireCommandBytes));
+            if (bytes == 0)
+            {
+                preWireCommandBytes = 0;
+                clientCopiedRectangleCount = 0;
+                break;
+            }
+            preWireCommandBytes += bytes;
+            clientCopiedRectangles[clientCopiedRectangleCount++] = destination;
+        }
+
+        if (clientCopiedRectangleCount != 0)
+        {
+            std::array<GenerationTileMap::Selection, kMaximumH264Selections>
+                residualSelections{};
+            const std::size_t residualCount =
+                impl_->h264Frame.collectReadyTransmissionSelectionsExcluding(
+                    std::span<const GenerationTileMap::Selection>(
+                        authoritativeSelections.data(), authoritativeCount),
+                    std::span<const Rectangle>(
+                        clientCopiedRectangles.data(),
+                        clientCopiedRectangleCount),
+                    residualSelections);
+            if (residualCount != 0)
+            {
+                transmissionSelections = residualSelections;
+                transmissionCount = residualCount;
+                useScrollCopy = true;
+            }
+            else
+            {
+                preWireCommandBytes = 0;
+                clientCopiedRectangleCount = 0;
+            }
+        }
+    }
+
+    // Scroll reuse may already have removed authoritative work from this list.
+    // Cache reuse is a second refinement of the remaining H.264 transmissions.
+    const auto submittedSelections = transmissionSelections;
+    const std::size_t submittedCount = transmissionCount;
+    std::array<GenerationTileMap::Selection, kMaximumH264Selections>
+        h264Selections{};
+    std::size_t cacheHitIndex = submittedCount;
+    xrdp_console::rdp::VerifiedBitmapCacheHitSplit cacheHitSplit{};
+    if (!impl_->h264Frame.baselineSubmissionPending() &&
+        impl_->verifiedBitmapCache.valid() &&
+        impl_->pendingBitmapCacheHit.active())
+    {
+        for (std::size_t index = 0; index < submittedCount; ++index)
+        {
+            const auto split =
+                xrdp_console::rdp::splitSelectionForVerifiedCacheHit(
+                    submittedSelections[index],
+                    impl_->pendingBitmapCacheHit.selection.rectangle);
+            if (split.matched)
+            {
+                const std::size_t residualCount = submittedCount - 1U +
+                                                  split.residualCount;
+                // Never emit a cache-only logical frame. Keep at least one
+                // H.264 transmission selected in this transaction.
+                if (residualCount != 0 &&
+                    residualCount <= h264Selections.size())
+                {
+                    cacheHitIndex = index;
+                    cacheHitSplit = split;
+                }
+                break;
+            }
+        }
+    }
+
+    bool useCacheHit = cacheHitIndex != submittedCount;
+    const auto rebuildH264Selections = [&]() noexcept {
+        std::size_t count = 0;
+        for (std::size_t index = 0; index < submittedCount; ++index)
+        {
+            if (useCacheHit && index == cacheHitIndex)
+            {
+                for (std::size_t residual = 0;
+                     residual < cacheHitSplit.residualCount; ++residual)
+                {
+                    h264Selections[count++] = cacheHitSplit.residual[residual];
+                }
+            }
+            else
+            {
+                h264Selections[count++] = submittedSelections[index];
+            }
+        }
+        return count;
+    };
+    std::size_t h264Count = rebuildH264Selections();
+
+    std::array<std::byte, kCacheToSurfaceCommandBytes> cacheBefore{};
+    std::size_t cacheBeforeBytes = 0;
+    bool cacheHitCommandFailed = false;
+    if (useCacheHit)
+    {
+        cacheBeforeBytes =
+            xrdp_console::rdp::buildGfxCacheToSurfaceCommand(
+                {impl_->pendingBitmapCacheHit.cacheSlot,
+                 static_cast<std::uint16_t>(surfaceId),
+                 {impl_->pendingBitmapCacheHit.selection.rectangle.x,
+                  impl_->pendingBitmapCacheHit.selection.rectangle.y}},
+                cacheBefore);
+        if (cacheBeforeBytes == 0)
+        {
+            useCacheHit = false;
+            cacheHitCommandFailed = true;
+            cacheBeforeBytes = 0;
+            h264Count = rebuildH264Selections();
+        }
+    }
+
+    auto seedPlan = impl_->verifiedBitmapCache.seedPlan();
+    bool useCacheSeed = false;
+    if (seedPlan.valid &&
+        !impl_->h264Frame.baselineSubmissionPending())
+    {
+        for (std::size_t index = 0; index < h264Count; ++index)
+        {
+            if (selectionContainsRectangle(
+                    h264Selections[index], seedPlan.sourceRectangle))
+            {
+                useCacheSeed = true;
+                break;
+            }
+        }
+    }
+
+    std::array<std::byte,
+               kEvictCacheEntryCommandBytes + kSurfaceToCacheCommandBytes>
+        cacheAfter{};
+    std::size_t cacheAfterBytes = 0;
+    if (useCacheSeed && seedPlan.evict)
+    {
+        cacheAfterBytes =
+            xrdp_console::rdp::buildGfxEvictCacheEntryCommand(
+                {seedPlan.cacheSlot}, cacheAfter);
+        useCacheSeed = cacheAfterBytes != 0;
+    }
+    if (useCacheSeed)
+    {
+        const std::size_t stored =
+            xrdp_console::rdp::buildGfxSurfaceToCacheCommand(
+                {static_cast<std::uint16_t>(surfaceId), seedPlan.cacheKey,
+                 seedPlan.cacheSlot, seedPlan.sourceRectangle},
+                std::span(cacheAfter).subspan(cacheAfterBytes));
+        useCacheSeed = stored != 0;
+        cacheAfterBytes = useCacheSeed ? cacheAfterBytes + stored : 0;
+    }
+
+    const auto commandFits = [&](std::size_t selectionCount) noexcept {
+        const std::size_t base =
+            xrdp_console::rdp::gfxAvc420CommandBytes(
+                selectionCount, selectionCount);
+        if (base == 0 || base > kMaximumH264CommandBytes ||
+            preWireCommandBytes > kMaximumH264CommandBytes - base)
+        {
+            return false;
+        }
+        const std::size_t withScroll = base + preWireCommandBytes;
+        const std::size_t cacheBytes = cacheBeforeBytes + cacheAfterBytes;
+        return cacheBytes <= kMaximumH264CommandBytes - withScroll;
+    };
+    if (!commandFits(h264Count) && useCacheSeed)
+    {
+        useCacheSeed = false;
+        cacheAfterBytes = 0;
+    }
+    if (!commandFits(h264Count) && useCacheHit)
+    {
+        useCacheHit = false;
+        cacheHitCommandFailed = true;
+        cacheBeforeBytes = 0;
+        h264Count = rebuildH264Selections();
+    }
+    if (!commandFits(h264Count))
+    {
+        return 1;
+    }
+
+    std::array<Rectangle, kMaximumH264Selections> rectangles{};
+    for (std::size_t index = 0; index < h264Count; ++index)
+    {
+        const Rectangle rectangle = h264Selections[index].rectangle;
         if (xrdp_console::rdp::alignAvc420Rectangle(
                 rectangle, impl_->h264Frame.geometry()) != rectangle)
         {
@@ -2583,6 +3440,7 @@ ModuleContext::check_h264_gfx() noexcept
     }
 
     std::array<std::byte, kMaximumH264CommandBytes> commandBytes{};
+    std::array<std::byte, kMaximumH264CommandBytes> frameCommandBytes{};
     std::size_t commandPrefixBytes = 0;
     if (impl_->h264Frame.baselineSubmissionPending())
     {
@@ -2622,7 +3480,7 @@ ModuleContext::check_h264_gfx() noexcept
         }
     }
     const std::span<const Rectangle> rectangleSpan(
-        rectangles.data(), transmissionCount);
+        rectangles.data(), h264Count);
     const GfxAvc420Command command{
         static_cast<std::uint16_t>(surfaceId),
         frameId,
@@ -2630,11 +3488,21 @@ ModuleContext::check_h264_gfx() noexcept
         impl_->h264Frame.geometry(),
         rectangleSpan,
         rectangleSpan,
+        useScrollCopy
+            ? std::span<const std::byte>(
+                  preWireCommands.data(), preWireCommandBytes)
+            : std::span<const std::byte>{},
     };
+    const std::size_t baseCommandBytes =
+        buildGfxAvc420Command(command, frameCommandBytes);
     const std::size_t encodedCommandBytes =
-        buildGfxAvc420Command(
-            command,
-            std::span<std::byte>(commandBytes).subspan(commandPrefixBytes));
+        baseCommandBytes == 0
+            ? 0
+            : xrdp_console::rdp::spliceGfxFrameCommands(
+                  std::span(frameCommandBytes).first(baseCommandBytes),
+                  std::span(cacheBefore).first(cacheBeforeBytes),
+                  std::span(cacheAfter).first(cacheAfterBytes),
+                  std::span(commandBytes).subspan(commandPrefixBytes));
     if (encodedCommandBytes == 0 ||
         encodedCommandBytes + commandPrefixBytes > INT_MAX)
     {
@@ -2670,12 +3538,96 @@ ModuleContext::check_h264_gfx() noexcept
     if (!impl_->h264Frame.noteSubmitted(
             frameId,
             std::span<const GenerationTileMap::Selection>(
-                transmissionSelections.data(), transmissionCount)))
+                authoritativeSelections.data(), authoritativeCount)))
     {
+        impl_->verifiedBitmapCache.disable();
+        impl_->pendingBitmapCacheHit.clear();
+        impl_->h264Frame.invalidateAll();
         // The mmap is now owned by xrdp and may already be encoding. Fail
         // closed rather than opening a second producer slot with inconsistent
         // generation bookkeeping.
         return 1;
+    }
+    if (useCacheHit)
+    {
+        impl_->verifiedBitmapCache.noteHitSubmitted(
+            impl_->pendingBitmapCacheHit.cacheSlot);
+        impl_->profile.noteBitmapCacheLiveHit(
+            impl_->pendingBitmapCacheHit.selection.rectangle);
+    }
+    if (impl_->pendingBitmapCacheHit.active())
+    {
+        bool schedulerSelectedHit = false;
+        bool h264SelectedHit = false;
+        for (std::size_t index = 0; index < authoritativeCount; ++index)
+        {
+            if (selectionContainsRectangle(
+                    authoritativeSelections[index],
+                    impl_->pendingBitmapCacheHit.selection.rectangle))
+            {
+                schedulerSelectedHit = true;
+                break;
+            }
+        }
+        for (std::size_t index = 0; index < submittedCount; ++index)
+        {
+            if (selectionContainsRectangle(
+                    submittedSelections[index],
+                    impl_->pendingBitmapCacheHit.selection.rectangle))
+            {
+                h264SelectedHit = true;
+                break;
+            }
+        }
+        if (schedulerSelectedHit)
+        {
+            if (!useCacheHit && h264SelectedHit)
+            {
+                impl_->profile.noteBitmapCacheFallback();
+                log_message(
+                    LOG_LEVEL_INFO,
+                    "XRDP_CONSOLE_CLIENT_CACHE event=frame "
+                    "result=h264-fallback reason=%s",
+                    cacheHitCommandFailed ? "command-or-budget" :
+                                            "cache-hit-not-usable");
+            }
+            impl_->pendingBitmapCacheHit.clear();
+        }
+    }
+    if (useCacheSeed)
+    {
+        impl_->verifiedBitmapCache.noteSeedSubmitted(seedPlan, frameId);
+        impl_->profile.noteBitmapCacheAdmission(seedPlan.evict);
+    }
+    else if (seedPlan.valid)
+    {
+        for (std::size_t index = 0; index < authoritativeCount; ++index)
+        {
+            if (selectionContainsRectangle(
+                    authoritativeSelections[index],
+                    seedPlan.sourceRectangle))
+            {
+                impl_->verifiedBitmapCache.discardSeed();
+                break;
+            }
+        }
+    }
+    impl_->h264SubmittedScrollBaselineSequence =
+        !impl_->h264Frame.transmissionPending() &&
+                !impl_->h264Frame.capturePending() &&
+                !impl_->damageTracker->hasPendingDamage()
+            ? impl_->scrollMotionObserver.baselineSequence()
+            : 0;
+    if (useScrollCopy)
+    {
+        log_message(
+            LOG_LEVEL_INFO,
+            "XRDP_CONSOLE_SCROLL_COPY active dy=%d runs=%llu "
+            "copied_pixels=%llu residual_runs=%llu",
+            scrollCopyDisplacementY,
+            static_cast<unsigned long long>(clientCopiedRectangleCount),
+            static_cast<unsigned long long>(exactScrollCopyPixels),
+            static_cast<unsigned long long>(transmissionCount));
     }
     if (profileH264Timing)
     {

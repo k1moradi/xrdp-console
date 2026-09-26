@@ -38,6 +38,7 @@ struct xrdp_console_module
 {
     struct xrdp_mod abi;
     void *context;
+    unsigned int scaled_output_aux_surface_mask;
 };
 
 static struct xrdp_console_module *
@@ -460,12 +461,21 @@ xrdp_console_module_h264_surface_id(const xrdp_console_module *module)
     int monitor_count;
     int surface_id;
 
-    if (!xrdp_console_module_h264_encoder_available(module))
+    if (module == NULL || module->abi.wm == 0)
     {
         return -1;
     }
 
     wm = (const struct xrdp_wm *)module->abi.wm;
+    if (wm->mm == NULL || wm->client_info == NULL ||
+        wm->client_info->gfx == 0 ||
+        wm->client_info->capture_code != CC_GFX_A2 ||
+        wm->mm->egfx == NULL || wm->mm->egfx_up == 0 ||
+        wm->mm->egfx_flags != XRDP_EGFX_H264)
+    {
+        return -1;
+    }
+
     monitor_count = wm->client_info->display_sizes.monitorCount;
     if (monitor_count > 1)
     {
@@ -474,6 +484,287 @@ xrdp_console_module_h264_surface_id(const xrdp_console_module *module)
 
     surface_id = monitor_count == 1 ? 0 : wm->mm->egfx->surface_id;
     return surface_id >= 0 && surface_id <= UINT16_MAX ? surface_id : -1;
+}
+
+int
+xrdp_console_module_scaled_output_mapping_available(
+    const xrdp_console_module *module,
+    const struct xrdp_console_scaled_output_mapping *mapping)
+{
+    const struct xrdp_wm *wm;
+    struct xrdp_console_graphics_capabilities capabilities;
+    int active_surface_id;
+
+    if (mapping == NULL ||
+        xrdp_console_module_get_graphics_capabilities(
+            module, &capabilities) != 0 ||
+        capabilities.selected_gfx_mode != XRDP_CONSOLE_GFX_H264 ||
+        capabilities.rdpgfx_scaled_output_protocol_eligible == 0)
+    {
+        return 0;
+    }
+
+    active_surface_id = xrdp_console_module_h264_surface_id(module);
+    if (active_surface_id < 0)
+    {
+        return 0;
+    }
+
+    wm = (const struct xrdp_wm *)module->abi.wm;
+    return xrdp_console_gfx_scaled_output_mapping_valid(
+        mapping->surface_id, active_surface_id,
+        mapping->output_x, mapping->output_y,
+        mapping->target_width, mapping->target_height,
+        (uint32_t)wm->client_info->display_sizes.session_width,
+        (uint32_t)wm->client_info->display_sizes.session_height);
+}
+
+int
+xrdp_console_module_send_scaled_output_mapping(
+    xrdp_console_module *module,
+    const struct xrdp_console_scaled_output_mapping *mapping)
+{
+    struct xrdp_wm *wm;
+
+    if (!xrdp_console_module_scaled_output_mapping_available(module, mapping))
+    {
+        return 1;
+    }
+
+    wm = (struct xrdp_wm *)module->abi.wm;
+    return xrdp_egfx_send_map_surface_scaled(
+        wm->mm->egfx, mapping->surface_id,
+        mapping->output_x, mapping->output_y,
+        mapping->target_width, mapping->target_height);
+}
+
+enum
+{
+    XRDP_CONSOLE_SCALED_OUTPUT_AUX_SURFACES = 4
+};
+
+struct xrdp_console_output_bar
+{
+    int x;
+    int y;
+    int width;
+    int height;
+};
+
+static int
+restore_xrdp_primary_surface(struct xrdp_console_module *module)
+{
+    struct xrdp_wm *wm;
+    int surface_id;
+
+    if (module == NULL || module->abi.wm == 0)
+    {
+        return 1;
+    }
+    wm = (struct xrdp_wm *)module->abi.wm;
+    surface_id = xrdp_console_module_h264_surface_id(module);
+    if (wm->mm == NULL || wm->mm->egfx == NULL || wm->screen == NULL ||
+        surface_id != 0 || wm->screen->width <= 0 || wm->screen->height <= 0)
+    {
+        return 1;
+    }
+    if (xrdp_egfx_send_create_surface(
+            wm->mm->egfx, surface_id, wm->screen->width, wm->screen->height,
+            XR_PIXEL_FORMAT_XRGB_8888) != 0)
+    {
+        return 1;
+    }
+    return xrdp_egfx_send_map_surface(wm->mm->egfx, surface_id, 0, 0);
+}
+
+int
+xrdp_console_module_clear_scaled_output_aux_surfaces(
+    xrdp_console_module *module)
+{
+    struct xrdp_wm *wm;
+    unsigned int mask;
+    int error = 0;
+    int index;
+
+    if (module == NULL)
+    {
+        return 1;
+    }
+    mask = module->scaled_output_aux_surface_mask;
+    if (mask == 0)
+    {
+        return 0;
+    }
+    if (module->abi.wm == 0)
+    {
+        return 1;
+    }
+    wm = (struct xrdp_wm *)module->abi.wm;
+    if (wm->mm == NULL || wm->mm->egfx == NULL)
+    {
+        return 1;
+    }
+
+    for (index = 0; index < XRDP_CONSOLE_SCALED_OUTPUT_AUX_SURFACES; ++index)
+    {
+        const unsigned int bit = 1U << index;
+        if ((mask & bit) == 0)
+        {
+            continue;
+        }
+        if (xrdp_egfx_send_delete_surface(wm->mm->egfx, index + 1) != 0)
+        {
+            error = 1;
+        }
+        else
+        {
+            module->scaled_output_aux_surface_mask &= ~bit;
+        }
+    }
+    return error;
+}
+
+static int
+rollback_scaled_output_activation(
+    struct xrdp_console_module *module, int native_surface_created)
+{
+    struct xrdp_wm *wm = (struct xrdp_wm *)module->abi.wm;
+    int rollback_error = 0;
+
+    if (xrdp_console_module_clear_scaled_output_aux_surfaces(module) != 0)
+    {
+        rollback_error = 1;
+    }
+    if (native_surface_created &&
+        xrdp_egfx_send_delete_surface(wm->mm->egfx, 0) != 0)
+    {
+        rollback_error = 1;
+    }
+    if (rollback_error == 0 && restore_xrdp_primary_surface(module) == 0)
+    {
+        return XRDP_CONSOLE_SCALED_OUTPUT_FALLBACK_SAFE;
+    }
+    return XRDP_CONSOLE_SCALED_OUTPUT_SURFACE_UNUSABLE;
+}
+
+int
+xrdp_console_module_activate_native_scaled_h264_surface(
+    xrdp_console_module *module, int native_width, int native_height,
+    const struct xrdp_console_scaled_output_mapping *mapping)
+{
+    struct xrdp_console_output_bar bars[XRDP_CONSOLE_SCALED_OUTPUT_AUX_SURFACES];
+    struct xrdp_egfx_rect fill_rect;
+    struct xrdp_wm *wm;
+    int output_width;
+    int output_height;
+    int right;
+    int bottom;
+    int bar_count = 0;
+    int index;
+
+    if (native_width <= 0 || native_height <= 0 ||
+        native_width > INT16_MAX || native_height > INT16_MAX ||
+        (native_width & 1) != 0 || (native_height & 1) != 0 ||
+        mapping == NULL ||
+        !xrdp_console_module_scaled_output_mapping_available(module, mapping) ||
+        mapping->surface_id != 0)
+    {
+        return XRDP_CONSOLE_SCALED_OUTPUT_FALLBACK_SAFE;
+    }
+
+    wm = (struct xrdp_wm *)module->abi.wm;
+    if (wm->mm == NULL || wm->mm->egfx == NULL || wm->screen == NULL ||
+        wm->screen->width <= 0 || wm->screen->height <= 0 ||
+        wm->screen->width > INT16_MAX || wm->screen->height > INT16_MAX)
+    {
+        return XRDP_CONSOLE_SCALED_OUTPUT_FALLBACK_SAFE;
+    }
+    output_width = wm->screen->width;
+    output_height = wm->screen->height;
+    if ((uint64_t)(uint32_t)mapping->output_x +
+            (uint32_t)mapping->target_width > (uint32_t)output_width ||
+        (uint64_t)(uint32_t)mapping->output_y +
+            (uint32_t)mapping->target_height > (uint32_t)output_height)
+    {
+        return XRDP_CONSOLE_SCALED_OUTPUT_FALLBACK_SAFE;
+    }
+    if ((unsigned int)output_width !=
+            wm->client_info->display_sizes.session_width ||
+        (unsigned int)output_height !=
+            wm->client_info->display_sizes.session_height)
+    {
+        return XRDP_CONSOLE_SCALED_OUTPUT_FALLBACK_SAFE;
+    }
+    right = mapping->output_x + mapping->target_width;
+    bottom = mapping->output_y + mapping->target_height;
+
+    if (mapping->output_y > 0)
+    {
+        bars[bar_count++] = (struct xrdp_console_output_bar){
+            0, 0, output_width, mapping->output_y};
+    }
+    if (bottom < output_height)
+    {
+        bars[bar_count++] = (struct xrdp_console_output_bar){
+            0, bottom, output_width, output_height - bottom};
+    }
+    if (mapping->output_x > 0)
+    {
+        bars[bar_count++] = (struct xrdp_console_output_bar){
+            0, mapping->output_y, mapping->output_x, mapping->target_height};
+    }
+    if (right < output_width)
+    {
+        bars[bar_count++] = (struct xrdp_console_output_bar){
+            right, mapping->output_y, output_width - right,
+            mapping->target_height};
+    }
+
+    if (xrdp_console_module_clear_scaled_output_aux_surfaces(module) != 0)
+    {
+        return XRDP_CONSOLE_SCALED_OUTPUT_SURFACE_UNUSABLE;
+    }
+    if (xrdp_egfx_send_delete_surface(wm->mm->egfx, 0) != 0)
+    {
+        return XRDP_CONSOLE_SCALED_OUTPUT_SURFACE_UNUSABLE;
+    }
+    if (xrdp_egfx_send_create_surface(
+            wm->mm->egfx, 0, native_width, native_height,
+            XR_PIXEL_FORMAT_XRGB_8888) != 0)
+    {
+        return rollback_scaled_output_activation(module, 0);
+    }
+    if (xrdp_egfx_send_map_surface_scaled(
+            wm->mm->egfx, 0, mapping->output_x, mapping->output_y,
+            mapping->target_width, mapping->target_height) != 0)
+    {
+        return rollback_scaled_output_activation(module, 1);
+    }
+
+    for (index = 0; index < bar_count; ++index)
+    {
+        const int surface_id = index + 1;
+        fill_rect.x1 = 0;
+        fill_rect.y1 = 0;
+        fill_rect.x2 = (short)bars[index].width;
+        fill_rect.y2 = (short)bars[index].height;
+        if (xrdp_egfx_send_create_surface(
+                wm->mm->egfx, surface_id, bars[index].width,
+                bars[index].height, XR_PIXEL_FORMAT_XRGB_8888) != 0)
+        {
+            return rollback_scaled_output_activation(module, 1);
+        }
+        module->scaled_output_aux_surface_mask |= 1U << index;
+        if (xrdp_egfx_send_fill_surface(
+                wm->mm->egfx, surface_id, 0, 1, &fill_rect) != 0 ||
+            xrdp_egfx_send_map_surface(
+                wm->mm->egfx, surface_id, bars[index].x,
+                bars[index].y) != 0)
+        {
+            return rollback_scaled_output_activation(module, 1);
+        }
+    }
+    return XRDP_CONSOLE_SCALED_OUTPUT_ACTIVE;
 }
 
 int

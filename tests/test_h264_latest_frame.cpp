@@ -224,6 +224,53 @@ bool producer_window_holds_one_async_frame()
     return success;
 }
 
+bool client_surface_copy_commits_only_copied_tiles()
+{
+    H264LatestFrameState state;
+    std::array<GenerationTileMap::Selection, 8> selections{};
+    std::array<GenerationTileMap::Selection, 8> readySelections{};
+    bool success = true;
+
+    success &= check(state.configure({128, 64}), "configuration failed");
+    success &= check(state.collectCaptureSelections(selections) == 1 &&
+                         state.commitCaptured(selections[0]),
+                     "baseline capture failed");
+    const GenerationTileMap::Selection baseline{
+        {0, 0, 128, 64}, UINT64_MAX};
+    success &= check(state.noteSubmitted(1, std::span(&baseline, 1)) &&
+                         state.releaseSubmission(1),
+                     "baseline submission failed");
+
+    state.markDamage({0, 0, 128, 64});
+    success &= check(state.collectCaptureSelections(selections) == 1 &&
+                         state.commitCaptured(selections[0]),
+                     "incremental capture failed");
+
+    const std::array<Rectangle, 1> copied{{{0, 0, 64, 64}}};
+    const std::size_t readyCount =
+        state.collectReadyTransmissionSelections(readySelections);
+    const std::size_t residualCount =
+        state.collectReadyTransmissionSelectionsExcluding(
+            std::span<const GenerationTileMap::Selection>(
+                readySelections.data(), readyCount),
+            copied, selections);
+    success &= check(residualCount == 1 &&
+                         selections[0].rectangle ==
+                             Rectangle{64, 0, 64, 64},
+                     "client-copied tile was not excluded");
+    success &= check(state.noteSubmitted(
+                         2,
+                         std::span<const GenerationTileMap::Selection>(
+                             selections.data(), residualCount),
+                         copied),
+                     "client-copy submission bookkeeping failed");
+    success &= check(!state.transmissionPending(),
+                     "client-copied tile remained pending");
+    success &= check(state.releaseSubmission(2),
+                     "client-copy frame did not release");
+    return success;
+}
+
 bool capture_selection_respects_xshm_pixel_budget()
 {
     const GenerationTileMap::Selection wide{{0, 0, 3840, 64}, 7};
@@ -823,6 +870,7 @@ int main()
     success &= baseline_submission_is_not_starved_by_newer_damage();
     success &= newest_generation_replaces_stale_unsent_tile();
     success &= producer_window_holds_one_async_frame();
+    success &= client_surface_copy_commits_only_copied_tiles();
     success &= capture_selection_respects_xshm_pixel_budget();
     success &= partial_nv12_update_writes_only_selected_rectangle();
     success &= priority_transmission_can_bypass_background_runs();

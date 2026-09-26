@@ -3,6 +3,7 @@
 #include "rdp/scroll_motion_observer.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -108,13 +109,22 @@ bool baseline_then_scroll_is_observed()
     const auto baseline = observer.completeEpisode(full);
     success &= check(baseline.kind == ScrollMotionObservationKind::BaselineSeeded,
                      "first complete frame did not seed baseline");
+    success &= check(baseline.baselineSequence != 0 &&
+                         observer.markBaselinePresented(
+                             baseline.baselineSequence),
+                     "baseline presentation generation was not accepted");
 
     constexpr std::int32_t displacement = -37;
     const auto current = scroll(previous, width, height, displacement);
     success &= check(observer.stageCapture(view(current, width, height), full),
                      "scroll stage failed");
-    const auto observed = observer.completeEpisode(full);
+    std::array<ExactScrollCopyRun, kMaximumExactScrollCopyRuns> copyRuns{};
+    const auto observed = observer.completeEpisode(full, {}, copyRuns);
     success &= check(observed.verified(), "known scroll was not verified");
+    success &= check(observed.sourceBaselinePresented &&
+                         observed.baselineSequence != baseline.baselineSequence &&
+                         !observer.baselinePresented(),
+                     "verified scroll lost presentation generation state");
     success &= check(observed.displacementY == displacement,
                      "verified scroll displacement was wrong");
     success &= check(observed.reusablePixels ==
@@ -124,10 +134,38 @@ bool baseline_then_scroll_is_observed()
     success &= check(observed.exposedPixels ==
                          static_cast<std::uint64_t>(width) * 37U,
                      "exposed pixel count was wrong");
+    success &= check(!observed.exactCopyRunOverflow &&
+                         observed.exactCopyRunCount != 0 &&
+                         observed.exactReusablePixels != 0,
+                     "exact scroll reuse was not classified");
+    for (std::size_t index = 1;
+         index < observed.exactCopyRunCount; ++index)
+    {
+        success &= check(
+            copyRuns[index - 1U].destinationPoint.y <=
+                copyRuns[index].destinationPoint.y,
+            "upward copy runs were not ordered top-to-bottom");
+    }
     success &= check(observer.stats().verified == 1 &&
                          observer.stats().discoveryAttempts == 1,
                      "observer stats did not record verification");
     return success;
+}
+
+bool exact_reuse_fails_closed_on_run_overflow()
+{
+    constexpr std::uint32_t width = 320;
+    constexpr std::uint32_t height = 240;
+    const auto previous = makeTextured(width, height);
+    auto current = scroll(previous, width, height, -37);
+    setPixel(current, width, 70, 70, 0x00abcdefU);
+    std::array<ExactScrollCopyRun, 1> runs{};
+    const auto result = classifyExactVerticalScrollReuse(
+        view(previous, width, height), view(current, width, height),
+        {0, 0, width, height}, -37, runs);
+    return check(result.overflow && result.runCount == 0 &&
+                     result.reusablePixels == 0,
+                 "exact reuse returned a partial plan on overflow");
 }
 
 bool small_episode_is_not_searched()
@@ -227,5 +265,9 @@ int main()
     success &= invalidation_forgets_motion_history();
     success &= snapshot_memory_is_bounded();
     success &= invalid_capture_does_not_start_an_episode();
+    success &= exact_reuse_fails_closed_on_run_overflow();
+    success &= check(clientScrollCopyRequested("1") &&
+                         !clientScrollCopyRequested("true"),
+                     "scroll-copy opt-in gate was not exact");
     return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

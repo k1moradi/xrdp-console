@@ -42,6 +42,8 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         rdp/rfx_capability_policy.h
         rdp/scaled_output_capability_policy.c
         rdp/scaled_output_capability_policy.h
+        rdp/client_scaled_output_plan.cpp
+        rdp/client_scaled_output_plan.h
         rdp/rfx_encoder.cpp
         rdp/rfx_encoder.h
         rdp/remote_fx_scheduler.h
@@ -52,10 +54,18 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         rdp/gfx_avc420_frame.h
         rdp/gfx_surface_copy.cpp
         rdp/gfx_surface_copy.h
+        rdp/gfx_bitmap_cache_observer.cpp
+        rdp/gfx_bitmap_cache_observer.h
+        rdp/gfx_bitmap_cache_commands.cpp
+        rdp/gfx_bitmap_cache_commands.h
+        rdp/verified_bitmap_cache16.cpp
+        rdp/verified_bitmap_cache16.h
         rdp/h264_latest_frame.cpp
         rdp/h264_latest_frame.h
         rdp/scroll_copy_plan.cpp
         rdp/scroll_copy_plan.h
+        rdp/scroll_reuse_classifier.cpp
+        rdp/scroll_reuse_classifier.h
         rdp/vertical_motion_discovery.cpp
         rdp/vertical_motion_discovery.h
         rdp/scroll_motion_observer.cpp

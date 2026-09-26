@@ -1,0 +1,129 @@
+diff --git a/xrdp/xrdp_encoder.c b/xrdp/xrdp_encoder.c
+--- a/xrdp/xrdp_encoder.c
++++ b/xrdp/xrdp_encoder.c
+@@ -1249,7 +1249,108 @@ gfx_surfacetosurface(struct xrdp_encoder *self,
+     return xrdp_egfx_surface_to_surface(bulk, surface_id_src, surface_id_dst,
+                                         rects, num_pts, pts);
+ }
++
++/*****************************************************************************/
++static struct stream *
++gfx_surfacetocache(struct xrdp_encoder *self,
++                   struct xrdp_egfx_bulk *bulk, struct stream *in_s)
++{
++    int surface_id;
++    uint64_t cache_key;
++    int cache_slot;
++    int left;
++    int top;
++    int right;
++    int bottom;
++    struct xrdp_egfx_rect rect;
++
++    (void)self;
++    if (!s_check_rem(in_s, 20))
++    {
++        return NULL;
++    }
++    in_uint16_le(in_s, surface_id);
++    in_uint64_le(in_s, cache_key);
++    in_uint16_le(in_s, cache_slot);
++    in_uint16_le(in_s, left);
++    in_uint16_le(in_s, top);
++    in_uint16_le(in_s, right);
++    in_uint16_le(in_s, bottom);
++    if (cache_slot < 1 || right <= left || bottom <= top)
++    {
++        return NULL;
++    }
++    rect.x1 = left;
++    rect.y1 = top;
++    rect.x2 = right;
++    rect.y2 = bottom;
++    return xrdp_egfx_surface_to_cache(
++        bulk, surface_id, cache_key, cache_slot, &rect);
++}
++
++/*****************************************************************************/
++static struct stream *
++gfx_cachetosurface(struct xrdp_encoder *self,
++                   struct xrdp_egfx_bulk *bulk, struct stream *in_s)
++{
++    int cache_slot;
++    int surface_id;
++    int num_pts;
++    int index;
++    int x;
++    int y;
++    struct stream *rv;
++    struct xrdp_egfx_point *pts;
++
++    (void)self;
++    if (!s_check_rem(in_s, 6))
++    {
++        return NULL;
++    }
++    in_uint16_le(in_s, cache_slot);
++    in_uint16_le(in_s, surface_id);
++    in_uint16_le(in_s, num_pts);
++    if (cache_slot < 1 || num_pts < 1 || num_pts > 8192 ||
++            !s_check_rem(in_s, num_pts * 4))
++    {
++        return NULL;
++    }
++    pts = g_new0(struct xrdp_egfx_point, num_pts);
++    if (pts == NULL)
++    {
++        return NULL;
++    }
++    for (index = 0; index < num_pts; ++index)
++    {
++        in_uint16_le(in_s, x);
++        in_uint16_le(in_s, y);
++        pts[index].x = x;
++        pts[index].y = y;
++    }
++    rv = xrdp_egfx_cache_to_surface(
++        bulk, cache_slot, surface_id, num_pts, pts);
++    g_free(pts);
++    return rv;
++}
++
++/*****************************************************************************/
++static struct stream *
++gfx_evictcacheentry(struct xrdp_encoder *self,
++                    struct xrdp_egfx_bulk *bulk, struct stream *in_s)
++{
++    int cache_slot;
++
++    (void)self;
++    if (!s_check_rem(in_s, 2))
++    {
++        return NULL;
++    }
++    in_uint16_le(in_s, cache_slot);
++    return cache_slot < 1
++           ? NULL
++           : xrdp_egfx_evict_cache_entry(bulk, cache_slot);
++}
+-
++
+ /*****************************************************************************/
+ static struct stream *
+ gfx_createsurface(struct xrdp_encoder *self,
+@@ -1406,6 +1507,15 @@ process_enc_egfx(struct xrdp_encoder *self, XRDP_ENC_DATA *enc)
+             case XR_RDPGFX_CMDID_SURFACETOSURFACE:      /* 0x0005 */
+                 s = gfx_surfacetosurface(self, bulk, &in_s);
+                 break;
++            case XR_RDPGFX_CMDID_SURFACETOCACHE:        /* 0x0006 */
++                s = gfx_surfacetocache(self, bulk, &in_s);
++                break;
++            case XR_RDPGFX_CMDID_CACHETOSURFACE:        /* 0x0007 */
++                s = gfx_cachetosurface(self, bulk, &in_s);
++                break;
++            case XR_RDPGFX_CMDID_EVICTCACHEENTRY:       /* 0x0008 */
++                s = gfx_evictcacheentry(self, bulk, &in_s);
++                break;
+             case XR_RDPGFX_CMDID_CREATESURFACE:         /* 0x0009 */
+                 s = gfx_createsurface(self, bulk, &in_s);
+                 break;

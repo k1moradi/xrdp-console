@@ -19,3 +19,6 @@
 0019-xrdp-console-h264-async-encoder.patch
 0020-xrdp-console-adaptive-gfx-pacing.patch
 0021-xrdp-console-record-rdpgfx-capset.patch
+0022-xrdp-map-surface-to-scaled-output.patch
+0023-xrdp-rdpgfx-bitmap-cache-commands.patch
+0024-xrdp-encoder-rdpgfx-bitmap-cache.patch

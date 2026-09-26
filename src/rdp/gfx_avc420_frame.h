@@ -27,6 +27,9 @@ struct GfxAvc420Command final
     PixelSize frameGeometry{};
     std::span<const Rectangle> dirtyRectangles{};
     std::span<const Rectangle> encodeRectangles{};
+    // Complete RDPGFX commands inserted after START_FRAME and before
+    // WIRE_TO_SURFACE. Used for same-frame client-side reuse operations.
+    std::span<const std::byte> preWireCommands{};
 };
 
 struct GfxSolidFillCommand final

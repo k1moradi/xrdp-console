@@ -76,6 +76,11 @@ public:
     // be stale because a newer XDamage generation is waiting for capture.
     [[nodiscard]] std::size_t collectReadyTransmissionSelections(
         std::span<GenerationTileMap::Selection> output) const noexcept;
+    [[nodiscard]] std::size_t collectReadyTransmissionSelectionsExcluding(
+        std::span<const GenerationTileMap::Selection> selections,
+        std::span<const Rectangle> exclusions,
+        std::span<GenerationTileMap::Selection> output) const noexcept;
+
     [[nodiscard]] std::size_t collectReadyTransmissionSelectionsIntersecting(
         Rectangle clip,
         std::span<GenerationTileMap::Selection> output) const noexcept;
@@ -109,6 +114,10 @@ public:
     [[nodiscard]] bool noteSubmitted(
         std::uint32_t frameId,
         std::span<const GenerationTileMap::Selection> selections) noexcept;
+    [[nodiscard]] bool noteSubmitted(
+        std::uint32_t frameId,
+        std::span<const GenerationTileMap::Selection> selections,
+        std::span<const Rectangle> clientCopiedRectangles) noexcept;
 
     // xrdp's mod_frame_ack callback is a producer-window release. For GFX it
     // is issued after encoder completion and, when frame ACKs are enabled,

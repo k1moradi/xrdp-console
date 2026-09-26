@@ -21,3 +21,26 @@ xrdp_console_gfx_scaled_output_protocol_eligible(
             return 0;
     }
 }
+
+int
+xrdp_console_gfx_scaled_output_mapping_valid(
+    int surface_id, int expected_surface_id,
+    int output_x, int output_y, int target_width, int target_height,
+    uint32_t output_width, uint32_t output_height)
+{
+    uint64_t right;
+    uint64_t bottom;
+
+    if (surface_id < 0 || surface_id > UINT16_MAX ||
+        expected_surface_id < 0 || surface_id != expected_surface_id ||
+        output_x < 0 || output_y < 0 ||
+        target_width <= 0 || target_height <= 0 ||
+        output_width == 0 || output_height == 0)
+    {
+        return 0;
+    }
+
+    right = (uint64_t)(uint32_t)output_x + (uint32_t)target_width;
+    bottom = (uint64_t)(uint32_t)output_y + (uint32_t)target_height;
+    return right <= output_width && bottom <= output_height;
+}

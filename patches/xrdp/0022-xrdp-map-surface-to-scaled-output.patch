@@ -1,0 +1,157 @@
+diff --git a/tests/xrdp/test_xrdp_egfx.c b/tests/xrdp/test_xrdp_egfx.c
+index 507d9c8..3903928 100644
+--- a/tests/xrdp/test_xrdp_egfx.c
++++ b/tests/xrdp/test_xrdp_egfx.c
+@@ -19,6 +19,60 @@ START_TEST(test_xrdp_egfx_send_create_surface__happy_path)
+ }
+ END_TEST
+ 
++START_TEST(test_xrdp_egfx_map_surface_scaled__wire_layout)
++{
++    struct xrdp_egfx_bulk *bulk = g_new0(struct xrdp_egfx_bulk, 1);
++    const int surface_id = 0x1234;
++    const int output_x = 0x01020304;
++    const int output_y = 0x11121314;
++    const int target_width = 1512;
++    const int target_height = 949;
++    int descriptor;
++    int compression_header;
++    int command_id;
++    int flags;
++    int pdu_length;
++    int encoded_surface_id;
++    int reserved;
++    int encoded_output_x;
++    int encoded_output_y;
++    int encoded_target_width;
++    int encoded_target_height;
++    struct stream *s = xrdp_egfx_map_surface_scaled(
++                           bulk, surface_id, output_x, output_y,
++                           target_width, target_height);
++
++    s->p = s->data;
++    in_uint8(s, descriptor);
++    in_uint8(s, compression_header);
++    in_uint16_le(s, command_id);
++    in_uint16_le(s, flags);
++    in_uint32_le(s, pdu_length);
++    in_uint16_le(s, encoded_surface_id);
++    in_uint16_le(s, reserved);
++    in_uint32_le(s, encoded_output_x);
++    in_uint32_le(s, encoded_output_y);
++    in_uint32_le(s, encoded_target_width);
++    in_uint32_le(s, encoded_target_height);
++
++    ck_assert_int_eq(0xE0, descriptor);
++    ck_assert_int_eq(0x04, compression_header);
++    ck_assert_int_eq(XR_RDPGFX_CMDID_MAPSURFACETOSCALEDOUTPUT, command_id);
++    ck_assert_int_eq(0, flags);
++    ck_assert_int_eq(28, pdu_length);
++    ck_assert_int_eq(surface_id, encoded_surface_id);
++    ck_assert_int_eq(0, reserved);
++    ck_assert_int_eq(output_x, encoded_output_x);
++    ck_assert_int_eq(output_y, encoded_output_y);
++    ck_assert_int_eq(target_width, encoded_target_width);
++    ck_assert_int_eq(target_height, encoded_target_height);
++    ck_assert_int_eq(0, (int) (s->end - s->p));
++
++    free_stream(s);
++    g_free(bulk);
++}
++END_TEST
++
+ /******************************************************************************/
+ Suite *
+ make_suite_egfx_base_functions(void)
+@@ -31,6 +85,8 @@ make_suite_egfx_base_functions(void)
+     tc_process_monitors = tcase_create("xrdp_egfx_base_functions");
+     tcase_add_test(tc_process_monitors,
+                    test_xrdp_egfx_send_create_surface__happy_path);
++    tcase_add_test(tc_process_monitors,
++                   test_xrdp_egfx_map_surface_scaled__wire_layout);
+ 
+     suite_add_tcase(s, tc_process_monitors);
+ 
+diff --git a/xrdp/xrdp_egfx.c b/xrdp/xrdp_egfx.c
+index f34b771..006ce60 100644
+--- a/xrdp/xrdp_egfx.c
++++ b/xrdp/xrdp_egfx.c
+@@ -14,6 +14,59 @@ xrdp_egfx_send_map_surface(struct xrdp_egfx *egfx, int surface_id,
+     return error;
+ }
+ 
++/******************************************************************************/
++struct stream *
++xrdp_egfx_map_surface_scaled(struct xrdp_egfx_bulk *bulk, int surface_id,
++                             int x, int y, int target_width,
++                             int target_height)
++{
++    int bytes;
++    struct stream *s;
++
++    LOG(LOG_LEVEL_TRACE, "xrdp_egfx_map_surface_scaled:");
++    make_stream(s);
++    init_stream(s, 8192);
++    /* RDP_SEGMENTED_DATA */
++    out_uint8(s, 0xE0); /* descriptor = SINGLE */
++    /* RDP8_BULK_ENCODED_DATA */
++    out_uint8(s, PACKET_COMPR_TYPE_RDP8); /* header */
++    /* RDPGFX_HEADER */
++    out_uint16_le(s, XR_RDPGFX_CMDID_MAPSURFACETOSCALEDOUTPUT); /* cmdId */
++    out_uint16_le(s, 0); /* flags = 0 */
++    s_push_layer(s, iso_hdr, 4); /* pduLength, set later */
++    out_uint16_le(s, surface_id);
++    out_uint16_le(s, 0); /* reserved */
++    out_uint32_le(s, x);
++    out_uint32_le(s, y);
++    out_uint32_le(s, target_width);
++    out_uint32_le(s, target_height);
++    s_mark_end(s);
++    bytes = (int) ((s->end - s->iso_hdr) + 4);
++    s_pop_layer(s, iso_hdr);
++    out_uint32_le(s, bytes);
++    return s;
++}
++
++/******************************************************************************/
++int
++xrdp_egfx_send_map_surface_scaled(struct xrdp_egfx *egfx, int surface_id,
++                                  int x, int y, int target_width,
++                                  int target_height)
++{
++    int error;
++    struct stream *s;
++
++    LOG(LOG_LEVEL_TRACE, "xrdp_egfx_send_map_surface_scaled:");
++    s = xrdp_egfx_map_surface_scaled(egfx->bulk, surface_id, x, y,
++                                     target_width, target_height);
++    error = xrdp_egfx_send_s(egfx, s);
++    LOG(LOG_LEVEL_DEBUG,
++        "xrdp_egfx_send_map_surface_scaled: xrdp_egfx_send_s error %d",
++        error);
++    free_stream(s);
++    return error;
++}
++
+ /******************************************************************************/
+ struct stream *
+ xrdp_egfx_fill_surface(struct xrdp_egfx_bulk *bulk, int surface_id,
+diff --git a/xrdp/xrdp_egfx.h b/xrdp/xrdp_egfx.h
+index 3d9fdf3..4904910 100644
+--- a/xrdp/xrdp_egfx.h
++++ b/xrdp/xrdp_egfx.h
+@@ -9,6 +9,14 @@ int
+ xrdp_egfx_send_map_surface(struct xrdp_egfx *egfx, int surface_id,
+                            int x, int y);
+ struct stream *
++xrdp_egfx_map_surface_scaled(struct xrdp_egfx_bulk *bulk, int surface_id,
++                             int x, int y, int target_width,
++                             int target_height);
++int
++xrdp_egfx_send_map_surface_scaled(struct xrdp_egfx *egfx, int surface_id,
++                                  int x, int y, int target_width,
++                                  int target_height);
++struct stream *
+ xrdp_egfx_fill_surface(struct xrdp_egfx_bulk *bulk, int surface_id,
+                        int fill_color, int num_rects,
+                        const struct xrdp_egfx_rect *rects);

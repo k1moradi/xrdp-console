@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
+#include <assert.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -62,6 +67,31 @@ main(void)
             ++failures;
         }
     }
+
+    assert(xrdp_console_gfx_scaled_output_mapping_valid(
+               0, 0, 0, 0, 1512, 949, 1512, 949) == 1);
+    assert(xrdp_console_gfx_scaled_output_mapping_valid(
+               0, 0, 0, 49, 1512, 850, 1512, 949) == 1);
+    assert(xrdp_console_gfx_scaled_output_mapping_valid(
+               1, 0, 0, 0, 1512, 949, 1512, 949) == 0);
+    assert(xrdp_console_gfx_scaled_output_mapping_valid(
+               -1, -1, 0, 0, 1512, 949, 1512, 949) == 0);
+    assert(xrdp_console_gfx_scaled_output_mapping_valid(
+               0, 0, -1, 0, 1512, 949, 1512, 949) == 0);
+    assert(xrdp_console_gfx_scaled_output_mapping_valid(
+               0, 0, 0, 0, 0, 949, 1512, 949) == 0);
+    assert(xrdp_console_gfx_scaled_output_mapping_valid(
+               0, 0, 1, 0, 1512, 949, 1512, 949) == 0);
+    assert(xrdp_console_gfx_scaled_output_mapping_valid(
+               0, 0, 0, 100, 1512, 850, 1512, 949) == 0);
+    assert(xrdp_console_gfx_scaled_output_mapping_valid(
+               0, 0, INT_MAX, INT_MAX, INT_MAX, INT_MAX,
+               UINT32_C(4000000000), UINT32_C(4000000000)) == 0);
+    assert(xrdp_console_gfx_scaled_output_mapping_valid(
+               UINT16_MAX, UINT16_MAX, 0, 0, 1, 1, 1, 1) == 1);
+    assert(xrdp_console_gfx_scaled_output_mapping_valid(
+               (int)UINT16_MAX + 1, (int)UINT16_MAX + 1,
+               0, 0, 1, 1, 1, 1) == 0);
 
     return failures == 0 ? 0 : 1;
 }
