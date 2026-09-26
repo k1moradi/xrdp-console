@@ -33,13 +33,14 @@ capability-gated smoke as skipped.
 
 The isolated FreeRDP configuration retains client channels/RDPGFX and FFmpeg
 H.264 while disabling unrelated Kerberos, CUPS, and PC/SC support to avoid
-extra host development dependencies. Client scaled-output, scroll reuse,
-bitmap-cache observation, and verified-cache requests default on, while actual
-use must remain gated by negotiated capabilities and safe eligibility. Test
-the combined default path, each optimization in isolation (`0` for the other
-gates), and an all-off baseline. Never alter client capability advertisements
-merely to activate an optimization. Native Microsoft-client behavior remains
-a manual acceptance gate.
+extra host development dependencies. Client scaled-output, scroll reuse, and
+verified-cache requests default on, while actual use must remain gated by
+negotiated capabilities and safe eligibility. Bitmap-cache observation is a
+diagnostic, stays opt-in, and should not add bookkeeping to ordinary sessions.
+Test the combined default path, each optimization in isolation (`0` for the
+other performance gates), and an all-off baseline. Never alter client
+capability advertisements merely to activate an optimization. Native
+Microsoft-client behavior remains a manual acceptance gate.
 
 For portable source/unit-only CI, CMake can be used without building the
 production module or pinned xrdp runtime:

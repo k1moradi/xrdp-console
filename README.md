@@ -29,28 +29,31 @@ RDP text clipboard ── CLIPRDR / X11 CLIPBOARD selection ── same desktop
   standard RemoteFX, GFX Planar, or classic bitmap. The module does not force a
   codec the client did not negotiate.
 - Default-on RDPGFX client-offload paths for scaled-output mapping, verified
-  SurfaceToSurface scroll reuse, bitmap-cache observation, and a bounded
-  verified bitmap cache. They refine scheduler-selected H.264 updates and
-  retain H.264 fallback. Actual use remains gated by negotiated capabilities,
-  geometry eligibility, ACK state, and exact verification; the module does
-  not force or advertise client capabilities.
+  SurfaceToSurface scroll reuse, and a bounded verified bitmap cache. They
+  refine scheduler-selected H.264 updates and retain H.264 fallback. Actual
+  use remains gated by negotiated capabilities, geometry eligibility, ACK
+  state, and exact verification; the module does not force or advertise client
+  capabilities. Bitmap-cache observation is diagnostic-only and remains
+  opt-in.
 
-Unset environment variables request all four paths. An exact `0` disables a
-path, exact `1` explicitly enables it, and malformed values fail closed. The
-module logs the requested policy and negotiated/actual eligibility per
-session.
+Unset environment variables request the three performance paths. For those
+paths, exact `0` disables and exact `1` explicitly enables; malformed values
+fail closed. Set `XRDP_CONSOLE_CLIENT_CACHE_OBSERVE=1` only when collecting
+cache diagnostics; it is intentionally not enabled by default. The module logs
+the requested policy and negotiated/actual eligibility per session.
 
 | Gate | Default behavior |
 | --- | --- |
 | `XRDP_CONSOLE_CLIENT_SCALE` | Attempt client-side mapping only when the client negotiated the needed capability and preflight succeeds; otherwise use server-side scaling. |
 | `XRDP_CONSOLE_CLIENT_SCROLL` | Permit same-surface reuse only after scheduler selection, high-confidence matching, exact pixel verification, and geometry/baseline checks. |
-| `XRDP_CONSOLE_CLIENT_CACHE_OBSERVE` | Observe bitmap-cache reuse without changing rendering. |
+| `XRDP_CONSOLE_CLIENT_CACHE_OBSERVE` | Disabled by default; exact `1` observes cache reuse without changing rendering. |
 | `XRDP_CONSOLE_CLIENT_CACHE` | Use the bounded 16-slot verified cache only when capacity, identity geometry, and ACK residency are known; otherwise use H.264. |
 
-To isolate one path, set the other three variables to `0`; set all four to `0`
-for an all-off baseline. These are server-side policy switches, not client
-capability advertisements, so Microsoft clients continue using the normal
-server address and **port 3389**. A prior Microsoft macOS session negotiated
+To isolate one performance path, set the other two performance variables to
+`0`; set all three to `0` for an all-off baseline. Leave cache observation
+unset unless diagnosing reuse. These are server-side policy switches, not
+client capability advertisements, so Microsoft clients continue using the
+normal server address and **port 3389**. A prior Microsoft macOS session negotiated
 RDPGFX 10.7 flags `0x82`, including the scaled-map-disable bit; server-side
 scaling is therefore the correct fallback for that client. OpenGL/Vulkan
 probes remain diagnostic only; no production GPU acceleration path exists.
@@ -200,9 +203,10 @@ service state, and listener before changing the host. It switches the
 `[Console]` profile to module code `21`, enables text clipboard and dynamic
 presentation resizing, installs the matching module/chansrv artifacts, and
 restarts xrdp. The configured listener remains on **port 3389**. Activation
-does not enable the four client-offload gates; leave them unset for baseline,
-then enable only one at a time in the xrdp service environment. It refuses to
-restart while a client is connected and prints a root-only rollback backup
+uses the default-on, capability-gated performance paths; cache observation
+remains opt-in. Set the three performance gates to `0` for an all-off baseline
+or isolate one at a time in the xrdp service environment. It refuses to restart
+while a client is connected and prints a root-only rollback backup
 directory under `/var/backups/xrdp-console/`.
 
 To roll back, use the exact backup path printed by activation:

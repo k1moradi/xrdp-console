@@ -7,24 +7,26 @@ authenticated-Xvfb tests run without modifying the host xrdp service. The
 optional local RDP loader smoke uses FreeRDP when available. Microsoft-client
 interoperability remains a manual Windows/macOS test gate.
 
-The scaled-output, scroll-copy, bitmap-cache observation, and verified
-bitmap-cache paths default to requested/enabled, with actual use still gated
-by negotiated capabilities and per-path safety checks. An unset value enables
-the request, exact `1` explicitly enables it, and any explicit value other
-than `1` disables it. This provides an exact `=0` rollback without modifying
-client capability advertisements.
+Scaled-output, scroll-copy, and verified bitmap-cache performance paths
+default to requested/enabled, with actual use gated by negotiated capabilities
+and per-path safety checks. For these three paths, an unset value enables the
+request, exact `1` explicitly enables it, and any other explicit value
+disables it. Cache observation is diagnostic-only and remains disabled unless
+`XRDP_CONSOLE_CLIENT_CACHE_OBSERVE=1` is explicitly set. None of these switches
+modifies client capability advertisements.
 
 | Gate | Default behavior | Explicit `=0` behavior |
 | --- | --- | --- |
 | `XRDP_CONSOLE_CLIENT_SCALE` | Attempt client-side mapping only if negotiated capabilities and preflight allow it; otherwise server-side scaling. | Keep server-side scaling. |
 | `XRDP_CONSOLE_CLIENT_SCROLL` | Refine scheduler-selected H.264 runs only after high-confidence matching and exact pixel verification. | Disable SurfaceToSurface reuse. |
-| `XRDP_CONSOLE_CLIENT_CACHE_OBSERVE` | Observe cache behavior without changing rendering. | Disable observation. |
+| `XRDP_CONSOLE_CLIENT_CACHE_OBSERVE` | Disabled; exact `1` observes cache behavior without changing rendering. | Disable observation. |
 | `XRDP_CONSOLE_CLIENT_CACHE` | Use bounded ACK-tracked cache only with known capacity, eligible geometry, and safe residency; otherwise H.264. | Disable verified cache. |
 
 For live validation, exercise the combined default path first, then isolate
-each optimization by setting the other three gates to `0`; an all-off baseline
-sets all four to `0`. Disconnect clients before restarting xrdp. Confirm the
-server remains on port 3389 and inspect per-session requested-policy,
+each performance optimization by setting the other two performance gates to
+`0`; an all-off baseline sets the three performance gates to `0`. Keep cache
+observation unset unless collecting diagnostics. Disconnect clients before
+restarting xrdp. Confirm the server remains on port 3389 and inspect per-session requested-policy,
 negotiated-capability, and actual-path logs. A previously observed Microsoft
 macOS client negotiated RDPGFX 10.7 flags `0x82`, including the scaled-map
 disable bit, so server-side scaling is the required fallback for that client.

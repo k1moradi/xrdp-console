@@ -14,4 +14,12 @@ clientOffloadEnabledByDefault(const char *value) noexcept
     return value == nullptr || (value[0] == '1' && value[1] == '\0');
 }
 
+// Diagnostic observation is not an optimization, so it remains opt-in to
+// avoid adding per-tile bookkeeping to the default path on older servers.
+[[nodiscard]] constexpr bool
+clientOffloadObservationExplicitlyRequested(const char *value) noexcept
+{
+    return value != nullptr && value[0] == '1' && value[1] == '\0';
+}
+
 } // namespace xrdp_console::rdp

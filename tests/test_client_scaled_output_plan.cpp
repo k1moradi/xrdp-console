@@ -34,6 +34,14 @@ main()
     assert(xrdp_console::rdp::clientOffloadEnabledByDefault("1"));
     assert(!xrdp_console::rdp::clientOffloadEnabledByDefault("0"));
     assert(!xrdp_console::rdp::clientOffloadEnabledByDefault("true"));
+    assert(!xrdp_console::rdp::
+               clientOffloadObservationExplicitlyRequested(nullptr));
+    assert(xrdp_console::rdp::
+               clientOffloadObservationExplicitlyRequested("1"));
+    assert(!xrdp_console::rdp::
+               clientOffloadObservationExplicitlyRequested("0"));
+    assert(!xrdp_console::rdp::
+               clientOffloadObservationExplicitlyRequested("true"));
 
     assert(shouldAttemptClientScaledOutputResizeRearm(true, true, false));
     assert(!shouldAttemptClientScaledOutputResizeRearm(false, true, false));

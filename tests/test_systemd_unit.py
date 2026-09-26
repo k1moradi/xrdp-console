@@ -71,6 +71,7 @@ class DirectConsoleServiceTests(unittest.TestCase):
         self.assertIn("port 3389", text)
         self.assertIn("an RDP client is connected", text)
         self.assertIn("requested by default", text)
+        self.assertIn("diagnostic-only", text)
         self.assertIn("No client capabilities are forced", text)
 
 

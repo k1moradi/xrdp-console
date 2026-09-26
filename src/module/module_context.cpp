@@ -137,7 +137,8 @@ copy_text(char *destination, std::size_t capacity, const char *value) noexcept
 bitmapCacheObservationRequested() noexcept
 {
     const char *value = std::getenv("XRDP_CONSOLE_CLIENT_CACHE_OBSERVE");
-    return xrdp_console::rdp::clientOffloadEnabledByDefault(value);
+    return xrdp_console::rdp::
+        clientOffloadObservationExplicitlyRequested(value);
 }
 
 [[nodiscard]] bool
