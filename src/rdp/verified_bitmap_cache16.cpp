@@ -5,6 +5,8 @@
 #include <cstring>
 #include <limits>
 
+#include "client_offload_policy.h"
+
 namespace xrdp_console::rdp
 {
 namespace
@@ -122,7 +124,7 @@ splitSelectionForVerifiedCacheHit(
 bool
 verifiedBitmapCacheRequested(const char *value) noexcept
 {
-    return value != nullptr && value[0] == '1' && value[1] == '\0';
+    return clientOffloadEnabledByDefault(value);
 }
 
 bool

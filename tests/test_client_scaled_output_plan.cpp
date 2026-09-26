@@ -6,6 +6,7 @@
 #include <cassert>
 #include <cstddef>
 
+#include "rdp/client_offload_policy.h"
 #include "rdp/client_scaled_output_plan.h"
 
 using xrdp_console::rdp::ClientScaledOutputDryRunPlan;
@@ -25,10 +26,14 @@ int
 main()
 {
     assert(clientScaledOutputActivationRequested("1"));
-    assert(!clientScaledOutputActivationRequested(nullptr));
+    assert(clientScaledOutputActivationRequested(nullptr));
     assert(!clientScaledOutputActivationRequested(""));
     assert(!clientScaledOutputActivationRequested("0"));
     assert(!clientScaledOutputActivationRequested("true"));
+    assert(xrdp_console::rdp::clientOffloadEnabledByDefault(nullptr));
+    assert(xrdp_console::rdp::clientOffloadEnabledByDefault("1"));
+    assert(!xrdp_console::rdp::clientOffloadEnabledByDefault("0"));
+    assert(!xrdp_console::rdp::clientOffloadEnabledByDefault("true"));
 
     assert(shouldAttemptClientScaledOutputResizeRearm(true, true, false));
     assert(!shouldAttemptClientScaledOutputResizeRearm(false, true, false));

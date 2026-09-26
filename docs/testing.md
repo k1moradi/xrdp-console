@@ -8,21 +8,27 @@ optional local RDP loader smoke uses FreeRDP when available. Microsoft-client
 interoperability remains a manual Windows/macOS test gate.
 
 The scaled-output, scroll-copy, bitmap-cache observation, and verified
-bitmap-cache paths are individually gated by exact service environment values:
+bitmap-cache paths default to requested/enabled, with actual use still gated
+by negotiated capabilities and per-path safety checks. An unset value enables
+the request, exact `1` explicitly enables it, and any explicit value other
+than `1` disables it. This provides an exact `=0` rollback without modifying
+client capability advertisements.
 
-| Gate | Behavior when unset | Behavior when set to `1` |
+| Gate | Default behavior | Explicit `=0` behavior |
 | --- | --- | --- |
-| `XRDP_CONSOLE_CLIENT_SCALE` | Keep server-side presentation scaling. | Attempt client-side scaled output only when negotiated RDPGFX capabilities are eligible; otherwise fall back safely. |
-| `XRDP_CONSOLE_CLIENT_SCROLL` | Do not emit SurfaceToSurface scroll reuse. | Refine scheduler-selected H.264 runs only after high-confidence motion matching and exact pixel verification. |
-| `XRDP_CONSOLE_CLIENT_CACHE_OBSERVE` | Do not collect bitmap-cache observations. | Observe reuse candidates without changing rendering. |
-| `XRDP_CONSOLE_CLIENT_CACHE` | Do not use the verified bitmap cache. | Use bounded, ACK-tracked verified cache entries with H.264 fallback. |
+| `XRDP_CONSOLE_CLIENT_SCALE` | Attempt client-side mapping only if negotiated capabilities and preflight allow it; otherwise server-side scaling. | Keep server-side scaling. |
+| `XRDP_CONSOLE_CLIENT_SCROLL` | Refine scheduler-selected H.264 runs only after high-confidence matching and exact pixel verification. | Disable SurfaceToSurface reuse. |
+| `XRDP_CONSOLE_CLIENT_CACHE_OBSERVE` | Observe cache behavior without changing rendering. | Disable observation. |
+| `XRDP_CONSOLE_CLIENT_CACHE` | Use bounded ACK-tracked cache only with known capacity, eligible geometry, and safe residency; otherwise H.264. | Disable verified cache. |
 
-For live testing, first run with all four variables unset, then set exactly one
-to `1` per run and restart xrdp between runs. Confirm the server remains on
-port 3389. Verify negotiated capabilities and path-selection logs for every
-session. A previously observed Microsoft macOS client advertised RDPGFX 10.7
-flags `0x82`, which makes scaled-output mapping ineligible; seeing the
-server-scaled fallback in that case is expected. FreeRDP loader tests do not
+For live validation, exercise the combined default path first, then isolate
+each optimization by setting the other three gates to `0`; an all-off baseline
+sets all four to `0`. Disconnect clients before restarting xrdp. Confirm the
+server remains on port 3389 and inspect per-session requested-policy,
+negotiated-capability, and actual-path logs. A previously observed Microsoft
+macOS client negotiated RDPGFX 10.7 flags `0x82`, including the scaled-map
+disable bit, so server-side scaling is the required fallback for that client.
+Do not override that negotiated restriction. FreeRDP loader tests do not
 replace manual Windows/macOS validation, especially for scroll tearing, input
 responsiveness, clipboard, resize, and reconnect.
 

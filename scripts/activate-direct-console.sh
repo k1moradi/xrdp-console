@@ -14,9 +14,11 @@ Usage:
 Activation preserves the existing RDP listener on port 3389. It installs the
 locally built direct-X11 module and pinned chansrv binary, enables the module's
 text clipboard and dynamic-resize channels, and restarts xrdp and the console
-chansrv service. It does not set the optional client-offload test gates; leave
-them unset for a baseline run, then test one gate at a time. A root-only backup
-is printed for explicit rollback.
+chansrv service. Client scaled-output, scroll-reuse, cache observation, and
+verified bitmap caching are requested by default, subject to negotiated
+capabilities and per-path safety checks. Set an individual
+XRDP_CONSOLE_CLIENT_* variable to exactly 0 in the xrdp service environment
+to disable that path. A root-only backup is printed for explicit rollback.
 EOF
 }
 
@@ -396,6 +398,7 @@ echo "Installed the matching pinned chansrv binary for text clipboard support."
 echo "RDP listener preserved on port 3389."
 echo "Enabled Console text clipboard, dynamic virtual channels, and presentation resizing."
 echo "RemoteFX is negotiated only when the client supports the module's standard RFX path; otherwise classic bitmap remains available."
-echo "Client scaled-output, scroll-reuse, and bitmap-cache gates were not enabled by this activation."
+echo "Client scaled-output, scroll-reuse, bitmap-cache observation, and verified-cache paths default to enabled when negotiated capabilities permit."
+echo "No client capabilities are forced or advertised by this setting; set an individual XRDP_CONSOLE_CLIENT_* variable to exactly 0 to disable that path."
 echo "Rollback: sudo $0 --rollback $backup_directory"
 systemctl --no-pager --full status xrdp | sed -n '1,18p'

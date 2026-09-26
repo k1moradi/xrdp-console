@@ -266,8 +266,10 @@ int main()
     success &= snapshot_memory_is_bounded();
     success &= invalid_capture_does_not_start_an_episode();
     success &= exact_reuse_fails_closed_on_run_overflow();
-    success &= check(clientScrollCopyRequested("1") &&
+    success &= check(clientScrollCopyRequested(nullptr) &&
+                         clientScrollCopyRequested("1") &&
+                         !clientScrollCopyRequested("0") &&
                          !clientScrollCopyRequested("true"),
-                     "scroll-copy opt-in gate was not exact");
+                     "scroll-copy default/override policy was incorrect");
     return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

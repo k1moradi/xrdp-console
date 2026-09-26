@@ -30,6 +30,7 @@ extern "C" {
 #include "../core/presentation_transform.h"
 #include "../clipboard/clipboard_controller.h"
 #include "../rdp/classic_graphics_scheduler.h"
+#include "../rdp/client_offload_policy.h"
 #include "../rdp/client_scaled_output_plan.h"
 #include "../rdp/gfx_avc420_frame.h"
 #include "../rdp/gfx_bitmap_cache_commands.h"
@@ -136,7 +137,7 @@ copy_text(char *destination, std::size_t capacity, const char *value) noexcept
 bitmapCacheObservationRequested() noexcept
 {
     const char *value = std::getenv("XRDP_CONSOLE_CLIENT_CACHE_OBSERVE");
-    return value != nullptr && value[0] == '1' && value[1] == '\0';
+    return xrdp_console::rdp::clientOffloadEnabledByDefault(value);
 }
 
 [[nodiscard]] bool
@@ -148,6 +149,37 @@ h264BitmapCacheIdentityGeometry(
            source == frame.geometry() &&
            frame.viewport() ==
                Rectangle{0, 0, source.widthPixels, source.heightPixels};
+}
+
+void
+configureVerifiedBitmapCache(
+    xrdp_console::rdp::VerifiedBitmapCache16 &cache,
+    const xrdp_console::rdp::H264LatestFrameState &frame,
+    const xrdp_console_graphics_capabilities &capabilities,
+    const char *event) noexcept
+{
+    cache.disable();
+    if (!xrdp_console::rdp::verifiedBitmapCacheRequested(
+            std::getenv("XRDP_CONSOLE_CLIENT_CACHE")))
+    {
+        return;
+    }
+
+    const auto limits = xrdp_console::rdp::gfxBitmapCacheLimits(
+        static_cast<std::uint32_t>(capabilities.selected_gfx_cap_version),
+        static_cast<std::uint32_t>(capabilities.selected_gfx_cap_flags));
+    const bool identity = h264BitmapCacheIdentityGeometry(frame);
+    const bool enabled = identity && limits.capacityKnown &&
+        cache.configure(limits.maximumBytes, limits.maximumSlots);
+    log_message(
+        LOG_LEVEL_INFO,
+        "XRDP_CONSOLE_CLIENT_CACHE event=%s enabled=%d identity=%d "
+        "protocol_supported=%d capacity_known=%d slots=16 verify_bytes=%llu",
+        event, enabled ? 1 : 0, identity ? 1 : 0,
+        limits.protocolSupported ? 1 : 0, limits.capacityKnown ? 1 : 0,
+        static_cast<unsigned long long>(
+            xrdp_console::rdp::VerifiedBitmapCache16::kSlotCount *
+            xrdp_console::rdp::VerifiedBitmapCache16::kMaximumBitmapBytes));
 }
 
 [[nodiscard]] bool
@@ -1479,6 +1511,27 @@ ModuleContext::connect() noexcept
         impl_->scrollMotionObserver.reset();
         impl_->h264SubmittedScrollBaselineSequence = 0;
         impl_->bitmapCacheObserver.reset();
+        log_message(
+            LOG_LEVEL_INFO,
+            "XRDP_CONSOLE_CLIENT_OFFLOAD_POLICY event=connect "
+            "default=enabled scale_requested=%d scale_capable=%d "
+            "scroll_requested=%d cache_observe_requested=%d "
+            "cache_requested=%d h264_transport=%d source=%ux%u "
+            "presentation=%ux%u",
+            xrdp_console::rdp::clientScaledOutputActivationRequested(
+                std::getenv("XRDP_CONSOLE_CLIENT_SCALE")) ? 1 : 0,
+            negotiatedGraphics.rdpgfx_scaled_output_protocol_eligible != 0
+                ? 1
+                : 0,
+            xrdp_console::rdp::clientScrollCopyRequested(
+                std::getenv("XRDP_CONSOLE_CLIENT_SCROLL")) ? 1 : 0,
+            bitmapCacheObservationRequested() ? 1 : 0,
+            xrdp_console::rdp::verifiedBitmapCacheRequested(
+                std::getenv("XRDP_CONSOLE_CLIENT_CACHE")) ? 1 : 0,
+            graphicsTransport == GraphicsTransport::H264Gfx ? 1 : 0,
+            sourceGeometry.widthPixels, sourceGeometry.heightPixels,
+            impl_->state.presentationGeometry.widthPixels,
+            impl_->state.presentationGeometry.heightPixels);
         if (graphicsTransport == GraphicsTransport::H264Gfx &&
             bitmapCacheObservationRequested())
         {
@@ -1500,31 +1553,11 @@ ModuleContext::connect() noexcept
         }
         impl_->verifiedBitmapCache.disable();
         impl_->pendingBitmapCacheHit.clear();
-        if (graphicsTransport == GraphicsTransport::H264Gfx &&
-            xrdp_console::rdp::verifiedBitmapCacheRequested(
-                std::getenv("XRDP_CONSOLE_CLIENT_CACHE")))
+        if (graphicsTransport == GraphicsTransport::H264Gfx)
         {
-            const auto limits = xrdp_console::rdp::gfxBitmapCacheLimits(
-                static_cast<std::uint32_t>(
-                    negotiatedGraphics.selected_gfx_cap_version),
-                static_cast<std::uint32_t>(
-                    negotiatedGraphics.selected_gfx_cap_flags));
-            const bool identity =
-                h264BitmapCacheIdentityGeometry(impl_->h264Frame);
-            const bool enabled = identity && limits.capacityKnown &&
-                impl_->verifiedBitmapCache.configure(
-                    limits.maximumBytes, limits.maximumSlots);
-            log_message(
-                LOG_LEVEL_INFO,
-                "XRDP_CONSOLE_CLIENT_CACHE event=connect enabled=%d "
-                "identity=%d protocol_supported=%d capacity_known=%d "
-                "slots=16 verify_bytes=%llu",
-                enabled ? 1 : 0, identity ? 1 : 0,
-                limits.protocolSupported ? 1 : 0,
-                limits.capacityKnown ? 1 : 0,
-                static_cast<unsigned long long>(
-                    xrdp_console::rdp::VerifiedBitmapCache16::kSlotCount *
-                    xrdp_console::rdp::VerifiedBitmapCache16::kMaximumBitmapBytes));
+            configureVerifiedBitmapCache(
+                impl_->verifiedBitmapCache, impl_->h264Frame,
+                negotiatedGraphics, "connect");
         }
         if (graphicsTransport == GraphicsTransport::H264Gfx &&
             !impl_->scrollMotionObserver.configure(sourceGeometry))
@@ -1781,6 +1814,12 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     impl_->verifiedBitmapCache.disable();
     impl_->pendingBitmapCacheHit.clear();
     impl_->h264SubmittedScrollBaselineSequence = 0;
+    if (graphicsTransport == GraphicsTransport::H264Gfx)
+    {
+        configureVerifiedBitmapCache(
+            impl_->verifiedBitmapCache, impl_->h264Frame,
+            negotiatedGraphics, "resize");
+    }
     if (graphicsTransport == GraphicsTransport::H264Gfx &&
         !impl_->scrollMotionObserver.configure(impl_->state.sourceGeometry))
     {
@@ -1931,6 +1970,9 @@ ModuleContext::suppress_output(bool suppress, int left, int top, int right,
                 impl_->h264Frame = std::move(live.frame);
                 impl_->presentationTransform = std::move(live.transform);
                 impl_->presentationScaler = std::move(live.scaler);
+                configureVerifiedBitmapCache(
+                    impl_->verifiedBitmapCache, impl_->h264Frame,
+                    negotiatedGraphics, "resize-resume");
                 impl_->h264SubmittedFrameId = 0;
                 impl_->h264SubmittedAt = {};
                 log_message(

@@ -7,6 +7,7 @@
 #include <limits>
 
 #include "../core/generation_tile_map.h"
+#include "client_offload_policy.h"
 #include "scroll_copy_plan.h"
 
 namespace xrdp_console::rdp
@@ -94,7 +95,7 @@ rectanglesEqual(FramebufferView previousFrame, Rectangle previousRectangle,
 bool
 clientScrollCopyRequested(const char *value) noexcept
 {
-    return value != nullptr && value[0] == '1' && value[1] == '\0';
+    return clientOffloadEnabledByDefault(value);
 }
 
 ExactScrollReuseResult

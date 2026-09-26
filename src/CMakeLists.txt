@@ -44,6 +44,7 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         rdp/scaled_output_capability_policy.h
         rdp/client_scaled_output_plan.cpp
         rdp/client_scaled_output_plan.h
+        rdp/client_offload_policy.h
         rdp/rfx_encoder.cpp
         rdp/rfx_encoder.h
         rdp/remote_fx_scheduler.h

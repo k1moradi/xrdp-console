@@ -70,6 +70,8 @@ class DirectConsoleServiceTests(unittest.TestCase):
         text = ACTIVATION.read_text(encoding="utf-8")
         self.assertIn("port 3389", text)
         self.assertIn("an RDP client is connected", text)
+        self.assertIn("requested by default", text)
+        self.assertIn("No client capabilities are forced", text)
 
 
 if __name__ == "__main__":

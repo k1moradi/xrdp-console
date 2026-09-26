@@ -19,48 +19,55 @@ RDP text clipboard ── CLIPRDR / X11 CLIPBOARD selection ── same desktop
   handling continue to get service during graphics updates.
 - Keyboard and mouse injection through XTest, XFixes cursor updates, cleanup of
   held keys/buttons on disconnect, and inverse pointer mapping.
-- Presentation resizing without changing the physical Xorg mode. By default,
-  server-side aspect-fit scaling keeps the full source visible; eligible
-  clients may opt into protocol-gated client-side scaled output.
+- Presentation resizing without changing the physical Xorg mode. The module
+  requests client-side aspect-fit scaled output by default when eligible;
+  otherwise server-side scaling keeps the full source visible.
 - A first-party text clipboard bridge for the RDP `cliprdr` channel and the
   X11 `CLIPBOARD` selection.
 - Capability-based graphics selection. Depending on what the client and server
   actually negotiate and initialize, output can use RDPGFX H.264/AVC420,
   standard RemoteFX, GFX Planar, or classic bitmap. The module does not force a
   codec the client did not negotiate.
-- Opt-in RDPGFX client-offload paths for scaled-output mapping, verified
+- Default-on RDPGFX client-offload paths for scaled-output mapping, verified
   SurfaceToSurface scroll reuse, bitmap-cache observation, and a bounded
-  verified bitmap cache. They refine scheduler-selected H.264 updates and keep
-  H.264 fallback; each is disabled unless its service environment gate is
-  exactly `1`.
+  verified bitmap cache. They refine scheduler-selected H.264 updates and
+  retain H.264 fallback. Actual use remains gated by negotiated capabilities,
+  geometry eligibility, ACK state, and exact verification; the module does
+  not force or advertise client capabilities.
 
-Run a baseline with all four gates unset, then test one gate at a time:
+Unset environment variables request all four paths. An exact `0` disables a
+path, exact `1` explicitly enables it, and malformed values fail closed. The
+module logs the requested policy and negotiated/actual eligibility per
+session.
 
-| Gate | Behavior |
+| Gate | Default behavior |
 | --- | --- |
-| `XRDP_CONSOLE_CLIENT_SCALE=1` | Use client-side scaled-output mapping only when negotiated capabilities are eligible; otherwise retain server-side scaling. |
-| `XRDP_CONSOLE_CLIENT_SCROLL=1` | Allow conservative same-surface scroll copies only after scheduler selection, high-confidence motion matching, and exact pixel verification. |
-| `XRDP_CONSOLE_CLIENT_CACHE_OBSERVE=1` | Observe bitmap-cache reuse without changing rendering. |
-| `XRDP_CONSOLE_CLIENT_CACHE=1` | Enable the bounded 16-slot verified bitmap cache, with H.264 fallback on uncertainty or failure. |
+| `XRDP_CONSOLE_CLIENT_SCALE` | Attempt client-side mapping only when the client negotiated the needed capability and preflight succeeds; otherwise use server-side scaling. |
+| `XRDP_CONSOLE_CLIENT_SCROLL` | Permit same-surface reuse only after scheduler selection, high-confidence matching, exact pixel verification, and geometry/baseline checks. |
+| `XRDP_CONSOLE_CLIENT_CACHE_OBSERVE` | Observe bitmap-cache reuse without changing rendering. |
+| `XRDP_CONSOLE_CLIENT_CACHE` | Use the bounded 16-slot verified cache only when capacity, identity geometry, and ACK residency are known; otherwise use H.264. |
 
-These gates are configured in the xrdp service environment, not in the RDP
-client, so Microsoft clients continue using the normal server address and
-**port 3389**. A prior Microsoft macOS session advertised RDPGFX 10.7 flags
-`0x82`, which is not eligible for scaled-output mapping; the server-side
-presentation fallback is expected for that capability set. OpenGL/Vulkan
-probes remain diagnostic only and do not accelerate the runtime.
+To isolate one path, set the other three variables to `0`; set all four to `0`
+for an all-off baseline. These are server-side policy switches, not client
+capability advertisements, so Microsoft clients continue using the normal
+server address and **port 3389**. A prior Microsoft macOS session negotiated
+RDPGFX 10.7 flags `0x82`, including the scaled-map-disable bit; server-side
+scaling is therefore the correct fallback for that client. OpenGL/Vulkan
+probes remain diagnostic only; no production GPU acceleration path exists.
 
-To test a gate, disconnect RDP clients, add exactly one `Environment=` line to
-the xrdp service drop-in (for example,
-`Environment=XRDP_CONSOLE_CLIENT_SCROLL=1`), reload systemd, and restart xrdp.
-Remove that line and restart for the all-gates-off baseline. Do not change the
-service's RDP port; clients use port `3389` throughout.
+To change a path, disconnect RDP clients, add or edit its `Environment=` line
+in the xrdp service drop-in (for example,
+`Environment=XRDP_CONSOLE_CLIENT_SCROLL=0`), reload systemd, and restart xrdp.
+Remove the override to restore default-on policy. The activation script does
+not alter client capability negotiation or the service port; clients continue
+using port `3389`.
 
 ## Current limitations
 
-- The gated scroll-copy path and bitmap cache still need careful live
-  validation with Microsoft Windows/macOS clients. Leave the gates off if a
-  client shows tearing, stale content, or worse input responsiveness.
+- The default-on scroll-copy path and bitmap cache still need careful live
+  validation with Microsoft Windows/macOS clients. Set their corresponding
+  environment gates to `0` if a client shows tearing, stale content, or worse
+  input responsiveness.
 - The module's clipboard bridge is text-focused; it does not implement image
   clipboard formats or file transfer.
 - The baseline has been exercised with Microsoft Windows/macOS clients, but
@@ -218,7 +225,8 @@ sudo journalctl -u xrdp -f
 
 The primary product is the direct-X11 Console module. The repository also
 contains benchmark and diagnostic tools for validating latency, resource use,
-input responsiveness, client-visible pixels, and opt-in RDPGFX offload paths.
+input responsiveness, client-visible pixels, and capability-gated RDPGFX
+client-offload paths.
 Start with
 [`docs/measurement-model.md`](docs/measurement-model.md) and
 [`docs/network-latency.md`](docs/network-latency.md). The benchmark defaults

@@ -43,7 +43,7 @@ void put32(std::span<std::byte> out, std::size_t at, unsigned value)
 int main()
 {
     assert(verifiedBitmapCacheRequested("1"));
-    assert(!verifiedBitmapCacheRequested(nullptr));
+    assert(verifiedBitmapCacheRequested(nullptr));
     assert(!verifiedBitmapCacheRequested(""));
     assert(!verifiedBitmapCacheRequested("0"));
     assert(!verifiedBitmapCacheRequested("true"));

@@ -20,15 +20,17 @@ presentation geometry and transform, not the Xorg mode. Mouse coordinates use
 the inverse transform, while letterbox input is excluded. RDP graphics are
 selected from negotiated capabilities and successfully initialized paths;
 the module does not force H.264 or RemoteFX when the client did not negotiate
-them. Eligibility for protocol-defined RDPGFX scaled output is currently
-diagnostic only; server-side CPU aspect-fit scaling remains the active
-presentation path.
+them. Client scaled-output mapping, verified scroll reuse, and verified
+bitmap caching are requested by default but used only when negotiated
+capabilities and runtime preflight permit them. Otherwise server-side
+presentation and H.264 remain the fallback. The production runtime does not
+currently use the local GPU; GL/Vulkan probes are diagnostic only.
 
 Current scope is deliberately bounded. The first-party clipboard bridge is
-text-only. Scroll-motion discovery is observational rather than a production
-surface-copy accelerator, and fast page scrolling can still show uneven or
-tearing updates. The optional GL 3.3/Vulkan probes and pixel-pipeline
-benchmarks do not add GPU processing to the runtime.
+text-only. The default-on verified scroll-copy path still requires live
+Microsoft-client testing for tearing and input responsiveness. The optional GL
+3.3/Vulkan probes and pixel-pipeline benchmarks do not add GPU processing to
+the runtime.
 
 See the top-level [`README.md`](../README.md) for dependency installation,
 build profiles, benchmark commands, and explicit activation/rollback steps.
