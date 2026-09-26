@@ -1156,11 +1156,25 @@ ModuleContext::connect() noexcept
             "xrdp-console: negotiated graphics "
             "bitmap_rfx_codec_id=%d nscodec_codec_id=%d "
             "h264_codec_id=%d gfx_enabled=%d selected_gfx_mode=%s "
+            "selected_gfx_cap_version=0x%08x "
+            "selected_gfx_cap_flags=0x%08x "
+            "rdpgfx_scaled_output_protocol_eligible=%s "
+            "source=%ux%u presentation=%ux%u "
             "first_party_transport=%s actual_output=%s",
             negotiatedGraphics.bitmap_rfx_codec_id,
             negotiatedGraphics.nscodec_codec_id,
             negotiatedGraphics.h264_codec_id,
             negotiatedGraphics.gfx_enabled, selectedGfxMode,
+            static_cast<unsigned int>(
+                negotiatedGraphics.selected_gfx_cap_version),
+            static_cast<unsigned int>(
+                negotiatedGraphics.selected_gfx_cap_flags),
+            negotiatedGraphics.rdpgfx_scaled_output_protocol_eligible
+                ? "yes"
+                : "no",
+            sourceGeometry.widthPixels, sourceGeometry.heightPixels,
+            impl_->state.presentationGeometry.widthPixels,
+            impl_->state.presentationGeometry.heightPixels,
             firstPartyTransport, actualOutputPath);
         return 0;
     }

@@ -28,6 +28,10 @@ struct xrdp_console_graphics_capabilities
     int h264_codec_id;
     int gfx_enabled;
     int selected_gfx_mode;
+    int selected_gfx_cap_version;
+    int selected_gfx_cap_flags;
+    /* Protocol eligibility only; this does not assert tested client behavior. */
+    int rdpgfx_scaled_output_protocol_eligible;
 };
 
 xrdp_console_module *xrdp_console_module_create(void *context);

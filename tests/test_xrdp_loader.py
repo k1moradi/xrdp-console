@@ -664,6 +664,25 @@ password=smoke
                         stdout_path,
                         client_log_path,
                     )
+                    wait_for_log(
+                        server,
+                        log_path,
+                        "rdpgfx_scaled_output_protocol_eligible=",
+                        4.0,
+                        stdout_path,
+                        client_log_path,
+                    )
+                    if re.search(
+                            r"xrdp-console: negotiated graphics .*"
+                            r"selected_gfx_cap_version=0x[0-9a-fA-F]{8} "
+                            r"selected_gfx_cap_flags=0x[0-9a-fA-F]{8} "
+                            r"rdpgfx_scaled_output_protocol_eligible=(?:yes|no) "
+                            r"source=\d+x\d+ presentation=\d+x\d+",
+                            read_text(log_path)) is None:
+                        raise AssertionError(
+                            "module diagnostics omitted selected RDPGFX capset "
+                            "or source/presentation geometry\n"
+                            f"{xrdp_log_excerpt(log_path)}")
                     if rfx_mode:
                         wait_for_log(
                             server,

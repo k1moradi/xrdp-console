@@ -12,6 +12,7 @@
 
 #include "module_abi.h"
 #include "../rdp/rfx_capability_policy.h"
+#include "../rdp/scaled_output_capability_policy.h"
 
 int xrdp_console_context_start(void *context, int width, int height, int bpp);
 int xrdp_console_context_connect(void *context);
@@ -383,6 +384,9 @@ xrdp_console_module_get_graphics_capabilities(
         capabilities->h264_codec_id = 0;
         capabilities->gfx_enabled = 0;
         capabilities->selected_gfx_mode = XRDP_CONSOLE_GFX_NONE;
+        capabilities->selected_gfx_cap_version = 0;
+        capabilities->selected_gfx_cap_flags = 0;
+        capabilities->rdpgfx_scaled_output_protocol_eligible = 0;
     }
 
     if (module == NULL || capabilities == NULL || module->abi.wm == 0)
@@ -402,6 +406,14 @@ xrdp_console_module_get_graphics_capabilities(
     capabilities->gfx_enabled = wm->client_info->gfx != 0;
     if (wm->mm != NULL)
     {
+        capabilities->selected_gfx_cap_version =
+            wm->mm->egfx_caps_version;
+        capabilities->selected_gfx_cap_flags = wm->mm->egfx_caps_flags;
+        capabilities->rdpgfx_scaled_output_protocol_eligible =
+            xrdp_console_gfx_scaled_output_protocol_eligible(
+                (uint32_t)wm->mm->egfx_caps_version,
+                (uint32_t)wm->mm->egfx_caps_flags);
+
         if (wm->mm->egfx_flags == XRDP_EGFX_H264)
         {
             capabilities->selected_gfx_mode = XRDP_CONSOLE_GFX_H264;

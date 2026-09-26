@@ -40,6 +40,8 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         rdp/rfx_batch_plan.h
         rdp/rfx_capability_policy.c
         rdp/rfx_capability_policy.h
+        rdp/scaled_output_capability_policy.c
+        rdp/scaled_output_capability_policy.h
         rdp/rfx_encoder.cpp
         rdp/rfx_encoder.h
         rdp/remote_fx_scheduler.h

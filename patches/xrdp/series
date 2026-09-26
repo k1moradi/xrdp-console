@@ -18,3 +18,4 @@
 0018-xrdp-chansrv-retry-silent-text-selection-timeout.patch
 0019-xrdp-console-h264-async-encoder.patch
 0020-xrdp-console-adaptive-gfx-pacing.patch
+0021-xrdp-console-record-rdpgfx-capset.patch

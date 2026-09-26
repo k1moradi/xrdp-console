@@ -111,6 +111,18 @@ add_test(NAME proxy-backpressure-unit
 set_tests_properties(proxy-backpressure-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+add_executable(scaled-output-capability-policy-unit
+    test_scaled_output_capability_policy.c
+    ${CMAKE_SOURCE_DIR}/src/rdp/scaled_output_capability_policy.c)
+set_target_properties(scaled-output-capability-policy-unit PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS OFF)
+target_include_directories(scaled-output-capability-policy-unit PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/rdp)
+add_test(NAME scaled-output-capability-policy-unit
+    COMMAND scaled-output-capability-policy-unit)
+
 add_test(NAME systemd-unit
     COMMAND ${Python3_EXECUTABLE} -B
     ${CMAKE_CURRENT_SOURCE_DIR}/test_systemd_unit.py)

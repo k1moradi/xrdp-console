@@ -1,0 +1,49 @@
+From: xrdp-console contributors
+Subject: [PATCH] xrdp: retain selected RDPGFX capability for diagnostics
+
+Record the successfully sent RDPGFX CAPS_CONFIRM version and flags so the
+first-party module can report protocol-level scaled-output eligibility.
+This patch adds state and diagnostics only; it does not send scaled-output
+commands or alter graphics selection, rendering, or transport behavior.
+
+--- a/xrdp/xrdp_types.h
++++ b/xrdp/xrdp_types.h
+@@ -491,6 +491,9 @@ struct xrdp_mm
+     struct xrdp_egfx *egfx;
+     int egfx_up;
+     enum xrdp_egfx_flags egfx_flags;
++    /* Last capset sent in a successful CAPS_CONFIRM; zero means none. */
++    int egfx_caps_version;
++    int egfx_caps_flags;
+     /* Reused only by the first-party Console GFX Planar fallback. */
+     struct xrdp_console_planar_scratch *console_planar_scratch;
+     struct xrdp_console_planar_batch *console_planar_batch;
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -2238,6 +2238,8 @@ xrdp_mm_egfx_caps_advertise(void *user, int caps_count,
+ 
+     LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_caps_advertise:");
+     self = (struct xrdp_mm *) user;
++    self->egfx_caps_version = 0;
++    self->egfx_caps_flags = 0;
+     screen = self->wm->screen;
+     if (screen->data == NULL)
+     {
+@@ -2336,7 +2338,17 @@ xrdp_mm_egfx_caps_advertise(void *user, int caps_count,
+                                            ver_flags[best_index].version,
+                                            ver_flags[best_index].flags);
+         LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_caps_advertise: xrdp_egfx_send_capsconfirm "
+             "error %d best_index %d", error, best_index);
++        if (error == 0)
++        {
++            self->egfx_caps_version = ver_flags[best_index].version;
++            self->egfx_caps_flags = ver_flags[best_index].flags;
++            LOG(LOG_LEVEL_INFO,
++                "xrdp_mm_egfx_caps_advertise: selected capability "
++                "version=0x%08x flags=0x%08x",
++                (unsigned int)self->egfx_caps_version,
++                (unsigned int)self->egfx_caps_flags);
++        }
+         error = xrdp_egfx_send_reset_graphics(self->egfx,
+                                               screen->width, screen->height,
+                                               self->wm->client_info->display_sizes.monitorCount,
