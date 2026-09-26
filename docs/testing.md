@@ -7,6 +7,25 @@ authenticated-Xvfb tests run without modifying the host xrdp service. The
 optional local RDP loader smoke uses FreeRDP when available. Microsoft-client
 interoperability remains a manual Windows/macOS test gate.
 
+The scaled-output, scroll-copy, bitmap-cache observation, and verified
+bitmap-cache paths are individually gated by exact service environment values:
+
+| Gate | Behavior when unset | Behavior when set to `1` |
+| --- | --- | --- |
+| `XRDP_CONSOLE_CLIENT_SCALE` | Keep server-side presentation scaling. | Attempt client-side scaled output only when negotiated RDPGFX capabilities are eligible; otherwise fall back safely. |
+| `XRDP_CONSOLE_CLIENT_SCROLL` | Do not emit SurfaceToSurface scroll reuse. | Refine scheduler-selected H.264 runs only after high-confidence motion matching and exact pixel verification. |
+| `XRDP_CONSOLE_CLIENT_CACHE_OBSERVE` | Do not collect bitmap-cache observations. | Observe reuse candidates without changing rendering. |
+| `XRDP_CONSOLE_CLIENT_CACHE` | Do not use the verified bitmap cache. | Use bounded, ACK-tracked verified cache entries with H.264 fallback. |
+
+For live testing, first run with all four variables unset, then set exactly one
+to `1` per run and restart xrdp between runs. Confirm the server remains on
+port 3389. Verify negotiated capabilities and path-selection logs for every
+session. A previously observed Microsoft macOS client advertised RDPGFX 10.7
+flags `0x82`, which makes scaled-output mapping ineligible; seeing the
+server-scaled fallback in that case is expected. FreeRDP loader tests do not
+replace manual Windows/macOS validation, especially for scroll tearing, input
+responsiveness, clipboard, resize, and reconnect.
+
 CTest discovers `xfreerdp3` or `xfreerdp` from `PATH` by default. To select a
 specific executable, configure with
 `-DXRDP_CONSOLE_FREERDP_EXECUTABLE=/absolute/path/to/xfreerdp3`, or set the same
@@ -24,8 +43,8 @@ listed in the README with apt, build the isolated client using
 does not replace system FreeRDP. The H.264 CTest must actually run and pass
 before claiming H.264 client interoperability; a skip is not such evidence.
 
-Some isolated benchmark tests still cover the deprecated, opt-in VNC/RFB
-comparison mode. They are not runtime, packaging, or deployment requirements.
+The RFB helper tests listed below cover retained measurement utilities only;
+they do not exercise or provide a production display transport.
 
 | Test | Coverage |
 | --- | --- |
@@ -42,6 +61,9 @@ comparison mode. They are not runtime, packaging, or deployment requirements.
 | `module-lifecycle` | C++23 XCB module construction, authenticated-Xvfb connect/reconnect, fd-0 handling, geometry setup, dead-server failure, teardown, and wait-state preservation |
 | `interaction-priority-unit` | pointer/focus bounds, scroll clearing of cursor-local priority, and keyboard-focus priority recovery |
 | `h264-latest-frame-unit` | generation-safe H.264 tile scheduling, including a mixed-age page-scroll reproduction and the scroll-priority regression |
+| `client-scaled-output-plan-unit` / `scaled-output-capability-policy-unit` | gated client-scale eligibility, geometry planning, and safe fallback decisions |
+| `scroll-motion-observer-unit` / `scroll-copy-plan-unit` | bounded scroll-motion observation and conservative copy-run classification |
+| `gfx-bitmap-cache-observer-unit` / `verified-bitmap-cache16-unit` | cache observations, byte-verified bounded slots, ACK residency, and fallback state |
 | `xrdp-upstream-unit` | serial pinned-xrdp `make check`, including Console dirty-region, pacing, and RDPGFX acknowledgement telemetry regressions |
 | `xrdp-loader-smoke` | generated xrdp loading the module through FreeRDP, accepting the initial cursor update, then drawing a known red/blue source marker and asserting that the expected pixel reaches the FreeRDP framebuffer |
 | `xrdp-loader-gfx-h264-odd-scaled-smoke` | capability-gated standard H.264 GFX AVC420 loader/pixel smoke at odd scaled presentation geometry; skipped if the selected FreeRDP lacks a compiled H.264 GFX decoder |

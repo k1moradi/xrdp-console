@@ -19,7 +19,7 @@ the test client into a private prefix instead:
 ```sh
 sudo apt install \
   git cmake ninja-build build-essential pkg-config libssl-dev \
-  libavcodec-dev libavutil-dev libswscale-dev \
+  libavcodec-dev libavutil-dev libswscale-dev libusb-1.0-0-dev \
   libx11-dev libxext-dev libxinerama-dev libxcursor-dev libxdamage-dev \
   libxfixes-dev libxi-dev libxkbfile-dev libxrandr-dev libxrender-dev
 scripts/build-test-freerdp.sh
@@ -30,6 +30,14 @@ with the isolated client selected. CMake also accepts
 `-DXRDP_CONSOLE_FREERDP_EXECUTABLE=/absolute/path/to/xfreerdp3`. Without a
 capable client, CTest runs the other loader tests and marks only the H.264
 capability-gated smoke as skipped.
+
+The isolated FreeRDP configuration retains client channels/RDPGFX and FFmpeg
+H.264 while disabling unrelated Kerberos, CUPS, and PC/SC support to avoid
+extra host development dependencies. The four client-offload gates
+(`XRDP_CONSOLE_CLIENT_SCALE`, `XRDP_CONSOLE_CLIENT_SCROLL`,
+`XRDP_CONSOLE_CLIENT_CACHE_OBSERVE`, and `XRDP_CONSOLE_CLIENT_CACHE`) must be
+tested one at a time after a baseline with all unset. Activation does not set
+these gates. Native Microsoft-client behavior remains a manual acceptance gate.
 
 For portable source/unit-only CI, CMake can be used without building the
 production module or pinned xrdp runtime:

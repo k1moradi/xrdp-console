@@ -34,6 +34,15 @@ EOF
     exit 1
 fi
 
+if ! pkg-config --exists libusb-1.0; then
+    cat >&2 <<'EOF'
+Missing libusb development files required by the isolated FreeRDP client build.
+On Ubuntu, install them with:
+  sudo apt install libusb-1.0-0-dev
+EOF
+    exit 1
+fi
+
 if [ ! -d "$source_root/.git" ]; then
     if [ -e "$source_root" ]; then
         echo "Refusing to replace non-Git source path: $source_root" >&2
@@ -82,7 +91,11 @@ cmake -S "$source_root" -B "$freerdp_build_root" -G Ninja \
     -DWITH_PROXY=OFF \
     -DWITH_FFMPEG=ON \
     -DWITH_VIDEO_FFMPEG=ON \
-    -DWITH_SWSCALE=ON
+    -DWITH_SWSCALE=ON \
+    -DWITH_KRB5=OFF \
+    -DWITH_CUPS=OFF \
+    -DWITH_SMARTCARD_PCSC=OFF \
+    -DWITH_UNICODE_BUILTIN=ON
 
 cmake --build "$freerdp_build_root" --parallel "$build_jobs"
 cmake --install "$freerdp_build_root"
