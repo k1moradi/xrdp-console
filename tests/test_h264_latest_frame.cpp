@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "rdp/h264_latest_frame.h"
+#include "rdp/h264_interaction_scheduler.h"
 #include "core/presentation_scaler.h"
 
+#include <algorithm>
 #include <array>
 #include <climits>
 #include <cstddef>
@@ -300,6 +302,163 @@ bool priority_transmission_can_bypass_background_runs()
     success &= check(priorityCount == 1 &&
                          selections[0].rectangle == Rectangle{192, 64, 64, 64},
                      "priority transmission included background damage");
+    return success;
+}
+
+bool
+initializeFrameForScrollPriorityTest(H264LatestFrameState &state,
+                                     PixelSize geometry)
+{
+    std::array<GenerationTileMap::Selection, 64> selections{};
+    if (!state.configure(geometry))
+    {
+        return false;
+    }
+
+    while (state.capturePending())
+    {
+        const std::size_t count =
+            state.collectCaptureSelections(selections);
+        if (count == 0)
+        {
+            return false;
+        }
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            if (!state.commitCaptured(selections[index]))
+            {
+                return false;
+            }
+        }
+    }
+
+    const GenerationTileMap::Selection baseline{
+        {0, 0, geometry.widthPixels, geometry.heightPixels}, UINT64_MAX};
+    return state.baselineReady() &&
+           state.noteSubmitted(1, std::span(&baseline, 1)) &&
+           state.releaseSubmission(1);
+}
+
+struct FirstScrollQuantum final
+{
+    std::array<bool, 48> clientTilesNew{};
+    Rectangle capturedTile{};
+    bool moreDamagePending{};
+};
+
+bool
+runFirstScrollQuantum(bool applyScrollPriorityPolicy,
+                      FirstScrollQuantum &result)
+{
+    constexpr PixelSize kGeometry{512, 384};
+    constexpr std::uint32_t kTileDimension = 64;
+    H264LatestFrameState state;
+    if (!initializeFrameForScrollPriorityTest(state, kGeometry))
+    {
+        return false;
+    }
+
+    state.markDamage({0, 0, kGeometry.widthPixels, kGeometry.heightPixels});
+    InteractionPriorityState interaction{};
+    noteInteractionPointer(interaction, 256, 192, kGeometry, true);
+    if (applyScrollPriorityPolicy)
+    {
+        noteInteractionScroll(interaction, 256, 192);
+    }
+
+    std::array<GenerationTileMap::Selection, 64> selections{};
+    const std::size_t captureCount =
+        collectH264CaptureSelectionsForInteraction(
+            state, interaction, selections);
+    if (captureCount == 0)
+    {
+        return false;
+    }
+
+    const GenerationTileMap::Selection captureRun = selections[0];
+    result.capturedTile = {
+        captureRun.rectangle.x,
+        captureRun.rectangle.y,
+        std::min(kTileDimension, captureRun.rectangle.widthPixels),
+        std::min(kTileDimension, captureRun.rectangle.heightPixels),
+    };
+    const GenerationTileMap::Selection captured{
+        result.capturedTile, captureRun.generation};
+    if (!state.commitCaptured(captured))
+    {
+        return false;
+    }
+
+    const std::size_t transmitCount =
+        collectH264TransmissionSelectionsForInteraction(
+            state, interaction, interaction.pending, interaction.rectangle,
+            selections);
+    if (transmitCount == 0)
+    {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < transmitCount; ++index)
+    {
+        const Rectangle rectangle = selections[index].rectangle;
+        const std::uint32_t firstColumn =
+            static_cast<std::uint32_t>(rectangle.x) / kTileDimension;
+        const std::uint32_t firstRow =
+            static_cast<std::uint32_t>(rectangle.y) / kTileDimension;
+        const std::uint32_t endColumn =
+            (static_cast<std::uint32_t>(rectangle.x) +
+             rectangle.widthPixels + kTileDimension - 1U) /
+            kTileDimension;
+        const std::uint32_t endRow =
+            (static_cast<std::uint32_t>(rectangle.y) +
+             rectangle.heightPixels + kTileDimension - 1U) /
+            kTileDimension;
+        for (std::uint32_t row = firstRow; row < endRow; ++row)
+        {
+            for (std::uint32_t column = firstColumn;
+                 column < endColumn; ++column)
+            {
+                const std::size_t tileIndex =
+                    static_cast<std::size_t>(row) * 8U + column;
+                if (tileIndex >= result.clientTilesNew.size())
+                {
+                    return false;
+                }
+                result.clientTilesNew[tileIndex] = true;
+            }
+        }
+    }
+
+    result.moreDamagePending = state.capturePending();
+    return result.moreDamagePending;
+}
+
+bool
+scroll_priority_creates_and_then_avoids_mouse_local_mixed_age_update()
+{
+    FirstScrollQuantum oldScheduling{};
+    FirstScrollQuantum scrollScheduling{};
+    bool success = true;
+
+    success &= check(runFirstScrollQuantum(false, oldScheduling),
+                     "old scroll-priority quantum did not make progress");
+    success &= check(oldScheduling.capturedTile == Rectangle{64, 64, 64, 64},
+                     "old scheduler did not capture inside the pointer region first");
+    success &= check(oldScheduling.clientTilesNew[9] &&
+                         !oldScheduling.clientTilesNew[0] &&
+                         oldScheduling.moreDamagePending,
+                     "expected mixed-age surface was not reproduced: the mouse-local "
+                     "tile should be new while the page corner remains old");
+
+    success &= check(runFirstScrollQuantum(true, scrollScheduling),
+                     "scroll-policy quantum did not make progress");
+    success &= check(scrollScheduling.capturedTile == Rectangle{0, 0, 64, 64},
+                     "scroll damage still bypassed the normal page-wide order");
+    success &= check(scrollScheduling.clientTilesNew[0] &&
+                         !scrollScheduling.clientTilesNew[9] &&
+                         scrollScheduling.moreDamagePending,
+                     "scroll still advanced the mouse-local tile ahead of the "
+                     "page-wide update");
     return success;
 }
 
@@ -667,6 +826,7 @@ int main()
     success &= capture_selection_respects_xshm_pixel_budget();
     success &= partial_nv12_update_writes_only_selected_rectangle();
     success &= priority_transmission_can_bypass_background_runs();
+    success &= scroll_priority_creates_and_then_avoids_mouse_local_mixed_age_update();
     success &= reconfigure_preserves_monotonic_frame_ids();
     success &= full_invalidation_supersedes_incremental_transmission();
     success &= fingerprint_unchanged_capture_suppresses_transport();

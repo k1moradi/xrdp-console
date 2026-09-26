@@ -31,6 +31,7 @@ extern "C" {
 #include "../clipboard/clipboard_controller.h"
 #include "../rdp/classic_graphics_scheduler.h"
 #include "../rdp/gfx_avc420_frame.h"
+#include "../rdp/h264_interaction_scheduler.h"
 #include "../rdp/h264_latest_frame.h"
 #include "../rdp/scroll_motion_observer.h"
 #include "../rdp/rdp_update_sink.h"
@@ -1546,6 +1547,13 @@ ModuleContext::event(int message, long param1, long param2, long param3,
                 impl_->interactionPriority, sourceCoordinateX,
                 sourceCoordinateY, impl_->state.sourceGeometry);
         }
+        else if (message == WM_TOUCH_VSCROLL ||
+                 message == WM_TOUCH_HSCROLL)
+        {
+            noteInteractionScroll(
+                impl_->interactionPriority, sourceCoordinateX,
+                sourceCoordinateY);
+        }
         else if (message == WM_MOUSEMOVE ||
                  is_pointer_release_message(message))
         {
@@ -2246,8 +2254,8 @@ ModuleContext::check_h264_gfx() noexcept
             if (captureCount == 0)
             {
                 captureCount =
-                    impl_->h264Frame.collectCaptureSelectionsIntersecting(
-                        impl_->interactionPriority.rectangle,
+                    xrdp_console::rdp::collectH264CaptureSelectionsForInteraction(
+                        impl_->h264Frame, impl_->interactionPriority,
                         captureSelections);
             }
         }
@@ -2549,21 +2557,13 @@ ModuleContext::check_h264_gfx() noexcept
         };
         transmissionCount = 1;
     }
-    else if (impl_->interactionPriority.pending &&
-             priorityFrameRectangleValid &&
-             priorityFrameRectangle.widthPixels != 0 &&
-             priorityFrameRectangle.heightPixels != 0)
+    else
     {
         transmissionCount =
-            impl_->h264Frame.collectReadyTransmissionSelectionsIntersecting(
-                priorityFrameRectangle,
+            xrdp_console::rdp::collectH264TransmissionSelectionsForInteraction(
+                impl_->h264Frame, impl_->interactionPriority,
+                priorityFrameRectangleValid, priorityFrameRectangle,
                 transmissionSelections);
-    }
-    if (transmissionCount == 0 &&
-        !impl_->h264Frame.baselineSubmissionPending())
-    {
-        transmissionCount = impl_->h264Frame.collectReadyTransmissionSelections(
-            transmissionSelections);
     }
     if (transmissionCount == 0)
     {

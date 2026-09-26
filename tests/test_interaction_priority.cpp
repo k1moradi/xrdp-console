@@ -67,10 +67,37 @@ interaction_priority_tracks_pointer_focus_and_bounds()
     return success;
 }
 
+bool
+scroll_clears_local_priority_without_losing_keyboard_focus()
+{
+    InteractionPriorityState state{};
+    noteInteractionFocus(state, 120, 90, {1366, 768});
+
+    noteInteractionScroll(state, 900, 500);
+
+    bool success = true;
+    success &= check(state.pointerValid &&
+                         state.pointerCoordinateX == 900 &&
+                         state.pointerCoordinateY == 500,
+                     "scroll did not retain the pointer anchor");
+    success &= check(!state.pending && state.rectangle == Rectangle{},
+                     "scroll left a cursor-local graphics priority pending");
+    success &= check(state.focusValid && state.focusCoordinateX == 120 &&
+                         state.focusCoordinateY == 90,
+                     "scroll discarded the keyboard focus anchor");
+    success &= check(requestFocusedInteraction(state, {1366, 768}) &&
+                         state.rectangle == Rectangle{0, 0, 384, 256},
+                     "keyboard interaction could not restore focus priority");
+    return success;
+}
+
 } // namespace
 
 int
 main()
 {
-    return interaction_priority_tracks_pointer_focus_and_bounds() ? 0 : 1;
+    bool success = true;
+    success &= interaction_priority_tracks_pointer_focus_and_bounds();
+    success &= scroll_clears_local_priority_without_losing_keyboard_focus();
+    return success ? 0 : 1;
 }

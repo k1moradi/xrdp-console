@@ -126,3 +126,18 @@ clearInteractionPriority(InteractionPriorityState &state) noexcept
     state.rectangle = {};
     state.pending = false;
 }
+
+constexpr void
+noteInteractionScroll(InteractionPriorityState &state,
+                      std::int32_t sourceCoordinateX,
+                      std::int32_t sourceCoordinateY) noexcept
+{
+    state.pointerCoordinateX = sourceCoordinateX;
+    state.pointerCoordinateY = sourceCoordinateY;
+    state.pointerValid = true;
+
+    // A wheel gesture changes a viewport, not just the pixels under the
+    // pointer. Do not promote a small local patch ahead of the scrolling
+    // surface as a whole.
+    clearInteractionPriority(state);
+}
