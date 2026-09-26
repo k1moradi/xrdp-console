@@ -51,7 +51,7 @@ optional OpenGL/Vulkan probes do not add GPU processing to the runtime.
 
 ## Install prerequisites
 
-For Ubuntu 26.04, install the build, runtime, and Xvfb test prerequisites:
+For Ubuntu 26.04, install the build and deployment prerequisites:
 
 ```sh
 sudo apt install \
@@ -84,6 +84,11 @@ tests; use a Windows or macOS Microsoft RDP client for manual connection tests.
 `x11vnc` is not part of the production path and is not required to build,
 deploy, or test the direct-X11 module.
 
+The Ubuntu `xrdp` package supplies the host service/configuration framework
+used by the activation script. The active daemon is then switched to this
+project's pinned, locally built xrdp; the distribution daemon is not the
+direct-X11 module.
+
 OpenGL and Vulkan development packages are optional and only needed for
 diagnostic/profiling tools. For example, install `libgl-dev` and configure with
 `-DXRDP_CONSOLE_ENABLE_GL_CAPABILITY_PROBE=ON` to build the OpenGL 3.3 capability
@@ -91,30 +96,32 @@ probe. This is not a production GPU requirement.
 
 ## Build and test
 
-The production module is built together with the project's hash-pinned,
-patched xrdp 0.10.6.1 dependency. The upstream build is intentionally serial
-to limit memory use:
+Run the supported native build script. It configures and compiles the
+first-party module together with the hash-pinned, patched xrdp 0.10.6.1
+dependency, serially, then runs CTest:
 
 ```sh
-cmake -S . -B build-xrdp -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DXRDP_CONSOLE_NATIVE=ON \
-  -DXRDP_CONSOLE_BUILD_XRDP=ON
-cmake --build build-xrdp --parallel 1
-ctest --test-dir build-xrdp --output-on-failure
+scripts/build-direct-console.sh
 ```
 
-`XRDP_CONSOLE_NATIVE=ON` tunes binaries for the build host and is not suitable
-for distributing one binary across different CPUs; set it to `OFF` for a
-portable build. `XRDP_CONSOLE_BUILD_XRDP` defaults to `OFF`; without it CMake
-builds the standalone tools/tests but not the xrdp module.
+The script defaults to `build-direct-console/`; override that with
+`XRDP_CONSOLE_BUILD_DIR`. It enables `XRDP_CONSOLE_NATIVE=ON` (`-march=native`),
+which is appropriate for this host but not for distributing one binary across
+different CPUs. For a portable manual build, set `XRDP_CONSOLE_NATIVE=OFF`.
+`XRDP_CONSOLE_BUILD_XRDP` defaults to `OFF` in ordinary CMake configurations;
+the supported direct-console build script enables it.
 
-The module is produced at `build-xrdp/src/libxrdp_console.so`; the matching
-private xrdp install is under `build-xrdp/_deps/xrdp-install`. CMake install
-and CPack create ordinary files/packages only—they do not modify the running
-xrdp service. A configured CMake build directory records the checkout's
-absolute path, so use a fresh build directory if the repository is moved or
-renamed.
+The build, activation, and benchmark-matrix scripts are source-checkout
+workflows because they use the pinned dependency/build tree. They are not
+installed as if they could operate from a binary package; the installed
+diagnostic and restart helpers are independent of the checkout.
+
+The module is produced at `build-direct-console/src/libxrdp_console.so`; the
+matching private xrdp install is under
+`build-direct-console/_deps/xrdp-install`. CMake install and CPack create
+ordinary files/packages only—they do not modify the running xrdp service. A
+configured CMake build directory records the checkout's absolute path, so use
+a fresh build directory if the repository is moved or renamed.
 
 The test suite includes native unit tests, authenticated-Xvfb X11 integration
 tests, module lifecycle/reconnect checks, and (when the pinned xrdp build is
@@ -130,7 +137,7 @@ the production configuration above first, disconnect any current RDP session,
 then run:
 
 ```sh
-sudo env XRDP_CONSOLE_BUILD_DIR="$PWD/build-xrdp" \
+sudo env XRDP_CONSOLE_BUILD_DIR="$PWD/build-direct-console" \
   scripts/activate-direct-console.sh
 ```
 
@@ -140,13 +147,13 @@ service state, and listener before changing the host. It switches the
 presentation resizing, installs the matching module/chansrv artifacts, and
 restarts xrdp. The configured listener remains on **port 3389**. It refuses to
 restart while a client is connected and prints a root-only rollback backup
-directory under `/var/backups/xrdp-x11vnc/`.
+directory under `/var/backups/xrdp-console/`.
 
 To roll back, use the exact backup path printed by activation:
 
 ```sh
 sudo scripts/activate-direct-console.sh --rollback \
-  /var/backups/xrdp-x11vnc/direct-console-TIMESTAMP
+  /var/backups/xrdp-console/direct-console-TIMESTAMP
 ```
 
 Connect from the Windows or macOS Microsoft RDP client to the host's existing
@@ -165,9 +172,9 @@ contains benchmark and diagnostic tools; they are for validating latency,
 resource use, input responsiveness, and client-visible pixels, not a separate
 runtime requirement. Start with
 [`docs/measurement-model.md`](docs/measurement-model.md) and
-[`docs/network-latency.md`](docs/network-latency.md). The older VNC/RFB
-comparison helpers remain in the tree as historical tooling; the production
-Console path does not use them.
+[`docs/network-latency.md`](docs/network-latency.md). The benchmark defaults
+to direct-X11. Its VNC/RFB comparison mode is deprecated and opt-in; it is not
+installed as a production service or used by build/deploy scripts.
 
 Source areas:
 

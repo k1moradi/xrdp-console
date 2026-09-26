@@ -1,11 +1,9 @@
-# Validation record
+# Historical validation record
 
-The measurements in this file are historical results from the pre-1.1
-benchmark harness. They remain useful for comparison, but must be recollected
-with the current harness before being used as quantitative evidence. The
-current harness now uses an event-driven, bounded RFB relay, reports separate
-input-event and X11-draw timestamps, accounts for the private proxy/Xvfb/
-chansrv processes, and protects active Unix sockets and private ports.
+The measurements in this file are historical results from the pre-direct-X11
+benchmark path. They are retained for context only and must be recollected
+with the current direct-X11 harness before being used as quantitative
+evidence. They do not describe current production behavior.
 
 The source tree was consolidated after the external consultation and the
 clean network matrix collected on 2026-09-17. All cases used a private xrdp
@@ -35,16 +33,16 @@ The clean run confirms three practical conclusions:
 - p99 and missed-return counters must be retained in every comparison because
   the median alone hides the intermittent stalls.
 
-The machine has hardware OpenGL through Mesa/radeon, but Vulkan exposes only
-llvmpipe for its RV710 device. x11vnc captures X11 pixels; it cannot offload
-its framebuffer readback to a Vulkan video encoder. The benchmark therefore
-reports local GL render time separately from capture, xrdp encoding, and RDP
+The host's OpenGL/Vulkan capability probes are diagnostic only; production
+capture and presentation remain the direct-X11 CPU path. Current benchmark
+reports separate stimulus rendering, capture, xrdp encoding, and RDP
 presentation time.
 
 The optimized daemon is generated from the hash-pinned xrdp archive and
-`patches/xrdp/series`. The retained series contains only the fixed-console
-resize/error-recovery, direct VNC path, and input transport checks; the old
+`patches/xrdp/series`. The retained series contains direct Console
+resize/error-recovery, framebuffer output, input-priority, codec/clipboard,
+and bounded RDPGFX work; the old
 profiling, parser, request-ahead, progressive-flush, cache, and experimental
-GFX changes are not permanent dependency patches. The clean build and unit
-suite pass with `-O3 -march=native`; a live Mac reconnect is still needed to
-validate the black-screen symptom on this machine.
+GFX changes are not permanent dependency patches. This file is an archival
+record; use current CTest output and the live-client acceptance log for
+present-day status.

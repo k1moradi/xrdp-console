@@ -177,7 +177,6 @@ ExternalProject_Add(xrdp_upstream
     INSTALL_COMMAND "${XRDP_CONSOLE_MAKE_PROGRAM}" install "${_xrdp_make_flags}"
     BUILD_BYPRODUCTS
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
-        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libvnc.so"
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libxrdp.so"
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libcommon.so"
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/librfxencode.a"

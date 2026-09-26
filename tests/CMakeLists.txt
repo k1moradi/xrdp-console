@@ -613,7 +613,7 @@ if(TARGET xrdp-console)
     find_program(XRDP_CONSOLE_FREERDP_EXECUTABLE
         NAMES xfreerdp3 xfreerdp)
     if(XRDP_CONSOLE_FREERDP_EXECUTABLE AND
-       TARGET x11-pixel-probe AND TARGET x11vnc-latency-stimulus)
+       TARGET x11-pixel-probe AND TARGET x11-latency-stimulus)
         add_test(NAME xrdp-loader-smoke
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
@@ -622,7 +622,7 @@ if(TARGET xrdp-console)
             "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
             "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
             $<TARGET_FILE:x11-pixel-probe>
-            $<TARGET_FILE:x11vnc-latency-stimulus>)
+            $<TARGET_FILE:x11-latency-stimulus>)
         set_tests_properties(xrdp-loader-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 30)
@@ -634,7 +634,7 @@ if(TARGET xrdp-console)
             "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
             "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
             $<TARGET_FILE:x11-pixel-probe>
-            $<TARGET_FILE:x11vnc-latency-stimulus>
+            $<TARGET_FILE:x11-latency-stimulus>
             1512 949)
         set_tests_properties(xrdp-loader-scaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
@@ -647,7 +647,7 @@ if(TARGET xrdp-console)
             "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
             "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
             $<TARGET_FILE:x11-pixel-probe>
-            $<TARGET_FILE:x11vnc-latency-stimulus>
+            $<TARGET_FILE:x11-latency-stimulus>
             800 600)
         set_tests_properties(xrdp-loader-downscaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
@@ -660,7 +660,7 @@ if(TARGET xrdp-console)
             "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
             "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
             $<TARGET_FILE:x11-pixel-probe>
-            $<TARGET_FILE:x11vnc-latency-stimulus>
+            $<TARGET_FILE:x11-latency-stimulus>
             --gfx-planar)
         set_tests_properties(xrdp-loader-gfx-planar-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
@@ -673,7 +673,7 @@ if(TARGET xrdp-console)
             "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
             "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
             $<TARGET_FILE:x11-pixel-probe>
-            $<TARGET_FILE:x11vnc-latency-stimulus>
+            $<TARGET_FILE:x11-latency-stimulus>
             1512 949 --gfx-planar)
         set_tests_properties(xrdp-loader-gfx-planar-scaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
@@ -686,7 +686,7 @@ if(TARGET xrdp-console)
             "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
             "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
             $<TARGET_FILE:x11-pixel-probe>
-            $<TARGET_FILE:x11vnc-latency-stimulus>
+            $<TARGET_FILE:x11-latency-stimulus>
             1512 949 --gfx-h264)
         set_tests_properties(xrdp-loader-gfx-h264-odd-scaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
@@ -700,7 +700,7 @@ if(TARGET xrdp-console)
             "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
             "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
             $<TARGET_FILE:x11-pixel-probe>
-            $<TARGET_FILE:x11vnc-latency-stimulus>
+            $<TARGET_FILE:x11-latency-stimulus>
             --rfx)
         set_tests_properties(xrdp-loader-rfx-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
@@ -713,7 +713,7 @@ if(TARGET xrdp-console)
             "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
             "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
             $<TARGET_FILE:x11-pixel-probe>
-            $<TARGET_FILE:x11vnc-latency-stimulus>
+            $<TARGET_FILE:x11-latency-stimulus>
             1512 949 --rfx)
         set_tests_properties(xrdp-loader-rfx-scaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
@@ -726,7 +726,7 @@ if(TARGET xrdp-console)
             "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
             "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
             $<TARGET_FILE:x11-pixel-probe>
-            $<TARGET_FILE:x11vnc-latency-stimulus>
+            $<TARGET_FILE:x11-latency-stimulus>
             800 600 --rfx)
         set_tests_properties(xrdp-loader-rfx-downscaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"

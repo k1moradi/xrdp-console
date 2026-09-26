@@ -1,18 +1,23 @@
 # Test plan
 
-The repository keeps focused behavioral tests for the benchmark helpers and
-the private VNC client. The tests are intentionally unprivileged; end-to-end
-display tests remain separate because they require the physical X11 display,
-Xauthority, x11vnc, and client binaries.
+The test suite focuses on the direct-X11 Console module: XCB connection and
+authentication, XDamage, persistent XShm capture, cursor/input, presentation,
+clipboard, bounded RDPGFX, and lifecycle/reconnect behavior. Unit and
+authenticated-Xvfb tests run without modifying the host xrdp service. The
+optional local RDP loader smoke uses FreeRDP when available. Microsoft-client
+interoperability remains a manual Windows/macOS test gate.
+
+Some isolated benchmark tests still cover the deprecated, opt-in VNC/RFB
+comparison mode. They are not runtime, packaging, or deployment requirements.
 
 | Test | Coverage |
 | --- | --- |
 | `network-unit` | namespace command construction, cached-sudo failure boundary, and localhost no-privilege behavior |
 | `measurement-profile-unit` | valid profile parsing, malformed records, marker-state matching, failed-flush filtering, stale/out-of-window points, reordered logs, and timestamp-count errors |
-| `rfb-client-unit` | RFB KeyEvent wire encoding for both press and release |
-| `proxy-backpressure-unit` | bounded relay buffering, selector write readiness, and peer cleanup |
+| `rfb-client-unit` | legacy benchmark-only RFB KeyEvent encoding |
+| `proxy-backpressure-unit` | legacy benchmark-only bounded RFB relay buffering and cleanup |
 | `python-syntax` | source compilation for the installed Python helpers |
-| `systemd-unit` | clean SIGINT shutdown contract, no exit-status masking, and compatibility drop-in parity |
+| `systemd-unit` | direct Console service paths, native build/activation pairing, and port/client safety checks |
 | `damage-region-unit` | clipping, cost-aware overlap/adjacency coalescing, empty input, bounded sparse fragmentation, and explicit full-screen invalidation |
 | `x11-damage-integration` | authenticated-Xvfb XDamage setup, idle no-op snapshots, delta-rectangle coalescing and sparse-root preservation, snapshot/re-arm, persistent XShm capture of a known pixel, and teardown |
 | `x11-cursor-integration` | authenticated-Xvfb XFixes cursor-image capture, ARGB-to-xrdp conversion bounds, cursor-change notification delivery, and non-fatal oversized-cursor fallback |
@@ -33,14 +38,13 @@ The marker correlation contract is:
 4. Failed, malformed, stale, and wrong-state records are ignored rather than
    paired opportunistically.
 
-The graphical benchmark smoke runs are documented in
+The direct-X11 graphical benchmark smoke runs are documented in
 [`docs/measurement-model.md`](measurement-model.md). They validate process
 startup/cleanup and the complete private path, but are not part of CTest because
 they depend on the physical display stack. The `xrdp-loader-smoke` test is a
 smaller private-server ABI and pixel-path check; it uses the generated xrdp
 install and FreeRDP, with `xvfb-run` when no display is available. The
-graphical benchmark also supports `--backend direct-x11` for the
-XCB/XDamage/XShm comparison, and its input-roundtrip mode exercises the
-first-party XTest controller. By default the direct benchmark matches client
+graphical benchmark defaults to `--backend direct-x11`; its input-roundtrip
+mode exercises the first-party XTest controller. By default it matches client
 geometry to the physical display; explicit options cover initial scaled
 presentation and dynamic client resize.

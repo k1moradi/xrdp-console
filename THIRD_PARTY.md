@@ -1,29 +1,22 @@
 # Third-party components
 
-The runtime bridge uses xrdp, x11vnc, FreeRDP, Xvfb, Mesa, and Vulkan from the
-operating system. The optional optimized xrdp daemon is reproduced from the
-hash-pinned xrdp 0.10.6.1 archive and the small patch series under
-`patches/xrdp/`. CMake downloads and builds it below `build/_deps/`; the
-generated source and binaries are not first-party files and are never
-installed into the system automatically.
+The product is a first-party xrdp module using the pinned xrdp 0.10.6.1
+runtime. The build downloads that upstream release and applies the small
+production patch series in `patches/xrdp/`; generated source and binaries stay
+under `build/_deps/` and are not committed.
 
-The xrdp build uses the host's development packages by default. Private
-dependency locations can be supplied with the CMake cache variables documented
-in `docs/xrdp-dependency.md`. No dependency sysroot or generated binary is
-checked in.
+The direct Console data path uses:
 
-The following interfaces are used:
+- XCB and its Damage, MIT-SHM, XFixes, and XTest extensions for direct X11
+  connection, capture, damage, cursor, and input;
+- xrdp and its chansrv/CLIPRDR implementation for RDP transport and clipboard;
+- Python 3 for build, deployment, benchmark, and diagnostic orchestration.
 
-- XCB and the XCB Damage/XFixes extensions for the first-party X11 module
-  transport and damage tracking;
-- Xlib and XTest for controlled input and pixel probes;
-- GLX for the compositor workload and OpenGL probe;
-- Vulkan loader for device reporting;
-- FreeRDP's `xfreerdp` client for the isolated RDP endpoint;
-- xrdp's `libvnc.so` profile for the VNC-to-RDP path;
-- Python 3 standard library for orchestration and reporting.
+FreeRDP and Xvfb are optional local integration-test tools. OpenGL and Vulkan
+are optional diagnostics/benchmark dependencies, not runtime accelerators.
+Microsoft's Windows and macOS RDP clients connect directly to xrdp.
 
-Each dependency is discovered at build or run time. The source distribution
-contains systemd deployment templates under `packaging/systemd`; it does not
-contain a deployed/private unit, credential, Xauthority cookie, backup, or
-machine-specific path.
+The upstream xrdp source distribution may build its own legacy `libvnc.so`
+module, but xrdp-console does not select that module, start x11vnc, or use RFB
+in its production session path. The old VNC/RFB benchmark modes are deprecated
+and opt-in only.

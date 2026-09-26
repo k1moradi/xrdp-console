@@ -29,7 +29,6 @@ PAGE_SIZE = os.sysconf("SC_PAGESIZE")
 
 
 GROUPS = (
-    "x11vnc",
     "xrdp",
     "code",
     "code_gpu",
@@ -54,8 +53,6 @@ def process_group(argv: tuple[str, ...]) -> str | None:
         return None
     text = " ".join(argv)
     executable = Path(argv[0]).name
-    if executable == "x11vnc" and "-display" in argv and ":0" in argv:
-        return "x11vnc"
     if executable == "xrdp" and "xrdp-sesman" not in text:
         return "xrdp"
     if executable == "code" or "/code" in argv[0]:
@@ -406,7 +403,7 @@ def write_row(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Read-only sampler for an intermittent xrdp/x11vnc lag episode"
+        description="Read-only sampler for an intermittent direct-X11 Console lag episode"
     )
     parser.add_argument("--duration", type=float, default=120.0, help="sampling duration in seconds")
     parser.add_argument("--interval", type=float, default=1.0, help="sample interval in seconds")

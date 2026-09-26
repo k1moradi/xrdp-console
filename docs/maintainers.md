@@ -1,46 +1,54 @@
 # Maintainer workflow
 
-Use a clean out-of-tree build and keep generated files out of commits:
+The canonical product build is the native direct-X11 build. It builds the
+first-party module and its matching pinned xrdp runtime, then runs CTest:
 
 ```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DXRDP_CONSOLE_NATIVE=ON \
-  -DCMAKE_INSTALL_PREFIX="$HOME/.local"
-cmake --build build --parallel 1
-ctest --test-dir build --output-on-failure
-cmake --install build
-cpack --config build/CPackConfig.cmake
+scripts/build-direct-console.sh
 ```
 
-`XRDP_CONSOLE_NATIVE` defaults to `ON` for this host and enables
-`-march=native` and `-mtune=native` for all first-party targets; Release
-builds additionally use `-O3`. Set it to `OFF` when producing binaries for
-another machine or for portable CI.
+It defaults to `build-direct-console/`; set `XRDP_CONSOLE_BUILD_DIR` to use another
+directory. The script does not activate or modify the host service. Run
+`scripts/activate-direct-console.sh` separately, only after reviewing tests
+and disconnecting RDP clients.
+
+For portable source/unit-only CI, CMake can be used without building the
+production module or pinned xrdp runtime:
+
+```sh
+cmake -S . -B build-portable -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DXRDP_CONSOLE_NATIVE=OFF -DXRDP_CONSOLE_BUILD_XRDP=OFF
+cmake --build build-portable --parallel
+ctest --test-dir build-portable --output-on-failure
+```
+
+This portable configuration is not the deployable direct-X11 product build.
 
 Before publishing a change:
 
-1. run `ctest --test-dir build --output-on-failure`;
-2. run `cmake --install build --prefix "$PWD/_dist"` and inspect the file list;
-3. run `cpack --config build/CPackConfig.cmake`;
+1. run the direct-X11 native build and its CTest suite;
+2. if changing install rules, run `cmake --install` into a staging prefix and inspect the file list;
+3. if changing packaging, run CPack from the same configured build and inspect the package contents;
 4. run `python3 -B tools/benchmark/xrdp_console_bench.py --help`;
 5. run the network self-test only when a cached sudo ticket is available.
 
-The shared-console daemon is a separate, host-specific dependency build. Fetch
-the pinned archive, apply `patches/xrdp/series`, build, test, and install it
-under `build/_deps/` with:
+The supported native direct-Console build fetches the pinned xrdp archive,
+applies `patches/xrdp/series`, builds the first-party module and upstream
+runtime, and runs CTest with:
 
 ```sh
-scripts/build-optimized-xrdp.sh
+scripts/build-direct-console.sh
 ```
 
-The script is intentionally serial and runs the xrdp unit suite. It installs
-only below `build/_deps/xrdp-install`; activation requires the explicit
-privileged helper and therefore never happens as a side effect of a normal
-CMake install. `docs/xrdp-dependency.md` and `patches/xrdp/README.md` are the
-source of truth for the upstream pin and retained changes.
+The script is intentionally serial for this low-memory host. It builds only
+inside the selected build directory; activation is a separate, explicit,
+privileged step using `scripts/activate-direct-console.sh`. A normal CMake
+build/install never changes the running service. `docs/xrdp-dependency.md` and
+`patches/xrdp/README.md` are the source of truth for the upstream pin and
+retained changes.
 
-Do not commit Xauthority files, VNC password files, systemd backups, raw
-isolated-run logs, private xrdp binaries, or dependency archives. Keep one
+Do not commit Xauthority files, systemd backups, raw isolated-run logs, private
+xrdp binaries, or dependency archives. Keep one
 canonical benchmark (`tools/benchmark/xrdp_console_bench.py`) and add a mode or a
 focused helper instead of creating another top-level benchmark variant.
 Do not edit generated xrdp files under `build/_deps/` or add first-party runtime

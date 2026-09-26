@@ -24,8 +24,8 @@ static long long monotonic_ns(void)
  * A benchmark workload must not inherit the physical panel's swap interval.
  * On this machine the default GLX interval can block glXSwapBuffers for about
  * one second when the desktop is being mirrored.  That would measure a
- * driver/compositor scheduling stall instead of the x11vnc path.  Disable the
- * interval when one of the standard GLX swap-control extensions is available,
+ * driver/compositor scheduling stall instead of the old VNC capture path.
+ * Disable the interval when one of the standard GLX swap-control extensions is available,
  * while retaining a clear diagnostic if the server does not expose one.
  */
 static const char *disable_swap_interval(Display *display, GLXDrawable drawable)
@@ -105,7 +105,7 @@ static void draw_frame(int state, int frame, unsigned int width,
     glClear(GL_COLOR_BUFFER_BIT);
 
     /* Many small moving quads approximate a compositor-heavy editor surface.
-     * The marker remains a solid red/blue block so the RFB benchmark can tell
+     * The marker remains a solid red/blue block so the pixel probe can tell
      * which submitted frame has become visible. */
     glMatrixMode(GL_PROJECTION);
     glLoadIdentity();

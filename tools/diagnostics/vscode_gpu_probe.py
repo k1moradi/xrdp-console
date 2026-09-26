@@ -6,8 +6,8 @@ The probe uses an isolated temporary profile and no extensions, so it does not
 change the user's running Code instance. It asks Chromium's GPU process for
 SystemInfo and reports the active rendering path. An optional device regular
 expression can turn a host-specific expectation into a checked condition. This
-is a capability check, not a claim that x11vnc itself can capture through
-Vulkan or GL.
+is a capability check; it does not claim that the current direct-X11 module
+uses GPU capture or encoding.
 """
 from __future__ import annotations
 
@@ -190,7 +190,7 @@ def main() -> int:
     if not Path(args.workspace).exists():
         raise SystemExit(f"Workspace not found: {args.workspace}")
 
-    with tempfile.TemporaryDirectory(prefix="xrdp-vnc-vscode-gpu-") as root:
+    with tempfile.TemporaryDirectory(prefix="xrdp-console-vscode-gpu-") as root:
         portable = Path(root) / "portable"
         user_data = Path(root) / "user-data"
         extensions = Path(root) / "extensions"

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import subprocess
 import sys
 import unittest
 
@@ -19,6 +20,16 @@ spec.loader.exec_module(module)
 
 
 class DirectPresentationGeometryTests(unittest.TestCase):
+    def test_benchmark_defaults_to_direct_x11(self):
+        result = subprocess.run(
+            [sys.executable, str(BENCHMARK), "--help"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("default: direct-x11", result.stdout)
+        self.assertIn("--backend {direct-x11,vnc}", result.stdout)
+
     def test_fixed_mode_preserves_physical_geometry_policy(self):
         self.assertEqual(
             module.resolve_direct_presentation_geometry(
@@ -58,13 +69,6 @@ class DirectPresentationGeometryTests(unittest.TestCase):
             module.effective_gfx_state("direct-x11", "rfx", False),
             "disabled",
         )
-
-    def test_vnc_gfx_request_and_disable_are_reported(self):
-        self.assertEqual(
-            module.effective_gfx_state("vnc", "rfx", False), "requested")
-        self.assertEqual(
-            module.effective_gfx_state("vnc", "rfx", True), "disabled")
-
 
 if __name__ == "__main__":
     unittest.main()

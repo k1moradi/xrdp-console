@@ -2,7 +2,9 @@ xrdp-console
 
 Copyright (C) 2026 Keivan Moradi
 
-This project contains original benchmark harness code and small C helper
-programs. It runs against independently installed xrdp, x11vnc, FreeRDP,
-Xvfb, X11, OpenGL, and Vulkan components; those dependencies remain under
-their own licenses.
+This project contains the first-party direct-X11 xrdp module, deployment
+scripts, tests, benchmark harness code, and helper programs. The runtime uses
+xrdp and X11 components. FreeRDP and Xvfb are optional test dependencies;
+OpenGL and Vulkan are optional diagnostic/benchmark dependencies. Third-party
+components remain under their own licenses. The deprecated VNC/RFB benchmark
+comparison is not part of the production runtime.

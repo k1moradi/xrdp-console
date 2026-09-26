@@ -5,7 +5,7 @@ network namespace. A veth pair connects it to the host-side xrdp process, and
 `tc netem` is applied to both directions:
 
 ```text
-FreeRDP namespace -- veth + netem -- host xrdp -- x11vnc -- Xorg :0
+FreeRDP namespace -- veth + netem -- host xrdp-console -- XCB/X11 :0
 ```
 
 `--network-delay-ms` is a one-way delay. With the same qdisc on both ends, the
@@ -33,7 +33,8 @@ The matrix runner uses these controls:
 | 2.5 ms | about 5 ms | good LAN or Wi-Fi |
 | 5 ms | about 10 ms | loaded LAN or Wi-Fi |
 
-Each transport is measured with 0, 15, and 30 fps GL redraw churn. Zero-delay
-cases deliberately force jitter to zero and use loopback; this prevents a
-misleading comparison in which the control has an impairment the label does
-not show.
+The supported matrix measures the direct-X11 backend with 0, 15, and 30 fps
+GL redraw churn. The runner explicitly selects `--backend direct-x11` and
+standard RemoteFX. Zero-delay cases deliberately force jitter to zero and use
+loopback; this prevents a misleading comparison in which the control has an
+impairment the label does not show.

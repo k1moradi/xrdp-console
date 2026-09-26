@@ -21,16 +21,18 @@ Apply the files listed in `series` with `patch -p1` from the upstream source
 root. The patches are intentionally ordered by behavior rather than by the
 historical fork's commit history:
 
-1. `0001-xrdp-resize-state-and-failure-recovery.patch` keeps the VNC resize
+1. `0001-xrdp-resize-state-and-failure-recovery.patch` keeps RDPGFX resize
    state-machine recovery and propagates resize/update failures safely.
-2. `0002-xrdp-fixed-console-vnc-path.patch` keeps fixed-console geometry,
-   direct bitmap transport, and end-to-end update error propagation, and
-   reserves module code `21` for the first-party physical-console capability.
+2. `0002-xrdp-direct-console-path.patch` adds direct Console complete-pixel
+   output classification, update error propagation, and module code `21` for
+   the first-party physical-console capability. A compatibility macro keeps
+   other upstream module codes on their existing behavior; the Console module
+   does not load `libvnc.so` or connect to an RFB server.
 3. `0003-xrdp-console-input-priority.patch` drains a bounded burst of RDP
    transport work before backend work, followed by one transport check after
    it, only for module code `21`. This keeps queued input and disconnects
-   ahead of synchronous direct-X11 graphics work without changing legacy
-   VNC/Xorg scheduling.
+   ahead of synchronous direct-X11 graphics work without changing scheduling
+   for other module codes.
 4. `0004-xrdp-console-own-rfx-encoder.patch` prevents pinned xrdp from
    creating its asynchronous generic encoder for module code `21` by default,
    leaving synchronous RemoteFX/Planar ownership at the first-party module
@@ -153,11 +155,10 @@ in the candidate daemon, so an older patched generation cannot be mistaken
 for this Planar batching implementation.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-twenty patches are retained production-path behavior and bounded operational
-diagnostics, not benchmark knobs. Code
-`21` is deliberately used only by the direct module's profile; legacy VNC
-profiles continue using code `0`/`1`. The
-old checked-in fork contained profiling, parser-quantum, request-ahead,
+twenty patches are retained direct-Console production behavior and bounded
+operational diagnostics, not benchmark knobs. Code `21` is reserved for the
+direct module; other module codes retain upstream behavior. The old checked-in
+fork contained profiling, parser-quantum, request-ahead,
 progressive-flush, and experimental GFX changes; those are deliberately
 classified as tooling or deleted experiments rather than preserved as
 permanent dependency patches.

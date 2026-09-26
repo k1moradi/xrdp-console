@@ -1,5 +1,9 @@
 # Measurement model
 
+The supported benchmark backend is direct-X11. VNC/RFB modes described below
+are deprecated, opt-in historical comparisons and are never used by
+production or deployment scripts.
+
 Input-roundtrip runs use four timestamps. The key injector records **T0**
 immediately before submitting the synthetic key to the isolated RDP client's
 X server. The physical X11 stimulus records **T1_event** immediately after it
@@ -11,9 +15,9 @@ the FreeRDP output display.
 The report therefore separates:
 
 ```text
-T0 -> T1_event       RDP input, xrdp, VNC, and physical X event delivery
+T0 -> T1_event       RDP input, xrdp, and physical X event delivery
 T1_event -> T1_draw  local X11 marker rendering
-T1_draw -> T2        capture, VNC/RDP encoding, transport, and client display
+T1_draw -> T2        capture, RDP encoding, transport, and client display
 T0 -> T2             full interactive round trip
 ```
 
@@ -46,7 +50,7 @@ p99, maximum, misses, GL render time, process CPU/RSS, and best-effort TCP
 wire bytes/sec, retransmissions, send queue, and RTT. `ss`-unavailable fields
 are reported as `NA` rather than inferred.
 
-Graphics and input-roundtrip runs support `--backend direct-x11 --transport
+Graphics and input-roundtrip runs default to `--backend direct-x11 --transport
 rdp`. This mode does not start x11vnc or the RFB relay. It loads the first-party
 XCB/XDamage/XShm module into the private xrdp build and uses module code `21`.
 The direct benchmark's default graphics request is standard RemoteFX
@@ -61,10 +65,11 @@ resize requests:
 GL swap-complete -> T2   direct XCB/XDamage/XShm -> requested RDP graphics path -> FreeRDP presentation
 ```
 
-It uses the same marker stimulus and FreeRDP pixel probe as the VNC backend, so
-`T1_draw -> T2` is the controlled comparison for the capture/output path. In
-input-roundtrip mode, the module forwards the RDP keyboard event to XTest and
-the same physical X11 marker measures `T0 -> T1_event -> T1_draw -> T2`.
+Both modes use the marker stimulus and FreeRDP pixel probe. The supported
+direct-X11 mode measures `T1_draw -> T2`; the VNC backend remains only as a
+deprecated, opt-in historical comparison. In input-roundtrip mode, the module
+forwards the RDP keyboard event to XTest and the same physical X11 marker
+measures `T0 -> T1_event -> T1_draw -> T2`.
 The loader smoke test separately verifies the graphics vertical path with a
 known client-visible pixel assertion. Do not interpret a benchmark's requested
 transport as the production Microsoft-client negotiation result; use the

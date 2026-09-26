@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Regression checks for the x11vnc console service shutdown contract."""
+"""Regression checks for the direct-console systemd deployment contract."""
 
 from __future__ import annotations
 
@@ -9,31 +9,11 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).parents[1]
-SERVICE = ROOT / "packaging/systemd/x11vnc-console.service.in"
-DROPIN = ROOT / "packaging/systemd/x11vnc-console-clean-shutdown.conf"
 XRDP_SERVICE = ROOT / "packaging/systemd/xrdp.service"
 SESMAN_SERVICE = ROOT / "packaging/systemd/xrdp-sesman.service"
-
-
-class X11vncServiceTests(unittest.TestCase):
-    def test_template_uses_x11vnc_clean_shutdown_signal(self):
-        text = SERVICE.read_text(encoding="utf-8")
-        self.assertIn("KillSignal=SIGINT", text)
-        self.assertNotIn("SuccessExitStatus=2", text)
-        self.assertNotIn("ConditionPathExists=", text)
-
-    def test_canonical_environment_overrides_legacy_environment(self):
-        text = SERVICE.read_text(encoding="utf-8")
-        legacy = text.index("EnvironmentFile=-/etc/default/xrdp-vnc-bench")
-        canonical = text.index("EnvironmentFile=-/etc/default/xrdp-console")
-        self.assertLess(legacy, canonical)
-
-    def test_compatibility_dropin_matches_template(self):
-        service = SERVICE.read_text(encoding="utf-8")
-        dropin = DROPIN.read_text(encoding="utf-8")
-        self.assertIn("KillSignal=SIGINT", dropin)
-        self.assertNotIn("SuccessExitStatus=2", dropin)
-        self.assertEqual(service.count("KillSignal=SIGINT"), 1)
+ACTIVATION = ROOT / "scripts/activate-direct-console.sh"
+BUILD = ROOT / "scripts/build-direct-console.sh"
+ROOT_CMAKE = ROOT / "CMakeLists.txt"
 
 
 class DirectConsoleServiceTests(unittest.TestCase):
@@ -58,6 +38,38 @@ class DirectConsoleServiceTests(unittest.TestCase):
         self.assertIn("BindsTo=xrdp.service", text)
         self.assertNotIn("/home/keivan/", text)
         self.assertNotIn("xrdp-x11vnc", text)
+
+    def test_native_builder_and_direct_activator_defaults(self):
+        build = BUILD.read_text(encoding="utf-8")
+        activation = ACTIVATION.read_text(encoding="utf-8")
+        cmake = ROOT_CMAKE.read_text(encoding="utf-8")
+
+        self.assertIn("-DXRDP_CONSOLE_NATIVE=ON", build)
+        self.assertIn("-DXRDP_CONSOLE_BUILD_XRDP=ON", build)
+        self.assertIn("build-direct-console", build)
+        self.assertIn("build-direct-console", activation)
+        self.assertIn("libxrdp_console.so", activation)
+        self.assertIn("scripts/diagnose-direct-console.sh", cmake)
+        self.assertIn("scripts/restart-direct-console.sh", cmake)
+        self.assertNotIn("scripts/build-direct-console.sh", cmake)
+        self.assertNotIn("scripts/activate-direct-console.sh", cmake)
+        self.assertNotIn("scripts/run-network-latency-matrix.sh", cmake)
+        matrix = (ROOT / "scripts/run-network-latency-matrix.sh").read_text(
+            encoding="utf-8")
+        self.assertIn("--backend direct-x11", matrix)
+        self.assertIn("--direct-graphics-transport rfx", matrix)
+        self.assertIn("--direct-module", matrix)
+        benchmark = (ROOT / "tools/benchmark/xrdp_console_bench.py").read_text(
+            encoding="utf-8")
+        self.assertIn('WORKSPACE / "build-direct-console"', benchmark)
+        self.assertNotIn('WORKSPACE / "build" / "src"', benchmark)
+        self.assertNotIn("x11vnc-console.service", cmake)
+        self.assertNotIn("x11vnc,", cmake)
+
+    def test_activation_keeps_port_and_refuses_connected_clients(self):
+        text = ACTIVATION.read_text(encoding="utf-8")
+        self.assertIn("port 3389", text)
+        self.assertIn("an RDP client is connected", text)
 
 
 if __name__ == "__main__":

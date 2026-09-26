@@ -36,7 +36,7 @@ int main(void)
 
     VkApplicationInfo application = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-        .pApplicationName = "xrdp-x11vnc-vulkan-probe",
+        .pApplicationName = "xrdp-console-vulkan-probe",
         .applicationVersion = 1,
         .pEngineName = "probe",
         .engineVersion = 1,

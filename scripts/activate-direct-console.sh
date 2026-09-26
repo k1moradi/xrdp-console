@@ -39,7 +39,7 @@ wait_for_rdp_listener()
 }
 
 workspace_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-build_root=${XRDP_CONSOLE_BUILD_DIR:-$workspace_root/build}
+build_root=${XRDP_CONSOLE_BUILD_DIR:-$workspace_root/build-direct-console}
 prefix=${XRDP_CONSOLE_XRDP_INSTALL_DIR:-$build_root/_deps/xrdp-install}
 daemon=$prefix/sbin/xrdp
 chansrv_source=$prefix/sbin/xrdp-chansrv
@@ -50,7 +50,7 @@ revision_header=$build_root/generated/build_revision.h
 config=/etc/xrdp/xrdp.ini
 dropin_directory=/etc/systemd/system/xrdp.service.d
 dropin=$dropin_directory/upstream-local.conf
-backup_root=/var/backups/xrdp-x11vnc
+backup_root=/var/backups/xrdp-console
 
 rollback()
 {

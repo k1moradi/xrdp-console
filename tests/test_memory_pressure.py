@@ -295,7 +295,7 @@ class MemoryPressureHelperTests(unittest.TestCase):
              "--memory-pressure-mib must be between"),
             (["--memory-pressure-mib", "1537"],
              "--memory-pressure-mib must be between"),
-            (["--memory-pressure-mib", "1"],
+            (["--memory-pressure-mib", "1", "--backend", "vnc"],
              "memory pressure is supported only with direct-x11/RDP"),
             (["--memory-pressure-mib", "1", "--backend", "direct-x11",
               "--mode", "graphics"],

@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Measure the local x11vnc or direct-X11 -> xrdp -> RDP-client path.
+"""Measure the direct-X11 -> xrdp -> RDP-client path.
 
-The benchmark starts only user-owned, loopback services:
+The supported benchmark starts only user-owned, loopback services:
 
-    physical X :0 -> isolated x11vnc -> isolated xrdp -> FreeRDP on Xvfb
     physical X :0 -> xrdp-console (XCB/XDamage/XShm) -> FreeRDP on Xvfb
 
+The deprecated, explicit `--backend vnc` mode retains the old comparison
+pipeline for historical reproduction only.
+
     An OpenGL workload toggles a solid red/blue marker on the physical display.
-    ``--backend vnc`` is the default and timestamps the completed GL swap and
-    polls the corresponding pixel in the FreeRDP window.  ``--backend
-    direct-x11`` selects the first-party module and the same client-visible
-    graphics measurement; ``--direct-graphics-transport`` selects RemoteFX
-    (the default) or classic bitmap output.  Its input-roundtrip mode sends the same RDP key
+    ``--backend direct-x11`` is the default and timestamps the completed GL
+    swap and polls the corresponding pixel in the FreeRDP window.
+    ``--backend vnc`` remains a deprecated, opt-in historical comparison.
+    ``--direct-graphics-transport`` selects RemoteFX (the default), classic
+    bitmap, or GFX Planar output. Input-roundtrip mode sends the same RDP key
     stimulus through the module's XTest controller.  ``--transport rfb`` instead
     starts a private no-password x11vnc and timestamps the same marker in RAW
     RFB bytes on the loopback socket.  ``--transport vnc-viewer`` puts an
@@ -67,6 +69,9 @@ SCRIPT_WORKSPACE = SCRIPT_DIR.parents[1]
 workspace_value = environment_value(
     "XRDP_CONSOLE_WORKSPACE", "XRDP_VNC_WORKSPACE")
 WORKSPACE = Path(workspace_value or str(SCRIPT_WORKSPACE))
+build_directory_value = os.environ.get("XRDP_CONSOLE_BUILD_DIR")
+BUILD_DIRECTORY = Path(
+    build_directory_value or str(WORKSPACE / "build-direct-console"))
 HOME = Path.home()
 results_value = environment_value("XRDP_CONSOLE_RESULTS", "XRDP_VNC_RESULTS")
 if results_value is not None:
@@ -111,11 +116,12 @@ installed_helper_dir = (
 helper_value = environment_value(
     "XRDP_CONSOLE_HELPER_DIR", "XRDP_VNC_BENCH_HELPER_DIR")
 HELPER_DIR = Path(
-    helper_value or str(first_directory(WORKSPACE / "build/bin", installed_helper_dir))
+    helper_value or str(first_directory(
+        BUILD_DIRECTORY / "bin", installed_helper_dir))
 )
-GPU_STIMULUS = HELPER_DIR / "x11vnc-gpu-stimulus"
+GPU_STIMULUS = HELPER_DIR / "x11-gpu-stimulus"
 PIXEL_PROBE = HELPER_DIR / "x11-pixel-probe"
-KEY_STIMULUS = HELPER_DIR / "x11vnc-latency-stimulus"
+KEY_STIMULUS = HELPER_DIR / "x11-latency-stimulus"
 KEY_INJECTOR = HELPER_DIR / "x11-xtest-key"
 V6_V4_PROXY = SCRIPT_DIR / "rfb_v6_v4_proxy.py"
 PRIVATE_FREERDP = ISOLATED / "rdp-bench-root/usr/bin/xfreerdp"
@@ -133,7 +139,9 @@ VNC_VIEWER = first_path(
 )
 xrdp_override = environment_value("XRDP_CONSOLE_XRDP", "XRDP_VNC_XRDP")
 XRDP = first_path(
-    Path(xrdp_override) if xrdp_override else Path("/usr/local/sbin/xrdp"),
+    Path(xrdp_override) if xrdp_override else
+    BUILD_DIRECTORY / "_deps" / "xrdp-install" / "sbin" / "xrdp",
+    Path("/usr/local/sbin/xrdp"),
     Path("/usr/sbin/xrdp"),
 )
 x11vnc_override = environment_value(
@@ -145,9 +153,8 @@ module_override = environment_value(
     "XRDP_CONSOLE_MODULE", "XRDP_VNC_CONSOLE_MODULE")
 DIRECT_MODULE = first_file(
     Path(module_override) if module_override else
-    WORKSPACE / "build" / "src" / "libxrdp_console.so",
-    WORKSPACE / "build" / "install-check" / "lib" /
-    "xrdp-console" / "libxrdp_console.so",
+    BUILD_DIRECTORY / "src" / "libxrdp_console.so",
+    WORKSPACE.parent / "lib" / "xrdp-console" / "libxrdp_console.so",
 )
 # Keep xrdp and chansrv from the same installation when a private prefix is
 # explicitly selected. Mixing socket-root builds can otherwise make a run
@@ -253,7 +260,7 @@ class X11DisplayPowerState:
     dpms_off_seconds: int | None
     monitor_on: bool | None
 
-# X11 keysym for F9, the key consumed by x11vnc-latency-stimulus.
+# X11 keysym for F9, the key consumed by x11-latency-stimulus.
 RFB_KEY_F9 = 0xFFC6
 
 
@@ -3920,12 +3927,12 @@ def main() -> int:
               "independent churn, or full input round-trip"))
     parser.add_argument(
         "--transport", choices=("rdp", "rfb", "vnc-viewer"), default="rdp",
-        help=("client transport: complete private RDP path, direct RAW-RFB "
-              "wire baseline, or a real VNC viewer (default: rdp)"))
+        help=("client transport: complete private RDP path (default); direct "
+              "RFB and VNC-viewer are deprecated historical comparisons"))
     parser.add_argument(
-        "--backend", choices=("vnc", "direct-x11"), default="vnc",
-        help=("RDP server backend: x11vnc/libvnc.so or the first-party "
-              "XCB/XDamage/XShm module (default: vnc)"))
+        "--backend", choices=("direct-x11", "vnc"), default="direct-x11",
+        help=("RDP server backend (default: direct-x11); vnc is deprecated "
+              "and retained only as an opt-in historical comparison"))
     parser.add_argument(
         "--direct-graphics-transport",
         choices=("rfx", "classic", "gfx-planar"),
@@ -3946,16 +3953,13 @@ def main() -> int:
     parser.add_argument("--width", type=int, default=1024)
     parser.add_argument("--height", type=int, default=640)
     parser.add_argument("--pipeline", choices=("gfx", "rfx"), default="gfx",
-                        help="FreeRDP graphics path to request (default: gfx)")
+                        help="graphics path for the deprecated VNC comparison")
     parser.add_argument("--max-bpp", type=int, choices=(16, 24, 32), default=32,
                         help="private xrdp color depth (default: 32)")
     parser.add_argument("--disable-gfx-for-vnc", action="store_true",
-                        help=("set global drdynvc=false and Console "
-                              "channel.drdynvc=false (the effective GFX "
-                              "disable switch)"))
+                        help=argparse.SUPPRESS)
     parser.add_argument("--enable-gfx-for-vnc", action="store_true",
-                        help=("set channel.drdynvc=true in the private Console "
-                              "profile (allow GFX negotiation)"))
+                        help=argparse.SUPPRESS)
     parser.add_argument("--disable-dynamic-resizing", action="store_true",
                         help=("disable the private Console profile's dynamic "
                               "RDP monitor resize requests"))
@@ -3973,16 +3977,16 @@ def main() -> int:
     parser.add_argument("--client-height", type=int, default=768,
                         help="isolated RDP client height (default: 768)")
     parser.add_argument("--base-port", type=int, default=3390,
-                        help="private xrdp port; x11vnc uses the next port")
+                        help="private benchmark xrdp port")
     parser.add_argument("--only", choices=tuple(VNC_PROFILES),
-                        help="run one x11vnc profile (default: baseline and lan)")
+                        help="legacy VNC comparison profile (deprecated)")
     parser.add_argument("--repetitions", type=int, default=1,
                         help="number of independent runs per profile (default: 1)")
     parser.add_argument("--xrdp", default=str(XRDP))
     parser.add_argument("--x11vnc", default=str(X11VNC),
-                        help="x11vnc binary used by the isolated backend")
+                        help=argparse.SUPPRESS)
     parser.add_argument("--console-lib", default="libvnc.so",
-                        help="VNC module filename for the private xrdp instance")
+                        help=argparse.SUPPRESS)
     parser.add_argument(
         "--direct-module", type=Path, default=DIRECT_MODULE,
         help="first-party module used by --backend direct-x11")
@@ -3995,7 +3999,7 @@ def main() -> int:
     parser.add_argument(
         "--scrollcopyrect", choices=("never", "mouse", "keys", "always"),
         default="never",
-        help="x11vnc scrollcopyrect mode (default: never)")
+        help=argparse.SUPPRESS)
     parser.add_argument(
         "--network-mode", choices=("auto", "localhost", "namespace"),
         default="auto",
@@ -4033,6 +4037,12 @@ def main() -> int:
                              else args.bulk_compression == "on")
     XRDP = Path(args.xrdp)
     X11VNC = Path(args.x11vnc)
+    if args.backend == "vnc":
+        print(
+            "WARNING: --backend vnc is deprecated and retained only for "
+            "historical comparison; direct-x11 is the supported backend.",
+            file=sys.stderr,
+        )
     if args.backend == "direct-x11":
         if args.transport != "rdp":
             parser.error("--backend direct-x11 requires --transport rdp")
@@ -4177,7 +4187,7 @@ def main() -> int:
             args.client_width, args.client_height = resolved_geometry
         pressure_session.start()
         ISOLATED.mkdir(parents=True, exist_ok=True)
-        runtime = Path(tempfile.mkdtemp(prefix="xrdp-vnc-gpu-", dir=ISOLATED))
+        runtime = Path(tempfile.mkdtemp(prefix="xrdp-console-bench-", dir=ISOLATED))
         benchmark_backend = (
             "xrdp-console direct-X11" if args.backend == "direct-x11"
             else "xrdp -> x11vnc end-to-end")

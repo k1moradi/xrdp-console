@@ -30,11 +30,11 @@ The CMake integration is opt-in because the upstream build is intentionally
 serial on this 3.7 GiB host:
 
 ```sh
-cmake -S . -B build-xrdp -G Ninja \
+cmake -S . -B build-direct-console -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DXRDP_CONSOLE_NATIVE=ON \
   -DXRDP_CONSOLE_BUILD_XRDP=ON
-cmake --build build-xrdp --parallel 1
+cmake --build build-direct-console --parallel 1
 ```
 
 The dependency build uses `-O3 -march=native -mtune=native` by default.
@@ -52,8 +52,8 @@ The series is deliberately small and applies in this order:
 
 | patch | purpose | reason retained |
 | --- | --- | --- |
-| `0001-xrdp-resize-state-and-failure-recovery.patch` | VNC resize state and error recovery | Prevents the fixed-console session from losing its graphics state after a client resize or failed update. |
-| `0002-xrdp-fixed-console-vnc-path.patch` | fixed geometry, direct bitmap path, end-to-end update error propagation, and first-party capability code `21` | Keeps the physical X11 framebuffer authoritative, makes update failures visible to the session, and gives the direct module an explicit complete-framebuffer/smooth-scroll classification. |
+| `0001-xrdp-resize-state-and-failure-recovery.patch` | RDPGFX resize state and error recovery | Prevents the direct Console session from losing its graphics state after a client resize or failed update. |
+| `0002-xrdp-direct-console-path.patch` | direct Console framebuffer output, end-to-end update error propagation, and module code `21` | Keeps the physical X11 framebuffer authoritative, makes update failures visible to the session, and gives the direct module an explicit complete-framebuffer/smooth-scroll classification. The Console module does not use xrdp's VNC module or an RFB connection. |
 | `0003-xrdp-console-input-priority.patch` | console-only transport priority | Drains a bounded burst of queued RDP input and disconnects before direct-X11 backend work, then performs one transport check afterward, while preserving the legacy service order for other module codes. |
 | `0004-xrdp-console-own-rfx-encoder.patch` | first-party synchronous RFX/Planar ownership | Prevents the asynchronous generic encoder thread from retaining direct-module pixel buffers by default; patch 19 selectively restores the generic encoder for negotiated GFX H.264, whose submissions use transferred mmap ownership. |
 | `0005-librfxcodec-unaligned-stream-access.patch` | defined unaligned RFX stream access | Removes UBSan-confirmed misaligned typed loads/stores in the x86 stream macros while preserving wire bytes. |
@@ -92,6 +92,7 @@ experimental GFX flow-control code are intentionally not in the series.
   They must not become permanent xrdp maintenance burden.
 
 The migration is complete: a pristine archive plus this series configures,
-builds, passes `make check`, installs `xrdp` and `libvnc.so`, and the
-resulting artifacts are used by the private activation workflow. Generated
-dependency state belongs below `build/_deps/` and is not committed.
+builds, passes `make check`, and produces the pinned xrdp runtime used by the
+direct-Console activation workflow. Upstream may also build its own
+`libvnc.so`, but it is not selected by xrdp-console. Generated dependency
+state belongs below `build/_deps/` and is not committed.

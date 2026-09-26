@@ -23,8 +23,8 @@ endif()
 set(BENCHMARK_BINARIES
     x11-pixel-probe
     x11-xtest-key
-    x11vnc-latency-stimulus
-    x11vnc-scroll-stimulus)
+    x11-latency-stimulus
+    x11-scroll-stimulus)
 
 add_executable(x11-pixel-probe helpers/x11_pixel_probe.c)
 target_link_libraries(x11-pixel-probe PRIVATE PkgConfig::X11)
@@ -33,26 +33,26 @@ add_executable(x11-xtest-key helpers/x11_xtest_key.c)
 target_link_libraries(x11-xtest-key PRIVATE PkgConfig::X11 ${XTST_LIBRARY})
 
 if(GL_FOUND)
-    add_executable(x11vnc-glx-probe helpers/x11vnc_glx_probe.c)
-    target_link_libraries(x11vnc-glx-probe PRIVATE
+    add_executable(x11-glx-probe helpers/x11_glx_probe.c)
+    target_link_libraries(x11-glx-probe PRIVATE
         PkgConfig::X11 PkgConfig::GL)
 
-    add_executable(x11vnc-gpu-stimulus helpers/x11vnc_gpu_stimulus.c)
-    target_link_libraries(x11vnc-gpu-stimulus PRIVATE
+    add_executable(x11-gpu-stimulus helpers/x11_gpu_stimulus.c)
+    target_link_libraries(x11-gpu-stimulus PRIVATE
         PkgConfig::X11 PkgConfig::GL)
     list(APPEND BENCHMARK_BINARIES
-        x11vnc-glx-probe
-        x11vnc-gpu-stimulus)
+        x11-glx-probe
+        x11-gpu-stimulus)
 else()
     message(STATUS
         "Skipping optional GLX benchmark helpers: OpenGL development files were not found")
 endif()
 
-add_executable(x11vnc-latency-stimulus helpers/x11vnc_latency_stimulus.c)
-target_link_libraries(x11vnc-latency-stimulus PRIVATE PkgConfig::X11)
+add_executable(x11-latency-stimulus helpers/x11_latency_stimulus.c)
+target_link_libraries(x11-latency-stimulus PRIVATE PkgConfig::X11)
 
-add_executable(x11vnc-scroll-stimulus helpers/x11vnc_scroll_stimulus.c)
-target_link_libraries(x11vnc-scroll-stimulus PRIVATE PkgConfig::X11)
+add_executable(x11-scroll-stimulus helpers/x11_scroll_stimulus.c)
+target_link_libraries(x11-scroll-stimulus PRIVATE PkgConfig::X11)
 
 if(VULKAN_FOUND)
     add_executable(vulkan-probe helpers/vulkan_probe.c)

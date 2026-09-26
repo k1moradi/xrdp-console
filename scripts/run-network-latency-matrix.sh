@@ -2,10 +2,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -eu
 
-# Run the recommendation's first matrix without touching the production
+# Run the direct-X11 interaction-latency matrix without touching production
 # listeners. The benchmark creates and removes a private veth/netns per case.
 PROJECT_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 BENCH=${BENCH:-$PROJECT_ROOT/tools/benchmark/xrdp_console_bench.py}
+BUILD_DIR=${XRDP_CONSOLE_BUILD_DIR:-$PROJECT_ROOT/build-direct-console}
 AUTH=${1:?usage: $0 /path/to/readable-Xauthority}
 DURATION=${DURATION:-30}
 JITTER=${JITTER:-0}
@@ -32,8 +33,10 @@ for churn in 0 15 30; do
         fi
         echo "=== churn=${churn}fps one_way_delay=${delay}ms output=${output} ==="
         PYTHONUNBUFFERED=1 python3 -B "$BENCH" \
-            --auth "$AUTH" --only lan --mode input-roundtrip \
-            --pipeline rfx --disable-gfx-for-vnc \
+            --auth "$AUTH" --backend direct-x11 \
+            --direct-graphics-transport rfx --mode input-roundtrip \
+            --xrdp "$BUILD_DIR/_deps/xrdp-install/sbin/xrdp" \
+            --direct-module "$BUILD_DIR/src/libxrdp_console.so" \
             --input-churn-fps "$churn" --duration "$DURATION" \
             --client-display "$display" --base-port "$port" \
             --network-mode "$mode" --network-delay-ms "$delay" \
