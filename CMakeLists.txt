@@ -18,9 +18,19 @@ option(XRDP_CONSOLE_ENABLE_CODEC_BENCH
 option(XRDP_CONSOLE_BUILD_TOOLS
     "Build benchmark and diagnostic tools"
     ON)
+option(XRDP_CONSOLE_ENABLE_PIXEL_PIPELINE_BENCH
+    "Build the opt-in XShm/H.264 CPU-stage profiling benchmark"
+    OFF)
+option(XRDP_CONSOLE_ENABLE_GL_CAPABILITY_PROBE
+    "Build the opt-in OpenGL 3.3 Core/GLX capability and readback probe"
+    OFF)
 option(XRDP_CONSOLE_BUILD_XRDP
     "Build the pinned patched xrdp dependency under build/_deps"
     OFF)
+
+if(XRDP_CONSOLE_ENABLE_PIXEL_PIPELINE_BENCH)
+    enable_language(CXX)
+endif()
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)

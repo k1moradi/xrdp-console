@@ -2,7 +2,7 @@
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(X11 REQUIRED IMPORTED_TARGET x11)
-pkg_check_modules(GL REQUIRED IMPORTED_TARGET gl)
+pkg_check_modules(GL QUIET IMPORTED_TARGET gl)
 pkg_check_modules(VULKAN QUIET IMPORTED_TARGET vulkan)
 
 find_library(XTST_LIBRARY NAMES Xtst)
@@ -23,8 +23,6 @@ endif()
 set(BENCHMARK_BINARIES
     x11-pixel-probe
     x11-xtest-key
-    x11vnc-glx-probe
-    x11vnc-gpu-stimulus
     x11vnc-latency-stimulus
     x11vnc-scroll-stimulus)
 
@@ -34,11 +32,21 @@ target_link_libraries(x11-pixel-probe PRIVATE PkgConfig::X11)
 add_executable(x11-xtest-key helpers/x11_xtest_key.c)
 target_link_libraries(x11-xtest-key PRIVATE PkgConfig::X11 ${XTST_LIBRARY})
 
-add_executable(x11vnc-glx-probe helpers/x11vnc_glx_probe.c)
-target_link_libraries(x11vnc-glx-probe PRIVATE PkgConfig::X11 PkgConfig::GL)
+if(GL_FOUND)
+    add_executable(x11vnc-glx-probe helpers/x11vnc_glx_probe.c)
+    target_link_libraries(x11vnc-glx-probe PRIVATE
+        PkgConfig::X11 PkgConfig::GL)
 
-add_executable(x11vnc-gpu-stimulus helpers/x11vnc_gpu_stimulus.c)
-target_link_libraries(x11vnc-gpu-stimulus PRIVATE PkgConfig::X11 PkgConfig::GL)
+    add_executable(x11vnc-gpu-stimulus helpers/x11vnc_gpu_stimulus.c)
+    target_link_libraries(x11vnc-gpu-stimulus PRIVATE
+        PkgConfig::X11 PkgConfig::GL)
+    list(APPEND BENCHMARK_BINARIES
+        x11vnc-glx-probe
+        x11vnc-gpu-stimulus)
+else()
+    message(STATUS
+        "Skipping optional GLX benchmark helpers: OpenGL development files were not found")
+endif()
 
 add_executable(x11vnc-latency-stimulus helpers/x11vnc_latency_stimulus.c)
 target_link_libraries(x11vnc-latency-stimulus PRIVATE PkgConfig::X11)
@@ -78,6 +86,40 @@ if(XRDP_CONSOLE_ENABLE_CODEC_BENCH)
         message(STATUS
             "Skipping xrdp-codec-bench: rfxcodec development files were not found")
     endif()
+endif()
+
+if(XRDP_CONSOLE_ENABLE_PIXEL_PIPELINE_BENCH)
+    pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb)
+    pkg_check_modules(XCB_SHM REQUIRED IMPORTED_TARGET xcb-shm)
+    pkg_check_modules(X264 REQUIRED IMPORTED_TARGET x264)
+
+    add_executable(xrdp-pixel-pipeline-bench
+        helpers/xrdp_pixel_pipeline_bench.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/generation_tile_map.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/mapped_buffer.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/presentation_scaler.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/presentation_transform.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/tile_fingerprint_map.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/gfx_avc420_frame.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/gfx_surface_copy.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/h264_latest_frame.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/scroll_copy_plan.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/scroll_motion_observer.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/vertical_motion_discovery.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/vertical_motion_verifier.cpp
+        ${CMAKE_SOURCE_DIR}/src/x11/x11_shared_memory_capture.cpp)
+    set_target_properties(xrdp-pixel-pipeline-bench PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(xrdp-pixel-pipeline-bench PRIVATE
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/helpers)
+    target_compile_options(xrdp-pixel-pipeline-bench PRIVATE
+        -Wall -Wextra -Wpedantic -Werror)
+    target_link_libraries(xrdp-pixel-pipeline-bench PRIVATE
+        PkgConfig::XCB PkgConfig::XCB_SHM PkgConfig::X264)
+    list(APPEND BENCHMARK_BINARIES xrdp-pixel-pipeline-bench)
 endif()
 
 install(TARGETS ${BENCHMARK_BINARIES}

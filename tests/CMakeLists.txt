@@ -31,6 +31,35 @@ if(TARGET xrdp-console)
         ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py)
 endif()
 
+if(TARGET xrdp-pixel-pipeline-bench)
+    list(APPEND PYTHON_SOURCES
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_pixel_pipeline_bench_cli.py)
+    add_executable(stage-statistics-unit test_stage_statistics.cpp)
+    set_target_properties(stage-statistics-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(stage-statistics-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/tools/benchmark/helpers)
+    target_compile_options(stage-statistics-unit PRIVATE
+        -Wall -Wextra -Wpedantic -Werror)
+    add_test(NAME stage-statistics-unit COMMAND stage-statistics-unit)
+    add_test(NAME pixel-pipeline-bench-cli
+        COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_pixel_pipeline_bench_cli.py
+        $<TARGET_FILE:xrdp-pixel-pipeline-bench>)
+    set_tests_properties(pixel-pipeline-bench-cli PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+endif()
+
+if(TARGET xrdp-gl-capability-probe)
+    add_test(NAME gl-capability-probe
+        COMMAND $<TARGET_FILE:xrdp-gl-capability-probe>)
+    set_tests_properties(gl-capability-probe PROPERTIES
+        SKIP_RETURN_CODE 77
+        TIMEOUT 30)
+endif()
+
 if(TARGET xrdp-codec-bench)
     list(APPEND PYTHON_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/test_rfx_codec_bench.py)
