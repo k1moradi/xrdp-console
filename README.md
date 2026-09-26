@@ -51,8 +51,7 @@ optional OpenGL/Vulkan probes do not add GPU processing to the runtime.
 
 ## Install prerequisites
 
-For Ubuntu 26.04, the following packages cover the pinned xrdp/module build,
-unit/integration tests, and local RDP smoke client:
+For Ubuntu 26.04, install the build, runtime, and Xvfb test prerequisites:
 
 ```sh
 sudo apt install \
@@ -62,13 +61,28 @@ sudo apt install \
   libpam0g-dev libxkbfile-dev libxfixes-dev libxrandr-dev \
   libx264-dev libjpeg-dev libfreetype-dev libssl-dev \
   libfuse3-dev libx11-dev libxtst-dev \
-  xauth x11-utils xvfb xrdp freerdp-x11
+  xauth x11-utils xvfb xrdp
 ```
 
-FreeRDP's X11 package name varies by release: Ubuntu 26.04 provides
-`freerdp-x11`; Ubuntu 24.04 uses `freerdp2-x11`. On another Debian/Ubuntu
-release, check with `apt-cache search '^freerdp(-|[23]-)x11$'`. FreeRDP is used
-for local smoke tests; Microsoft clients connect to the server directly.
+The server and its Xvfb tests do not require a FreeRDP client. To run the
+optional local RDP smoke test on Ubuntu 26.04, install:
+
+```sh
+sudo apt install freerdp-x11
+```
+
+Do not use `freerdp2-x11` on Ubuntu 26.04; that package name is unavailable in
+its repositories. FreeRDP package names vary between releases. To find the
+client package available on another Debian/Ubuntu release, run:
+
+```sh
+apt-cache search '^freerdp.*x11$'
+```
+
+If no client package is available, you can still build and run the server-side
+tests; use a Windows or macOS Microsoft RDP client for manual connection tests.
+`x11vnc` is not part of the production path and is not required to build,
+deploy, or test the direct-X11 module.
 
 OpenGL and Vulkan development packages are optional and only needed for
 diagnostic/profiling tools. For example, install `libgl-dev` and configure with
