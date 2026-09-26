@@ -6,6 +6,12 @@ set -eu
 
 workspace_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build_root=${XRDP_CONSOLE_BUILD_DIR:-$workspace_root/build-direct-console}
+freerdp_client=${XRDP_CONSOLE_FREERDP_EXECUTABLE:-}
+
+if [ -n "$freerdp_client" ] && [ ! -x "$freerdp_client" ]; then
+    echo "XRDP_CONSOLE_FREERDP_EXECUTABLE is not executable: $freerdp_client" >&2
+    exit 1
+fi
 
 for required in cmake ninja ctest; do
     if ! command -v "$required" >/dev/null 2>&1; then
@@ -35,7 +41,8 @@ fi
 cmake -S "$workspace_root" -B "$build_root" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DXRDP_CONSOLE_NATIVE=ON \
-    -DXRDP_CONSOLE_BUILD_XRDP=ON
+    -DXRDP_CONSOLE_BUILD_XRDP=ON \
+    "-DXRDP_CONSOLE_FREERDP_EXECUTABLE=$freerdp_client"
 
 # The pinned xrdp build is serialized to stay within the target laptop's
 # memory budget. First-party targets are also built serially for predictability.

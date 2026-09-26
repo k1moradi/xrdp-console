@@ -610,8 +610,24 @@ if(TARGET xrdp-console)
         module-lifecycle
         PROPERTIES RESOURCE_LOCK xrdp_console_private_xvfb)
 
-    find_program(XRDP_CONSOLE_FREERDP_EXECUTABLE
-        NAMES xfreerdp3 xfreerdp)
+    set(XRDP_CONSOLE_FREERDP_EXECUTABLE "" CACHE FILEPATH
+        "FreeRDP client executable used by RDP loader integration tests")
+    if(NOT XRDP_CONSOLE_FREERDP_EXECUTABLE)
+        find_program(XRDP_CONSOLE_DISCOVERED_FREERDP_EXECUTABLE
+            NAMES xfreerdp3 xfreerdp)
+        set(XRDP_CONSOLE_FREERDP_EXECUTABLE
+            "${XRDP_CONSOLE_DISCOVERED_FREERDP_EXECUTABLE}")
+    elseif(NOT EXISTS "${XRDP_CONSOLE_FREERDP_EXECUTABLE}" OR
+           IS_DIRECTORY "${XRDP_CONSOLE_FREERDP_EXECUTABLE}")
+        message(FATAL_ERROR
+            "XRDP_CONSOLE_FREERDP_EXECUTABLE does not name an existing file: "
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}")
+    endif()
+
+    if(XRDP_CONSOLE_FREERDP_EXECUTABLE)
+        message(STATUS
+            "RDP loader tests use FreeRDP: ${XRDP_CONSOLE_FREERDP_EXECUTABLE}")
+    endif()
     if(XRDP_CONSOLE_FREERDP_EXECUTABLE AND
        TARGET x11-pixel-probe AND TARGET x11-latency-stimulus)
         add_test(NAME xrdp-loader-smoke

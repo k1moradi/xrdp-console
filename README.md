@@ -84,6 +84,32 @@ tests; use a Windows or macOS Microsoft RDP client for manual connection tests.
 `x11vnc` is not part of the production path and is not required to build,
 deploy, or test the direct-X11 module.
 
+Ubuntu's packaged FreeRDP may be built without an H.264 GFX decoder. In that
+case, the capability-gated `xrdp-loader-gfx-h264-odd-scaled-smoke` test is
+reported as skipped; installing FFmpeg alone cannot add a decoder to an already
+compiled FreeRDP binary. The ordinary CTest suite and other loader modes still
+run with the packaged client.
+
+To run the H.264 GFX loader test, keep the distro FreeRDP package installed and
+build a separate test client against Ubuntu's FFmpeg development packages:
+
+```sh
+sudo apt install \
+  git cmake ninja-build build-essential pkg-config libssl-dev \
+  libavcodec-dev libavutil-dev libswscale-dev \
+  libx11-dev libxext-dev libxinerama-dev libxcursor-dev libxdamage-dev \
+  libxfixes-dev libxi-dev libxkbfile-dev libxrandr-dev libxrender-dev
+scripts/build-test-freerdp.sh
+```
+
+The build script verifies the resulting client's H.264 GFX and FFmpeg build
+flags and installs it only under `build-test-freerdp/`; it does not uninstall
+or overwrite Ubuntu's FreeRDP packages. It prints the exact executable path to
+use in the subsequent `scripts/build-direct-console.sh` command. The client
+path can also be passed directly to CMake using
+`-DXRDP_CONSOLE_FREERDP_EXECUTABLE=/absolute/path/to/xfreerdp3`. See
+[`docs/testing.md`](docs/testing.md) for the capability-gated test behavior.
+
 The Ubuntu `xrdp` package supplies the host service/configuration framework
 used by the activation script. The active daemon is then switched to this
 project's pinned, locally built xrdp; the distribution daemon is not the

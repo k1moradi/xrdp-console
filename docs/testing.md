@@ -7,6 +7,23 @@ authenticated-Xvfb tests run without modifying the host xrdp service. The
 optional local RDP loader smoke uses FreeRDP when available. Microsoft-client
 interoperability remains a manual Windows/macOS test gate.
 
+CTest discovers `xfreerdp3` or `xfreerdp` from `PATH` by default. To select a
+specific executable, configure with
+`-DXRDP_CONSOLE_FREERDP_EXECUTABLE=/absolute/path/to/xfreerdp3`, or set the same
+environment variable when running `scripts/build-direct-console.sh`. This
+allows a private test client to coexist with the distribution package.
+
+`xrdp-loader-gfx-h264-odd-scaled-smoke` is capability-gated. It runs only when
+the selected FreeRDP reports `WITH_GFX_H264=ON` and a supported H.264 decoder
+backend in `/buildconfig`; otherwise it returns CTest's configured skip code.
+Ubuntu's packaged FreeRDP on this development host currently lacks those flags.
+For an end-to-end H.264 test, install the FreeRDP/FFmpeg build dependencies
+listed in the README with apt, build the isolated client using
+`scripts/build-test-freerdp.sh`, then pass its printed path through
+`XRDP_CONSOLE_FREERDP_EXECUTABLE`. That script uses a private install prefix and
+does not replace system FreeRDP. The H.264 CTest must actually run and pass
+before claiming H.264 client interoperability; a skip is not such evidence.
+
 Some isolated benchmark tests still cover the deprecated, opt-in VNC/RFB
 comparison mode. They are not runtime, packaging, or deployment requirements.
 
@@ -27,6 +44,7 @@ comparison mode. They are not runtime, packaging, or deployment requirements.
 | `h264-latest-frame-unit` | generation-safe H.264 tile scheduling, including a mixed-age page-scroll reproduction and the scroll-priority regression |
 | `xrdp-upstream-unit` | serial pinned-xrdp `make check`, including Console dirty-region, pacing, and RDPGFX acknowledgement telemetry regressions |
 | `xrdp-loader-smoke` | generated xrdp loading the module through FreeRDP, accepting the initial cursor update, then drawing a known red/blue source marker and asserting that the expected pixel reaches the FreeRDP framebuffer |
+| `xrdp-loader-gfx-h264-odd-scaled-smoke` | capability-gated standard H.264 GFX AVC420 loader/pixel smoke at odd scaled presentation geometry; skipped if the selected FreeRDP lacks a compiled H.264 GFX decoder |
 
 The marker correlation contract is:
 
