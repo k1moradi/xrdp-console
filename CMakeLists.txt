@@ -142,7 +142,7 @@ set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
 set(CPACK_GENERATOR "TGZ;DEB")
 set(CPACK_DEBIAN_PACKAGE_SECTION "devel")
 set(CPACK_DEBIAN_PACKAGE_DEPENDS
-    "python3, x11vnc, xrdp, freerdp2-x11 | freerdp3-x11, xvfb, iproute2, openssl, x11-utils, x11-xserver-utils, util-linux, procps, iputils-ping")
+    "python3, x11vnc, xrdp, freerdp-x11 | freerdp2-x11 | freerdp3-x11, xvfb, iproute2, openssl, x11-utils, x11-xserver-utils, util-linux, procps, iputils-ping")
 set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 set(CPACK_STRIP_FILES TRUE)
 include(CPack)

@@ -1,26 +1,46 @@
 # xrdp-console
 
-`xrdp-console` is the first-party GPLv3 shared-console project. The current
-migration slice contains the measured VNC bridge, its developer tooling, and
-the first direct-X11 C++ runtime vertical slice: XCB/XDamage/XShm capture,
-XFixes cursor forwarding, and XTest input into xrdp's classic bitmap callbacks.
+`xrdp-console` is a first-party GPLv3 xrdp module for sharing the already
+logged-in physical X11 desktop over RDP. The local monitor and remote client
+see and control the same X11 session; the module does not start a second
+desktop.
 
-The current measured paths are:
+The production path is now direct X11 rather than an RFB/VNC bridge:
 
 ```text
-physical X11 display -> x11vnc -> xrdp libvnc.so -> RDP client
-physical X11 display -> xrdp-console XCB/XDamage/XShm -> classic RDP bitmap -> RDP client
+physical X11 -> XCB/XDamage + persistent XShm capture -> bounded presentation -> negotiated RDP graphics
+RDP keyboard/mouse -> xrdp-console -> XTest -> the same physical X11 session
+RDP text clipboard <-> xrdp-console CLIPRDR <-> X11 CLIPBOARD selection
 ```
 
-The default `--backend vnc` measures the existing workstation path where an
-RDP connection must show the same LXQt session as the physical monitor.
-`--backend direct-x11` measures the first-party XCB/XDamage/XShm module against
-the same private xrdp and FreeRDP stages, without starting x11vnc or the RFB
-proxy. Both modes keep benchmark services on private ports. The workspace
-also carries a reproducible, host-native xrdp candidate with fixed-console
-geometry, direct-bitmap/error propagation, and resize-state recovery. It is
-built and activated explicitly; a normal CMake install never replaces the
-system daemon.
+The module uses bounded damage snapshots and capture/presentation work,
+client-input-first servicing, XFixes cursor updates, XTest input, inverse mouse
+mapping, aspect-fit presentation, and client-requested presentation resizing
+without changing the physical Xorg mode. Its text clipboard bridge uses the
+RDP `cliprdr` channel and the X11 `CLIPBOARD` selection; it does not implement
+file or image clipboard formats.
+
+Graphics output is capability-gated, not forced on the client: negotiated
+RDPGFX H.264/AVC420 is used when the required server encoder and surface state
+are available; standard RemoteFX, xrdp GFX Planar, or classic bitmap paths are
+used where appropriate as compatible alternatives. The server records the
+negotiated capabilities and selected path. RDPGFX scaled-output eligibility is
+diagnostic only; client-side scaling is not enabled. Presentation scaling
+currently remains a bounded CPU path. The optional OpenGL 3.3 and Vulkan
+targets are probes/benchmarks, not a production GPU capture or encoding path.
+
+The repository retains the x11vnc/libvnc backend as a legacy comparison and
+rollback path. `--backend vnc` measures that path; `--backend direct-x11`
+measures the first-party module. Both benchmark modes use isolated private
+services and leave production ports alone. A hash-pinned, patched xrdp 0.10.6.1
+build is generated under `build/_deps/`; building it and activating the direct
+module are explicit operations. A normal CMake install never replaces or
+reconfigures the system daemon.
+
+Known limitation: rapid page scrolling can still look uneven or tear while
+frames are arriving. Scroll-motion analysis is diagnostic; it does not yet
+perform production surface-copy acceleration. Validate this behavior with the
+Microsoft Windows and macOS clients before treating scrolling as complete.
 
 The end-to-end benchmark is a developer tool, `xrdp_console_bench.py`. It supports
 graphics latency, input round trips, controlled compositor churn, classic RFX
@@ -30,42 +50,77 @@ input probes, GL workloads, scroll stimuli, and Vulkan reporting.
 
 ## Build
 
-On Debian or Ubuntu, install the development dependencies first:
+On Ubuntu 26.04, install the build, module, and test dependencies with:
 
 ```sh
 sudo apt install \
   cmake ninja-build build-essential pkg-config python3 \
-  libxcb1-dev libxcb-damage0-dev libxcb-xfixes0-dev libxcb-xinput-dev \
-  libxcb-xtest0-dev \
-  libfuse3-dev \
-  libx11-dev libxtst-dev libgl-dev libvulkan-dev \
-  xauth x11-utils xrdp x11vnc freerdp3-x11 tigervnc-viewer xvfb
+  libxcb1-dev libxcb-damage0-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+  libxcb-xinput-dev libxcb-xtest0-dev \
+  libxkbfile-dev libx264-dev libjpeg-dev libfreetype-dev libssl-dev \
+  libfuse3-dev libx11-dev libxtst-dev \
+  xauth x11-utils xrdp x11vnc freerdp-x11 tigervnc-viewer xvfb
 ```
 
-Configure an out-of-tree Release build. For this machine, use the native
-option so every project target is optimized for the host CPU:
+The FreeRDP X11 client package name depends on the Ubuntu release. Ubuntu
+26.04 provides `freerdp-x11`; Ubuntu 24.04 uses `freerdp2-x11`. If following
+these instructions on another Debian/Ubuntu release, check its package index
+with `apt-cache search '^freerdp(-|[23]-)x11$'` and install the available X11
+client package. `freerdp3-x11` may be present as a transitional package.
+
+OpenGL and Vulkan development packages are optional: install `libgl-dev` for
+the GLX helpers or `libvulkan-dev` for the Vulkan probe. To build the optional
+GL capability probe, configure with
+`-DXRDP_CONSOLE_ENABLE_GL_CAPABILITY_PROBE=ON`. To build the CPU pixel-pipeline
+benchmark, use `-DXRDP_CONSOLE_ENABLE_PIXEL_PIPELINE_BENCH=ON` (requires x264
+development files). These tools do not enable a GPU runtime path.
+
+The ordinary out-of-tree Release build compiles the tools and unprivileged
+tests. It does not fetch/build xrdp or produce the production module because
+`XRDP_CONSOLE_BUILD_XRDP` defaults to `OFF`. `XRDP_CONSOLE_NATIVE` defaults to
+`ON`; this optimizes for the build host and does not produce a portable binary.
+Set it to `OFF` when portability is more important than host-specific tuning:
+
+Configured CMake build trees store the checkout's absolute path. If the
+repository was moved or renamed, configure a fresh build directory rather than
+trying to reuse the old cache.
 
 ```sh
 cmake -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
-  -DXRDP_CONSOLE_NATIVE=ON \
-  -DCMAKE_INSTALL_PREFIX="$HOME/.local"
-cmake --build build --parallel 1
+  -DXRDP_CONSOLE_NATIVE=ON
+cmake --build build --parallel
 ctest --test-dir build --output-on-failure
-cmake --install build
+```
+
+To install the developer tools to a user prefix and/or create packages:
+
+```sh
+cmake --install build --prefix "$HOME/.local"
 cpack --config build/CPackConfig.cmake
 ```
 
-The build installs benchmark helper binaries under
-`libexec/xrdp-console/benchmark/helpers` and developer tools under the data
-directory. Run the benchmark directly from
-`tools/benchmark/xrdp_console_bench.py` or its installed data path. CPack produces
-a relocatable `.tar.gz` and, on Debian systems, a `.deb`. The optional offline
-RemoteFX batch benchmark is built when `rfxcodec` development files are
-available; its absence does not affect the end-to-end benchmark. Vulkan
-development files are optional too; without them
-the Vulkan capability helper is omitted while the rest of the toolkit remains
-buildable.
+To build the first-party module and the pinned patched xrdp candidate, enable
+the production dependency explicitly. The upstream xrdp build is intentionally
+serial to limit memory use:
+
+```sh
+cmake -S . -B build-xrdp -G Ninja \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DXRDP_CONSOLE_NATIVE=ON \
+  -DXRDP_CONSOLE_BUILD_XRDP=ON
+cmake --build build-xrdp --parallel 1
+ctest --test-dir build-xrdp --output-on-failure
+```
+
+That build produces `build-xrdp/src/libxrdp_console.so` and the matching
+private xrdp installation under `build-xrdp/_deps/xrdp-install`. Neither
+`cmake --install` nor CPack activates it as the system server. The install
+places benchmark helpers under `libexec/xrdp-console/benchmark/helpers` and
+developer tools under the data directory. CPack produces a relocatable
+`.tar.gz` and, on Debian systems, a `.deb`. The optional offline RemoteFX
+batch benchmark uses the pinned codec when building xrdp, or system `rfxcodec`
+development files otherwise.
 
 For an explicit host-native build without installing:
 
@@ -105,16 +160,18 @@ python3 -B tools/benchmark/xrdp_console_bench.py \
 ```
 
 This mode skips x11vnc, the IPv6-to-IPv4 RFB proxy, and chansrv; stages the
-module into the private xrdp installation; enables the module's direct,
-text-only `cliprdr` channel; sets `code=21` for the first-party
-complete-framebuffer and smooth-scroll capabilities; and initially forces the
-FreeRDP geometry to the physical X11 geometry. Graphics mode reports the
-draw-completion to
-FreeRDP-framebuffer-visible stage. Input-roundtrip mode additionally forwards
-RDP keyboard events through XTest and measures the full marker round trip. The
-current classic pointer path uses a 32x32 cursor canvas; larger X cursors are
-ignored while the previous/default remote cursor is retained. Held XTest keys
-and mouse buttons are released when the module session ends.
+module into the private xrdp installation; and exercises its direct text-only
+`cliprdr` channel under module code `21`. The harness's default direct graphics
+request is standard RemoteFX (`--direct-graphics-transport rfx`); it can also
+request classic bitmap or GFX Planar. This controlled benchmark does not
+exercise the production H.264 path. By default it sets the client geometry to
+the physical X11 geometry; use `--direct-allow-scaled-presentation` to test a
+different initial presentation size, or `--direct-dynamic-resizing` to test
+client monitor-resize requests. Graphics mode measures draw-completion to
+FreeRDP-framebuffer visibility. Input-roundtrip also exercises XTest keyboard
+delivery and reports the end-to-end marker stages. The classic pointer canvas
+is 32x32; unsupported larger X cursors retain the previous/default RDP cursor.
+Held XTest keys and buttons are released when the module session ends.
 
 The namespace transport needs a cached sudo ticket for short-lived network
 setup and cleanup commands. The benchmark itself remains a normal-user
@@ -226,23 +283,31 @@ requiring a particular adapter model.
 ## Console profile
 
 The first-party direct-X11 backend can be activated as the host's production
-Console module after building and testing the pinned native daemon and module:
+Console module after building and testing the pinned daemon and module:
 
 ```sh
-scripts/build-optimized-xrdp.sh
 SUDO_ASKPASS=/usr/bin/ssh-askpass SSH_ASKPASS_REQUIRE=force \
-  sudo -A scripts/activate-direct-console.sh
+  sudo -A env XRDP_CONSOLE_BUILD_DIR="$PWD/build-xrdp" \
+  scripts/activate-direct-console.sh
 ```
 
 Activation keeps the configured RDP listener at **port 3389**, installs the
 tested `libxrdp_console.so` beside the matching xrdp 0.10.6.1 daemon, and
-switches `[Console]` to module code 21. It enables the direct text clipboard
-and dynamic-resize channels while leaving graphics selection capability-gated:
-standard RemoteFX is used only when negotiated and supported, otherwise the
-module retains classic bitmap output. Unsupported device/audio/remote-app
-channels are disabled for this Console session. The operation refuses to
-restart while an RDP client is connected and keeps a root-only backup under
-`/var/backups/xrdp-x11vnc/`.
+switches `[Console]` to module code 21. It enables text clipboard and
+dynamic-resize channels. Graphics choice remains capability-gated: the module
+uses a negotiated and successfully initialized H.264/AVC420 path where
+available, with compatible RFX/GFX Planar/classic output paths otherwise. It
+does not force a codec the client did not negotiate. Unsupported
+device/audio/remote-app channels are disabled for this Console session. The
+operation refuses to restart while an RDP client is connected and keeps a
+root-only backup under `/var/backups/xrdp-x11vnc/`.
+
+The physical X11 mode remains unchanged when the RDP presentation is resized;
+the server currently uses its CPU aspect-fit scaler and inverse pointer mapping.
+Negotiated RDPGFX scaled-output eligibility is logged for investigation but is
+not yet used to move scaling to the Microsoft client. Native Windows/macOS
+client validation is still required for codec negotiation, resize, scrolling,
+and clipboard interoperability.
 
 To restore the previous configuration, module, and daemon override, use the
 backup path printed by activation:
@@ -257,15 +322,16 @@ The graphical askpass command prompts for sudo authorization without putting
 the password in shell history or process arguments. Keep the RDP client on
 port 3389; activation does not rewrite that setting.
 
-The toolkit documents the measured x11vnc profile for a local network, but it
+The toolkit retains the legacy x11vnc profile for comparison and rollback, but
 does not silently rewrite `/etc/xrdp` or install a privileged systemd unit. A
 deployment that wants the Windows-like shared-console behavior can use the
 installed systemd template in `share/xrdp-console/systemd` as a starting
 point and review every path and Xauthority policy for its display manager. See
 [`docs/console-profile.md`](docs/console-profile.md).
 
-The optimized daemon is generated from the pinned xrdp archive and the small
-patch series under `patches/xrdp/`. Build it without root privileges with:
+For the legacy VNC deployment only, the optimized xrdp daemon can be generated
+from the pinned archive and patch series under `patches/xrdp/`. Build that
+dependency without root privileges with:
 
 ```sh
 scripts/build-optimized-xrdp.sh
@@ -276,8 +342,8 @@ locations can be supplied through the `XRDP_CONSOLE_XRDP_CPPFLAGS`,
 `XRDP_CONSOLE_XRDP_LDFLAGS`, and `XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH` cache
 variables; see [`docs/xrdp-dependency.md`](docs/xrdp-dependency.md).
 
-After reviewing the candidate and closing the RDP connection, switch only the
-xrdp service to it with:
+For the legacy VNC Console profile only, after reviewing the candidate and
+closing the RDP connection, switch the xrdp service to it with:
 
 ```sh
 sudo scripts/use-matched-xrdp-console-daemon.sh
@@ -286,17 +352,18 @@ sudo scripts/use-matched-xrdp-console-daemon.sh
 The script backs up the systemd drop-in and restores it automatically if the
 new daemon fails to stay active. It preserves the existing x11vnc profile,
 clipboard channel, fixed-console geometry, direct-bitmap transport, and
-resize/error-recovery behavior.
+resize/error-recovery behavior. It is not the direct-X11 module activation
+path; use `activate-direct-console.sh` for that.
 
-If this checkout should replace the distribution `xrdp` package for this
-machine, run the explicit privileged deployment from the same terminal after
-authenticating with `sudo -v`:
+For a host intentionally using the legacy x11vnc Console profile, if this
+checkout should replace the distribution `xrdp` package, run the explicit
+privileged deployment after authenticating with `sudo -v`:
 
 ```sh
 sudo scripts/install-console-xrdp.sh
 ```
 
-That deployment keeps the existing `/etc/xrdp` Console configuration and
+That legacy deployment keeps the existing `/etc/xrdp` Console configuration and
 x11vnc service, retains `xrdp-sesman` only for the physical-console clipboard
 socket, removes only the distribution `xrdp` package, and leaves `xorgxrdp`
 installed but unused. It stores recoverable backups under
@@ -320,7 +387,7 @@ manager itself is part of the failure.
 ## Source layout
 
 ```text
-src/                    first-party runtime (direct-X11 backend in development)
+src/                    first-party direct-X11 runtime, RDP graphics and clipboard
 tools/benchmark/        benchmark client, relay, and native helper sources
 tools/diagnostics/      read-only diagnostic tools
 tests/                  fast unprivileged Python tests

@@ -48,21 +48,27 @@ are reported as `NA` rather than inferred.
 
 Graphics and input-roundtrip runs support `--backend direct-x11 --transport
 rdp`. This mode does not start x11vnc or the RFB relay. It loads the first-party
-XCB/XDamage/XShm module into the private xrdp build, uses module code `21` for
-the complete-framebuffer and smooth-scroll capabilities, disables GFX/drdynvc
-and dynamic resizing, and forces the FreeRDP window to the physical X11
-geometry:
+XCB/XDamage/XShm module into the private xrdp build and uses module code `21`.
+The direct benchmark's default graphics request is standard RemoteFX
+(`--direct-graphics-transport rfx`); `classic` and `gfx-planar` are explicit
+alternatives. This controlled benchmark does not exercise the production
+H.264/AVC420 path. By default, its client window is set to the physical X11
+geometry. `--direct-allow-scaled-presentation` allows a different initial
+presentation size, while `--direct-dynamic-resizing` exercises client monitor
+resize requests:
 
 ```text
-GL swap-complete -> T2   direct XCB/XDamage/XShm -> classic bitmap -> FreeRDP presentation
+GL swap-complete -> T2   direct XCB/XDamage/XShm -> requested RDP graphics path -> FreeRDP presentation
 ```
 
 It uses the same marker stimulus and FreeRDP pixel probe as the VNC backend, so
 `T1_draw -> T2` is the controlled comparison for the capture/output path. In
 input-roundtrip mode, the module forwards the RDP keyboard event to XTest and
 the same physical X11 marker measures `T0 -> T1_event -> T1_draw -> T2`.
-The loader smoke test separately verifies the graphics vertical path with one
-known red/blue marker assertion.
+The loader smoke test separately verifies the graphics vertical path with a
+known client-visible pixel assertion. Do not interpret a benchmark's requested
+transport as the production Microsoft-client negotiation result; use the
+module's negotiated-capability and actual-output log records for that.
 
 For opt-in direct-module pipeline attribution, pass
 `--xrdp-env XRDP_CONSOLE_PROFILE=1`. The private xrdp log then emits one

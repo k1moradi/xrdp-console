@@ -1,4 +1,8 @@
-# Shared physical-console profile
+# Legacy VNC shared-console profile
+
+This page documents the retained x11vnc/libvnc comparison and rollback path.
+The current first-party production profile uses `libxrdp_console.so` and is
+documented in the top-level [`README.md`](../README.md#console-profile).
 
 The Windows-like workflow is achieved by exporting the already logged-in X11
 console instead of starting a second desktop:

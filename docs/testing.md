@@ -40,6 +40,7 @@ they depend on the physical display stack. The `xrdp-loader-smoke` test is a
 smaller private-server ABI and pixel-path check; it uses the generated xrdp
 install and FreeRDP, with `xvfb-run` when no display is available. The
 graphical benchmark also supports `--backend direct-x11` for the
-XCB/XDamage/XShm comparison, and its input-roundtrip mode now exercises the
-first-party XTest controller. Both modes force the client geometry to the
-physical display.
+XCB/XDamage/XShm comparison, and its input-roundtrip mode exercises the
+first-party XTest controller. By default the direct benchmark matches client
+geometry to the physical display; explicit options cover initial scaled
+presentation and dynamic client resize.
