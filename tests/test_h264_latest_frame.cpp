@@ -77,6 +77,71 @@ bool baseline_requires_every_tile_then_submits_full_frame()
     return success;
 }
 
+bool baseline_submission_is_not_starved_by_newer_damage()
+{
+    H264LatestFrameState state;
+    std::array<GenerationTileMap::Selection, 2> capture{};
+    bool success = true;
+
+    success &= check(state.configure({128, 64}), "configuration failed");
+    success &= check(state.collectCaptureSelections(capture) == 1,
+                     "initial source run was not selected");
+
+    GenerationTileMap::Selection firstTile = capture[0];
+    firstTile.rectangle.widthPixels = 64;
+    success &= check(state.commitCaptured(firstTile),
+                     "first initialization tile failed");
+
+    state.markDamage({4, 4, 1, 1});
+    success &= check(state.collectCaptureSelections(capture) != 0 &&
+                         capture[0].rectangle.x == 0,
+                     "new damage did not make the initialized tile hottest");
+    GenerationTileMap::Selection staleHotTile = capture[0];
+    staleHotTile.rectangle = {0, 0, 64, 64};
+
+    // Another update arrives before this capture commits, so the hot tile
+    // remains pending and would stay at the front of the ordinary queue.
+    state.markDamage({8, 8, 1, 1});
+    success &= check(state.commitCaptured(staleHotTile),
+                     "older hot-tile capture did not commit safely");
+    success &= check(state.capturePending(),
+                     "newer hot-tile damage was incorrectly consumed");
+
+    const std::size_t initializationCaptureCount =
+        state.collectInitializationCaptureSelections(capture);
+    success &= check(initializationCaptureCount == 1 &&
+                         capture[0].rectangle ==
+                             Rectangle{64, 0, 64, 64},
+                     "uninitialized tile was not prioritized over hot damage");
+    if (initializationCaptureCount == 1)
+    {
+        success &= check(state.commitCaptured(capture[0]),
+                         "last initialization tile failed");
+    }
+
+    success &= check(state.baselineReady() && state.capturePending(),
+                     "test did not reach complete-baseline/newer-damage state");
+    success &= check(state.nextFrameId() == 1,
+                     "newer damage starved the complete first baseline");
+
+    const GenerationTileMap::Selection fullBaseline{
+        {0, 0, 128, 64}, UINT64_MAX};
+    success &= check(state.noteSubmitted(1, std::span(&fullBaseline, 1)),
+                     "complete baseline was rejected with newer damage pending");
+    success &= check(state.releaseSubmission(1),
+                     "baseline producer slot did not release");
+    success &= check(state.nextFrameId() == 0,
+                     "newer damage was submitted before being recaptured");
+
+    success &= check(state.collectCaptureSelections(capture) != 0 &&
+                         capture[0].rectangle.x == 0 &&
+                         state.commitCaptured(capture[0]),
+                     "queued hot-tile generation did not remain recoverable");
+    success &= check(state.nextFrameId() == 2,
+                     "newer tile did not become submit-ready after recapture");
+    return success;
+}
+
 bool newest_generation_replaces_stale_unsent_tile()
 {
     H264LatestFrameState state;
@@ -596,6 +661,7 @@ int main()
 {
     bool success = true;
     success &= baseline_requires_every_tile_then_submits_full_frame();
+    success &= baseline_submission_is_not_starved_by_newer_damage();
     success &= newest_generation_replaces_stale_unsent_tile();
     success &= producer_window_holds_one_async_frame();
     success &= capture_selection_respects_xshm_pixel_budget();

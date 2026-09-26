@@ -452,6 +452,25 @@ H264LatestFrameState::collectCaptureSelections(
 }
 
 std::size_t
+H264LatestFrameState::collectInitializationCaptureSelections(
+    std::span<GenerationTileMap::Selection> output) const noexcept
+{
+    if (!valid() || output.empty())
+    {
+        return 0;
+    }
+
+    std::array<GenerationTileMap::Selection, 1> initialization{};
+    if (initializationDamage_.collectSelections(initialization) == 0)
+    {
+        return 0;
+    }
+
+    return captureDamage_.collectSelectionsIntersecting(
+        initialization[0].rectangle, output);
+}
+
+std::size_t
 H264LatestFrameState::collectCaptureSelectionsIntersecting(
     Rectangle clip,
     std::span<GenerationTileMap::Selection> output) const noexcept
@@ -825,8 +844,10 @@ H264LatestFrameState::frameBytes() const noexcept
 std::uint32_t
 H264LatestFrameState::nextFrameId() const noexcept
 {
-    const bool baselineReadyToSubmit =
-        baselineSubmissionPending() && captureDamage_.empty();
+    // Once every source tile has been initialized, submit that complete
+    // baseline even if newer damage is queued. The later generation remains
+    // pending and will follow the baseline instead of starving first paint.
+    const bool baselineReadyToSubmit = baselineSubmissionPending();
     return valid() && !frameInFlight_ && nextFrameId_ != 0 &&
                    (baselineReadyToSubmit ||
                     (baselineSubmitted_ && !transmissionDamage_.empty()))

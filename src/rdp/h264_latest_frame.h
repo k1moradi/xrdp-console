@@ -66,6 +66,8 @@ public:
 
     [[nodiscard]] std::size_t collectCaptureSelections(
         std::span<GenerationTileMap::Selection> output) const noexcept;
+    [[nodiscard]] std::size_t collectInitializationCaptureSelections(
+        std::span<GenerationTileMap::Selection> output) const noexcept;
     [[nodiscard]] std::size_t collectCaptureSelectionsIntersecting(
         Rectangle clip,
         std::span<GenerationTileMap::Selection> output) const noexcept;

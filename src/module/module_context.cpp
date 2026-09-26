@@ -2221,10 +2221,21 @@ ModuleContext::check_h264_gfx() noexcept
     {
         std::array<GenerationTileMap::Selection, 1> captureSelections{};
         std::size_t captureCount = 0;
+        if (!impl_->h264Frame.baselineReady())
+        {
+            captureCount =
+                impl_->h264Frame.collectInitializationCaptureSelections(
+                    captureSelections);
+        }
         if (impl_->interactionPriority.pending)
         {
-            captureCount = impl_->h264Frame.collectCaptureSelectionsIntersecting(
-                impl_->interactionPriority.rectangle, captureSelections);
+            if (captureCount == 0)
+            {
+                captureCount =
+                    impl_->h264Frame.collectCaptureSelectionsIntersecting(
+                        impl_->interactionPriority.rectangle,
+                        captureSelections);
+            }
         }
         if (captureCount == 0)
         {
