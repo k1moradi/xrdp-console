@@ -99,6 +99,14 @@ int main()
     const Rectangle source{128, 64, 64, 64};
 
     assert(cache.stageSeed(source, 7, 0x77U, capture, localTile));
+    const FramebufferView truncatedCapture{
+        std::span<const std::byte>(pixels).first(pixels.size() - 1U),
+        128, 64, 128U * 4U};
+    assert(!cache.stageSeed({256, 64, 64, 64}, 8, 0x88U,
+                            truncatedCapture, localTile));
+    const auto preservedSeed = cache.seedPlan();
+    assert(preservedSeed.valid && preservedSeed.sourceRectangle == source &&
+           preservedSeed.sourceGeneration == 7);
     cache.discardSeedFor({0, 0, 64, 64});
     assert(cache.seedPlan().valid);
     cache.discardSeedFor(source);

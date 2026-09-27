@@ -285,15 +285,16 @@ VerifiedBitmapCache16::stageSeed(
         return false;
     }
 
-    Seed next{};
-    if (!copySnapshot(next.bitmap, fingerprint, capture, localTile))
+    // copySnapshot() validates everything before writing destination bytes.
+    // Update the retained seed in place so a failed stage still preserves the
+    // previous candidate without zeroing and copying a 16 KiB temporary.
+    if (!copySnapshot(seed_.bitmap, fingerprint, capture, localTile))
     {
         return false;
     }
-    next.sourceRectangle = sourceRectangle;
-    next.sourceGeneration = sourceGeneration;
-    next.valid = true;
-    seed_ = next;
+    seed_.sourceRectangle = sourceRectangle;
+    seed_.sourceGeneration = sourceGeneration;
+    seed_.valid = true;
     return true;
 }
 
@@ -366,7 +367,7 @@ VerifiedBitmapCache16::noteSeedSubmitted(
     slot.pendingFrameId = frameId;
     slot.cacheKey = plan.cacheKey;
     slot.lastUse = ++useSequence_;
-    seed_ = {};
+    seed_.valid = false;
     nextCacheKey_ =
         plan.cacheKey == std::numeric_limits<std::uint64_t>::max()
             ? 1
@@ -376,7 +377,7 @@ VerifiedBitmapCache16::noteSeedSubmitted(
 void
 VerifiedBitmapCache16::discardSeed() noexcept
 {
-    seed_ = {};
+    seed_.valid = false;
 }
 
 void
@@ -384,7 +385,7 @@ VerifiedBitmapCache16::discardSeedFor(Rectangle sourceRectangle) noexcept
 {
     if (seed_.valid && seed_.sourceRectangle == sourceRectangle)
     {
-        seed_ = {};
+        seed_.valid = false;
     }
 }
 
