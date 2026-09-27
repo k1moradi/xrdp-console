@@ -1,0 +1,55 @@
+diff --git a/libxrdp/xrdp_bitmap32_compress.c b/libxrdp/xrdp_bitmap32_compress.c
+--- a/libxrdp/xrdp_bitmap32_compress.c
++++ b/libxrdp/xrdp_bitmap32_compress.c
+@@ -44,10 +44,10 @@
+ #if defined(L_ENDIAN)
+-    int rp;
+-    int gp;
+-    int bp;
++    unsigned int rp;
++    unsigned int gp;
++    unsigned int bp;
+ #endif
+     int index;
+     int out_index;
+-    int pixel;
++    unsigned int pixel;
+     int cy;
+     int *ptr32;
+@@ -83,5 +83,5 @@
+             bp |= (pixel << 24) & 0xff000000;
+-            *((int *)(r_data + out_index)) = rp;
+-            *((int *)(g_data + out_index)) = gp;
+-            *((int *)(b_data + out_index)) = bp;
++            g_memcpy(r_data + out_index, &rp, sizeof(rp));
++            g_memcpy(g_data + out_index, &gp, sizeof(gp));
++            g_memcpy(b_data + out_index, &bp, sizeof(bp));
+             out_index += 4;
+@@ -124,11 +124,11 @@
+ #if defined(L_ENDIAN)
+-    int ap;
+-    int rp;
+-    int gp;
+-    int bp;
++    unsigned int ap;
++    unsigned int rp;
++    unsigned int gp;
++    unsigned int bp;
+ #endif
+     int index;
+     int out_index;
+-    int pixel;
++    unsigned int pixel;
+     int cy;
+     int *ptr32;
+@@ -168,6 +168,6 @@
+             bp |= (pixel << 24) & 0xff000000;
+-            *((int *)(a_data + out_index)) = ap;
+-            *((int *)(r_data + out_index)) = rp;
+-            *((int *)(g_data + out_index)) = gp;
+-            *((int *)(b_data + out_index)) = bp;
++            g_memcpy(a_data + out_index, &ap, sizeof(ap));
++            g_memcpy(r_data + out_index, &rp, sizeof(rp));
++            g_memcpy(g_data + out_index, &gp, sizeof(gp));
++            g_memcpy(b_data + out_index, &bp, sizeof(bp));
+             out_index += 4;

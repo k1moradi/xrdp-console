@@ -149,6 +149,8 @@ BitmapCacheReuseObserver::insertionIndex(
         static_cast<std::size_t>(mixed % kMaximumEntries);
     std::size_t firstVacant = kMaximumEntries;
     std::size_t oldest = first;
+    std::uint64_t oldestSequence =
+        std::numeric_limits<std::uint64_t>::max();
 
     for (std::size_t probe = 0; probe < kMaximumEntries; ++probe)
     {
@@ -169,10 +171,10 @@ BitmapCacheReuseObserver::insertionIndex(
             matched = true;
             return index;
         }
-        if (entries_[oldest].occupied &&
-            entries_[index].lastSequence < entries_[oldest].lastSequence)
+        if (entry.lastSequence < oldestSequence)
         {
             oldest = index;
+            oldestSequence = entry.lastSequence;
         }
     }
     return firstVacant != kMaximumEntries ? firstVacant : oldest;

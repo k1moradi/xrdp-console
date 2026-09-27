@@ -200,7 +200,15 @@ def assert_client_pixel(client_display: str,
                         presentation_height: int = 768,
                         client_log_path: Path | None = None) -> None:
     """Draw a known source color and require it in the FreeRDP framebuffer."""
-    window = find_window(client_display, window_title, 8.0)
+    try:
+        window = find_window(client_display, window_title, 8.0)
+    except AssertionError as error:
+        raise AssertionError(
+            f"{error}\n[xrdp process stdout]\n{read_text(stdout_path)}\n"
+            f"[xrdp log]\n{xrdp_log_excerpt(log_path)}\n"
+            f"[FreeRDP client]\n"
+            f"{read_text(client_log_path) if client_log_path else ''}"
+        ) from error
     probe: subprocess.Popen[object] | None = None
     try:
         probe = subprocess.Popen(
@@ -247,6 +255,7 @@ def assert_client_pixel(client_display: str,
                     raise AssertionError(
                         "pixel probe exited before the client-visible pixel "
                         f"assertion completed (status={probe.poll()}):\n"
+                        f"[xrdp process stdout]\n{read_text(stdout_path)}\n"
                         f"{xrdp_log_excerpt(log_path)}\n"
                         f"[FreeRDP client]\n"
                         f"{read_text(client_log_path) if client_log_path else ''}"
@@ -269,7 +278,9 @@ def assert_client_pixel(client_display: str,
                     return last_pixel
             raise AssertionError(
                 "known source pixel did not reach the FreeRDP framebuffer: "
-                f"last={last_pixel!r}\n{xrdp_log_excerpt(log_path)}\n"
+                f"last={last_pixel!r}\n"
+                f"[xrdp process stdout]\n{read_text(stdout_path)}\n"
+                f"{xrdp_log_excerpt(log_path)}\n"
                 f"[FreeRDP client]\n"
                 f"{read_text(client_log_path) if client_log_path else ''}"
             )

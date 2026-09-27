@@ -21,27 +21,20 @@ public:
     {
     }
 
-    [[nodiscard]] bool u8(std::uint8_t value) noexcept
+    void u16(std::uint16_t value) noexcept
     {
-        if (position_ >= output_.size())
-        {
-            return false;
-        }
-
-        output_[position_++] = static_cast<std::byte>(value);
-        return true;
+        output_[position_] = static_cast<std::byte>(value);
+        output_[position_ + 1U] = static_cast<std::byte>(value >> 8U);
+        position_ += 2U;
     }
 
-    [[nodiscard]] bool u16(std::uint16_t value) noexcept
+    void u32(std::uint32_t value) noexcept
     {
-        return u8(static_cast<std::uint8_t>(value)) &&
-               u8(static_cast<std::uint8_t>(value >> 8U));
-    }
-
-    [[nodiscard]] bool u32(std::uint32_t value) noexcept
-    {
-        return u16(static_cast<std::uint16_t>(value)) &&
-               u16(static_cast<std::uint16_t>(value >> 16U));
+        output_[position_] = static_cast<std::byte>(value);
+        output_[position_ + 1U] = static_cast<std::byte>(value >> 8U);
+        output_[position_ + 2U] = static_cast<std::byte>(value >> 16U);
+        output_[position_ + 3U] = static_cast<std::byte>(value >> 24U);
+        position_ += 4U;
     }
 
     [[nodiscard]] std::size_t position() const noexcept
@@ -147,24 +140,27 @@ buildGfxSurfaceToSurfaceCommand(
         static_cast<std::uint64_t>(command.sourceRectangle.y) +
         command.sourceRectangle.heightPixels);
 
+    // Capacity was validated above; write directly into the exact-sized slice
+    // instead of repeating a bounds branch for every serialized byte.
     LittleEndianWriter writer(output.first(totalBytes));
-    bool success =
-        writer.u16(kGfxSurfaceToSurfaceCommand) && writer.u16(0) &&
-        writer.u32(static_cast<std::uint32_t>(totalBytes)) &&
-        writer.u16(command.sourceSurfaceId) &&
-        writer.u16(command.destinationSurfaceId) && writer.u16(left) &&
-        writer.u16(top) && writer.u16(right) && writer.u16(bottom) &&
-        writer.u16(static_cast<std::uint16_t>(
-            command.destinationPoints.size()));
+    writer.u16(kGfxSurfaceToSurfaceCommand);
+    writer.u16(0);
+    writer.u32(static_cast<std::uint32_t>(totalBytes));
+    writer.u16(command.sourceSurfaceId);
+    writer.u16(command.destinationSurfaceId);
+    writer.u16(left);
+    writer.u16(top);
+    writer.u16(right);
+    writer.u16(bottom);
+    writer.u16(static_cast<std::uint16_t>(command.destinationPoints.size()));
 
     for (const GfxPoint point : command.destinationPoints)
     {
-        success = success &&
-                  writer.u16(static_cast<std::uint16_t>(point.x)) &&
-                  writer.u16(static_cast<std::uint16_t>(point.y));
+        writer.u16(static_cast<std::uint16_t>(point.x));
+        writer.u16(static_cast<std::uint16_t>(point.y));
     }
 
-    return success && writer.position() == totalBytes ? totalBytes : 0;
+    return writer.position() == totalBytes ? totalBytes : 0;
 }
 
 } // namespace xrdp_console::rdp

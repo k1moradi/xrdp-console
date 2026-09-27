@@ -61,17 +61,18 @@ fingerprintBgraRectangle(FramebufferView framebuffer,
     const std::size_t xBytes = static_cast<std::size_t>(x) * kBytesPerPixel;
 
     std::uint64_t hash = kFnvOffset;
+    std::size_t rowOffset =
+        static_cast<std::size_t>(y) * framebuffer.strideBytes + xBytes;
     for (std::uint32_t row = 0; row < rectangle.heightPixels; ++row)
     {
-        const std::size_t offset =
-            (static_cast<std::size_t>(y) + row) * framebuffer.strideBytes +
-            xBytes;
-        const auto bytes = framebuffer.pixels.subspan(offset, rowBytes);
-        for (const std::byte byte : bytes)
+        const std::byte *rowBegin = framebuffer.pixels.data() + rowOffset;
+        const std::byte *rowEnd = rowBegin + rowBytes;
+        for (const std::byte *byte = rowBegin; byte != rowEnd; ++byte)
         {
-            hash ^= static_cast<std::uint8_t>(byte);
+            hash ^= static_cast<std::uint8_t>(*byte);
             hash *= kFnvPrime;
         }
+        rowOffset += framebuffer.strideBytes;
     }
 
     hash ^= static_cast<std::uint64_t>(rectangle.widthPixels) << 32U;
@@ -122,7 +123,9 @@ TileFingerprintMap::configure(PixelSize geometry) noexcept
 void
 TileFingerprintMap::reset() noexcept
 {
-    std::fill(fingerprints_.begin(), fingerprints_.end(), 0);
+    // initialized_ gates every observable fingerprint value. Leaving hidden
+    // payloads untouched avoids an unnecessary 64-bit write per tile; store()
+    // overwrites the payload before making that tile visible again.
     std::fill(initialized_.begin(), initialized_.end(), 0);
 }
 

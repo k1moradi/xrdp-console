@@ -22,3 +22,6 @@
 0022-xrdp-map-surface-to-scaled-output.patch
 0023-xrdp-rdpgfx-bitmap-cache-commands.patch
 0024-xrdp-encoder-rdpgfx-bitmap-cache.patch
+0025-xrdp-console-quiesce-gfx-during-resize.patch
+0026-xrdp-unsigned-bitmap-channel-extraction.patch
+0027-xrdp-quiesce-encoder-worker-before-destroy.patch

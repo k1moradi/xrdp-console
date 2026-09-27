@@ -1,0 +1,70 @@
+diff --git a/xrdp/xrdp.h b/xrdp/xrdp.h
+--- a/xrdp/xrdp.h
++++ b/xrdp/xrdp.h
+@@ -314,6 +314,9 @@ xrdp_mm_console_gfx_adaptive_flush_ms(
+ int
+ xrdp_mm_console_generic_encoder_allowed(
+     int session_code, int gfx_enabled, enum xrdp_egfx_flags egfx_flags);
++int
++xrdp_mm_console_dirty_gfx_output_allowed(int session_code,
++                                         int resize_pending);
+ void
+ xrdp_mm_console_set_interaction_anchor(
+     struct xrdp_console_interaction_priority *priority, int x, int y);
+diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -1445,6 +1445,14 @@ xrdp_mm_console_generic_encoder_allowed(
+     return gfx_enabled && egfx_flags == XRDP_EGFX_H264;
+ }
+ 
++int
++xrdp_mm_console_dirty_gfx_output_allowed(int session_code,
++                                         int resize_pending)
++{
++    /* Retain Console dirty pixels until replacement surfaces are mapped. */
++    return session_code != XRDP_CONSOLE_SESSION_CODE || !resize_pending;
++}
++
+ void
+ xrdp_mm_console_record_gfx_acknowledgement(
+     struct xrdp_console_gfx_ack_telemetry *telemetry,
+@@ -5264,7 +5274,9 @@ xrdp_mm_check_wait_objs(struct xrdp_mm *self)
+ 
+     if (self->wm->screen_dirty_region != NULL)
+     {
+-        if (xrdp_region_not_empty(self->wm->screen_dirty_region))
++        if (xrdp_mm_console_dirty_gfx_output_allowed(
++                    self->code, self->resize_data != NULL) &&
++                xrdp_region_not_empty(self->wm->screen_dirty_region))
+         {
+             int minimum_flush_ms = xrdp_mm_gfx_minimum_flush_ms(self);
+             int now = g_time3();
+diff --git a/tests/xrdp/test_xrdp_region.c b/tests/xrdp/test_xrdp_region.c
+--- a/tests/xrdp/test_xrdp_region.c
++++ b/tests/xrdp/test_xrdp_region.c
+@@ -670,2 +670,18 @@
++static void
++test_console_dirty_gfx_is_held_during_resize(void **state)
++{
++    UNUSED(state);
++
++    /* Hold Console dirty pixels until replacement surfaces are mapped. */
++    assert_int_equal(0, xrdp_mm_console_dirty_gfx_output_allowed(
++                            XRDP_CONSOLE_SESSION_CODE, 1));
++    assert_int_equal(1, xrdp_mm_console_dirty_gfx_output_allowed(
++                            XRDP_CONSOLE_SESSION_CODE, 0));
++
++    /* Other module codes retain upstream dirty-output behavior. */
++    assert_int_equal(1, xrdp_mm_console_dirty_gfx_output_allowed(0, 1));
++    assert_int_equal(1, xrdp_mm_console_dirty_gfx_output_allowed(1, 1));
++}
++
+ START_TEST(execute_suite)
+ {
+@@ -685,4 +701,5 @@ execute_suite(void)
+         cmocka_unit_test(test_console_interaction_priority_state),
+         cmocka_unit_test(test_console_generic_encoder_policy),
++        cmocka_unit_test(test_console_dirty_gfx_is_held_during_resize),
+         cmocka_unit_test(
+             test_console_gfx_adaptive_pacing_promotes_immediately),

@@ -118,11 +118,19 @@ full_invalidation_and_reset_are_bounded()
     success &= check(!map.configure({0, 10}),
                      "zero-width configuration unexpectedly succeeded");
     success &= check(map.configure({1366, 768}), "configuration failed");
+    map.mark({1, 1, 1, 1});
+    success &= check(map.collectSelections(selections) == 1,
+                     "pre-full selection missing");
+    const GenerationTileMap::Selection oldSelection = selections[0];
+
     map.markFull();
     success &= check(map.dirtyTileCount() == 22U * 12U,
                      "full invalidation tile count changed");
     success &= check(map.collectSelections(selections) == 12,
                      "full invalidation should form one run per tile row");
+    success &= check(map.commit(oldSelection) &&
+                         map.dirtyTileCount() == 22U * 12U,
+                     "old selection cleared newer full invalidation");
 
     map.reset();
     success &= check(map.empty() && map.dirtyTileCount() == 0 &&

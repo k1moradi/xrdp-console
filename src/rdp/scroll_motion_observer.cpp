@@ -218,15 +218,26 @@ ScrollMotionObserver::stageCapture(FramebufferView capture,
     const std::size_t destinationX =
         static_cast<std::size_t>(destination.x) * kBytesPerPixel;
     const std::size_t destinationY = static_cast<std::size_t>(destination.y);
-    for (std::uint32_t row = 0; row < capture.heightPixels; ++row)
+    if (capture.strideBytes == rowBytes && destinationX == 0 &&
+        destinationStride == rowBytes)
     {
-        const std::byte *source =
-            capture.pixels.data() + static_cast<std::size_t>(row) *
-                                        capture.strideBytes;
-        std::byte *target =
-            working_.data() + (destinationY + row) * destinationStride +
-            destinationX;
-        std::memcpy(target, source, rowBytes);
+        std::memcpy(
+            working_.data() + destinationY * destinationStride,
+            capture.pixels.data(),
+            rowBytes * static_cast<std::size_t>(capture.heightPixels));
+    }
+    else
+    {
+        for (std::uint32_t row = 0; row < capture.heightPixels; ++row)
+        {
+            const std::byte *source =
+                capture.pixels.data() + static_cast<std::size_t>(row) *
+                                            capture.strideBytes;
+            std::byte *target =
+                working_.data() + (destinationY + row) * destinationStride +
+                destinationX;
+            std::memcpy(target, source, rowBytes);
+        }
     }
 
     const std::uint64_t addedPixels = pixelCount(destination);

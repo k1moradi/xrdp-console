@@ -3,7 +3,16 @@
 #include "gfx_avc420_frame.h"
 
 #include <algorithm>
+#include <cstring>
 #include <limits>
+
+#if (defined(__i386__) || defined(__x86_64__)) && \
+    (defined(__GNUC__) || defined(__clang__))
+#include <tmmintrin.h>
+#define XRDP_CONSOLE_CAN_TARGET_SSSE3 1
+#else
+#define XRDP_CONSOLE_CAN_TARGET_SSSE3 0
+#endif
 
 namespace xrdp_console::rdp
 {
@@ -47,6 +56,143 @@ bgraToYuv709FullRange(std::uint8_t blue, std::uint8_t green,
         clampByte(divideBy256Floor(128 * r - 116 * g - 12 * b) + 128),
     };
 }
+
+#if XRDP_CONSOLE_CAN_TARGET_SSSE3
+
+struct FourPixelYuv16 final
+{
+    __m128i y{};
+    __m128i u{};
+    __m128i v{};
+};
+
+[[nodiscard]] bool
+ssse3ConversionAvailable() noexcept
+{
+    // Select the optimized kernel automatically when it is safe. The
+    // function carrying SSSE3 instructions is target-attributed, so the
+    // rest of the module remains runnable on older/non-x86 CPUs.
+    static const bool enabled = __builtin_cpu_supports("ssse3") != 0;
+    return enabled;
+}
+
+__attribute__((target("ssse3")))
+[[nodiscard]] FourPixelYuv16
+convertFourBgraPixelsSsse3(const std::uint8_t *source) noexcept
+{
+    const __m128i pixels =
+        _mm_loadu_si128(reinterpret_cast<const __m128i *>(source));
+    const __m128i channelMask = _mm_set1_epi32(0xff);
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i blue32 = _mm_and_si128(pixels, channelMask);
+    const __m128i green32 =
+        _mm_and_si128(_mm_srli_epi32(pixels, 8), channelMask);
+    const __m128i red32 =
+        _mm_and_si128(_mm_srli_epi32(pixels, 16), channelMask);
+    const __m128i blue16 = _mm_packs_epi32(blue32, zero);
+    const __m128i green16 = _mm_packs_epi32(green32, zero);
+    const __m128i red16 = _mm_packs_epi32(red32, zero);
+
+    __m128i y = _mm_add_epi16(
+        _mm_add_epi16(_mm_mullo_epi16(red16, _mm_set1_epi16(54)),
+                      _mm_mullo_epi16(green16, _mm_set1_epi16(183))),
+        _mm_mullo_epi16(blue16, _mm_set1_epi16(18)));
+    y = _mm_srli_epi16(y, 8);
+
+    __m128i u = _mm_add_epi16(
+        _mm_add_epi16(_mm_mullo_epi16(red16, _mm_set1_epi16(-29)),
+                      _mm_mullo_epi16(green16, _mm_set1_epi16(-99))),
+        _mm_mullo_epi16(blue16, _mm_set1_epi16(128)));
+    u = _mm_add_epi16(_mm_srai_epi16(u, 8), _mm_set1_epi16(128));
+
+    __m128i v = _mm_add_epi16(
+        _mm_add_epi16(_mm_mullo_epi16(red16, _mm_set1_epi16(128)),
+                      _mm_mullo_epi16(green16, _mm_set1_epi16(-116))),
+        _mm_mullo_epi16(blue16, _mm_set1_epi16(-12)));
+    v = _mm_add_epi16(_mm_srai_epi16(v, 8), _mm_set1_epi16(128));
+
+    // Pack and widen the chroma channels to exactly mirror scalar clamping
+    // before the 2x2 box average.
+    const __m128i u8 = _mm_packus_epi16(u, zero);
+    const __m128i v8 = _mm_packus_epi16(v, zero);
+    u = _mm_unpacklo_epi8(u8, zero);
+    v = _mm_unpacklo_epi8(v8, zero);
+    return {y, u, v};
+}
+
+__attribute__((target("ssse3")))
+void
+convertBgraRowPairSsse3_709FullRange(
+    const std::uint8_t *top, const std::uint8_t *bottom,
+    std::uint8_t *yTop, std::uint8_t *yBottom, std::uint8_t *uv,
+    std::uint32_t widthPixels) noexcept
+{
+    const __m128i zero = _mm_setzero_si128();
+    const __m128i pairSumOnes = _mm_set1_epi16(1);
+    const __m128i chromaRounding = _mm_set1_epi32(2);
+    const __m128i interleaveUv = _mm_setr_epi8(
+        0, 8, 2, 10, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1);
+
+    std::uint32_t x = 0;
+    for (; x + 4U <= widthPixels; x += 4U)
+    {
+        const std::size_t byteOffset = static_cast<std::size_t>(x) * 4U;
+        const FourPixelYuv16 topPixels =
+            convertFourBgraPixelsSsse3(top + byteOffset);
+        const FourPixelYuv16 bottomPixels =
+            convertFourBgraPixelsSsse3(bottom + byteOffset);
+
+        const __m128i topY8 = _mm_packus_epi16(topPixels.y, zero);
+        const __m128i bottomY8 = _mm_packus_epi16(bottomPixels.y, zero);
+        const std::uint32_t packedTopY =
+            static_cast<std::uint32_t>(_mm_cvtsi128_si32(topY8));
+        const std::uint32_t packedBottomY =
+            static_cast<std::uint32_t>(_mm_cvtsi128_si32(bottomY8));
+        std::memcpy(yTop + x, &packedTopY, sizeof(packedTopY));
+        std::memcpy(yBottom + x, &packedBottomY, sizeof(packedBottomY));
+
+        __m128i uSums = _mm_add_epi32(
+            _mm_madd_epi16(topPixels.u, pairSumOnes),
+            _mm_madd_epi16(bottomPixels.u, pairSumOnes));
+        __m128i vSums = _mm_add_epi32(
+            _mm_madd_epi16(topPixels.v, pairSumOnes),
+            _mm_madd_epi16(bottomPixels.v, pairSumOnes));
+        uSums = _mm_srli_epi32(_mm_add_epi32(uSums, chromaRounding), 2);
+        vSums = _mm_srli_epi32(_mm_add_epi32(vSums, chromaRounding), 2);
+        const __m128i uv16 = _mm_packs_epi32(uSums, vSums);
+        const __m128i uv8 = _mm_shuffle_epi8(uv16, interleaveUv);
+        const std::uint32_t packedUv =
+            static_cast<std::uint32_t>(_mm_cvtsi128_si32(uv8));
+        std::memcpy(uv + x, &packedUv, sizeof(packedUv));
+    }
+
+    // Even AVC420 widths can leave one final two-pixel scalar pair.
+    for (; x < widthPixels; x += 2U)
+    {
+        const std::size_t byteOffset = static_cast<std::size_t>(x) * 4U;
+        const Yuv topLeft = bgraToYuv709FullRange(
+            top[byteOffset], top[byteOffset + 1U], top[byteOffset + 2U]);
+        const Yuv topRight = bgraToYuv709FullRange(
+            top[byteOffset + 4U], top[byteOffset + 5U],
+            top[byteOffset + 6U]);
+        const Yuv bottomLeft = bgraToYuv709FullRange(
+            bottom[byteOffset], bottom[byteOffset + 1U],
+            bottom[byteOffset + 2U]);
+        const Yuv bottomRight = bgraToYuv709FullRange(
+            bottom[byteOffset + 4U], bottom[byteOffset + 5U],
+            bottom[byteOffset + 6U]);
+        yTop[x] = static_cast<std::uint8_t>(topLeft.y);
+        yTop[x + 1U] = static_cast<std::uint8_t>(topRight.y);
+        yBottom[x] = static_cast<std::uint8_t>(bottomLeft.y);
+        yBottom[x + 1U] = static_cast<std::uint8_t>(bottomRight.y);
+        uv[x] = static_cast<std::uint8_t>(
+            (topLeft.u + topRight.u + bottomLeft.u + bottomRight.u + 2) / 4);
+        uv[x + 1U] = static_cast<std::uint8_t>(
+            (topLeft.v + topRight.v + bottomLeft.v + bottomRight.v + 2) / 4);
+    }
+}
+
+#endif
 
 [[nodiscard]] bool
 rectangleFitsFrame(Rectangle rectangle, PixelSize frame) noexcept
@@ -178,6 +324,34 @@ convertBgraToNv12_709FullRange(
         std::uint8_t *uv = uvPlane +
             static_cast<std::size_t>(y / 2U) * source.widthPixels;
 
+#if defined(__GNUC__) && !defined(__clang__)
+        const std::uint8_t *topPixel = top;
+        const std::uint8_t *bottomPixel = bottom;
+        for (std::uint32_t x = 0; x < source.widthPixels;
+             x += 2U, topPixel += 8U, bottomPixel += 8U,
+             yTop += 2U, yBottom += 2U, uv += 2U)
+        {
+            const Yuv topLeft = bgraToYuv709FullRange(
+                topPixel[0], topPixel[1], topPixel[2]);
+            const Yuv topRight = bgraToYuv709FullRange(
+                topPixel[4], topPixel[5], topPixel[6]);
+            const Yuv bottomLeft = bgraToYuv709FullRange(
+                bottomPixel[0], bottomPixel[1], bottomPixel[2]);
+            const Yuv bottomRight = bgraToYuv709FullRange(
+                bottomPixel[4], bottomPixel[5], bottomPixel[6]);
+
+            yTop[0] = static_cast<std::uint8_t>(topLeft.y);
+            yTop[1] = static_cast<std::uint8_t>(topRight.y);
+            yBottom[0] = static_cast<std::uint8_t>(bottomLeft.y);
+            yBottom[1] = static_cast<std::uint8_t>(bottomRight.y);
+            uv[0] = static_cast<std::uint8_t>(
+                (topLeft.u + topRight.u + bottomLeft.u + bottomRight.u + 2) /
+                4);
+            uv[1] = static_cast<std::uint8_t>(
+                (topLeft.v + topRight.v + bottomLeft.v + bottomRight.v + 2) /
+                4);
+        }
+#else
         for (std::uint32_t x = 0; x < source.widthPixels; x += 2U)
         {
             const std::size_t byteOffset = static_cast<std::size_t>(x) * 4U;
@@ -204,6 +378,7 @@ convertBgraToNv12_709FullRange(
                 (topLeft.v + topRight.v + bottomLeft.v + bottomRight.v + 2) /
                 4);
         }
+#endif
     }
     return true;
 }
@@ -267,6 +442,10 @@ updateNv12RectangleFromBgraRegion_709FullRange(
         static_cast<std::size_t>(destinationRectangle.x);
     const std::size_t destinationY =
         static_cast<std::size_t>(destinationRectangle.y);
+#if XRDP_CONSOLE_CAN_TARGET_SSSE3
+    const bool useSsse3 = sourceRectangle.widthPixels >= 4U &&
+                           ssse3ConversionAvailable();
+#endif
 
     for (std::uint32_t y = 0; y < sourceRectangle.heightPixels; y += 2U)
     {
@@ -278,30 +457,39 @@ updateNv12RectangleFromBgraRegion_709FullRange(
         std::uint8_t *yBottom = yTop + frameWidth;
         std::uint8_t *uv = uvPlane +
             ((destinationY + y) / 2U) * frameWidth + destinationX;
-
-        for (std::uint32_t x = 0; x < sourceRectangle.widthPixels; x += 2U)
+#if XRDP_CONSOLE_CAN_TARGET_SSSE3
+        if (useSsse3)
         {
-            const std::size_t byteOffset = static_cast<std::size_t>(x) * 4U;
-            const Yuv topLeft = bgraToYuv709FullRange(
-                top[byteOffset], top[byteOffset + 1U], top[byteOffset + 2U]);
-            const Yuv topRight = bgraToYuv709FullRange(
-                top[byteOffset + 4U], top[byteOffset + 5U],
-                top[byteOffset + 6U]);
-            const Yuv bottomLeft = bgraToYuv709FullRange(
-                bottomRow[byteOffset], bottomRow[byteOffset + 1U],
-                bottomRow[byteOffset + 2U]);
-            const Yuv bottomRight = bgraToYuv709FullRange(
-                bottomRow[byteOffset + 4U], bottomRow[byteOffset + 5U],
-                bottomRow[byteOffset + 6U]);
+            convertBgraRowPairSsse3_709FullRange(
+                top, bottomRow, yTop, yBottom, uv,
+                sourceRectangle.widthPixels);
+            continue;
+        }
+#endif
 
-            yTop[x] = static_cast<std::uint8_t>(topLeft.y);
-            yTop[x + 1U] = static_cast<std::uint8_t>(topRight.y);
-            yBottom[x] = static_cast<std::uint8_t>(bottomLeft.y);
-            yBottom[x + 1U] = static_cast<std::uint8_t>(bottomRight.y);
-            uv[x] = static_cast<std::uint8_t>(
+        const std::uint8_t *topPixel = top;
+        const std::uint8_t *bottomPixel = bottomRow;
+        for (std::uint32_t x = 0; x < sourceRectangle.widthPixels;
+             x += 2U, topPixel += 8U, bottomPixel += 8U,
+             yTop += 2U, yBottom += 2U, uv += 2U)
+        {
+            const Yuv topLeft = bgraToYuv709FullRange(
+                topPixel[0], topPixel[1], topPixel[2]);
+            const Yuv topRight = bgraToYuv709FullRange(
+                topPixel[4], topPixel[5], topPixel[6]);
+            const Yuv bottomLeft = bgraToYuv709FullRange(
+                bottomPixel[0], bottomPixel[1], bottomPixel[2]);
+            const Yuv bottomRight = bgraToYuv709FullRange(
+                bottomPixel[4], bottomPixel[5], bottomPixel[6]);
+
+            yTop[0] = static_cast<std::uint8_t>(topLeft.y);
+            yTop[1] = static_cast<std::uint8_t>(topRight.y);
+            yBottom[0] = static_cast<std::uint8_t>(bottomLeft.y);
+            yBottom[1] = static_cast<std::uint8_t>(bottomRight.y);
+            uv[0] = static_cast<std::uint8_t>(
                 (topLeft.u + topRight.u + bottomLeft.u + bottomRight.u + 2) /
                 4);
-            uv[x + 1U] = static_cast<std::uint8_t>(
+            uv[1] = static_cast<std::uint8_t>(
                 (topLeft.v + topRight.v + bottomLeft.v + bottomRight.v + 2) /
                 4);
         }

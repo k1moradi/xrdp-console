@@ -33,59 +33,42 @@ rectangleFits(Rectangle rectangle, FramebufferView frame) noexcept
 }
 
 [[nodiscard]] bool
-contains(Rectangle outer, Rectangle inner) noexcept
-{
-    if (outer.x < 0 || outer.y < 0 || inner.x < 0 || inner.y < 0)
-    {
-        return false;
-    }
-    const std::uint64_t outerRight =
-        static_cast<std::uint64_t>(outer.x) + outer.widthPixels;
-    const std::uint64_t outerBottom =
-        static_cast<std::uint64_t>(outer.y) + outer.heightPixels;
-    const std::uint64_t innerRight =
-        static_cast<std::uint64_t>(inner.x) + inner.widthPixels;
-    const std::uint64_t innerBottom =
-        static_cast<std::uint64_t>(inner.y) + inner.heightPixels;
-    return inner.x >= outer.x && inner.y >= outer.y &&
-           innerRight <= outerRight && innerBottom <= outerBottom;
-}
-
-[[nodiscard]] bool
 rectanglesEqual(FramebufferView previousFrame, Rectangle previousRectangle,
                 FramebufferView currentFrame,
                 Rectangle currentRectangle) noexcept
 {
     if (previousRectangle.widthPixels != currentRectangle.widthPixels ||
         previousRectangle.heightPixels != currentRectangle.heightPixels ||
-        !rectangleFits(previousRectangle, previousFrame) ||
-        !rectangleFits(currentRectangle, currentFrame) ||
         previousRectangle.widthPixels >
             std::numeric_limits<std::size_t>::max() / kBytesPerPixel)
     {
         return false;
     }
 
+    // The classifier calls this only for tiles inside the reusable source and
+    // destination rectangles, which are frame-validated before the tile loop.
     const std::size_t rowBytes =
         static_cast<std::size_t>(previousRectangle.widthPixels) *
         kBytesPerPixel;
+    const auto *previous =
+        previousFrame.pixels.data() +
+        static_cast<std::size_t>(previousRectangle.y) *
+            previousFrame.strideBytes +
+        static_cast<std::size_t>(previousRectangle.x) * kBytesPerPixel;
+    const auto *current =
+        currentFrame.pixels.data() +
+        static_cast<std::size_t>(currentRectangle.y) *
+            currentFrame.strideBytes +
+        static_cast<std::size_t>(currentRectangle.x) * kBytesPerPixel;
     for (std::uint32_t row = 0;
          row < previousRectangle.heightPixels; ++row)
     {
-        const auto *previous =
-            previousFrame.pixels.data() +
-            static_cast<std::size_t>(previousRectangle.y + row) *
-                previousFrame.strideBytes +
-            static_cast<std::size_t>(previousRectangle.x) * kBytesPerPixel;
-        const auto *current =
-            currentFrame.pixels.data() +
-            static_cast<std::size_t>(currentRectangle.y + row) *
-                currentFrame.strideBytes +
-            static_cast<std::size_t>(currentRectangle.x) * kBytesPerPixel;
         if (std::memcmp(previous, current, rowBytes) != 0)
         {
             return false;
         }
+        previous += previousFrame.strideBytes;
+        current += currentFrame.strideBytes;
     }
     return true;
 }
@@ -135,6 +118,22 @@ classifyExactVerticalScrollReuse(
         return result;
     }
 
+    const std::uint32_t reusableLeft =
+        static_cast<std::uint32_t>(reusableDestination.x);
+    const std::uint64_t reusableRight =
+        static_cast<std::uint64_t>(reusableLeft) +
+        reusableDestination.widthPixels;
+    const std::uint32_t reusableTop =
+        static_cast<std::uint32_t>(reusableDestination.y);
+    const std::uint64_t reusableBottom =
+        static_cast<std::uint64_t>(reusableTop) +
+        reusableDestination.heightPixels;
+    const std::uint32_t firstTileX = static_cast<std::uint32_t>(
+        ((static_cast<std::uint64_t>(reusableLeft) +
+          GenerationTileMap::kTileWidthPixels - 1U) /
+         GenerationTileMap::kTileWidthPixels) *
+        GenerationTileMap::kTileWidthPixels);
+
     const std::uint32_t tileRows =
         (currentFrame.heightPixels +
          GenerationTileMap::kTileHeightPixels - 1U) /
@@ -146,6 +145,16 @@ classifyExactVerticalScrollReuse(
         const std::uint32_t height = std::min(
             GenerationTileMap::kTileHeightPixels,
             currentFrame.heightPixels - y);
+        const std::uint64_t bottom =
+            static_cast<std::uint64_t>(y) + height;
+        const std::int64_t sourceY =
+            static_cast<std::int64_t>(y) - displacementY;
+        if (y < reusableTop || bottom > reusableBottom || sourceY < 0 ||
+            sourceY > std::numeric_limits<std::int32_t>::max())
+        {
+            return true;
+        }
+
         ExactScrollCopyRun pending{};
         bool pendingActive = false;
 
@@ -169,26 +178,24 @@ classifyExactVerticalScrollReuse(
             return true;
         };
 
-        for (std::uint32_t x = 0; x < currentFrame.widthPixels;
+        for (std::uint32_t x = firstTileX; x < currentFrame.widthPixels;
              x += GenerationTileMap::kTileWidthPixels)
         {
             const std::uint32_t width = std::min(
                 GenerationTileMap::kTileWidthPixels,
                 currentFrame.widthPixels - x);
+            if (static_cast<std::uint64_t>(x) + width > reusableRight)
+            {
+                break;
+            }
             const Rectangle destination{
                 static_cast<std::int32_t>(x),
                 static_cast<std::int32_t>(y), width, height};
-            const std::int64_t sourceY =
-                static_cast<std::int64_t>(destination.y) - displacementY;
-            const bool sourceYValid =
-                sourceY >= 0 &&
-                sourceY <= std::numeric_limits<std::int32_t>::max();
             const Rectangle source{
                 destination.x,
-                sourceYValid ? static_cast<std::int32_t>(sourceY) : 0,
+                static_cast<std::int32_t>(sourceY),
                 destination.widthPixels, destination.heightPixels};
             const bool reusable =
-                sourceYValid && contains(reusableDestination, destination) &&
                 rectanglesEqual(previousFrame, source,
                                 currentFrame, destination);
             if (!reusable)

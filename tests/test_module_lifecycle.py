@@ -301,6 +301,17 @@ def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit(f"usage: {sys.argv[0]} MODULE")
 
+    # A sanitizer runtime preloaded into Python must not be inherited by the
+    # uninstrumented Xvfb/xdpyinfo children. It remains loaded in this process
+    # for ctypes to load the instrumented module without a late TLS allocation.
+    preload = os.environ.get("LD_PRELOAD", "")
+    if any(
+        pathlib.Path(entry).name.startswith("libtsan.so")
+        for entry in preload.split(os.pathsep)
+        if entry
+    ):
+        os.environ.pop("LD_PRELOAD", None)
+
     auth_directory = tempfile.TemporaryDirectory(
         prefix="xrdp-console-xauthority-"
     )

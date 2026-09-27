@@ -192,12 +192,20 @@ VerifiedBitmapCache16::copySnapshot(
         return false;
     }
 
-    for (std::uint32_t row = 0; row < localTile.heightPixels; ++row)
+    if (capture.strideBytes == rowBytes)
     {
-        std::memcpy(
-            destination.bytes.data() + static_cast<std::size_t>(row) * rowBytes,
-            first + static_cast<std::size_t>(row) * capture.strideBytes,
-            rowBytes);
+        std::memcpy(destination.bytes.data(), first, bytes);
+    }
+    else
+    {
+        for (std::uint32_t row = 0; row < localTile.heightPixels; ++row)
+        {
+            std::memcpy(
+                destination.bytes.data() +
+                    static_cast<std::size_t>(row) * rowBytes,
+                first + static_cast<std::size_t>(row) * capture.strideBytes,
+                rowBytes);
+        }
     }
     destination.sizeBytes = bytes;
     destination.fingerprint = fingerprint;
@@ -223,6 +231,10 @@ VerifiedBitmapCache16::matches(
     if (!tileView(capture, localTile, first, rowBytes))
     {
         return false;
+    }
+    if (capture.strideBytes == rowBytes)
+    {
+        return std::memcmp(snapshot.bytes.data(), first, snapshot.sizeBytes) == 0;
     }
     for (std::uint32_t row = 0; row < localTile.heightPixels; ++row)
     {

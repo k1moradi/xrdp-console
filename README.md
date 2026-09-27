@@ -161,8 +161,13 @@ scripts/build-direct-console.sh
 
 The script defaults to `build-direct-console/`; override that with
 `XRDP_CONSOLE_BUILD_DIR`. It enables `XRDP_CONSOLE_NATIVE=ON` (`-march=native`),
-which is appropriate for this host but not for distributing one binary across
-different CPUs. For a portable manual build, set `XRDP_CONSOLE_NATIVE=OFF`.
+and Release builds use `-O3 -march=native -mtune=native` for the first-party
+module and pinned xrdp dependency. This is the fastest host-specific build,
+not a portable binary for distributing across different CPUs. For a portable
+manual build, set `XRDP_CONSOLE_NATIVE=OFF` and configure the dependency flags
+accordingly. The build script runs the pinned xrdp upstream tests and the full
+project CTest suite before printing the separate activation command; it does
+not deploy or restart the live service.
 `XRDP_CONSOLE_BUILD_XRDP` defaults to `OFF` in ordinary CMake configurations;
 the supported direct-console build script enables it.
 

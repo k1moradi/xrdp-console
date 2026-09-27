@@ -8,6 +8,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <span>
+#include <vector>
 
 namespace
 {
@@ -71,6 +72,75 @@ bool conversion_validates_geometry_and_stride()
     success &= check(!convertBgraToNv12_709FullRange(
                          {pixels, 4, 2, 8}, output),
                      "undersized BGRA stride was accepted");
+    return success;
+}
+
+bool rectangle_conversion_matches_scalar_reference()
+{
+    struct ConversionCase
+    {
+        std::uint32_t widthPixels;
+        std::uint32_t heightPixels;
+        std::size_t rowPaddingBytes;
+    };
+    constexpr std::array cases{
+        ConversionCase{2, 2, 0},
+        ConversionCase{4, 2, 8},
+        ConversionCase{6, 4, 12},
+        ConversionCase{10, 6, 8},
+        ConversionCase{18, 8, 4},
+        ConversionCase{1366, 768, 16},
+    };
+
+    bool success = true;
+    for (const ConversionCase conversionCase : cases)
+    {
+        const std::size_t strideBytes =
+            static_cast<std::size_t>(conversionCase.widthPixels) * 4U +
+            conversionCase.rowPaddingBytes;
+        std::vector<std::uint8_t> bgra(
+            strideBytes * conversionCase.heightPixels, 0xa5U);
+        std::uint32_t randomState = 0x12345678U;
+        for (std::uint32_t y = 0; y < conversionCase.heightPixels; ++y)
+        {
+            for (std::uint32_t x = 0; x < conversionCase.widthPixels; ++x)
+            {
+                const std::size_t pixelOffset =
+                    static_cast<std::size_t>(y) * strideBytes +
+                    static_cast<std::size_t>(x) * 4U;
+                for (std::size_t channel = 0; channel < 4U; ++channel)
+                {
+                    randomState =
+                        randomState * 1664525U + 1013904223U;
+                    bgra[pixelOffset + channel] =
+                        static_cast<std::uint8_t>(randomState >> 24U);
+                }
+            }
+        }
+
+        const FramebufferView source{
+            std::as_bytes(std::span<const std::uint8_t>(bgra)),
+            conversionCase.widthPixels, conversionCase.heightPixels,
+            strideBytes};
+        const std::size_t outputBytes =
+            nv12FrameBytes({conversionCase.widthPixels,
+                            conversionCase.heightPixels});
+        std::vector<std::byte> scalar(outputBytes);
+        std::vector<std::byte> candidate(outputBytes);
+        const Rectangle fullRectangle{
+            0, 0, conversionCase.widthPixels, conversionCase.heightPixels};
+        const bool scalarConverted =
+            convertBgraToNv12_709FullRange(source, scalar);
+        const bool candidateConverted =
+            updateNv12RectangleFromBgraRegion_709FullRange(
+                source, fullRectangle, fullRectangle,
+                {conversionCase.widthPixels, conversionCase.heightPixels},
+                candidate);
+        success &= check(scalarConverted && candidateConverted,
+                         "AVC420 parity case conversion failed");
+        success &= check(candidate == scalar,
+                         "optimized AVC420 conversion diverged from scalar output");
+    }
     return success;
 }
 
@@ -187,6 +257,7 @@ int main()
     bool success = true;
     success &= conversion_matches_xorgxrdp_reference();
     success &= conversion_validates_geometry_and_stride();
+    success &= rectangle_conversion_matches_scalar_reference();
     success &= rectangle_alignment_matches_avc420_requirements();
     success &= command_layout_matches_xrdp_encoder_contract();
     success &= command_rejects_invalid_input();

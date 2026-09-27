@@ -37,6 +37,13 @@ cmake -S . -B build-direct-console -G Ninja \
 cmake --build build-direct-console --parallel 1
 ```
 
+`XRDP_CONSOLE_RUN_XRDP_TESTS` defaults to `ON`, so the pinned xrdp upstream
+`make check` suite is included in the build and CTest workflow. Isolated
+first-party sanitizer builds may set it to `OFF` to avoid running upstream
+signal/timing-sensitive tests under instrumentation; this does not disable the
+project's own CTest coverage. The normal native Release build should keep the
+default enabled.
+
 The dependency build uses `-O3 -march=native -mtune=native` by default.
 Configure
 `XRDP_CONSOLE_XRDP_CPPFLAGS`, `XRDP_CONSOLE_XRDP_LDFLAGS`, and
@@ -72,8 +79,15 @@ The series is deliberately small and applies in this order:
 | `0018-xrdp-chansrv-retry-silent-text-selection-timeout.patch` | bounded silent-owner recovery | Makes a no-response text selection attempt retryable while preserving an approximately 2 s total request budget across three attempts and the two 50 ms retry delays. Intermediate timeout diagnostics remain DEBUG-only; exhausted conversion failure remains explicit. |
 | `0019-xrdp-console-h264-async-encoder.patch` | Console-only async H.264 encoder opt-in | Reuses xrdp's existing RDPGFX H.264 worker only when Console code `21` has negotiated GFX H.264; classic/Planar/Progressive-RFX Console output keeps the existing first-party ownership boundary. |
 | `0020-xrdp-console-adaptive-gfx-pacing.patch` | hysteretic client-pressure pacing | Replaces the Planar fallback's binary 256 KiB throttle with 16/33/66/100 ms ACK-driven levels, immediate promotion on queue pressure/rapid growth, and three-ACK hysteretic recovery while preserving zero-delay interaction-priority work. |
+| `0021-xrdp-console-record-rdpgfx-capset.patch` | negotiated capability diagnostics | Records client RDPGFX capability state without changing negotiation or output behavior. |
+| `0022-xrdp-map-surface-to-scaled-output.patch` | client-side scaled-output mapping | Adds the checked command serialization and test support for the client-scaling path. |
+| `0023-xrdp-rdpgfx-bitmap-cache-commands.patch` | RDPGFX bitmap-cache commands | Adds cache command serializers for first-party client-side reuse. |
+| `0024-xrdp-encoder-rdpgfx-bitmap-cache.patch` | bitmap-cache encoder bridge | Connects the negotiated graphics encoder to verified cache commands. |
+| `0025-xrdp-console-quiesce-gfx-during-resize.patch` | resize surface lifecycle ordering | Holds Console dirty output while resize is pending so it cannot target an invalidated surface; legacy behavior is unchanged. |
+| `0026-xrdp-unsigned-bitmap-channel-extraction.patch` | defined Planar pixel/channel extraction | Removes UBSan-reported signed-shift and unaligned-store undefined behavior without changing encoded bytes. |
+| `0027-xrdp-quiesce-encoder-worker-before-destroy.patch` | encoder worker teardown handoff | Waits until the detached worker has finished using encoder state and wait objects before freeing them; this closes a teardown overlap observed under TSan. |
 
-These twenty patches are retained production-path behavior and bounded
+These twenty-seven patches are retained production-path behavior and bounded
 operational diagnostics, not benchmark knobs.
 The old
 fork's profiling records, incremental parser, request-ahead scheduling,
@@ -82,7 +96,7 @@ experimental GFX flow-control code are intentionally not in the series.
 
 ## Classification of the old fork
 
-* **KEEP:** the twenty patches listed above; they are required by the measured
+* **KEEP:** the twenty-seven patches listed above; they are required by the measured
   fixed-console/direct-console product path and address concrete transport,
   parser, codec, and keyboard-layout correctness issues.
 * **TOOLING:** profiling and benchmark-only changes; these belong in the

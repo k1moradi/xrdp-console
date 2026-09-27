@@ -146,6 +146,17 @@ set(XRDP_CONSOLE_XRDP_INSTALL_DIR
 
 set(_xrdp_make_flags "CFLAGS=${XRDP_CONSOLE_XRDP_CFLAGS}")
 
+set(_xrdp_test_arguments)
+if(XRDP_CONSOLE_RUN_XRDP_TESTS)
+    list(APPEND _xrdp_test_arguments
+        TEST_COMMAND
+            "${CMAKE_COMMAND}"
+            "-DXRDP_BUILD_DIR=<BINARY_DIR>"
+            "-DXRDP_MAKE_PROGRAM=${XRDP_CONSOLE_MAKE_PROGRAM}"
+            "-DXRDP_CFLAGS=${XRDP_CONSOLE_XRDP_CFLAGS}"
+            -P "${CMAKE_SOURCE_DIR}/cmake/run_xrdp_tests.cmake")
+endif()
+
 ExternalProject_Add(xrdp_upstream
     PREFIX "${CMAKE_BINARY_DIR}/xrdp_upstream-${_xrdp_state_tag}-prefix"
     URL "${XRDP_CONSOLE_XRDP_SOURCE_URL}"
@@ -168,12 +179,7 @@ ExternalProject_Add(xrdp_upstream
         "PKG_CONFIG_PATH=${XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH}"
         ${_xrdp_configure_args}
     BUILD_COMMAND "${XRDP_CONSOLE_MAKE_PROGRAM}" -j1 "${_xrdp_make_flags}"
-    TEST_COMMAND
-        "${CMAKE_COMMAND}"
-        "-DXRDP_BUILD_DIR=<BINARY_DIR>"
-        "-DXRDP_MAKE_PROGRAM=${XRDP_CONSOLE_MAKE_PROGRAM}"
-        "-DXRDP_CFLAGS=${XRDP_CONSOLE_XRDP_CFLAGS}"
-        -P "${CMAKE_SOURCE_DIR}/cmake/run_xrdp_tests.cmake"
+    ${_xrdp_test_arguments}
     INSTALL_COMMAND "${XRDP_CONSOLE_MAKE_PROGRAM}" install "${_xrdp_make_flags}"
     BUILD_BYPRODUCTS
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
@@ -185,7 +191,9 @@ ExternalProject_Add(xrdp_upstream
     USES_TERMINAL_TEST TRUE
     USES_TERMINAL_INSTALL TRUE)
 
-ExternalProject_Add_StepTargets(xrdp_upstream test)
+if(XRDP_CONSOLE_RUN_XRDP_TESTS)
+    ExternalProject_Add_StepTargets(xrdp_upstream test)
+endif()
 
 message(STATUS "xrdp ${XRDP_CONSOLE_XRDP_VERSION} will build natively with: ${XRDP_CONSOLE_XRDP_CFLAGS}")
 message(STATUS "xrdp patchset hash: ${_xrdp_patchset_hash}")

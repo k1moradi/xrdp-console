@@ -149,13 +149,35 @@ historical fork's commit history:
     The resulting background cadence is 16/33/66/100 ms while current
     interaction-priority work still bypasses background pacing. ACK suspension
     preserves the current level but drops the stale queue-trend baseline.
+21. `0021-xrdp-console-record-rdpgfx-capset.patch` records negotiated RDPGFX
+    capability state for diagnostics without changing capability negotiation.
+22. `0022-xrdp-map-surface-to-scaled-output.patch` adds the RDPGFX scaled-output
+    mapping command serializer and its exact-wire tests.
+23. `0023-xrdp-rdpgfx-bitmap-cache-commands.patch` adds the bitmap-cache
+    command serializers used by the direct Console client-offload path.
+24. `0024-xrdp-encoder-rdpgfx-bitmap-cache.patch` connects xrdp's RDPGFX encoder
+    to the first-party verified client bitmap-cache commands.
+25. `0025-xrdp-console-quiesce-gfx-during-resize.patch` retains the Console
+    dirty region while resize is pending, preventing output from targeting an
+    invalidated surface before the replacement surfaces are mapped. Other
+    module codes retain upstream scheduling; the helper is covered by the
+    xrdp region unit test.
+26. `0026-xrdp-unsigned-bitmap-channel-extraction.patch` uses unsigned
+    pixel/channel words so 32-bpp Planar shifts are defined for colors with
+    the high bit set, and copies packed words into byte-oriented channel
+    buffers without alignment assumptions; encoded bytes are unchanged.
+27. `0027-xrdp-quiesce-encoder-worker-before-destroy.patch` adds a mutex
+    handoff around xrdp's detached GFX encoder worker. The `term_done` pipe
+    signals shutdown but does not join the thread; the handoff ensures the
+    worker has finished using encoder state and wait objects before teardown
+    closes or frees them.
 
 The activation script requires the `XRDP_CONSOLE_GFX_PLANAR_BATCH_V1` marker
 in the candidate daemon, so an older patched generation cannot be mistaken
 for this Planar batching implementation.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-twenty patches are retained direct-Console production behavior and bounded
+twenty-seven patches are retained direct-Console production behavior and bounded
 operational diagnostics, not benchmark knobs. Code `21` is reserved for the
 direct module; other module codes retain upstream behavior. The old checked-in
 fork contained profiling, parser-quantum, request-ahead,

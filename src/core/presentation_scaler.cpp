@@ -198,9 +198,32 @@ PresentationScaler::scaleRows(FramebufferView source,
         return {};
     }
 
+    const std::uint32_t outputWidth = presentationRectangle.widthPixels;
+    const std::size_t horizontalMapOffset =
+        static_cast<std::size_t>(presentationRectangle.x - viewport_.x);
+    if (horizontalMapOffset > sourceXForViewportColumn_.size() ||
+        outputWidth > sourceXForViewportColumn_.size() - horizontalMapOffset)
+    {
+        return {};
+    }
+    const std::uint32_t *sourceColumnForOutput =
+        sourceXForViewportColumn_.data() + horizontalMapOffset;
+    const std::uint32_t sourceLeft =
+        static_cast<std::uint32_t>(sourceRectangle.x);
+    const std::uint64_t sourceRight =
+        static_cast<std::uint64_t>(sourceLeft) +
+        sourceRectangle.widthPixels;
+    // configure() builds a monotonic horizontal source map. Checking its
+    // endpoints once proves every indexed source column is inside this
+    // captured rectangle, avoiding a bounds branch for every output pixel.
+    if (sourceColumnForOutput[0] < sourceLeft ||
+        sourceColumnForOutput[outputWidth - 1U] >= sourceRight)
+    {
+        return {};
+    }
+
     const std::size_t destinationStride =
-        static_cast<std::size_t>(presentationRectangle.widthPixels) *
-        kBytesPerPixel;
+        static_cast<std::size_t>(outputWidth) * kBytesPerPixel;
 
     for (std::uint32_t localY = 0; localY < presentationRowCount; ++localY)
     {
@@ -226,25 +249,11 @@ PresentationScaler::scaleRows(FramebufferView source,
             source.pixels.data() +
             static_cast<std::size_t>(localSourceY) * source.strideBytes);
         auto *destinationRow = pixels_.data() +
-                               static_cast<std::size_t>(localY) *
-                                   presentationRectangle.widthPixels;
-        for (std::uint32_t x = 0;
-             x < presentationRectangle.widthPixels; ++x)
+                               static_cast<std::size_t>(localY) * outputWidth;
+        for (std::uint32_t x = 0; x < outputWidth; ++x)
         {
-            const std::int32_t destinationX =
-                presentationRectangle.x + static_cast<std::int32_t>(x);
-            const std::uint32_t viewportLocalX = static_cast<std::uint32_t>(
-                destinationX - viewport_.x);
-            const std::uint32_t globalSourceX =
-                sourceXForViewportColumn_[viewportLocalX];
-            const std::int64_t localSourceX =
-                static_cast<std::int64_t>(globalSourceX) - sourceRectangle.x;
-            if (localSourceX < 0 ||
-                static_cast<std::uint64_t>(localSourceX) >= source.widthPixels)
-            {
-                return {};
-            }
-            destinationRow[x] = sourceRow[localSourceX];
+            destinationRow[x] =
+                sourceRow[sourceColumnForOutput[x] - sourceLeft];
         }
     }
 
@@ -253,7 +262,7 @@ PresentationScaler::scaleRows(FramebufferView source,
             reinterpret_cast<const std::byte *>(pixels_.data()),
             static_cast<std::size_t>(presentationRowCount) *
                 destinationStride),
-        presentationRectangle.widthPixels,
+        outputWidth,
         presentationRowCount,
         destinationStride,
     };

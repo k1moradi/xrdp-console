@@ -103,6 +103,18 @@ discoverVerticalMotion(
             candidates, candidateCount, preferredDisplacements[index]));
     }
 
+    // Fallback magnitudes are unique by construction, so they only need to be
+    // checked against the preferred prefix rather than all prior fallbacks.
+    const auto preferredEnd = candidates.cbegin() + candidateCount;
+    const auto appendFallbackCandidate =
+        [&](std::int32_t displacement) noexcept {
+            if (std::find(candidates.cbegin(), preferredEnd, displacement) ==
+                preferredEnd)
+            {
+                candidates[candidateCount++] = displacement;
+            }
+        };
+
     const std::uint32_t fallbackRadius = std::min(
         config.fallbackSearchRadiusPixels,
         static_cast<std::uint32_t>(
@@ -112,12 +124,10 @@ discoverVerticalMotion(
          ++magnitude)
     {
         const auto signedMagnitude = static_cast<std::int32_t>(magnitude);
-        static_cast<void>(appendUnique(
-            candidates, candidateCount, -signedMagnitude));
+        appendFallbackCandidate(-signedMagnitude);
         if (candidateCount < candidateLimit)
         {
-            static_cast<void>(appendUnique(
-                candidates, candidateCount, signedMagnitude));
+            appendFallbackCandidate(signedMagnitude);
         }
     }
 

@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.20)
 project(xrdp_console
     VERSION 0.1.0
     DESCRIPTION "Direct-X11 shared physical-console module for xrdp"
-    LANGUAGES C)
+    LANGUAGES C CXX)
 
 include(GNUInstallDirs)
 include(CTest)
@@ -27,10 +27,9 @@ option(XRDP_CONSOLE_ENABLE_GL_CAPABILITY_PROBE
 option(XRDP_CONSOLE_BUILD_XRDP
     "Build the pinned patched xrdp dependency under build/_deps"
     OFF)
-
-if(XRDP_CONSOLE_ENABLE_PIXEL_PIPELINE_BENCH)
-    enable_language(CXX)
-endif()
+option(XRDP_CONSOLE_RUN_XRDP_TESTS
+    "Run the pinned xrdp upstream test suite during build and CTest"
+    ON)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -55,7 +54,6 @@ if(XRDP_CONSOLE_NATIVE)
 endif()
 
 if(XRDP_CONSOLE_BUILD_XRDP)
-    enable_language(CXX)
     include(cmake/xrdp_dependency.cmake)
 
     # Refresh at every build so a new commit or clean working tree cannot
@@ -80,7 +78,7 @@ endif()
 
 if(BUILD_TESTING)
     add_subdirectory(tests)
-    if(XRDP_CONSOLE_BUILD_XRDP)
+    if(XRDP_CONSOLE_BUILD_XRDP AND XRDP_CONSOLE_RUN_XRDP_TESTS)
         add_test(NAME xrdp-upstream-unit
             COMMAND ${CMAKE_COMMAND}
                 "-DXRDP_BUILD_DIR=${XRDP_CONSOLE_XRDP_BUILD_DIR}"

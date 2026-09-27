@@ -31,6 +31,19 @@ bottomEdge(Rectangle rectangle) noexcept
            static_cast<WideCoordinate>(rectangle.heightPixels);
 }
 
+void
+advanceGeneration(std::uint64_t &generation) noexcept
+{
+    if (generation != std::numeric_limits<std::uint64_t>::max())
+    {
+        ++generation;
+    }
+    if (generation == 0)
+    {
+        generation = 1;
+    }
+}
+
 } // namespace
 
 bool
@@ -130,14 +143,7 @@ GenerationTileMap::mark(Rectangle rectangle) noexcept
     // require centuries even at billions of marks per second; preserving
     // ordering for every realistic runtime is more useful than adding an
     // epoch field to every tile.
-    if (generation_ != std::numeric_limits<std::uint64_t>::max())
-    {
-        ++generation_;
-    }
-    if (generation_ == 0)
-    {
-        generation_ = 1;
-    }
+    advanceGeneration(generation_);
 
     for (std::uint32_t row = affected.top; row < affected.bottom; ++row)
     {
@@ -157,7 +163,14 @@ GenerationTileMap::mark(Rectangle rectangle) noexcept
 void
 GenerationTileMap::markFull() noexcept
 {
-    mark({0, 0, bounds_.widthPixels, bounds_.heightPixels});
+    if (tileGenerations_.empty())
+    {
+        return;
+    }
+
+    advanceGeneration(generation_);
+    std::fill(tileGenerations_.begin(), tileGenerations_.end(), generation_);
+    dirtyTileCount_ = tileGenerations_.size();
 }
 
 bool
