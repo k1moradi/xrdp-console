@@ -277,6 +277,42 @@ sample_budget_is_hard_bounded()
 }
 
 bool
+all_sample_budgets_preserve_exact_motion()
+{
+    constexpr std::uint32_t width = 192;
+    constexpr std::uint32_t height = 160;
+    const auto previous = pattern(width, height);
+    const auto current = scrollVertical(previous, width, height, -24);
+    VerticalMotionVerificationConfig config{};
+    config.minimumComparedSamples = 1;
+    config.minimumInformativeSamples = 1;
+
+    bool success = true;
+    for (std::uint32_t budget = 1U; budget <= 1024U; ++budget)
+    {
+        config.maximumSamples = budget;
+        const auto result = verifyVerticalMotion(
+            view(previous, width, height), view(current, width, height),
+            {0, 0, width, height}, -24, config);
+        success &= check(result.verified(),
+                         "exact motion failed for a sample budget");
+        success &= check(result.samplesCompared != 0 &&
+                             result.samplesCompared <= budget,
+                         "sample budget sweep exceeded its configured limit");
+    }
+
+    config.maximumSamples = 5000U;
+    const auto hardCapped = verifyVerticalMotion(
+        view(previous, width, height), view(current, width, height),
+        {0, 0, width, height}, -24, config);
+    success &= check(hardCapped.verified(),
+                     "exact motion failed at the absolute sample cap");
+    success &= check(hardCapped.samplesCompared == 1024U,
+                     "absolute-cap sample grid was not fully populated");
+    return success;
+}
+
+bool
 invalidFramesAndUnsafeConfigurationsAreRejected()
 {
     constexpr std::uint32_t width = 64;
@@ -348,6 +384,7 @@ main()
     success &= flat_content_is_rejected_as_ambiguous();
     success &= xrgb_unused_byte_is_ignored();
     success &= sample_budget_is_hard_bounded();
+    success &= all_sample_budgets_preserve_exact_motion();
     success &= invalidFramesAndUnsafeConfigurationsAreRejected();
     return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

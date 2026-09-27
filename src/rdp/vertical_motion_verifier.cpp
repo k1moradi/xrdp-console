@@ -3,6 +3,7 @@
 #include "vertical_motion_verifier.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +17,9 @@ namespace
 
 constexpr std::uint32_t kBytesPerPixel = 4U;
 constexpr std::uint32_t kAbsoluteMaximumSamples = 1024U;
+constexpr std::size_t kMaximumSampleColumns = 32U;
+static_assert(kMaximumSampleColumns * kMaximumSampleColumns ==
+              kAbsoluteMaximumSamples);
 
 [[nodiscard]] bool
 validConfig(const VerticalMotionVerificationConfig &config) noexcept
@@ -214,6 +218,14 @@ verifyVerticalMotion(FramebufferView previousFrame,
         return result;
     }
 
+    std::array<std::uint32_t, kMaximumSampleColumns> localXs{};
+    for (std::uint32_t column = 0; column < columns; ++column)
+    {
+        localXs[column] = static_cast<std::uint32_t>(
+            (static_cast<std::uint64_t>(2U * column + 1U) * xPositions) /
+            (2U * columns));
+    }
+
     for (std::uint32_t row = 0; row < rows; ++row)
     {
         const std::uint32_t localY = static_cast<std::uint32_t>(
@@ -221,9 +233,7 @@ verifyVerticalMotion(FramebufferView previousFrame,
             (2U * rows));
         for (std::uint32_t column = 0; column < columns; ++column)
         {
-            const std::uint32_t localX = static_cast<std::uint32_t>(
-                (static_cast<std::uint64_t>(2U * column + 1U) * xPositions) /
-                (2U * columns));
+            const std::uint32_t localX = localXs[column];
 
             const std::uint32_t oldX =
                 static_cast<std::uint32_t>(plan.sourceRectangle.x) + localX;
