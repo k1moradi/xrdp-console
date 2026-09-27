@@ -109,6 +109,9 @@ bool baseline_then_scroll_is_observed()
     const auto baseline = observer.completeEpisode(full);
     success &= check(baseline.kind == ScrollMotionObservationKind::BaselineSeeded,
                      "first complete frame did not seed baseline");
+    success &= check(baseline.capturedPixels ==
+                         static_cast<std::uint64_t>(width) * height,
+                     "full-frame baseline capture accounting changed");
     success &= check(baseline.baselineSequence != 0 &&
                          observer.markBaselinePresented(
                              baseline.baselineSequence),
@@ -121,6 +124,9 @@ bool baseline_then_scroll_is_observed()
     std::array<ExactScrollCopyRun, kMaximumExactScrollCopyRuns> copyRuns{};
     const auto observed = observer.completeEpisode(full, {}, copyRuns);
     success &= check(observed.verified(), "known scroll was not verified");
+    success &= check(observed.capturedPixels ==
+                         static_cast<std::uint64_t>(width) * height,
+                     "full-frame scroll capture accounting changed");
     success &= check(observed.sourceBaselinePresented &&
                          observed.baselineSequence != baseline.baselineSequence &&
                          !observer.baselinePresented(),
@@ -189,6 +195,9 @@ bool small_episode_is_not_searched()
                      "small episode incorrectly ran discovery");
     success &= check(observer.stats().discoveryAttempts == 0,
                      "small episode consumed discovery work");
+    success &= check(observed.capturedPixels == 16U * 16U &&
+                         !observer.episodeActive(),
+                     "partial capture accounting/state changed");
     return success;
 }
 

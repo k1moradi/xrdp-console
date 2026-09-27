@@ -205,8 +205,26 @@ ScrollMotionObserver::stageCapture(FramebufferView capture,
         capture.widthPixels >
             std::numeric_limits<std::size_t>::max() / kBytesPerPixel ||
         capture.strideBytes <
-            static_cast<std::size_t>(capture.widthPixels) * kBytesPerPixel ||
-        !beginEpisode())
+            static_cast<std::size_t>(capture.widthPixels) * kBytesPerPixel)
+    {
+        return false;
+    }
+
+    const bool fullFrameCapture =
+        destination == Rectangle{0, 0, geometry_.widthPixels,
+                                 geometry_.heightPixels};
+    if (!episodeActive_ && fullFrameCapture)
+    {
+        if (!valid())
+        {
+            return false;
+        }
+        // A full capture overwrites every byte below. Avoid copying the old
+        // baseline (or clearing the first one) only to replace it immediately.
+        capturedPixels_ = 0;
+        episodeActive_ = true;
+    }
+    else if (!beginEpisode())
     {
         return false;
     }
