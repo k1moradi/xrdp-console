@@ -70,21 +70,27 @@ rationale.
 
 ## Supported host assumptions
 
-The current deployment scripts target the existing development/test host
-configuration. They are **not yet a complete clean-machine installer**.
+The activation workflow can repair a stopped direct-console installation and
+can bootstrap a missing `/usr/local/sbin/xrdp-chansrv` from the tested build.
+It deliberately does **not** invent the physical desktop user's service
+environment on a clean machine.
 
-`activate-direct-console.sh` expects all of the following to already exist:
+The host must already provide:
 
-- an active `xrdp.service`;
-- an active `xrdp-console-chansrv.service`;
-- an X11 physical desktop reachable as `DISPLAY=:0`;
-- a readable `XAUTHORITY` path in the xrdp service environment;
-- xrdp already listening on TCP port `3389`;
+- an `xrdp.service` definition whose environment exports `DISPLAY=:0`;
+- a readable `XAUTHORITY` path in that xrdp service environment;
+- an `xrdp-console-chansrv.service` definition for the physical desktop user;
+- `/etc/xrdp/xrdp.ini` with exactly one `[Globals]` `port=3389`;
 - no active RDP client when activation or restart is requested.
 
-If `xrdp-console-chansrv.service` is not already provisioned on a new host,
-stop there: the current repository does not yet provide a clean-host installer
-for that service.
+The two services do not need to be active before activation. The activator
+records their current active/inactive state, stops them before replacing
+runtime files, starts the newly installed chansrv before xrdp, and restores
+the recorded state if activation fails or the backup is rolled back.
+
+The repository still does not synthesize a missing
+`xrdp-console-chansrv.service`: selecting the physical desktop user and its
+session environment is host-specific and must be provisioned explicitly.
 
 The tested package instructions below are for Ubuntu 26.04. Package names may
 differ on other distributions.
@@ -244,31 +250,24 @@ workflow is not supposed to silently skip the H.264 loader requirement.
 
 ## Before activation
 
-Activation modifies the live xrdp configuration and restarts services. Build
-and test first.
-
-Check the required host state:
+Activation modifies the live xrdp configuration and service state. Build and
+test first, disconnect every RDP client, then run the read-only preflight:
 
 ```sh
-systemctl is-active xrdp.service
-systemctl is-active xrdp-console-chansrv.service
+cd ~/xrdp-console
 
-systemctl show xrdp.service -p Environment --value
-
-ss -ltn 'sport = :3389'
-ss -tn state established 'sport = :3389'
+sudo env XRDP_CONSOLE_BUILD_DIR="$PWD/build-direct-console" \
+  scripts/activate-direct-console.sh --preflight
 ```
 
-Confirm that:
+Preflight validates the tested daemon/module/chansrv artifacts, the two systemd
+unit definitions, `DISPLAY=:0`, the readable `XAUTHORITY`, the configured
+`port=3389`, and the absence of an established RDP client. It does not require
+the services to be active and does not change files or service state.
 
-- both services report `active`;
-- the xrdp service environment contains `DISPLAY=:0`;
-- its `XAUTHORITY` file exists and is readable;
-- port `3389` is listening;
-- there is no established RDP client.
-
-The activation script performs these checks again and refuses to proceed when
-they are not satisfied.
+If a service is stopped or failed, preflight reports that state. Normal
+activation will attempt to repair it using the tested build and will print
+service status plus recent journal lines automatically if startup fails.
 
 ## Activate the tested build
 
@@ -283,8 +282,12 @@ sudo env XRDP_CONSOLE_BUILD_DIR="$PWD/build-direct-console" \
 
 Activation validates the built daemon/module, checks the embedded build
 revision, preserves port `3389`, backs up the existing configuration and
-runtime files, installs the tested module plus matching pinned chansrv, updates
-the `[Console]` profile to module code `21`, and restarts the required services.
+revision, preserves port `3389`, backs up the existing configuration, runtime
+files, and prior active/inactive service state, installs the tested module plus
+matching pinned chansrv, updates the `[Console]` profile to module code `21`,
+starts chansrv before xrdp, and verifies both services and the RDP listener.
+A missing previous `/usr/local/sbin/xrdp-chansrv` is treated as a first install,
+not as an error.
 
 The script prints a root-only backup directory such as:
 

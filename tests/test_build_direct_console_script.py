@@ -6,19 +6,24 @@ import unittest
 
 
 class BuildDirectConsoleScriptTests(unittest.TestCase):
-    def test_activation_command_is_copy_paste_safe_single_line(self) -> None:
+    def test_preflight_and_activation_commands_are_copy_paste_safe(self) -> None:
         script = Path(sys.argv[1]).read_text(encoding="utf-8")
 
-        expected = (
-            "\"sudo env XRDP_CONSOLE_BUILD_DIR='$build_root' "
-            "'$workspace_root/scripts/activate-direct-console.sh'\""
+        self.assertIn('"Preflight (read-only):"', script)
+        self.assertIn(
+            'printf "sudo env XRDP_CONSOLE_BUILD_DIR=\'%s\' '
+            "'%s/scripts/activate-direct-console.sh' --preflight\\n\"",
+            script,
         )
-        self.assertIn(expected, script)
-
-        activation_section = script.split(
-            '"Activate only after reviewing the test results:"', 1
-        )[1]
-        self.assertNotIn(r"\n  '", activation_section)
+        self.assertIn(
+            '"Activate only after reviewing the preflight result:"', script
+        )
+        self.assertIn(
+            'printf "sudo env XRDP_CONSOLE_BUILD_DIR=\'%s\' '
+            "'%s/scripts/activate-direct-console.sh'\\n\"",
+            script,
+        )
+        self.assertNotIn(r"\n  '", script)
 
 
 if __name__ == "__main__":

@@ -103,5 +103,9 @@ ctest --test-dir "$build_root" --output-on-failure
 printf '%s\n' \
     "Native direct-X11 build and tests passed." \
     "Build directory: $build_root" \
-    "Activate only after reviewing the test results:" \
-    "sudo env XRDP_CONSOLE_BUILD_DIR='$build_root' '$workspace_root/scripts/activate-direct-console.sh'"
+    "Preflight (read-only):"
+printf "sudo env XRDP_CONSOLE_BUILD_DIR='%s' '%s/scripts/activate-direct-console.sh' --preflight\n" \
+    "$build_root" "$workspace_root"
+printf '%s\n' "Activate only after reviewing the preflight result:"
+printf "sudo env XRDP_CONSOLE_BUILD_DIR='%s' '%s/scripts/activate-direct-console.sh'\n" \
+    "$build_root" "$workspace_root"

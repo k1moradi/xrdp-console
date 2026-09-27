@@ -9,14 +9,21 @@ usage()
     cat <<EOF
 Usage:
   sudo $0
+  sudo $0 --preflight
   sudo $0 --rollback BACKUP_DIRECTORY
 
-Activation preserves the existing RDP listener on port 3389. It installs the
-locally built direct-X11 module and pinned chansrv binary, enables the module's
-text clipboard and dynamic-resize channels, and restarts xrdp and the console
-chansrv service. Client scaled-output, scroll-reuse, and verified bitmap
-caching are requested by default, subject to negotiated capabilities and
-per-path safety checks. Cache observation is diagnostic-only and opt-in. Set an individual
+Activation preserves the RDP listener configuration on port 3389. It can
+repair a stopped direct-console installation and can install the pinned
+chansrv binary when no previous /usr/local/sbin/xrdp-chansrv exists. The
+xrdp.service and xrdp-console-chansrv.service unit definitions must already
+exist because their physical-session user/environment policy is host-specific.
+
+Use --preflight for the same read-only artifact, configuration, environment,
+and connected-client checks without changing files or service state.
+
+Client scaled-output, scroll-reuse, and verified bitmap caching are
+requested by default, subject to negotiated capabilities and per-path safety checks.
+Cache observation is diagnostic-only and opt-in. Set an individual
 XRDP_CONSOLE_CLIENT_* variable to exactly 0 in the xrdp service environment
 to disable that path. A root-only backup is printed for explicit rollback.
 EOF
@@ -28,14 +35,44 @@ fail()
     exit 1
 }
 
+service_state()
+{
+    systemctl is-active "$1" 2>/dev/null || true
+}
+
+service_exists()
+{
+    load_state=$(systemctl show "$1" -p LoadState --value 2>/dev/null) ||
+        return 1
+    [ "$load_state" = "loaded" ]
+}
+
+fail_service()
+{
+    failed_service=$1
+    shift
+    echo "activate-direct-console: service failure: $failed_service" >&2
+    systemctl --no-pager --full status "$failed_service" >&2 || true
+    journalctl -u "$failed_service" -b -n 40 --no-pager >&2 || true
+    fail "$*"
+}
+
 wait_for_rdp_listener()
 {
     attempts=0
     while [ "$attempts" -lt 50 ]; do
-        listener=$(ss -ltnH 'sport = :3389') || listener=
-        if [ -n "$listener" ]; then
-            return 0
-        fi
+        service_pid=$(systemctl show xrdp.service -p MainPID --value 2>/dev/null) ||
+            service_pid=
+        case "$service_pid" in
+            ''|0|*[!0-9]*) ;;
+            *)
+                listener=$(ss -ltnpH 'sport = :3389') || listener=
+                if printf '%s\n' "$listener" |
+                    grep -Eq "pid=${service_pid}([,)]|$)"; then
+                    return 0
+                fi
+                ;;
+        esac
         sleep 0.2
         attempts=$((attempts + 1))
     done
@@ -61,10 +98,39 @@ rollback()
     backup_directory=$1
     [ -d "$backup_directory" ] || fail "missing backup directory: $backup_directory"
     [ -f "$backup_directory/xrdp.ini" ] || fail "backup has no xrdp.ini"
-    [ -f "$backup_directory/chansrv-existed" ] ||
-        fail "backup predates the chansrv snapshot; refusing a partial rollback"
-    [ -e "$backup_directory/xrdp-chansrv" ] ||
+
+    stateful_backup=0
+    if [ -f "$backup_directory/service-state-v1" ]; then
+        stateful_backup=1
+    else
+        # Backward compatibility with backups made by the previous activator.
+        [ -f "$backup_directory/chansrv-existed" ] ||
+            fail "backup predates the chansrv snapshot; refusing a partial rollback"
+        [ -e "$backup_directory/xrdp-chansrv" ] ||
+            fail "backup is missing the previous chansrv binary"
+    fi
+
+    if [ -f "$backup_directory/module-existed" ] &&
+       [ ! -e "$backup_directory/libxrdp_console.so" ] &&
+       [ ! -L "$backup_directory/libxrdp_console.so" ]; then
+        fail "backup is missing the previous module"
+    fi
+    if [ -f "$backup_directory/chansrv-existed" ] &&
+       [ ! -e "$backup_directory/xrdp-chansrv" ] &&
+       [ ! -L "$backup_directory/xrdp-chansrv" ]; then
         fail "backup is missing the previous chansrv binary"
+    fi
+    if [ -f "$backup_directory/dropin-existed" ] &&
+       [ ! -e "$backup_directory/upstream-local.conf" ] &&
+       [ ! -L "$backup_directory/upstream-local.conf" ]; then
+        fail "backup is missing the previous service drop-in"
+    fi
+
+    systemctl stop xrdp.service ||
+        fail_service xrdp.service "could not stop xrdp before rollback"
+    systemctl stop xrdp-console-chansrv.service ||
+        fail_service xrdp-console-chansrv.service \
+            "could not stop console chansrv before rollback"
 
     cp -a -- "$backup_directory/xrdp.ini" "$config"
     if [ -f "$backup_directory/module-existed" ]; then
@@ -77,7 +143,11 @@ rollback()
     fi
 
     rm -f -- "$chansrv_target"
-    cp -a -- "$backup_directory/xrdp-chansrv" "$chansrv_target"
+    if [ -f "$backup_directory/chansrv-existed" ]; then
+        [ -e "$backup_directory/xrdp-chansrv" ] ||
+            fail "backup is missing the previous chansrv binary"
+        cp -a -- "$backup_directory/xrdp-chansrv" "$chansrv_target"
+    fi
 
     if [ -f "$backup_directory/dropin-existed" ]; then
         [ -f "$backup_directory/upstream-local.conf" ] ||
@@ -89,34 +159,70 @@ rollback()
     fi
 
     systemctl daemon-reload
-    systemctl restart xrdp || fail "rollback restored files but xrdp restart failed"
-    systemctl is-active --quiet xrdp || fail "xrdp is not active after rollback"
-    wait_for_rdp_listener || fail "xrdp did not restore its port 3389 listener"
-    systemctl restart xrdp-console-chansrv.service ||
-        fail "rollback restored files but chansrv restart failed"
-    systemctl is-active --quiet xrdp-console-chansrv.service ||
-        fail "console chansrv is not active after rollback"
+    if [ "$stateful_backup" -eq 1 ]; then
+        if [ -f "$backup_directory/chansrv-was-active" ]; then
+            systemctl restart xrdp-console-chansrv.service ||
+                fail "rollback restored files but chansrv restart failed"
+            systemctl is-active --quiet xrdp-console-chansrv.service ||
+                fail "console chansrv is not active after rollback"
+        else
+            systemctl stop xrdp-console-chansrv.service >/dev/null 2>&1 || true
+        fi
+
+        if [ -f "$backup_directory/xrdp-was-active" ]; then
+            systemctl restart xrdp ||
+                fail "rollback restored files but xrdp restart failed"
+            systemctl is-active --quiet xrdp ||
+                fail "xrdp is not active after rollback"
+            wait_for_rdp_listener ||
+                fail "xrdp did not restore its port 3389 listener"
+        else
+            systemctl stop xrdp.service >/dev/null 2>&1 || true
+        fi
+    else
+        systemctl restart xrdp ||
+            fail "rollback restored files but xrdp restart failed"
+        systemctl is-active --quiet xrdp ||
+            fail "xrdp is not active after rollback"
+        wait_for_rdp_listener ||
+            fail "xrdp did not restore its port 3389 listener"
+        systemctl restart xrdp-console-chansrv.service ||
+            fail "rollback restored files but chansrv restart failed"
+        systemctl is-active --quiet xrdp-console-chansrv.service ||
+            fail "console chansrv is not active after rollback"
+    fi
     echo "Restored xrdp, chansrv, configuration, module, and service drop-in from: $backup_directory"
     echo "The RDP listener remains configured for port 3389."
 }
 
-if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
-    usage
-    exit 0
-fi
+preflight_only=0
+case "${1:-}" in
+    --help|-h)
+        usage
+        exit 0
+        ;;
+    --rollback)
+        [ "$#" -eq 2 ] || { usage >&2; exit 2; }
+        [ "$(id -u)" -eq 0 ] ||
+            fail "run rollback as root (for example, with sudo)"
+        rollback "$2"
+        exit 0
+        ;;
+    --preflight)
+        [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+        preflight_only=1
+        ;;
+    "")
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac
 
-if [ "${1:-}" = "--rollback" ]; then
-    [ "$#" -eq 2 ] || { usage >&2; exit 2; }
-    [ "$(id -u)" -eq 0 ] || fail "run rollback as root (for example, with sudo)"
-    rollback "$2"
-    exit 0
-fi
-
-[ "$#" -eq 0 ] || { usage >&2; exit 2; }
 [ "$(id -u)" -eq 0 ] || fail "run as root (for example, with sudo)"
 [ -x "$daemon" ] || fail "missing pinned xrdp daemon: $daemon"
 [ -x "$chansrv_source" ] || fail "missing pinned xrdp chansrv: $chansrv_source"
-[ -e "$chansrv_target" ] || fail "missing installed xrdp chansrv: $chansrv_target"
 [ -f "$module_source" ] || fail "missing direct-X11 module: $module_source"
 [ -r "$revision_header" ] ||
     fail "missing generated build identity: $revision_header"
@@ -143,9 +249,11 @@ if ! grep -aFq -- "$build_revision" "$module_source"; then
     fail "module does not contain expected build revision $build_revision"
 fi
 
-systemctl is-active --quiet xrdp || fail "xrdp.service must be active before activation"
-systemctl is-active --quiet xrdp-console-chansrv.service ||
-    fail "xrdp-console-chansrv.service must be active before activation"
+service_exists xrdp.service ||
+    fail "xrdp.service definition is missing, masked, or not loadable"
+service_exists xrdp-console-chansrv.service ||
+    fail "xrdp-console-chansrv.service definition is missing, masked, or not loadable; the physical-session launch policy must be provisioned before activation"
+
 service_environment=$(systemctl show xrdp.service -p Environment --value) ||
     fail "could not inspect the xrdp service environment"
 case " $service_environment " in
@@ -156,10 +264,6 @@ xauthority=$(printf '%s\n' "$service_environment" |
     tr ' ' '\n' | sed -n 's/^XAUTHORITY=//p')
 [ -n "$xauthority" ] && [ -r "$xauthority" ] ||
     fail "the xrdp service XAUTHORITY file is missing or unreadable"
-listener=$(ss -ltnH 'sport = :3389') ||
-    fail "could not inspect the xrdp listener"
-[ -n "$listener" ] ||
-    fail "xrdp is not listening on port 3389; refusing to alter the listener"
 established=$(ss -tnH state established 'sport = :3389') ||
     fail "could not inspect established RDP connections"
 [ -z "$established" ] ||
@@ -185,17 +289,40 @@ if ports != ["3389"]:
     raise SystemExit(f"expected exactly one [Globals] port=3389, found {ports!r}")
 PY
 
+xrdp_state=$(service_state xrdp.service)
+chansrv_state=$(service_state xrdp-console-chansrv.service)
+if [ "$preflight_only" -eq 1 ]; then
+    echo "Activation preflight passed."
+    echo "xrdp.service: ${xrdp_state:-unknown}"
+    echo "xrdp-console-chansrv.service: ${chansrv_state:-unknown}"
+    if [ -e "$chansrv_target" ] || [ -L "$chansrv_target" ]; then
+        echo "Existing chansrv target will be backed up before replacement: $chansrv_target"
+    else
+        echo "No previous chansrv target exists; activation will install: $chansrv_target"
+    fi
+    exit 0
+fi
+
 stamp=$(date +%Y%m%d-%H%M%S)
 install -d -m 0700 "$backup_root"
-backup_directory=$backup_root/direct-console-$stamp
-mkdir -m 0700 "$backup_directory"
+backup_directory=$(mktemp -d "$backup_root/direct-console-$stamp.XXXXXX") ||
+    fail "could not create a unique rollback directory under $backup_root"
 cp -a -- "$config" "$backup_directory/xrdp.ini"
+: >"$backup_directory/service-state-v1"
+if systemctl is-active --quiet xrdp.service; then
+    : >"$backup_directory/xrdp-was-active"
+fi
+if systemctl is-active --quiet xrdp-console-chansrv.service; then
+    : >"$backup_directory/chansrv-was-active"
+fi
 if [ -e "$module_target" ] || [ -L "$module_target" ]; then
     cp -a -- "$module_target" "$backup_directory/libxrdp_console.so"
     : >"$backup_directory/module-existed"
 fi
-cp -a -- "$chansrv_target" "$backup_directory/xrdp-chansrv"
-: >"$backup_directory/chansrv-existed"
+if [ -e "$chansrv_target" ] || [ -L "$chansrv_target" ]; then
+    cp -a -- "$chansrv_target" "$backup_directory/xrdp-chansrv"
+    : >"$backup_directory/chansrv-existed"
+fi
 if [ -e "$dropin" ]; then
     cp -a -- "$dropin" "$backup_directory/upstream-local.conf"
     : >"$backup_directory/dropin-existed"
@@ -217,6 +344,14 @@ trap rollback_failed_activation EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# Stop both services before replacing binaries. This also stops a legacy
+# chansrv auto-restart loop so it cannot race the candidate installation.
+systemctl stop xrdp.service ||
+    fail_service xrdp.service "could not stop xrdp before activation"
+systemctl stop xrdp-console-chansrv.service ||
+    fail_service xrdp-console-chansrv.service \
+        "could not stop console chansrv before activation"
 
 install -m 0755 "$chansrv_source" "$chansrv_target"
 install -m 0755 "$module_source" "$module_target"
@@ -371,19 +506,28 @@ if ! printf '[Service]\nExecStart=\nExecStart=%s --nodaemon --config /etc/xrdp/x
 fi
 
 systemctl daemon-reload || fail "systemd daemon-reload failed"
-systemctl restart xrdp || fail "the pinned xrdp daemon failed to start"
-systemctl is-active --quiet xrdp || fail "the pinned xrdp service is not active"
+
+# Start chansrv before xrdp so a broken legacy chansrv cannot make xrdp fail
+# with a dependency error.
+systemctl restart xrdp-console-chansrv.service ||
+    fail_service xrdp-console-chansrv.service \
+        "the pinned xrdp chansrv failed to start"
+systemctl is-active --quiet xrdp-console-chansrv.service ||
+    fail_service xrdp-console-chansrv.service \
+        "the pinned xrdp chansrv service is not active"
+
+systemctl restart xrdp ||
+    fail_service xrdp.service "the pinned xrdp daemon failed to start"
+systemctl is-active --quiet xrdp ||
+    fail_service xrdp.service "the pinned xrdp service is not active"
 active_exec=$(systemctl show xrdp.service -p ExecStart --value) ||
     fail "could not inspect the active xrdp command"
 case "$active_exec" in
     *"$daemon"*) ;;
     *) fail "systemd is not running the pinned candidate daemon" ;;
 esac
-wait_for_rdp_listener || fail "xrdp did not return to port 3389 within 10 seconds"
-systemctl restart xrdp-console-chansrv.service ||
-    fail "the pinned xrdp chansrv failed to restart"
-systemctl is-active --quiet xrdp-console-chansrv.service ||
-    fail "the pinned xrdp chansrv service is not active"
+wait_for_rdp_listener ||
+    fail_service xrdp.service "xrdp did not return to port 3389 within 10 seconds"
 
 if ! cmp -s -- "$module_source" "$module_target"; then
     fail "installed module differs from the tested build artifact"
