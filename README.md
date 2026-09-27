@@ -429,11 +429,15 @@ The current test suite covers:
 - pinned xrdp upstream tests including Console-specific patch regressions;
 - FreeRDP loader/pixel integration, including H.264 GFX.
 
-The H.264 coherence stress test exercises a moving desktop under normal and
-single-CPU-contention conditions and verifies whole-frame generation ordering
-through the isolated FreeRDP client. It is not a substitute for Microsoft
-Windows/macOS interoperability; native-client scrolling and freeze recovery
-remain manual release gates.
+The loader/pixel smokes use the project's H.264-capable FreeRDP build, not a
+FreeRDP client discovered from `PATH`. The H.264 visual-coherence matrix
+scrolls a generation-marked tiled pattern and samples 2,000 complete client
+frame snapshots per run. It compares default behavior with scroll reuse and
+cache disabled, including controlled single-CPU-contention runs. A failing
+run preserves its first incoherent client screenshot and the xrdp/FreeRDP logs
+under `build-direct-console/test-artifacts/<test-name>/`. This stress test is
+not a substitute for Microsoft Windows/macOS interoperability; native-client
+scrolling and freeze recovery remain manual release gates.
 
 The next correctness work is native-client retesting, followed by explicit
 stuck-frame detection/recovery if real-client evidence still shows stalls.
