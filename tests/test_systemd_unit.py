@@ -107,8 +107,17 @@ class DirectConsoleServiceTests(unittest.TestCase):
 
         self.assertIn("sudo $0 --preflight", activation)
         self.assertIn("service-state-v1", activation)
+        self.assertIn("service-state-v2", activation)
         self.assertIn("xrdp-was-active", activation)
+        self.assertIn("sesman-was-active", activation)
         self.assertIn("chansrv-was-active", activation)
+        self.assertIn("sesman=$prefix/sbin/xrdp-sesman", activation)
+        self.assertIn(
+            "sesman_dropin_directory=/etc/systemd/system/xrdp-sesman.service.d",
+            activation,
+        )
+        self.assertIn("Legacy xrdp-x11vnc daemon path detected", activation)
+        self.assertIn("Legacy xrdp-x11vnc sesman path detected", activation)
         self.assertIn("No previous chansrv target exists", activation)
         self.assertIn("fail_service", activation)
         self.assertNotIn("xrdp.service must be active before activation", activation)
@@ -117,36 +126,64 @@ class DirectConsoleServiceTests(unittest.TestCase):
             activation,
         )
 
-        activation_stop = activation.find(
-            "systemctl stop xrdp.service ||",
-            activation.find("trap 'exit 143' TERM"),
-        )
+        trap_position = activation.find("trap 'exit 143' TERM")
+        chansrv_stop = activation.find(
+            "systemctl stop xrdp-console-chansrv.service ||", trap_position)
+        xrdp_stop = activation.find(
+            "systemctl stop xrdp.service ||", chansrv_stop)
+        sesman_stop = activation.find(
+            "systemctl stop xrdp-sesman.service ||", xrdp_stop)
         self.assertLess(
             activation.find('fail "backup is missing the previous module"'),
-            activation_stop,
+            chansrv_stop,
         )
         activation_install = activation.find(
             'install -m 0755 "$chansrv_source" "$chansrv_target"',
-            activation_stop,
+            sesman_stop,
         )
-        self.assertGreaterEqual(activation_stop, 0)
-        self.assertGreater(activation_install, activation_stop)
+        self.assertGreaterEqual(chansrv_stop, 0)
+        self.assertGreater(xrdp_stop, chansrv_stop)
+        self.assertGreater(sesman_stop, xrdp_stop)
+        self.assertGreater(activation_install, sesman_stop)
 
         activation_restart = activation.rfind(
             'systemctl daemon-reload || fail "systemd daemon-reload failed"'
         )
         self.assertGreaterEqual(activation_restart, 0)
+        xrdp_restart = activation.find(
+            "systemctl restart xrdp.service",
+            activation_restart,
+        )
+        sesman_verify = activation.find(
+            "systemctl is-active --quiet xrdp-sesman.service",
+            xrdp_restart,
+        )
         chansrv_restart = activation.find(
             "systemctl restart xrdp-console-chansrv.service",
-            activation_restart,
+            xrdp_restart,
         )
-        xrdp_restart = activation.find(
-            "systemctl restart xrdp ||",
-            activation_restart,
-        )
-        self.assertGreaterEqual(chansrv_restart, 0)
         self.assertGreaterEqual(xrdp_restart, 0)
-        self.assertLess(chansrv_restart, xrdp_restart)
+        self.assertGreater(sesman_verify, xrdp_restart)
+        self.assertGreater(chansrv_restart, sesman_verify)
+        self.assertIn(
+            "ExecStart=%s --nodaemon --config /etc/xrdp/sesman.ini",
+            activation,
+        )
+        self.assertIn("Requires=xrdp-sesman.service", activation)
+        self.assertIn("sesman-upstream-local.conf", activation)
+
+        restart = (ROOT / "scripts/restart-direct-console.sh").read_text(
+            encoding="utf-8")
+        diagnose = (ROOT / "scripts/diagnose-direct-console.sh").read_text(
+            encoding="utf-8")
+        self.assertIn("xrdp-sesman.service", restart)
+        self.assertIn("checking required xrdp-sesman dependency", restart)
+        self.assertIn("--- xrdp-sesman service ---", diagnose)
+        self.assertIn(
+            "-p FragmentPath -p DropInPaths -p Requires -p ExecStart",
+            diagnose,
+        )
+        self.assertIn("recent xrdp-sesman journal", diagnose)
 
         self.assertIn("Preflight (read-only):", build)
         self.assertIn("--preflight", build)

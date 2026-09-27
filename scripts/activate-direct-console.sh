@@ -14,9 +14,11 @@ Usage:
 
 Activation preserves the RDP listener configuration on port 3389. It can
 repair a stopped direct-console installation and can install the pinned
-chansrv binary when no previous /usr/local/sbin/xrdp-chansrv exists. The
-xrdp.service and xrdp-console-chansrv.service unit definitions must already
-exist because their physical-session user/environment policy is host-specific.
+chansrv binary when no previous /usr/local/sbin/xrdp-chansrv exists. It also
+migrates legacy xrdp-x11vnc daemon/sesman ExecStart paths to the matching
+tested xrdp-console build. The xrdp.service, xrdp-sesman.service, and
+xrdp-console-chansrv.service unit definitions must already exist; only the
+physical-session chansrv user/environment policy remains host-specific.
 
 Use --preflight for the same read-only artifact, configuration, environment,
 and connected-client checks without changing files or service state.
@@ -83,14 +85,18 @@ workspace_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build_root=${XRDP_CONSOLE_BUILD_DIR:-$workspace_root/build-direct-console}
 prefix=${XRDP_CONSOLE_XRDP_INSTALL_DIR:-$build_root/_deps/xrdp-install}
 daemon=$prefix/sbin/xrdp
+sesman=$prefix/sbin/xrdp-sesman
 chansrv_source=$prefix/sbin/xrdp-chansrv
 chansrv_target=/usr/local/sbin/xrdp-chansrv
 module_source=$build_root/src/libxrdp_console.so
 module_target=$prefix/lib/xrdp/libxrdp_console.so
 revision_header=$build_root/generated/build_revision.h
 config=/etc/xrdp/xrdp.ini
+sesman_config=/etc/xrdp/sesman.ini
 dropin_directory=/etc/systemd/system/xrdp.service.d
 dropin=$dropin_directory/upstream-local.conf
+sesman_dropin_directory=/etc/systemd/system/xrdp-sesman.service.d
+sesman_dropin=$sesman_dropin_directory/upstream-local.conf
 backup_root=/var/backups/xrdp-console
 
 rollback()
@@ -100,7 +106,11 @@ rollback()
     [ -f "$backup_directory/xrdp.ini" ] || fail "backup has no xrdp.ini"
 
     stateful_backup=0
-    if [ -f "$backup_directory/service-state-v1" ]; then
+    sesman_stateful_backup=0
+    if [ -f "$backup_directory/service-state-v2" ]; then
+        stateful_backup=1
+        sesman_stateful_backup=1
+    elif [ -f "$backup_directory/service-state-v1" ]; then
         stateful_backup=1
     else
         # Backward compatibility with backups made by the previous activator.
@@ -125,12 +135,23 @@ rollback()
        [ ! -L "$backup_directory/upstream-local.conf" ]; then
         fail "backup is missing the previous service drop-in"
     fi
+    if [ "$sesman_stateful_backup" -eq 1 ] &&
+       [ -f "$backup_directory/sesman-dropin-existed" ] &&
+       [ ! -e "$backup_directory/sesman-upstream-local.conf" ] &&
+       [ ! -L "$backup_directory/sesman-upstream-local.conf" ]; then
+        fail "backup is missing the previous sesman service drop-in"
+    fi
 
-    systemctl stop xrdp.service ||
-        fail_service xrdp.service "could not stop xrdp before rollback"
     systemctl stop xrdp-console-chansrv.service ||
         fail_service xrdp-console-chansrv.service \
             "could not stop console chansrv before rollback"
+    systemctl stop xrdp.service ||
+        fail_service xrdp.service "could not stop xrdp before rollback"
+    if [ "$sesman_stateful_backup" -eq 1 ]; then
+        systemctl stop xrdp-sesman.service ||
+            fail_service xrdp-sesman.service \
+                "could not stop xrdp-sesman before rollback"
+    fi
 
     cp -a -- "$backup_directory/xrdp.ini" "$config"
     if [ -f "$backup_directory/module-existed" ]; then
@@ -158,8 +179,51 @@ rollback()
         rm -f -- "$dropin"
     fi
 
+    if [ "$sesman_stateful_backup" -eq 1 ]; then
+        if [ -f "$backup_directory/sesman-dropin-existed" ]; then
+            [ -f "$backup_directory/sesman-upstream-local.conf" ] ||
+                fail "backup is missing the previous sesman service drop-in"
+            install -d -m 0755 "$sesman_dropin_directory"
+            cp -a -- "$backup_directory/sesman-upstream-local.conf" "$sesman_dropin"
+        else
+            rm -f -- "$sesman_dropin"
+        fi
+    fi
+
     systemctl daemon-reload
-    if [ "$stateful_backup" -eq 1 ]; then
+    if [ "$sesman_stateful_backup" -eq 1 ]; then
+        if [ -f "$backup_directory/xrdp-was-active" ]; then
+            systemctl restart xrdp.service ||
+                fail "rollback restored files but xrdp restart failed"
+            systemctl is-active --quiet xrdp.service ||
+                fail "xrdp is not active after rollback"
+            if [ -f "$backup_directory/sesman-was-active" ]; then
+                systemctl is-active --quiet xrdp-sesman.service ||
+                    fail "xrdp-sesman is not active after rollback"
+            fi
+            wait_for_rdp_listener ||
+                fail "xrdp did not restore its port 3389 listener"
+        else
+            systemctl stop xrdp.service >/dev/null 2>&1 || true
+            if [ -f "$backup_directory/sesman-was-active" ]; then
+                systemctl restart xrdp-sesman.service ||
+                    fail "rollback restored files but xrdp-sesman restart failed"
+                systemctl is-active --quiet xrdp-sesman.service ||
+                    fail "xrdp-sesman is not active after rollback"
+            else
+                systemctl stop xrdp-sesman.service >/dev/null 2>&1 || true
+            fi
+        fi
+
+        if [ -f "$backup_directory/chansrv-was-active" ]; then
+            systemctl restart xrdp-console-chansrv.service ||
+                fail "rollback restored files but chansrv restart failed"
+            systemctl is-active --quiet xrdp-console-chansrv.service ||
+                fail "console chansrv is not active after rollback"
+        else
+            systemctl stop xrdp-console-chansrv.service >/dev/null 2>&1 || true
+        fi
+    elif [ "$stateful_backup" -eq 1 ]; then
         if [ -f "$backup_directory/chansrv-was-active" ]; then
             systemctl restart xrdp-console-chansrv.service ||
                 fail "rollback restored files but chansrv restart failed"
@@ -191,7 +255,11 @@ rollback()
         systemctl is-active --quiet xrdp-console-chansrv.service ||
             fail "console chansrv is not active after rollback"
     fi
-    echo "Restored xrdp, chansrv, configuration, module, and service drop-in from: $backup_directory"
+    if [ "$sesman_stateful_backup" -eq 1 ]; then
+        echo "Restored xrdp, sesman, chansrv, configuration, module, and service drop-ins from: $backup_directory"
+    else
+        echo "Restored xrdp, chansrv, configuration, module, and service drop-in from: $backup_directory"
+    fi
     echo "The RDP listener remains configured for port 3389."
 }
 
@@ -222,20 +290,27 @@ esac
 
 [ "$(id -u)" -eq 0 ] || fail "run as root (for example, with sudo)"
 [ -x "$daemon" ] || fail "missing pinned xrdp daemon: $daemon"
+[ -x "$sesman" ] || fail "missing pinned xrdp-sesman: $sesman"
 [ -x "$chansrv_source" ] || fail "missing pinned xrdp chansrv: $chansrv_source"
 [ -f "$module_source" ] || fail "missing direct-X11 module: $module_source"
 [ -r "$revision_header" ] ||
     fail "missing generated build identity: $revision_header"
 [ -f "$config" ] || fail "missing xrdp configuration: $config"
+[ -f "$sesman_config" ] || fail "missing xrdp-sesman configuration: $sesman_config"
 [ -d "$(dirname -- "$module_target")" ] ||
     fail "missing xrdp module directory: $(dirname -- "$module_target")"
 "$daemon" --version 2>/dev/null | grep -q '^xrdp 0\.10\.6\.1' ||
     fail "candidate daemon is not the pinned xrdp 0.10.6.1 build"
+"$sesman" --version 2>/dev/null | grep -q '^xrdp-sesman 0\.10\.6\.1' ||
+    fail "candidate xrdp-sesman is not the pinned xrdp 0.10.6.1 build"
 if ! grep -aFq -- 'XRDP_CONSOLE_GFX_PLANAR_BATCH_V1' "$daemon"; then
     fail "candidate daemon lacks the Console Planar batching patch marker"
 fi
 if ldd "$module_source" 2>/dev/null | grep -q 'not found'; then
     fail "direct-X11 module has an unresolved shared-library dependency"
+fi
+if ldd "$sesman" 2>/dev/null | grep -q 'not found'; then
+    fail "pinned xrdp-sesman has an unresolved shared-library dependency"
 fi
 if ldd "$chansrv_source" 2>/dev/null | grep -q 'not found'; then
     fail "pinned xrdp chansrv has an unresolved shared-library dependency"
@@ -251,6 +326,8 @@ fi
 
 service_exists xrdp.service ||
     fail "xrdp.service definition is missing, masked, or not loadable"
+service_exists xrdp-sesman.service ||
+    fail "xrdp-sesman.service definition is missing, masked, or not loadable"
 service_exists xrdp-console-chansrv.service ||
     fail "xrdp-console-chansrv.service definition is missing, masked, or not loadable; the physical-session launch policy must be provisioned before activation"
 
@@ -290,11 +367,39 @@ if ports != ["3389"]:
 PY
 
 xrdp_state=$(service_state xrdp.service)
+sesman_state=$(service_state xrdp-sesman.service)
 chansrv_state=$(service_state xrdp-console-chansrv.service)
+current_xrdp_exec=$(systemctl show xrdp.service -p ExecStart --value) ||
+    fail "could not inspect the xrdp command"
+current_sesman_exec=$(systemctl show xrdp-sesman.service -p ExecStart --value) ||
+    fail "could not inspect the xrdp-sesman command"
 if [ "$preflight_only" -eq 1 ]; then
     echo "Activation preflight passed."
     echo "xrdp.service: ${xrdp_state:-unknown}"
+    echo "xrdp-sesman.service: ${sesman_state:-unknown}"
     echo "xrdp-console-chansrv.service: ${chansrv_state:-unknown}"
+    case "$current_xrdp_exec" in
+        *"$daemon"*)
+            echo "xrdp already uses the tested pinned runtime."
+            ;;
+        *xrdp-x11vnc*)
+            echo "Legacy xrdp-x11vnc daemon path detected; activation will migrate it to: $daemon"
+            ;;
+        *)
+            echo "xrdp ExecStart will be overridden with the tested runtime: $daemon"
+            ;;
+    esac
+    case "$current_sesman_exec" in
+        *"$sesman"*)
+            echo "xrdp-sesman already uses the tested pinned runtime."
+            ;;
+        *xrdp-x11vnc*)
+            echo "Legacy xrdp-x11vnc sesman path detected; activation will migrate it to: $sesman"
+            ;;
+        *)
+            echo "xrdp-sesman ExecStart will be overridden with the tested runtime: $sesman"
+            ;;
+    esac
     if [ -e "$chansrv_target" ] || [ -L "$chansrv_target" ]; then
         echo "Existing chansrv target will be backed up before replacement: $chansrv_target"
     else
@@ -308,9 +413,12 @@ install -d -m 0700 "$backup_root"
 backup_directory=$(mktemp -d "$backup_root/direct-console-$stamp.XXXXXX") ||
     fail "could not create a unique rollback directory under $backup_root"
 cp -a -- "$config" "$backup_directory/xrdp.ini"
-: >"$backup_directory/service-state-v1"
+: >"$backup_directory/service-state-v2"
 if systemctl is-active --quiet xrdp.service; then
     : >"$backup_directory/xrdp-was-active"
+fi
+if systemctl is-active --quiet xrdp-sesman.service; then
+    : >"$backup_directory/sesman-was-active"
 fi
 if systemctl is-active --quiet xrdp-console-chansrv.service; then
     : >"$backup_directory/chansrv-was-active"
@@ -326,6 +434,10 @@ fi
 if [ -e "$dropin" ]; then
     cp -a -- "$dropin" "$backup_directory/upstream-local.conf"
     : >"$backup_directory/dropin-existed"
+fi
+if [ -e "$sesman_dropin" ]; then
+    cp -a -- "$sesman_dropin" "$backup_directory/sesman-upstream-local.conf"
+    : >"$backup_directory/sesman-dropin-existed"
 fi
 echo "Rollback backup: $backup_directory"
 
@@ -345,13 +457,16 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# Stop both services before replacing binaries. This also stops a legacy
-# chansrv auto-restart loop so it cannot race the candidate installation.
-systemctl stop xrdp.service ||
-    fail_service xrdp.service "could not stop xrdp before activation"
+# Stop consumers before replacing runtime files. Stop chansrv first to prevent
+# its restart loop from racing installation, then stop xrdp and any legacy
+# xrdp-x11vnc sesman process before migrating their ExecStart paths.
 systemctl stop xrdp-console-chansrv.service ||
     fail_service xrdp-console-chansrv.service \
         "could not stop console chansrv before activation"
+systemctl stop xrdp.service ||
+    fail_service xrdp.service "could not stop xrdp before activation"
+systemctl stop xrdp-sesman.service ||
+    fail_service xrdp-sesman.service "could not stop xrdp-sesman before activation"
 
 install -m 0755 "$chansrv_source" "$chansrv_target"
 install -m 0755 "$module_source" "$module_target"
@@ -495,9 +610,19 @@ then
     fail "could not safely update xrdp.ini"
 fi
 
+install -d -m 0755 "$sesman_dropin_directory"
+temporary_sesman_dropin=$(mktemp "$sesman_dropin_directory/.upstream-local.XXXXXX")
+if ! printf '[Service]\nExecStart=\nExecStart=%s --nodaemon --config /etc/xrdp/sesman.ini\n' \
+    "$sesman" >"$temporary_sesman_dropin" ||
+   ! chmod 0644 "$temporary_sesman_dropin" ||
+   ! mv -f -- "$temporary_sesman_dropin" "$sesman_dropin"; then
+    rm -f -- "$temporary_sesman_dropin"
+    fail "could not write the pinned xrdp-sesman service override"
+fi
+
 install -d -m 0755 "$dropin_directory"
 temporary_dropin=$(mktemp "$dropin_directory/.upstream-local.XXXXXX")
-if ! printf '[Service]\nExecStart=\nExecStart=%s --nodaemon --config /etc/xrdp/xrdp.ini\n' \
+if ! printf '[Unit]\nRequires=xrdp-sesman.service\nAfter=xrdp-sesman.service\n\n[Service]\nExecStart=\nExecStart=%s --nodaemon --config /etc/xrdp/xrdp.ini\n' \
     "$daemon" >"$temporary_dropin" ||
    ! chmod 0644 "$temporary_dropin" ||
    ! mv -f -- "$temporary_dropin" "$dropin"; then
@@ -507,27 +632,42 @@ fi
 
 systemctl daemon-reload || fail "systemd daemon-reload failed"
 
-# Start chansrv before xrdp so a broken legacy chansrv cannot make xrdp fail
-# with a dependency error.
-systemctl restart xrdp-console-chansrv.service ||
-    fail_service xrdp-console-chansrv.service \
-        "the pinned xrdp chansrv failed to start"
-systemctl is-active --quiet xrdp-console-chansrv.service ||
-    fail_service xrdp-console-chansrv.service \
-        "the pinned xrdp chansrv service is not active"
-
-systemctl restart xrdp ||
+# Starting xrdp lets systemd start the required, migrated sesman first.
+# Chansrv starts only after sesman is healthy because it asks sesman to create
+# the per-user socket directory.
+if ! systemctl restart xrdp.service; then
+    if ! systemctl is-active --quiet xrdp-sesman.service; then
+        fail_service xrdp-sesman.service \
+            "xrdp could not start because its pinned sesman dependency failed"
+    fi
     fail_service xrdp.service "the pinned xrdp daemon failed to start"
-systemctl is-active --quiet xrdp ||
+fi
+systemctl is-active --quiet xrdp.service ||
     fail_service xrdp.service "the pinned xrdp service is not active"
+systemctl is-active --quiet xrdp-sesman.service ||
+    fail_service xrdp-sesman.service "the pinned xrdp-sesman service is not active"
+
 active_exec=$(systemctl show xrdp.service -p ExecStart --value) ||
     fail "could not inspect the active xrdp command"
 case "$active_exec" in
     *"$daemon"*) ;;
     *) fail "systemd is not running the pinned candidate daemon" ;;
 esac
+active_sesman_exec=$(systemctl show xrdp-sesman.service -p ExecStart --value) ||
+    fail "could not inspect the active xrdp-sesman command"
+case "$active_sesman_exec" in
+    *"$sesman"*) ;;
+    *) fail "systemd is not running the pinned candidate xrdp-sesman" ;;
+esac
 wait_for_rdp_listener ||
     fail_service xrdp.service "xrdp did not return to port 3389 within 10 seconds"
+
+systemctl restart xrdp-console-chansrv.service ||
+    fail_service xrdp-console-chansrv.service \
+        "the pinned xrdp chansrv failed to start"
+systemctl is-active --quiet xrdp-console-chansrv.service ||
+    fail_service xrdp-console-chansrv.service \
+        "the pinned xrdp chansrv service is not active"
 
 if ! cmp -s -- "$module_source" "$module_target"; then
     fail "installed module differs from the tested build artifact"
@@ -538,6 +678,7 @@ fi
 
 activation_finalized=1
 echo "Activated the first-party direct-X11 module with pinned xrdp 0.10.6.1."
+echo "Activated the matching pinned xrdp-sesman runtime."
 echo "Installed the matching pinned chansrv binary for text clipboard support."
 echo "RDP listener preserved on port 3389."
 echo "Enabled Console text clipboard, dynamic virtual channels, and presentation resizing."

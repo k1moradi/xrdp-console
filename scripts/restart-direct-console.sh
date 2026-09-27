@@ -18,8 +18,27 @@ if [ -n "$established" ]; then
     exit 1
 fi
 
-systemctl restart xrdp.service
-systemctl is-active --quiet xrdp.service
+if ! systemctl restart xrdp.service; then
+    echo "xrdp restart failed; checking required xrdp-sesman dependency." >&2
+    systemctl --no-pager --full status xrdp-sesman.service >&2 || true
+    journalctl -u xrdp-sesman.service -n 60 --no-pager >&2 || true
+    systemctl --no-pager --full status xrdp.service >&2 || true
+    exit 1
+fi
+if ! systemctl is-active --quiet xrdp.service; then
+    echo "xrdp is not active after restart." >&2
+    systemctl --no-pager --full status xrdp.service >&2 || true
+    systemctl --no-pager --full status xrdp-sesman.service >&2 || true
+    journalctl -u xrdp-sesman.service -n 60 --no-pager >&2 || true
+    exit 1
+fi
+if ! systemctl is-active --quiet xrdp-sesman.service; then
+    echo "xrdp restarted but xrdp-sesman.service is not active." >&2
+    systemctl --no-pager --full status xrdp-sesman.service >&2 || true
+    journalctl -u xrdp-sesman.service -n 60 --no-pager >&2 || true
+    exit 1
+fi
+
 systemctl restart xrdp-console-chansrv.service
 systemctl is-active --quiet xrdp-console-chansrv.service
 

@@ -77,16 +77,25 @@ environment on a clean machine.
 
 The host must already provide:
 
-- an `xrdp.service` definition whose environment exports `DISPLAY=:0`;
+- loadable `xrdp.service` and `xrdp-sesman.service` definitions;
+- an `xrdp.service` environment that exports `DISPLAY=:0`;
 - a readable `XAUTHORITY` path in that xrdp service environment;
 - an `xrdp-console-chansrv.service` definition for the physical desktop user;
 - `/etc/xrdp/xrdp.ini` with exactly one `[Globals]` `port=3389`;
+- `/etc/xrdp/sesman.ini`;
 - no active RDP client when activation or restart is requested.
 
-The two services do not need to be active before activation. The activator
+The three services do not need to be active before activation. The activator
 records their current active/inactive state, stops them before replacing
-runtime files, starts the newly installed chansrv before xrdp, and restores
-the recorded state if activation fails or the backup is rolled back.
+runtime files, installs systemd drop-ins that bind xrdp and xrdp-sesman to the
+matching tested build, starts xrdp with systemd bringing up sesman first, and
+starts chansrv only after sesman is healthy. Rollback restores both runtime
+drop-ins and the recorded service state.
+
+Older `xrdp-x11vnc` installations are a supported migration case. A stale
+daemon or sesman `ExecStart` may point into the old project's build tree; the
+preflight reports that condition and activation replaces it transactionally
+with the current `xrdp-console` build rather than requiring manual unit edits.
 
 The repository still does not synthesize a missing
 `xrdp-console-chansrv.service`: selecting the physical desktop user and its
@@ -260,14 +269,17 @@ sudo env XRDP_CONSOLE_BUILD_DIR="$PWD/build-direct-console" \
   scripts/activate-direct-console.sh --preflight
 ```
 
-Preflight validates the tested daemon/module/chansrv artifacts, the two systemd
-unit definitions, `DISPLAY=:0`, the readable `XAUTHORITY`, the configured
-`port=3389`, and the absence of an established RDP client. It does not require
-the services to be active and does not change files or service state.
+Preflight validates the tested daemon/sesman/module/chansrv artifacts, all
+three systemd unit definitions, `DISPLAY=:0`, the readable `XAUTHORITY`, the
+configured `port=3389`, and the absence of an established RDP client. It does
+not require the services to be active and does not change files or service
+state. It also reports a legacy `xrdp-x11vnc` sesman path as a planned repair,
+not as a reason to strand the installation.
 
 If a service is stopped or failed, preflight reports that state. Normal
-activation will attempt to repair it using the tested build and will print
-service status plus recent journal lines automatically if startup fails.
+activation will repair daemon/sesman runtime paths using the tested build and
+will print the relevant service status plus recent journal lines automatically
+if startup fails.
 
 ## Activate the tested build
 
@@ -280,14 +292,14 @@ sudo env XRDP_CONSOLE_BUILD_DIR="$PWD/build-direct-console" \
   scripts/activate-direct-console.sh
 ```
 
-Activation validates the built daemon/module, checks the embedded build
-revision, preserves port `3389`, backs up the existing configuration and
+Activation validates the built daemon/sesman/module, checks the embedded build
 revision, preserves port `3389`, backs up the existing configuration, runtime
-files, and prior active/inactive service state, installs the tested module plus
-matching pinned chansrv, updates the `[Console]` profile to module code `21`,
-starts chansrv before xrdp, and verifies both services and the RDP listener.
-A missing previous `/usr/local/sbin/xrdp-chansrv` is treated as a first install,
-not as an error.
+files, xrdp and sesman service drop-ins, and prior active/inactive service
+state, installs the tested module plus matching pinned chansrv, updates the
+`[Console]` profile to module code `21`, starts the pinned sesman dependency
+with xrdp, then starts chansrv and verifies the complete runtime plus the RDP
+listener. A missing previous `/usr/local/sbin/xrdp-chansrv` is treated as a
+first install, not as an error.
 
 The script prints a root-only backup directory such as:
 
@@ -309,7 +321,7 @@ sudo scripts/activate-direct-console.sh --rollback \
 ```
 
 The rollback restores the previous xrdp configuration, module, chansrv binary,
-service drop-in, service state, and port-3389 listener.
+xrdp/sesman service drop-ins, service state, and port-3389 listener.
 
 ## Restart an already activated installation
 
@@ -320,8 +332,9 @@ cd ~/xrdp-console
 sudo scripts/restart-direct-console.sh
 ```
 
-The restart helper refuses to restart xrdp while a client is connected and
-verifies that the services return and port `3389` is listening.
+The restart helper refuses to restart xrdp while a client is connected,
+verifies the required sesman dependency before chansrv, and reports sesman
+status/journal context when a dependency failure prevents xrdp from starting.
 
 ## Diagnostics
 
@@ -331,6 +344,9 @@ For a read-only service/listener/log snapshot:
 cd ~/xrdp-console
 sudo scripts/diagnose-direct-console.sh
 ```
+
+The snapshot includes the effective xrdp/sesman unit commands and recent
+journals for xrdp, xrdp-sesman, and the console chansrv.
 
 For live xrdp logs:
 

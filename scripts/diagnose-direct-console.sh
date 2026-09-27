@@ -19,8 +19,15 @@ fi
 printf '\n%s\n' '--- xrdp service ---'
 systemctl --no-pager --full status xrdp.service 2>&1 || true
 
+printf '\n%s\n' '--- xrdp-sesman service ---'
+systemctl --no-pager --full status xrdp-sesman.service 2>&1 || true
+
 printf '\n%s\n' '--- console chansrv service ---'
 systemctl --no-pager --full status xrdp-console-chansrv.service 2>&1 || true
+
+printf '\n%s\n' '--- effective xrdp/sesman unit configuration ---'
+systemctl show xrdp.service xrdp-sesman.service \
+    -p FragmentPath -p DropInPaths -p Requires -p ExecStart 2>&1 || true
 
 printf '\n%s\n' '--- RDP listener ---'
 ss -ltnp 'sport = :3389' 2>&1 || true
@@ -30,3 +37,9 @@ ss -tnp state established 'sport = :3389' 2>&1 || true
 
 printf '\n%s\n' '--- recent xrdp journal ---'
 journalctl -u xrdp.service -n 80 --no-pager 2>&1 || true
+
+printf '\n%s\n' '--- recent xrdp-sesman journal ---'
+journalctl -u xrdp-sesman.service -n 80 --no-pager 2>&1 || true
+
+printf '\n%s\n' '--- recent console chansrv journal ---'
+journalctl -u xrdp-console-chansrv.service -n 80 --no-pager 2>&1 || true
