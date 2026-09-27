@@ -378,7 +378,23 @@ VerifiedBitmapCache16::noteSeedSubmitted(
     }
 
     Slot &slot = slots_[plan.cacheSlot - 1U];
-    slot.bitmap = seed_.bitmap;
+    if (seed_.bitmap.sizeBytes != seed_.bitmap.bytes.size()) [[unlikely]]
+    {
+        // Edge tiles use only a prefix of the fixed 64x64 snapshot storage.
+        // Copy that live prefix instead of all 16 KiB; matches() never reads
+        // bytes past sizeBytes.
+        std::memcpy(slot.bitmap.bytes.data(), seed_.bitmap.bytes.data(),
+                    seed_.bitmap.sizeBytes);
+        slot.bitmap.sizeBytes = seed_.bitmap.sizeBytes;
+        slot.bitmap.fingerprint = seed_.bitmap.fingerprint;
+        slot.bitmap.widthPixels = seed_.bitmap.widthPixels;
+        slot.bitmap.heightPixels = seed_.bitmap.heightPixels;
+    }
+    else
+    {
+        // Preserve the existing fixed-size copy for the common full tile.
+        slot.bitmap = seed_.bitmap;
+    }
     slot.state = SlotState::Pending;
     slot.pendingFrameId = frameId;
     slot.cacheKey = plan.cacheKey;

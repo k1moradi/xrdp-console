@@ -224,6 +224,20 @@ int main()
                          oneTileView, {0, 0, 64, 64}));
     const auto replace = lru.seedPlan();
     assert(replace.valid && replace.evict && replace.cacheSlot == 2);
+    lru.noteSeedSubmitted(replace, 17);
+    lru.acknowledge(17);
+
+    const Rectangle edgeTile{0, 0, 22, 42};
+    assert(lru.stageSeed(edgeTile, 100, 0xaaaaU,
+                         oneTileView, edgeTile));
+    const auto edgeReplace = lru.seedPlan();
+    assert(edgeReplace.valid && edgeReplace.evict &&
+           edgeReplace.cacheSlot == 3);
+    lru.noteSeedSubmitted(edgeReplace, 18);
+    lru.acknowledge(18);
+    assert(lru.findVerified(0xaaaaU, oneTileView, edgeTile) == 3);
+    assert(lru.findVerified(0xaaaaU, oneTileView,
+                            {0, 0, 64, 64}) == 0);
 
     cache.disable();
     assert(!cache.valid());
