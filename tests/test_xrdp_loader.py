@@ -566,32 +566,57 @@ def assert_client_pixel(client_display: str,
             batch_pattern = re.compile(
                 r"XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 frame=(\d+) "
                 r"starts=1 ends=1 rects=(\d+) tiles=(\d+) "
-                r"pixels=(\d+) pending=0")
-            matched_batch = False
+                r"pixels=(\d+) pending=(\d+)")
+            # Console Planar intentionally has a zero minimum flush interval.
+            # The stimulus draws the two sparse windows with separate X11
+            # requests, so both damages may already be pending for one frame,
+            # or the first may be flushed before the second request is
+            # observed. Validate the bounded aggregate output instead of
+            # depending on that scheduler timing.
+            matched_sparse_output = False
+            last_sparse_frame = sparse_baseline_frame
+            sparse_rects = 0
+            sparse_tiles = 0
+            sparse_pixels = 0
+            sparse_pending = 1
             while time.monotonic() < deadline:
                 for line in read_text(log_path).splitlines():
                     match = batch_pattern.search(line)
-                    if (match is None or
-                            int(match.group(1)) <= sparse_baseline_frame):
+                    if match is None:
                         continue
-                    rects, tiles, pixels = (
-                        int(match.group(index)) for index in (2, 3, 4))
+                    frame = int(match.group(1))
+                    if frame <= last_sparse_frame:
+                        continue
+                    rects, tiles, pixels, pending = (
+                        int(match.group(index)) for index in (2, 3, 4, 5))
+                    last_sparse_frame = frame
+                    sparse_rects += rects
+                    sparse_tiles += tiles
+                    sparse_pixels += pixels
+                    sparse_pending = pending
+
                     sparse_pixels_valid = (
-                        0 < pixels <= PLANAR_PIXEL_LIMIT and
-                        pixels <
+                        0 < sparse_pixels <= PLANAR_PIXEL_LIMIT and
+                        sparse_pixels <
                         (presentation_width * presentation_height) // 8)
                     if scaled_presentation:
-                        matched_batch = (
-                            rects == 2 and tiles >= 2 and sparse_pixels_valid)
+                        matched_sparse_output = (
+                            sparse_rects == 2 and
+                            sparse_tiles >= 2 and
+                            sparse_pixels_valid and
+                            sparse_pending == 0)
                     else:
-                        matched_batch = (
-                            rects == 2 and tiles == 2 and pixels == 800)
-                    if matched_batch:
+                        matched_sparse_output = (
+                            sparse_rects == 2 and
+                            sparse_tiles == 2 and
+                            sparse_pixels == 800 and
+                            sparse_pending == 0)
+                    if matched_sparse_output or sparse_rects >= 2:
                         break
-                if matched_batch:
+                if matched_sparse_output or sparse_rects >= 2:
                     break
                 time.sleep(0.05)
-            if not matched_batch:
+            if not matched_sparse_output:
                 summaries = "\n".join(
                     line for line in read_text(log_path).splitlines()
                     if "XRDP_CONSOLE_GFX_PLANAR_BATCH_V1" in line)
@@ -599,9 +624,11 @@ def assert_client_pixel(client_display: str,
                     line for line in read_text(stdout_path).splitlines()
                     if "DAMAGE_" in line)
                 raise AssertionError(
-                    "two sparse 20x20 updates did not produce one bounded "
-                    "Planar frame (expected two rects, <=128 Ki pixels, "
-                    f"pending=0):\n{summaries}\n"
+                    "two sparse 20x20 updates did not produce bounded Planar "
+                    "output (expected aggregate two rects, <=128 Ki pixels, "
+                    f"pending=0; observed rects={sparse_rects} "
+                    f"tiles={sparse_tiles} pixels={sparse_pixels} "
+                    f"pending={sparse_pending}):\n{summaries}\n"
                     f"{damage_debug}\n"
                     f"{xrdp_log_excerpt(log_path)}")
     finally:
