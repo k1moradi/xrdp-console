@@ -52,14 +52,6 @@ rectangleFits(Rectangle rectangle, FramebufferView frame) noexcept
     return right <= frame.widthPixels && bottom <= frame.heightPixels;
 }
 
-[[nodiscard]] const std::byte *
-pixelAt(FramebufferView frame, std::uint32_t x, std::uint32_t y) noexcept
-{
-    return frame.pixels.data() +
-           static_cast<std::size_t>(y) * frame.strideBytes +
-           static_cast<std::size_t>(x) * kBytesPerPixel;
-}
-
 [[nodiscard]] bool
 sameBgr(const std::byte *left, const std::byte *right) noexcept
 {
@@ -94,12 +86,13 @@ struct SampleSignature final
 };
 
 [[nodiscard]] SampleSignature
-signatureAt(FramebufferView frame, std::uint32_t x, std::uint32_t y) noexcept
+signatureAt(const std::byte *row, const std::byte *downRow,
+            std::size_t byteOffset) noexcept
 {
     return {
-        pixelAt(frame, x, y),
-        pixelAt(frame, x + 1U, y),
-        pixelAt(frame, x, y + 1U),
+        row + byteOffset,
+        row + byteOffset + kBytesPerPixel,
+        downRow + byteOffset,
     };
 }
 
@@ -219,36 +212,49 @@ verifyVerticalMotion(FramebufferView previousFrame,
         return result;
     }
 
-    std::array<std::uint32_t, kMaximumSampleColumns> localXs{};
+    std::array<std::size_t, kMaximumSampleColumns> columnByteOffsets{};
     for (std::uint32_t column = 0; column < columns; ++column)
     {
-        localXs[column] = static_cast<std::uint32_t>(
+        const std::uint32_t localX = static_cast<std::uint32_t>(
             (static_cast<std::uint64_t>(2U * column + 1U) * xPositions) /
             (2U * columns));
+        columnByteOffsets[column] =
+            static_cast<std::size_t>(localX) * kBytesPerPixel;
     }
+    const std::size_t previousXOffset =
+        static_cast<std::size_t>(plan.sourceRectangle.x) * kBytesPerPixel;
+    const std::size_t currentXOffset =
+        static_cast<std::size_t>(destinationRectangle.x) * kBytesPerPixel;
 
     for (std::uint32_t row = 0; row < rows; ++row)
     {
         const std::uint32_t localY = static_cast<std::uint32_t>(
             (static_cast<std::uint64_t>(2U * row + 1U) * yPositions) /
             (2U * rows));
+        const std::uint32_t oldY =
+            static_cast<std::uint32_t>(plan.sourceRectangle.y) + localY;
+        const std::uint32_t newY =
+            static_cast<std::uint32_t>(destinationRectangle.y) + localY;
+        const std::byte *previousRow =
+            previousFrame.pixels.data() +
+            static_cast<std::size_t>(oldY) * previousFrame.strideBytes +
+            previousXOffset;
+        const std::byte *currentRow =
+            currentFrame.pixels.data() +
+            static_cast<std::size_t>(newY) * currentFrame.strideBytes +
+            currentXOffset;
+        const std::byte *previousDownRow =
+            previousRow + previousFrame.strideBytes;
+        const std::byte *currentDownRow =
+            currentRow + currentFrame.strideBytes;
+
         for (std::uint32_t column = 0; column < columns; ++column)
         {
-            const std::uint32_t localX = localXs[column];
-
-            const std::uint32_t oldX =
-                static_cast<std::uint32_t>(plan.sourceRectangle.x) + localX;
-            const std::uint32_t oldY =
-                static_cast<std::uint32_t>(plan.sourceRectangle.y) + localY;
-            const std::uint32_t newX =
-                static_cast<std::uint32_t>(destinationRectangle.x) + localX;
-            const std::uint32_t newY =
-                static_cast<std::uint32_t>(destinationRectangle.y) + localY;
-
+            const std::size_t byteOffset = columnByteOffsets[column];
             const SampleSignature previous =
-                signatureAt(previousFrame, oldX, oldY);
+                signatureAt(previousRow, previousDownRow, byteOffset);
             const SampleSignature current =
-                signatureAt(currentFrame, newX, newY);
+                signatureAt(currentRow, currentDownRow, byteOffset);
             const bool match = signatureMatches(previous, current);
             const bool informative = signatureInformative(previous);
 

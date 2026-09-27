@@ -2,10 +2,12 @@
 
 #include "rdp/vertical_motion_verifier.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <span>
 #include <vector>
@@ -64,6 +66,33 @@ view(const std::vector<std::byte> &pixels,
     return {pixels, width, height, static_cast<std::size_t>(width) * 4U};
 }
 
+FramebufferView
+view(const std::vector<std::byte> &pixels, std::uint32_t width,
+     std::uint32_t height, std::size_t strideBytes) noexcept
+{
+    return {pixels, width, height, strideBytes};
+}
+
+std::vector<std::byte>
+withRowPadding(const std::vector<std::byte> &packed,
+               std::uint32_t width, std::uint32_t height,
+               std::size_t strideBytes)
+{
+    constexpr std::byte kPaddingValue{0xA5};
+    const std::size_t rowBytes = static_cast<std::size_t>(width) * 4U;
+    std::vector<std::byte> padded(strideBytes * height, kPaddingValue);
+    for (std::uint32_t y = 0; y < height; ++y)
+    {
+        const std::size_t packedOffset =
+            static_cast<std::size_t>(y) * rowBytes;
+        const std::size_t paddedOffset =
+            static_cast<std::size_t>(y) * strideBytes;
+        std::memcpy(padded.data() + paddedOffset,
+                    packed.data() + packedOffset, rowBytes);
+    }
+    return padded;
+}
+
 std::vector<std::byte>
 scrollVertical(const std::vector<std::byte> &previous,
                std::uint32_t width, std::uint32_t height,
@@ -109,6 +138,38 @@ scrollVertical(const std::vector<std::byte> &previous,
     return current;
 }
 
+std::vector<std::byte>
+scrollViewportUpward(const std::vector<std::byte> &previous,
+                     std::uint32_t width, Rectangle viewport,
+                     std::uint32_t shift)
+{
+    auto current = previous;
+    const std::size_t rowBytes =
+        static_cast<std::size_t>(viewport.widthPixels) * 4U;
+    for (std::uint32_t localY = 0;
+         localY + shift < viewport.heightPixels; ++localY)
+    {
+        const std::size_t sourceOffset =
+            (static_cast<std::size_t>(viewport.y +
+                                      static_cast<std::int32_t>(localY + shift)) *
+                 width +
+             static_cast<std::uint32_t>(viewport.x)) *
+            4U;
+        const std::size_t destinationOffset =
+            (static_cast<std::size_t>(viewport.y +
+                                      static_cast<std::int32_t>(localY)) *
+                 width +
+             static_cast<std::uint32_t>(viewport.x)) *
+            4U;
+        std::copy_n(previous.begin() +
+                        static_cast<std::ptrdiff_t>(sourceOffset),
+                    rowBytes,
+                    current.begin() +
+                        static_cast<std::ptrdiff_t>(destinationOffset));
+    }
+    return current;
+}
+
 bool
 exact_upward_motion_is_verified()
 {
@@ -137,6 +198,37 @@ exact_downward_motion_is_verified()
         view(previous, width, height), view(current, width, height),
         {0, 0, width, height}, 31);
     return check(result.verified(), "exact downward motion was rejected");
+}
+
+bool
+different_strides_and_offset_viewport_are_supported()
+{
+    constexpr std::uint32_t width = 256;
+    constexpr std::uint32_t height = 192;
+    constexpr Rectangle viewport{13, 17, 211, 151};
+    constexpr std::uint32_t shift = 29U;
+    constexpr std::size_t previousStride =
+        static_cast<std::size_t>(width) * 4U + 12U;
+    constexpr std::size_t currentStride =
+        static_cast<std::size_t>(width) * 4U + 28U;
+
+    const auto previousPacked = pattern(width, height);
+    const auto currentPacked = scrollViewportUpward(
+        previousPacked, width, viewport, shift);
+    const auto previous = withRowPadding(
+        previousPacked, width, height, previousStride);
+    const auto current = withRowPadding(
+        currentPacked, width, height, currentStride);
+    const auto result = verifyVerticalMotion(
+        view(previous, width, height, previousStride),
+        view(current, width, height, currentStride),
+        viewport, -static_cast<std::int32_t>(shift));
+
+    return check(result.verified(),
+                 "offset viewport with distinct row strides was rejected") &&
+           check(result.samplesCompared != 0 &&
+                     result.samplesMatched == result.samplesCompared,
+                 "row-base sampling changed exact scroll signatures");
 }
 
 bool
@@ -385,6 +477,7 @@ main()
     bool success = true;
     success &= exact_upward_motion_is_verified();
     success &= exact_downward_motion_is_verified();
+    success &= different_strides_and_offset_viewport_are_supported();
     success &= small_fixed_overlay_is_tolerated();
     success &= wrong_displacement_is_rejected();
     success &= unrelated_frame_is_rejected();
