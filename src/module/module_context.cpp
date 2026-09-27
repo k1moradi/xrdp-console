@@ -3476,7 +3476,12 @@ ModuleContext::check_h264_gfx() noexcept
      * The current interaction scheduler is authoritative. Scroll reuse may
      * only remove complete copied tiles from the selections it already chose.
      */
-    const auto authoritativeSelections = transmissionSelections;
+    // Keep the authoritative view aliased until scroll reuse actually
+    // replaces the scheduler output. Most frames avoid a 24 KiB array copy.
+    std::array<GenerationTileMap::Selection, kMaximumH264Selections>
+        authoritativeSelectionStorage;
+    const GenerationTileMap::Selection *authoritativeSelections =
+        transmissionSelections.data();
     const std::size_t authoritativeCount = transmissionCount;
     if (exactScrollCopyRunCount != 0 &&
         !impl_->h264Frame.baselineSubmissionPending())
@@ -3554,13 +3559,16 @@ ModuleContext::check_h264_gfx() noexcept
             const std::size_t residualCount =
                 impl_->h264Frame.collectReadyTransmissionSelectionsExcluding(
                     std::span<const GenerationTileMap::Selection>(
-                        authoritativeSelections.data(), authoritativeCount),
+                        authoritativeSelections, authoritativeCount),
                     std::span<const Rectangle>(
                         clientCopiedRectangles.data(),
                         clientCopiedRectangleCount),
                     residualSelections);
             if (residualCount != 0)
             {
+                authoritativeSelectionStorage = transmissionSelections;
+                authoritativeSelections =
+                    authoritativeSelectionStorage.data();
                 transmissionSelections = residualSelections;
                 transmissionCount = residualCount;
                 useScrollCopy = true;
@@ -3834,7 +3842,7 @@ ModuleContext::check_h264_gfx() noexcept
     if (!impl_->h264Frame.noteSubmitted(
             frameId,
             std::span<const GenerationTileMap::Selection>(
-                authoritativeSelections.data(), authoritativeCount)))
+                authoritativeSelections, authoritativeCount)))
     {
         impl_->verifiedBitmapCache.disable();
         impl_->pendingBitmapCacheHit.clear();
