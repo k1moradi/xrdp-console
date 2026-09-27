@@ -884,6 +884,37 @@ bool coherent_snapshot_capture_budget_is_bounded()
     return success;
 }
 
+bool resize_cannot_reenable_h264_without_coherent_snapshot()
+{
+    using xrdp_console::rdp::H264ResizeDecision;
+    using xrdp_console::rdp::selectH264ResizeDecision;
+
+    constexpr PixelSize source{1920, 1080};
+    bool success = true;
+    success &= check(
+        selectH264ResizeDecision(true, true, source, false) ==
+            H264ResizeDecision::SafeFallback,
+        "resize did not retain the safe GFX fallback when the coherent "
+        "XShm arena was unavailable");
+    success &= check(
+        selectH264ResizeDecision(true, true, source, true) ==
+            H264ResizeDecision::DirectH264,
+        "eligible H.264 was rejected when its coherent arena was ready");
+    success &= check(
+        selectH264ResizeDecision(true, true, {4096, 2160}, true) ==
+            H264ResizeDecision::SafeFallback,
+        "H.264 accepted a source exceeding the coherent snapshot budget");
+    success &= check(
+        selectH264ResizeDecision(false, true, source, true) ==
+            H264ResizeDecision::NotNegotiated,
+        "resize selected H.264 when it was not negotiated");
+    success &= check(
+        selectH264ResizeDecision(true, false, source, true) ==
+            H264ResizeDecision::SafeFallback,
+        "unsupported presentation geometry did not select safe fallback");
+    return success;
+}
+
 } // namespace
 
 int main()
@@ -910,5 +941,6 @@ int main()
     success &= oversized_nv12_frame_is_rejected_before_allocation();
     success &= scaled_newer_source_damage_blocks_stale_frame_tile();
     success &= coherent_snapshot_capture_budget_is_bounded();
+    success &= resize_cannot_reenable_h264_without_coherent_snapshot();
     return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

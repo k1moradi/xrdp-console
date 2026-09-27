@@ -30,6 +30,41 @@ h264CoherentSnapshotFits(PixelSize source) noexcept
            kMaximumCoherentH264SnapshotBytes / sizeof(std::uint32_t);
 }
 
+// Direct H.264 must only be selected when the persistent full-source arena
+// was successfully allocated. The size check is repeated here so callers
+// cannot accidentally treat a stale/incorrect readiness flag as sufficient.
+[[nodiscard]] constexpr bool
+h264CoherentSnapshotAvailable(PixelSize source,
+                              bool snapshotArenaAllocated) noexcept
+{
+    return snapshotArenaAllocated && h264CoherentSnapshotFits(source);
+}
+
+enum class H264ResizeDecision
+{
+    NotNegotiated,
+    SafeFallback,
+    DirectH264,
+};
+
+[[nodiscard]] constexpr H264ResizeDecision
+selectH264ResizeDecision(bool h264Negotiated,
+                         bool presentationGeometrySupported,
+                         PixelSize source,
+                         bool snapshotArenaAllocated) noexcept
+{
+    if (!h264Negotiated)
+    {
+        return H264ResizeDecision::NotNegotiated;
+    }
+    if (!presentationGeometrySupported ||
+        !h264CoherentSnapshotAvailable(source, snapshotArenaAllocated))
+    {
+        return H264ResizeDecision::SafeFallback;
+    }
+    return H264ResizeDecision::DirectH264;
+}
+
 static_assert(h264CoherentSnapshotFits({2560, 1440}));
 static_assert(h264CoherentSnapshotFits({3840, 2160}));
 static_assert(!h264CoherentSnapshotFits({4096, 2160}));

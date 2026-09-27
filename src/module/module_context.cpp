@@ -1811,10 +1811,12 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
 
     xrdp_console::rdp::H264LatestFrameState h264Frame;
     struct xrdp_console_graphics_capabilities negotiatedGraphics{};
-    if (num_monitors >= 0 && num_monitors <= 1 &&
+    const bool h264Negotiated =
+        num_monitors >= 0 && num_monitors <= 1 &&
         xrdp_console_module_get_graphics_capabilities(
-            impl_->module, &negotiatedGraphics) == 0 &&
-        negotiatedGraphics.selected_gfx_mode == XRDP_CONSOLE_GFX_H264)
+                impl_->module, &negotiatedGraphics) == 0 &&
+        negotiatedGraphics.selected_gfx_mode == XRDP_CONSOLE_GFX_H264;
+    if (h264Negotiated)
     {
         xrdp_console::rdp::H264PresentationPlan h264Plan{};
         PresentationTransform h264Transform;
@@ -1822,7 +1824,13 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
         const bool h264GeometrySupported =
             xrdp_console::rdp::makeH264PresentationPlan(
                 impl_->state.sourceGeometry, presentationGeometry, h264Plan);
-        if (h264GeometrySupported &&
+        const auto resizeDecision =
+            xrdp_console::rdp::selectH264ResizeDecision(
+                h264Negotiated, h264GeometrySupported,
+                impl_->state.sourceGeometry,
+                impl_->h264CoherentCaptureAvailable);
+        if (resizeDecision ==
+                xrdp_console::rdp::H264ResizeDecision::DirectH264 &&
             xrdp_console_module_h264_surface_id(impl_->module) >= 0 &&
             h264Frame.configure(
                 impl_->state.sourceGeometry, presentationGeometry,
@@ -1860,6 +1868,11 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
             }
             const char *reason = !h264GeometrySupported
                                      ? "unsupported presentation geometry"
+                                 : !xrdp_console::rdp::
+                                       h264CoherentSnapshotAvailable(
+                                           impl_->state.sourceGeometry,
+                                           impl_->h264CoherentCaptureAvailable)
+                                     ? "coherent source snapshot unavailable"
                                      : "H.264 surface or state setup failed";
             log_message(
                 LOG_LEVEL_WARNING,
@@ -2029,7 +2042,12 @@ ModuleContext::suppress_output(bool suppress, int left, int top, int right,
         impl_->clientScaledOutputResizeRearmPending = false;
         xrdp_console::rdp::H264PresentationPlan currentPlan{};
         struct xrdp_console_graphics_capabilities negotiatedGraphics{};
+        const bool coherentSnapshotAvailable =
+            xrdp_console::rdp::h264CoherentSnapshotAvailable(
+                impl_->state.sourceGeometry,
+                impl_->h264CoherentCaptureAvailable);
         const bool prerequisitesReady =
+            coherentSnapshotAvailable &&
             xrdp_console::rdp::makeH264PresentationPlan(
                 impl_->state.sourceGeometry,
                 impl_->state.presentationGeometry, currentPlan) &&
@@ -2038,10 +2056,24 @@ ModuleContext::suppress_output(bool suppress, int left, int top, int right,
             xrdp_console_module_h264_encoder_available(impl_->module) != 0;
         if (!prerequisitesReady)
         {
+            if (!coherentSnapshotAvailable)
+            {
+                // Never resume into the legacy per-tile H.264 capture path.
+                // The negotiated GFX route remains available and will receive
+                // a complete redraw below.
+                impl_->h264Frame.reset();
+                impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
+                impl_->h264SubmittedFrameId = 0;
+                impl_->h264SubmittedAt = {};
+                impl_->fullPresentationInvalidation = true;
+            }
             log_message(
                 LOG_LEVEL_WARNING,
                 "XRDP_CONSOLE_CLIENT_SCALE_LIVE event=resize-resume "
-                "result=fallback-safe reason=post-resize-prerequisite-unavailable");
+                "result=fallback-safe reason=%s",
+                coherentSnapshotAvailable
+                    ? "post-resize-prerequisite-unavailable"
+                    : "coherent-source-snapshot-unavailable");
         }
         else
         {
@@ -2834,8 +2866,21 @@ ModuleContext::check_h264_gfx() noexcept
     if (!valid() || !impl_->h264Frame.valid() ||
         impl_->damageTracker == nullptr || !impl_->damageTracker->valid() ||
         impl_->sharedMemoryCapture == nullptr ||
-        !impl_->sharedMemoryCapture->valid())
+        !impl_->sharedMemoryCapture->valid() ||
+        !xrdp_console::rdp::h264CoherentSnapshotAvailable(
+            impl_->h264Frame.sourceGeometry(),
+            impl_->h264CoherentCaptureAvailable))
     {
+        if (valid() && impl_->graphicsTransport == GraphicsTransport::H264Gfx &&
+            !xrdp_console::rdp::h264CoherentSnapshotAvailable(
+                impl_->h264Frame.sourceGeometry(),
+                impl_->h264CoherentCaptureAvailable))
+        {
+            log_message(
+                LOG_LEVEL_ERROR,
+                "xrdp-console: refusing H.264 service without a coherent "
+                "source snapshot arena");
+        }
         return 1;
     }
 
