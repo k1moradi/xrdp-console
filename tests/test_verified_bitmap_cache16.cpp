@@ -130,9 +130,22 @@ int main()
     pixels[64U * 4U + 5U] = std::byte((64U * 4U + 5U) & 0xffU);
     assert(cache.findVerified(0x77U + 1U, capture, localTile) == 0);
 
+    assert(cache.stageSeed({256, 64, 64, 64}, 8, 0x88U,
+                           capture, localTile));
+    const auto pendingSeed = cache.seedPlan();
+    assert(pendingSeed.valid && pendingSeed.cacheSlot == 2);
+    cache.noteSeedSubmitted(pendingSeed, 9);
     cache.clear();
     assert(cache.valid());
+    assert(!cache.seedPlan().valid);
     assert(cache.findVerified(0x77U, capture, localTile) == 0);
+    cache.acknowledge(9);
+    assert(cache.findVerified(0x88U, capture, localTile) == 0);
+    assert(cache.stageSeed(source, 10, 0x99U, capture, localTile));
+    const auto afterClearSeed = cache.seedPlan();
+    assert(afterClearSeed.valid && !afterClearSeed.evict &&
+           afterClearSeed.cacheSlot == 1 && afterClearSeed.cacheKey == 1);
+    cache.discardSeed();
 
     std::array<std::byte, 64> command{};
     std::size_t bytes = buildGfxSurfaceToCacheCommand(
