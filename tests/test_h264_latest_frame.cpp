@@ -28,6 +28,165 @@ bool check(bool condition, const char *message)
     return true;
 }
 
+std::size_t referenceCollectReadySelectionsExcluding(
+    std::span<const GenerationTileMap::Selection> selections,
+    std::span<const Rectangle> exclusions,
+    std::span<GenerationTileMap::Selection> output)
+{
+    constexpr std::uint32_t kTileWidth =
+        GenerationTileMap::kTileWidthPixels;
+    if (selections.empty() || output.empty())
+    {
+        return 0;
+    }
+    if (exclusions.empty())
+    {
+        const std::size_t count = std::min(selections.size(), output.size());
+        std::copy_n(selections.begin(), count, output.begin());
+        return count;
+    }
+
+    const bool singleExclusion = exclusions.size() == 1U;
+    const Rectangle single =
+        singleExclusion ? exclusions.front() : Rectangle{};
+    const bool singleValid =
+        singleExclusion && single.x >= 0 && single.y >= 0;
+    const std::uint64_t singleRight = singleValid
+        ? static_cast<std::uint64_t>(single.x) + single.widthPixels
+        : 0U;
+    const std::uint64_t singleBottom = singleValid
+        ? static_cast<std::uint64_t>(single.y) + single.heightPixels
+        : 0U;
+
+    const auto tileExcludedByAny = [exclusions](Rectangle tile) {
+        const std::uint64_t tileRight =
+            static_cast<std::uint64_t>(tile.x) + tile.widthPixels;
+        const std::uint64_t tileBottom =
+            static_cast<std::uint64_t>(tile.y) + tile.heightPixels;
+        for (const Rectangle exclusion : exclusions)
+        {
+            if (exclusion.x >= 0 && exclusion.y >= 0 &&
+                tile.x >= exclusion.x && tile.y >= exclusion.y &&
+                tileRight <= static_cast<std::uint64_t>(exclusion.x) +
+                                 exclusion.widthPixels &&
+                tileBottom <= static_cast<std::uint64_t>(exclusion.y) +
+                                  exclusion.heightPixels)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    std::size_t outputCount = 0;
+    for (const auto &run : selections)
+    {
+        if (outputCount == output.size())
+        {
+            break;
+        }
+        if (singleExclusion)
+        {
+            const std::uint64_t runBottom =
+                static_cast<std::uint64_t>(run.rectangle.y) +
+                run.rectangle.heightPixels;
+            if (!singleValid || run.rectangle.y < single.y ||
+                runBottom > singleBottom)
+            {
+                if (run.rectangle.widthPixels != 0U)
+                {
+                    output[outputCount++] = run;
+                }
+                continue;
+            }
+        }
+
+        std::uint32_t offset = 0;
+        std::uint32_t keptOffset = 0;
+        std::uint32_t keptWidth = 0;
+        while (offset < run.rectangle.widthPixels)
+        {
+            const std::uint32_t tileWidth = std::min(
+                kTileWidth, run.rectangle.widthPixels - offset);
+            const Rectangle tile{
+                run.rectangle.x + static_cast<std::int32_t>(offset),
+                run.rectangle.y, tileWidth, run.rectangle.heightPixels};
+            const bool tileExcluded = singleExclusion
+                ? tile.x >= single.x &&
+                      static_cast<std::uint64_t>(tile.x) + tile.widthPixels <=
+                          singleRight
+                : tileExcludedByAny(tile);
+            if (!tileExcluded)
+            {
+                if (keptWidth == 0)
+                {
+                    keptOffset = offset;
+                }
+                keptWidth += tileWidth;
+            }
+            else if (keptWidth != 0)
+            {
+                output[outputCount++] = {
+                    {run.rectangle.x + static_cast<std::int32_t>(keptOffset),
+                     run.rectangle.y, keptWidth, run.rectangle.heightPixels},
+                    run.generation};
+                keptWidth = 0;
+                if (outputCount == output.size())
+                {
+                    return outputCount;
+                }
+            }
+            offset += tileWidth;
+        }
+        if (keptWidth != 0 && outputCount < output.size())
+        {
+            output[outputCount++] = {
+                {run.rectangle.x + static_cast<std::int32_t>(keptOffset),
+                 run.rectangle.y, keptWidth, run.rectangle.heightPixels},
+                run.generation};
+        }
+    }
+    return outputCount;
+}
+
+bool
+exclusionOutputMatchesReference(
+    std::span<const GenerationTileMap::Selection> selections,
+    std::span<const Rectangle> exclusions,
+    std::span<GenerationTileMap::Selection> output)
+{
+    std::array<GenerationTileMap::Selection, 16> expected{};
+    if (output.size() > expected.size())
+    {
+        return check(false,
+                     "reference selection buffer is smaller than output");
+    }
+    const std::size_t expectedCount =
+        referenceCollectReadySelectionsExcluding(
+            selections, exclusions,
+            std::span<GenerationTileMap::Selection>(expected.data(),
+                                                    output.size()));
+    H264LatestFrameState state;
+    const std::size_t actualCount =
+        state.collectReadyTransmissionSelectionsExcluding(
+            selections, exclusions, output);
+    if (!check(actualCount == expectedCount,
+               "single-exclusion output count differs from reference"))
+    {
+        return false;
+    }
+    for (std::size_t index = 0; index < actualCount; ++index)
+    {
+        if (!(output[index].rectangle == expected[index].rectangle &&
+              output[index].generation == expected[index].generation))
+        {
+            return check(false,
+                         "single-exclusion output differs from reference");
+        }
+    }
+    return true;
+}
+
 bool identity_rectangle_mapping_is_exact_after_bounds_validation()
 {
     H264LatestFrameState state;
@@ -322,6 +481,157 @@ bool client_surface_copy_commits_only_copied_tiles()
                      "client-copied tile remained pending");
     success &= check(state.releaseSubmission(2),
                      "client-copy frame did not release");
+    return success;
+}
+
+bool aligned_wide_single_exclusion_splits_and_preserves_capacity()
+{
+    H264LatestFrameState state;
+    constexpr std::array<GenerationTileMap::Selection, 1> run{{
+        {{0, 32, 1366, 64}, 17},
+    }};
+    constexpr std::array<Rectangle, 1> interiorExclusion{{
+        {256, 32, 512, 64},
+    }};
+    std::array<GenerationTileMap::Selection, 4> output{};
+
+    const std::size_t splitCount =
+        state.collectReadyTransmissionSelectionsExcluding(
+            run, interiorExclusion, output);
+    bool success = check(splitCount == 2,
+                         "aligned wide exclusion did not produce two runs");
+    success &= check(output[0].rectangle == Rectangle{0, 32, 256, 64} &&
+                         output[0].generation == 17,
+                     "left residual run was incorrect");
+    success &= check(output[1].rectangle == Rectangle{768, 32, 598, 64} &&
+                         output[1].generation == 17,
+                     "right residual run was incorrect");
+
+    std::array<GenerationTileMap::Selection, 1> limitedOutput{};
+    const std::size_t limitedCount =
+        state.collectReadyTransmissionSelectionsExcluding(
+            run, interiorExclusion, limitedOutput);
+    success &= check(limitedCount == 1 &&
+                         limitedOutput[0].rectangle ==
+                             Rectangle{0, 32, 256, 64},
+                     "single-exclusion split changed output-capacity order");
+    success &= exclusionOutputMatchesReference(
+        run, interiorExclusion, limitedOutput);
+
+    constexpr std::array<Rectangle, 1> beyondPartialRightEdge{{
+        {1280, 32, 128, 64},
+    }};
+    const std::size_t edgeCount =
+        state.collectReadyTransmissionSelectionsExcluding(
+            run, beyondPartialRightEdge, output);
+    success &= check(edgeCount == 1 &&
+                         output[0].rectangle == Rectangle{0, 32, 1280, 64},
+                     "exclusion past the final partial tile was not clipped");
+    success &= exclusionOutputMatchesReference(
+        run, beyondPartialRightEdge, output);
+    return success;
+}
+
+bool unusual_scroll_exclusions_match_tile_reference()
+{
+    H264LatestFrameState state;
+    std::array<GenerationTileMap::Selection, 2> selections{{
+        {{3, 16, 384, 64}, 9},
+        {{-64, 32, 320, 64}, 11},
+    }};
+    constexpr std::array<Rectangle, 1> unalignedExclusion{{
+        {67, 16, 128, 64},
+    }};
+    constexpr std::array<Rectangle, 1> positiveExclusion{{
+        {64, 32, 128, 64},
+    }};
+    constexpr std::array<Rectangle, 2> multipleExclusions{{
+        {64, 16, 64, 64},
+        {256, 16, 64, 64},
+    }};
+    std::array<GenerationTileMap::Selection, 8> output{};
+    bool success = true;
+
+    success &= exclusionOutputMatchesReference(
+        std::span<const GenerationTileMap::Selection>(selections.data(), 1),
+        unalignedExclusion, output);
+    success &= exclusionOutputMatchesReference(
+        std::span<const GenerationTileMap::Selection>(selections.data() + 1, 1),
+        positiveExclusion, output);
+    success &= exclusionOutputMatchesReference(
+        std::span<const GenerationTileMap::Selection>(selections.data(), 1),
+        multipleExclusions, output);
+    return success;
+}
+
+bool randomized_scroll_exclusions_match_tile_reference()
+{
+    std::uint32_t randomState = 0x91e10da5U;
+    const auto nextRandom = [&randomState]() noexcept {
+        randomState ^= randomState << 13U;
+        randomState ^= randomState >> 17U;
+        randomState ^= randomState << 5U;
+        return randomState;
+    };
+
+    bool success = true;
+    for (std::size_t iteration = 0; iteration < 10000U; ++iteration)
+    {
+        std::array<GenerationTileMap::Selection, 6> selections{};
+        const std::size_t selectionCount = nextRandom() % 7U;
+        for (std::size_t index = 0; index < selectionCount; ++index)
+        {
+            std::int32_t x = 0;
+            switch (nextRandom() % 4U)
+            {
+                case 0:
+                    x = static_cast<std::int32_t>(nextRandom() % 10U) * 64;
+                    break;
+                case 1:
+                    x = static_cast<std::int32_t>(nextRandom() % 512U) - 128;
+                    break;
+                case 2:
+                    x = static_cast<std::int32_t>(nextRandom() % 512U);
+                    break;
+                default:
+                    x = static_cast<std::int32_t>(nextRandom() % 7U) * 64;
+                    break;
+            }
+            selections[index] = {
+                {x,
+                 static_cast<std::int32_t>(nextRandom() % 240U) - 32,
+                 nextRandom() % 700U,
+                 nextRandom() % 120U},
+                static_cast<std::uint64_t>(nextRandom()) + 1U};
+        }
+
+        std::array<Rectangle, 3> exclusions{};
+        const std::size_t exclusionCount = nextRandom() % 4U;
+        for (std::size_t index = 0; index < exclusionCount; ++index)
+        {
+            const std::int32_t x = (nextRandom() & 1U) == 0U
+                ? static_cast<std::int32_t>(nextRandom() % 12U) * 64
+                : static_cast<std::int32_t>(nextRandom() % 768U) - 64;
+            exclusions[index] = {
+                x,
+                static_cast<std::int32_t>(nextRandom() % 240U) - 32,
+                nextRandom() % 800U,
+                nextRandom() % 160U};
+        }
+
+        std::array<GenerationTileMap::Selection, 16> output{};
+        const std::size_t outputCapacity = nextRandom() % (output.size() + 1U);
+        success &= exclusionOutputMatchesReference(
+            std::span<const GenerationTileMap::Selection>(
+                selections.data(), selectionCount),
+            std::span<const Rectangle>(exclusions.data(), exclusionCount),
+            std::span<GenerationTileMap::Selection>(output.data(),
+                                                    outputCapacity));
+        if (!success)
+        {
+            return false;
+        }
+    }
     return success;
 }
 
@@ -979,6 +1289,9 @@ int main()
     success &= newest_generation_replaces_stale_unsent_tile();
     success &= producer_window_holds_one_async_frame();
     success &= client_surface_copy_commits_only_copied_tiles();
+    success &= aligned_wide_single_exclusion_splits_and_preserves_capacity();
+    success &= unusual_scroll_exclusions_match_tile_reference();
+    success &= randomized_scroll_exclusions_match_tile_reference();
     success &= capture_selection_respects_xshm_pixel_budget();
     success &= partial_nv12_update_writes_only_selected_rectangle();
     success &= priority_transmission_can_bypass_background_runs();

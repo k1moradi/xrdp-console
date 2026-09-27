@@ -674,6 +674,63 @@ H264LatestFrameState::collectReadyTransmissionSelectionsExcluding(
                 }
                 continue;
             }
+
+            // Exact scroll-copy exclusions and damage runs are tile-aligned.
+            // Split a single wide run arithmetically instead of visiting each
+            // 64-pixel tile; unusual shapes keep the generic path below.
+            if (run.rectangle.widthPixels >
+                    GenerationTileMap::kTileWidthPixels &&
+                run.rectangle.x >= 0 &&
+                static_cast<std::uint32_t>(run.rectangle.x) %
+                        GenerationTileMap::kTileWidthPixels ==
+                    0U &&
+                static_cast<std::uint32_t>(single.x) %
+                        GenerationTileMap::kTileWidthPixels ==
+                    0U)
+            {
+                const std::uint64_t runLeft =
+                    static_cast<std::uint64_t>(run.rectangle.x);
+                const std::uint64_t runRight =
+                    runLeft + run.rectangle.widthPixels;
+                constexpr std::uint64_t kMaximumExclusiveRectangleEdge =
+                    static_cast<std::uint64_t>(INT32_MAX) + 1U;
+                if (runRight <= kMaximumExclusiveRectangleEdge &&
+                    (singleRight % GenerationTileMap::kTileWidthPixels == 0U ||
+                     singleRight >= runRight))
+                {
+                    const std::uint64_t excludedLeft = std::max(
+                        runLeft, static_cast<std::uint64_t>(single.x));
+                    const std::uint64_t excludedRight =
+                        std::min(runRight, singleRight);
+                    if (excludedLeft < excludedRight)
+                    {
+                        if (excludedLeft != runLeft)
+                        {
+                            output[outputCount++] = {
+                                {run.rectangle.x, run.rectangle.y,
+                                 static_cast<std::uint32_t>(excludedLeft -
+                                                            runLeft),
+                                 run.rectangle.heightPixels},
+                                run.generation};
+                            if (outputCount == output.size())
+                            {
+                                return outputCount;
+                            }
+                        }
+                        if (excludedRight != runRight)
+                        {
+                            output[outputCount++] = {
+                                {static_cast<std::int32_t>(excludedRight),
+                                 run.rectangle.y,
+                                 static_cast<std::uint32_t>(runRight -
+                                                            excludedRight),
+                                 run.rectangle.heightPixels},
+                                run.generation};
+                        }
+                        continue;
+                    }
+                }
+            }
         }
         std::uint32_t offset = 0;
         std::uint32_t keptOffset = 0;
