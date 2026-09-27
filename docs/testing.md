@@ -3,9 +3,9 @@
 The test suite focuses on the direct-X11 Console module: XCB connection and
 authentication, XDamage, persistent XShm capture, cursor/input, presentation,
 clipboard, bounded RDPGFX, and lifecycle/reconnect behavior. Unit and
-authenticated-Xvfb tests run without modifying the host xrdp service. The
-optional local RDP loader smoke uses FreeRDP when available. Microsoft-client
-interoperability remains a manual Windows/macOS test gate.
+authenticated-Xvfb tests run without modifying the host xrdp service. The RDP
+loader integration tests use the project's isolated, H.264-enabled FreeRDP
+client; Microsoft-client interoperability remains a manual Windows/macOS gate.
 
 Scaled-output, scroll-copy, and verified bitmap-cache performance paths
 default to requested/enabled, with actual use gated by negotiated capabilities
@@ -34,22 +34,17 @@ Do not override that negotiated restriction. FreeRDP loader tests do not
 replace manual Windows/macOS validation, especially for scroll tearing, input
 responsiveness, clipboard, resize, and reconnect.
 
-CTest discovers `xfreerdp3` or `xfreerdp` from `PATH` by default. To select a
-specific executable, configure with
-`-DXRDP_CONSOLE_FREERDP_EXECUTABLE=/absolute/path/to/xfreerdp3`, or set the same
-environment variable when running `scripts/build-direct-console.sh`. This
-allows a private test client to coexist with the distribution package.
-
-`xrdp-loader-gfx-h264-odd-scaled-smoke` is capability-gated. It runs only when
-the selected FreeRDP reports `WITH_GFX_H264=ON` and a supported H.264 decoder
-backend in `/buildconfig`; otherwise it returns CTest's configured skip code.
-Ubuntu's packaged FreeRDP on this development host currently lacks those flags.
-For an end-to-end H.264 test, install the FreeRDP/FFmpeg build dependencies
-listed in the README with apt, build the isolated client using
-`scripts/build-test-freerdp.sh`, then pass its printed path through
-`XRDP_CONSOLE_FREERDP_EXECUTABLE`. That script uses a private install prefix and
-does not replace system FreeRDP. The H.264 CTest must actually run and pass
-before claiming H.264 client interoperability; a skip is not such evidence.
+The canonical `scripts/build-direct-console.sh` first builds the pinned client
+with `scripts/build-test-freerdp.sh` if it is not already present, then passes
+that private executable to CMake. CMake never discovers a client from `PATH`.
+It runs `/buildconfig` during configuration and requires
+`WITH_GFX_H264=ON` plus an H.264 decoder backend. A custom client can be
+selected with `XRDP_CONSOLE_FREERDP_EXECUTABLE` or the matching CMake cache
+option, but it must pass the same check. Missing or incapable clients fail
+configuration, and the H.264 loader smoke fails rather than skipping if its
+capability precondition is not met. The private build does not replace the
+distribution FreeRDP package. A passing H.264 smoke validates this FreeRDP
+client/server path only; it does not replace manual Windows/macOS testing.
 
 The RFB helper tests listed below cover retained measurement utilities only;
 they do not exercise or provide a production display transport.
@@ -74,7 +69,7 @@ they do not exercise or provide a production display transport.
 | `gfx-bitmap-cache-observer-unit` / `verified-bitmap-cache16-unit` | cache observations, byte-verified bounded slots, ACK residency, and fallback state |
 | `xrdp-upstream-unit` | serial pinned-xrdp `make check`, including Console dirty-region, pacing, and RDPGFX acknowledgement telemetry regressions |
 | `xrdp-loader-smoke` | generated xrdp loading the module through FreeRDP, accepting the initial cursor update, then drawing a known red/blue source marker and asserting that the expected pixel reaches the FreeRDP framebuffer |
-| `xrdp-loader-gfx-h264-odd-scaled-smoke` | capability-gated standard H.264 GFX AVC420 loader/pixel smoke at odd scaled presentation geometry; skipped if the selected FreeRDP lacks a compiled H.264 GFX decoder |
+| `xrdp-loader-gfx-h264-odd-scaled-smoke` | standard H.264 GFX AVC420 loader/pixel smoke at odd scaled presentation geometry; CMake requires the selected FreeRDP's H.264 decoder before registering the test |
 
 The marker correlation contract is:
 

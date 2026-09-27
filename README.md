@@ -94,31 +94,30 @@ sudo apt install \
   xauth x11-utils xvfb xrdp
 ```
 
-The server and its Xvfb tests do not require a FreeRDP client. To run the
-optional local RDP smoke test on Ubuntu 26.04, install:
+The pure unit tests and authenticated Xvfb tests do not need a remote desktop
+client. The complete native build and CTest workflow also runs RDP loader
+integration tests, including an H.264 GFX pixel smoke, and therefore requires
+the project's own H.264-enabled FreeRDP build. CTest does not select an
+arbitrary `xfreerdp` from `PATH`.
+
+Ubuntu's packaged FreeRDP can still be useful for manual client testing; on
+Ubuntu 26.04 the package is:
 
 ```sh
 sudo apt install freerdp3-x11
 ```
 
 Ubuntu 26.04 provides the FreeRDP 3 X11 client; `freerdp2-x11` is not the
-available package name. Package names vary between Debian/Ubuntu releases. To
-find the client package available on another release, run:
+available package name. This system package is not used by project CTests.
+Package names vary between Debian/Ubuntu releases. To find the client package
+available on another release, run:
 
 ```sh
 apt-cache search '^freerdp.*x11$'
 ```
 
-If no client package is available, you can still build and run the server-side
-tests; use a Windows or macOS Microsoft RDP client for manual connection tests.
-Ubuntu's packaged FreeRDP may be built without an H.264 GFX decoder. In that
-case, the capability-gated `xrdp-loader-gfx-h264-odd-scaled-smoke` test is
-reported as skipped; installing FFmpeg alone cannot add a decoder to an already
-compiled FreeRDP binary. The ordinary CTest suite and other loader modes still
-run with the packaged client.
-
-To run the H.264 GFX loader test, keep the distro FreeRDP package installed and
-build a separate test client against Ubuntu's FFmpeg development packages:
+Build the pinned, isolated H.264 test client with Ubuntu's FFmpeg development
+packages:
 
 ```sh
 sudo apt install \
@@ -129,15 +128,16 @@ sudo apt install \
 scripts/build-test-freerdp.sh
 ```
 
-The build script verifies the resulting client's H.264 GFX and FFmpeg build
-flags and installs it only under `build-test-freerdp/`; it does not uninstall
+The canonical `scripts/build-direct-console.sh` workflow builds this client
+automatically when it is absent, then verifies that the selected executable
+reports RDPGFX H.264 and a decoder backend before configuring CTest. The
+private build installs only under `build-test-freerdp/`; it does not uninstall
 or overwrite Ubuntu's FreeRDP packages. It disables unrelated Kerberos, CUPS,
-and PC/SC integrations while retaining RDPGFX and client channels. It prints
-the exact executable path to use in the subsequent
-`scripts/build-direct-console.sh` command. The client path can also be passed
-directly to CMake using
-`-DXRDP_CONSOLE_FREERDP_EXECUTABLE=/absolute/path/to/xfreerdp3`. See
-[`docs/testing.md`](docs/testing.md) for the capability-gated test behavior.
+and PC/SC integrations while retaining RDPGFX and client channels. A custom
+client may be selected with `XRDP_CONSOLE_FREERDP_EXECUTABLE` or the matching
+CMake cache option, but it must pass the same H.264 capability check. An
+incapable or missing client is a configuration error, not a skipped H.264
+test. See [`docs/testing.md`](docs/testing.md) for details.
 
 The Ubuntu `xrdp` package supplies the host service/configuration framework
 used by the activation script. The active daemon is then switched to this

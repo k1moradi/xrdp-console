@@ -12,9 +12,9 @@ directory. The script does not activate or modify the host service. Run
 `scripts/activate-direct-console.sh` separately, only after reviewing tests
 and disconnecting RDP clients.
 
-The optional H.264 loader smoke needs a FreeRDP client built with H.264 GFX
-decoding. Keep Ubuntu's packaged FreeRDP installed for normal system use; build
-the test client into a private prefix instead:
+The canonical CTest suite requires the project's own FreeRDP client with H.264
+GFX decoding. Keep Ubuntu's packaged FreeRDP separate for normal system use;
+the build script creates the test client in a private prefix:
 
 ```sh
 sudo apt install \
@@ -25,11 +25,12 @@ sudo apt install \
 scripts/build-test-freerdp.sh
 ```
 
-That script prints the exact command to run `scripts/build-direct-console.sh`
-with the isolated client selected. CMake also accepts
-`-DXRDP_CONSOLE_FREERDP_EXECUTABLE=/absolute/path/to/xfreerdp3`. Without a
-capable client, CTest runs the other loader tests and marks only the H.264
-capability-gated smoke as skipped.
+`scripts/build-direct-console.sh` runs this helper automatically if the
+private client is missing. It also accepts an explicit
+`XRDP_CONSOLE_FREERDP_EXECUTABLE` override. CMake checks `/buildconfig` and
+rejects a client without `WITH_GFX_H264=ON` and an H.264 decoder backend; it
+never falls back to a PATH-discovered distro binary and never marks the H.264
+loader smoke skipped because its client lacks that capability.
 
 The isolated FreeRDP configuration retains client channels/RDPGFX and FFmpeg
 H.264 while disabling unrelated Kerberos, CUPS, and PC/SC support to avoid

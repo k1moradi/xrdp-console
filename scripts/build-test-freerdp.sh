@@ -1,6 +1,6 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Build an isolated H.264-capable FreeRDP client for the optional CTest smoke.
+# Build the isolated H.264-capable FreeRDP client required by RDP loader CTests.
 
 set -eu
 
@@ -127,5 +127,4 @@ printf '%s\n' \
     "H.264-capable FreeRDP test client built and verified." \
     "Client: $freerdp_client" \
     "System FreeRDP packages were not replaced."
-printf 'Run the direct-X11 CTest build with:\n  XRDP_CONSOLE_FREERDP_EXECUTABLE=%s scripts/build-direct-console.sh\n' \
-    "$freerdp_client"
+printf 'Run the direct-X11 build and CTest suite with:\n  scripts/build-direct-console.sh\n'

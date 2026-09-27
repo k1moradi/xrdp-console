@@ -7,9 +7,60 @@ set -eu
 workspace_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build_root=${XRDP_CONSOLE_BUILD_DIR:-$workspace_root/build-direct-console}
 freerdp_client=${XRDP_CONSOLE_FREERDP_EXECUTABLE:-}
+freerdp_build_root=${XRDP_CONSOLE_FREERDP_BUILD_DIR:-$workspace_root/build-test-freerdp}
+case "$freerdp_build_root" in
+    /*) ;;
+    *) freerdp_build_root=$workspace_root/$freerdp_build_root ;;
+esac
+
+if [ -z "$freerdp_client" ]; then
+    for candidate in \
+        "$freerdp_build_root/install/bin/xfreerdp3" \
+        "$freerdp_build_root/install/bin/xfreerdp"; do
+        if [ -x "$candidate" ]; then
+            freerdp_client=$candidate
+            break
+        fi
+    done
+
+    if [ -z "$freerdp_client" ]; then
+        "$workspace_root/scripts/build-test-freerdp.sh"
+        for candidate in \
+            "$freerdp_build_root/install/bin/xfreerdp3" \
+            "$freerdp_build_root/install/bin/xfreerdp"; do
+            if [ -x "$candidate" ]; then
+                freerdp_client=$candidate
+                break
+            fi
+        done
+    fi
+fi
+
+case "$freerdp_client" in
+    /*) ;;
+    *) freerdp_client=$workspace_root/$freerdp_client ;;
+esac
 
 if [ -n "$freerdp_client" ] && [ ! -x "$freerdp_client" ]; then
     echo "XRDP_CONSOLE_FREERDP_EXECUTABLE is not executable: $freerdp_client" >&2
+    exit 1
+fi
+
+if [ -z "$freerdp_client" ]; then
+    echo "The project-built H.264 FreeRDP client was not produced." >&2
+    exit 1
+fi
+
+freerdp_buildconfig=$("$freerdp_client" /buildconfig 2>&1) || {
+    echo "Could not run FreeRDP /buildconfig: $freerdp_client" >&2
+    exit 1
+}
+if ! printf '%s\n' "$freerdp_buildconfig" | grep -q 'WITH_GFX_H264=ON' ||
+   ! printf '%s\n' "$freerdp_buildconfig" | grep -Eq \
+       'WITH_OPENH264=ON|WITH_FFMPEG=ON|WITH_VIDEO_FFMPEG=ON'; then
+    echo "RDP loader CTests require FreeRDP with RDPGFX H.264 and a decoder backend." >&2
+    echo "Selected client: $freerdp_client" >&2
+    printf '%s\n' "$freerdp_buildconfig" >&2
     exit 1
 fi
 

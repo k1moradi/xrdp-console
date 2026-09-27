@@ -521,9 +521,10 @@ def main() -> int:
                     "WITH_OPENH264=ON", "WITH_FFMPEG=ON",
                     "WITH_VIDEO_FFMPEG=ON"))):
             print(
-                "SKIP: selected FreeRDP client has no H.264 GFX decoder",
+                "ERROR: selected FreeRDP client has no H.264 GFX decoder; "
+                "build it with scripts/build-test-freerdp.sh",
                 file=sys.stderr)
-            return 77
+            return 1
     probe_x, probe_y = presentation_probe_point(
         presentation_width, presentation_height)
     window_title = f"xrdp-console-loader-{os.getpid()}"

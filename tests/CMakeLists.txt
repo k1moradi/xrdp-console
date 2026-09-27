@@ -656,17 +656,48 @@ if(TARGET xrdp-console)
         PROPERTIES RESOURCE_LOCK xrdp_console_private_xvfb)
 
     set(XRDP_CONSOLE_FREERDP_EXECUTABLE "" CACHE FILEPATH
-        "FreeRDP client executable used by RDP loader integration tests")
+        "H.264-capable FreeRDP client used by RDP loader integration tests")
     if(NOT XRDP_CONSOLE_FREERDP_EXECUTABLE)
-        find_program(XRDP_CONSOLE_DISCOVERED_FREERDP_EXECUTABLE
-            NAMES xfreerdp3 xfreerdp)
-        set(XRDP_CONSOLE_FREERDP_EXECUTABLE
-            "${XRDP_CONSOLE_DISCOVERED_FREERDP_EXECUTABLE}")
-    elseif(NOT EXISTS "${XRDP_CONSOLE_FREERDP_EXECUTABLE}" OR
-           IS_DIRECTORY "${XRDP_CONSOLE_FREERDP_EXECUTABLE}")
+        foreach(candidate IN ITEMS
+                "${CMAKE_SOURCE_DIR}/build-test-freerdp/install/bin/xfreerdp3"
+                "${CMAKE_SOURCE_DIR}/build-test-freerdp/install/bin/xfreerdp")
+            if(EXISTS "${candidate}" AND NOT IS_DIRECTORY "${candidate}")
+                set(XRDP_CONSOLE_FREERDP_EXECUTABLE "${candidate}")
+                break()
+            endif()
+        endforeach()
+    endif()
+
+    if(NOT XRDP_CONSOLE_FREERDP_EXECUTABLE OR
+       NOT EXISTS "${XRDP_CONSOLE_FREERDP_EXECUTABLE}" OR
+       IS_DIRECTORY "${XRDP_CONSOLE_FREERDP_EXECUTABLE}")
         message(FATAL_ERROR
-            "XRDP_CONSOLE_FREERDP_EXECUTABLE does not name an existing file: "
-            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}")
+            "RDP loader CTests require the project-built, H.264-capable "
+            "FreeRDP client. Build it with scripts/build-test-freerdp.sh, "
+            "or set XRDP_CONSOLE_FREERDP_EXECUTABLE to a verified "
+            "H.264-capable build. Do not use a PATH-discovered distro client.")
+    endif()
+
+    get_filename_component(XRDP_CONSOLE_FREERDP_EXECUTABLE
+        "${XRDP_CONSOLE_FREERDP_EXECUTABLE}" ABSOLUTE
+        BASE_DIR "${CMAKE_SOURCE_DIR}")
+    execute_process(
+        COMMAND "${XRDP_CONSOLE_FREERDP_EXECUTABLE}" /buildconfig
+        RESULT_VARIABLE freerdp_buildconfig_result
+        OUTPUT_VARIABLE freerdp_buildconfig_stdout
+        ERROR_VARIABLE freerdp_buildconfig_stderr
+        TIMEOUT 10)
+    set(freerdp_buildconfig
+        "${freerdp_buildconfig_stdout}\n${freerdp_buildconfig_stderr}")
+    if(NOT freerdp_buildconfig_result EQUAL 0 OR
+       NOT freerdp_buildconfig MATCHES "WITH_GFX_H264=ON" OR
+       NOT freerdp_buildconfig MATCHES
+           "WITH_(OPENH264|FFMPEG|VIDEO_FFMPEG)=ON")
+        message(FATAL_ERROR
+            "RDP loader CTests require a working FreeRDP build with "
+            "RDPGFX H.264 and an H.264 decoder backend. Selected client: "
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}\n/buildconfig output:\n"
+            "${freerdp_buildconfig}")
     endif()
 
     if(XRDP_CONSOLE_FREERDP_EXECUTABLE)
@@ -751,7 +782,6 @@ if(TARGET xrdp-console)
             1512 949 --gfx-h264)
         set_tests_properties(xrdp-loader-gfx-h264-odd-scaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
-            SKIP_RETURN_CODE 77
             TIMEOUT 40)
         add_test(NAME xrdp-loader-rfx-smoke
             COMMAND ${Python3_EXECUTABLE} -B
