@@ -28,6 +28,42 @@ bool check(bool condition, const char *message)
     return true;
 }
 
+bool identity_rectangle_mapping_is_exact_after_bounds_validation()
+{
+    H264LatestFrameState state;
+    bool success = check(state.configure({1366, 768}),
+                         "identity mapping configuration failed");
+
+    constexpr std::array<Rectangle, 4> rectangles{{
+        {0, 0, 1, 1},
+        {1365, 767, 1, 1},
+        {64, 128, 512, 256},
+        {0, 0, 1366, 768},
+    }};
+    for (const Rectangle rectangle : rectangles)
+    {
+        Rectangle mapped{};
+        success &= check(state.mapSourceRectangle(rectangle, mapped) &&
+                             mapped == rectangle,
+                         "identity source-to-frame mapping changed rectangle");
+        mapped = {};
+        success &= check(state.mapFrameRectangleToSource(rectangle, mapped) &&
+                             mapped == rectangle,
+                         "identity frame-to-source mapping changed rectangle");
+    }
+
+    Rectangle mapped{1, 2, 3, 4};
+    success &= check(!state.mapSourceRectangle({1365, 767, 2, 1}, mapped) &&
+                         mapped == Rectangle{},
+                     "identity source fast path bypassed bounds validation");
+    mapped = {1, 2, 3, 4};
+    success &= check(!state.mapFrameRectangleToSource(
+                             {1365, 767, 2, 1}, mapped) &&
+                         mapped == Rectangle{},
+                     "identity frame fast path bypassed bounds validation");
+    return success;
+}
+
 bool baseline_requires_every_tile_then_submits_full_frame()
 {
     H264LatestFrameState state;
@@ -920,6 +956,7 @@ bool resize_cannot_reenable_h264_without_coherent_snapshot()
 int main()
 {
     bool success = true;
+    success &= identity_rectangle_mapping_is_exact_after_bounds_validation();
     success &= baseline_requires_every_tile_then_submits_full_frame();
     success &= baseline_submission_is_not_starved_by_newer_damage();
     success &= newest_generation_replaces_stale_unsent_tile();

@@ -3462,7 +3462,9 @@ ModuleContext::check_h264_gfx() noexcept
         return finish();
     }
 
-    std::array<std::byte, kMaximumH264CommandBytes> preWireCommands{};
+    // The serializers overwrite every byte in the emitted prefix before it
+    // is consumed. Avoid clearing this 32 KiB scratch buffer every frame.
+    std::array<std::byte, kMaximumH264CommandBytes> preWireCommands;
     std::array<Rectangle,
                xrdp_console::rdp::kMaximumExactScrollCopyRuns>
         clientCopiedRectangles{};
@@ -3729,8 +3731,10 @@ ModuleContext::check_h264_gfx() noexcept
         rectangles[index] = rectangle;
     }
 
-    std::array<std::byte, kMaximumH264CommandBytes> commandBytes{};
-    std::array<std::byte, kMaximumH264CommandBytes> frameCommandBytes{};
+    // These serializers likewise write exact returned prefixes before any
+    // read. Keep the 64 KiB of per-frame scratch storage uninitialized.
+    std::array<std::byte, kMaximumH264CommandBytes> commandBytes;
+    std::array<std::byte, kMaximumH264CommandBytes> frameCommandBytes;
     std::size_t commandPrefixBytes = 0;
     if (impl_->h264Frame.baselineSubmissionPending())
     {

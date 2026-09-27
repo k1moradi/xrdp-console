@@ -260,6 +260,17 @@ H264LatestFrameState::mapSourceRectangle(
         return false;
     }
 
+    // Native-size H.264 is the common path. Once the ordinary source bounds
+    // validation above succeeds, an identity viewport maps the rectangle
+    // exactly and does not need the scaled-path divisions below.
+    if (sourceGeometry_ == geometry_ &&
+        viewport_ == Rectangle{0, 0, geometry_.widthPixels,
+                               geometry_.heightPixels})
+    {
+        frameRectangle = sourceRectangle;
+        return true;
+    }
+
     const auto ceilDivide = [](std::uint64_t numerator,
                                std::uint64_t denominator) noexcept {
         return numerator / denominator +
@@ -313,6 +324,18 @@ H264LatestFrameState::mapFrameRectangleToSource(
     {
         return false;
     }
+
+    // Native-size H.264 is the common path. Once the ordinary frame bounds
+    // validation above succeeds, an identity viewport maps the rectangle
+    // exactly and does not need the scaled-path clipping and divisions below.
+    if (sourceGeometry_ == geometry_ &&
+        viewport_ == Rectangle{0, 0, geometry_.widthPixels,
+                               geometry_.heightPixels})
+    {
+        sourceRectangle = frameRectangle;
+        return true;
+    }
+
     const std::int64_t viewportLeft = viewport_.x;
     const std::int64_t viewportTop = viewport_.y;
     const std::int64_t viewportRight =
