@@ -226,45 +226,39 @@ public:
     {
     }
 
-    [[nodiscard]] bool u8(std::uint8_t value) noexcept
+    void u8(std::uint8_t value) noexcept
     {
-        if (position_ >= output_.size())
-        {
-            return false;
-        }
         output_[position_++] = static_cast<std::byte>(value);
-        return true;
     }
 
-    [[nodiscard]] bool u16(std::uint16_t value) noexcept
+    void u16(std::uint16_t value) noexcept
     {
-        return u8(static_cast<std::uint8_t>(value)) &&
-               u8(static_cast<std::uint8_t>(value >> 8U));
+        output_[position_] = static_cast<std::byte>(value);
+        output_[position_ + 1U] = static_cast<std::byte>(value >> 8U);
+        position_ += 2U;
     }
 
-    [[nodiscard]] bool u32(std::uint32_t value) noexcept
+    void u32(std::uint32_t value) noexcept
     {
-        return u16(static_cast<std::uint16_t>(value)) &&
-               u16(static_cast<std::uint16_t>(value >> 16U));
+        output_[position_] = static_cast<std::byte>(value);
+        output_[position_ + 1U] = static_cast<std::byte>(value >> 8U);
+        output_[position_ + 2U] = static_cast<std::byte>(value >> 16U);
+        output_[position_ + 3U] = static_cast<std::byte>(value >> 24U);
+        position_ += 4U;
     }
 
-    [[nodiscard]] bool bytes(std::span<const std::byte> value) noexcept
+    void bytes(std::span<const std::byte> value) noexcept
     {
-        if (value.size() > output_.size() - position_)
-        {
-            return false;
-        }
         std::copy(value.begin(), value.end(), output_.begin() + position_);
         position_ += value.size();
-        return true;
     }
 
-    [[nodiscard]] bool rectangle(Rectangle value) noexcept
+    void rectangle(Rectangle value) noexcept
     {
-        return u16(static_cast<std::uint16_t>(value.x)) &&
-               u16(static_cast<std::uint16_t>(value.y)) &&
-               u16(static_cast<std::uint16_t>(value.widthPixels)) &&
-               u16(static_cast<std::uint16_t>(value.heightPixels));
+        u16(static_cast<std::uint16_t>(value.x));
+        u16(static_cast<std::uint16_t>(value.y));
+        u16(static_cast<std::uint16_t>(value.widthPixels));
+        u16(static_cast<std::uint16_t>(value.heightPixels));
     }
 
     [[nodiscard]] std::size_t position() const noexcept
@@ -611,25 +605,27 @@ buildGfxSolidFillCommand(const GfxSolidFillCommand &command,
         }
     }
 
+    // Capacity and all variable-sized fields were validated above. Write into
+    // the exact-sized slice without repeating a bounds branch per byte.
     LittleEndianWriter writer(output.first(totalBytes));
-    bool success = writer.u16(0x0004) && writer.u16(0) &&
-                   writer.u32(static_cast<std::uint32_t>(totalBytes)) &&
-                   writer.u16(command.surfaceId) && writer.u32(command.pixel) &&
-                   writer.u16(static_cast<std::uint16_t>(
-                       command.rectangles.size()));
+    writer.u16(0x0004);
+    writer.u16(0);
+    writer.u32(static_cast<std::uint32_t>(totalBytes));
+    writer.u16(command.surfaceId);
+    writer.u32(command.pixel);
+    writer.u16(static_cast<std::uint16_t>(command.rectangles.size()));
     for (const Rectangle rectangle : command.rectangles)
     {
-        success = success &&
-            writer.u16(static_cast<std::uint16_t>(rectangle.x)) &&
-            writer.u16(static_cast<std::uint16_t>(rectangle.y)) &&
-            writer.u16(static_cast<std::uint16_t>(
-                static_cast<std::uint64_t>(rectangle.x) +
-                rectangle.widthPixels)) &&
-            writer.u16(static_cast<std::uint16_t>(
-                static_cast<std::uint64_t>(rectangle.y) +
-                rectangle.heightPixels));
+        writer.u16(static_cast<std::uint16_t>(rectangle.x));
+        writer.u16(static_cast<std::uint16_t>(rectangle.y));
+        writer.u16(static_cast<std::uint16_t>(
+            static_cast<std::uint64_t>(rectangle.x) +
+            rectangle.widthPixels));
+        writer.u16(static_cast<std::uint16_t>(
+            static_cast<std::uint64_t>(rectangle.y) +
+            rectangle.heightPixels));
     }
-    return success && writer.position() == totalBytes ? totalBytes : 0;
+    return writer.position() == totalBytes ? totalBytes : 0;
 }
 
 std::size_t
@@ -676,36 +672,42 @@ buildGfxAvc420Command(const GfxAvc420Command &command,
         return 0;
     }
 
+    // Capacity and all variable-sized fields were validated above. Write into
+    // the exact-sized slice without repeating a bounds branch per byte.
     LittleEndianWriter writer(output.first(totalBytes));
-    bool success =
-        writer.u16(kGfxStartFrameCommand) && writer.u16(0) &&
-        writer.u32(kStartFrameBytes) && writer.u32(command.frameId) &&
-        writer.u32(0) &&
-        writer.bytes(command.preWireCommands) &&
-        writer.u16(kGfxWireToSurface1Command) && writer.u16(0) &&
-        writer.u32(static_cast<std::uint32_t>(wireBytes)) &&
-        writer.u16(command.surfaceId) && writer.u16(kGfxAvc420CodecId) &&
-        writer.u8(kGfxXrgb8888PixelFormat) && writer.u32(command.flags) &&
-        writer.u16(static_cast<std::uint16_t>(command.dirtyRectangles.size()));
+    writer.u16(kGfxStartFrameCommand);
+    writer.u16(0);
+    writer.u32(kStartFrameBytes);
+    writer.u32(command.frameId);
+    writer.u32(0);
+    writer.bytes(command.preWireCommands);
+    writer.u16(kGfxWireToSurface1Command);
+    writer.u16(0);
+    writer.u32(static_cast<std::uint32_t>(wireBytes));
+    writer.u16(command.surfaceId);
+    writer.u16(kGfxAvc420CodecId);
+    writer.u8(kGfxXrgb8888PixelFormat);
+    writer.u32(command.flags);
+    writer.u16(static_cast<std::uint16_t>(command.dirtyRectangles.size()));
     for (const Rectangle rectangle : command.dirtyRectangles)
     {
-        success = success && writer.rectangle(rectangle);
+        writer.rectangle(rectangle);
     }
-    success = success &&
-        writer.u16(static_cast<std::uint16_t>(command.encodeRectangles.size()));
+    writer.u16(static_cast<std::uint16_t>(command.encodeRectangles.size()));
     for (const Rectangle rectangle : command.encodeRectangles)
     {
-        success = success && writer.rectangle(rectangle);
+        writer.rectangle(rectangle);
     }
-    success = success && writer.u16(0) && writer.u16(0) &&
-              writer.u16(static_cast<std::uint16_t>(
-                  command.frameGeometry.widthPixels)) &&
-              writer.u16(static_cast<std::uint16_t>(
-                  command.frameGeometry.heightPixels)) &&
-              writer.u16(kGfxEndFrameCommand) && writer.u16(0) &&
-              writer.u32(kEndFrameBytes) && writer.u32(command.frameId);
+    writer.u16(0);
+    writer.u16(0);
+    writer.u16(static_cast<std::uint16_t>(command.frameGeometry.widthPixels));
+    writer.u16(static_cast<std::uint16_t>(command.frameGeometry.heightPixels));
+    writer.u16(kGfxEndFrameCommand);
+    writer.u16(0);
+    writer.u32(kEndFrameBytes);
+    writer.u32(command.frameId);
 
-    return success && writer.position() == totalBytes ? totalBytes : 0;
+    return writer.position() == totalBytes ? totalBytes : 0;
 }
 
 } // namespace xrdp_console::rdp
