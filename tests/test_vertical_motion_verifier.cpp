@@ -189,21 +189,26 @@ unrelated_frame_is_rejected()
     constexpr std::uint32_t width = 192;
     constexpr std::uint32_t height = 160;
     const auto previous = pattern(width, height);
-    auto current = pattern(width, height);
-    for (std::uint32_t y = 0; y < height; ++y)
+    bool success = true;
+    for (std::uint32_t channel = 0; channel < 3U; ++channel)
     {
-        for (std::uint32_t x = 0; x < width; ++x)
+        auto current = pattern(width, height);
+        for (std::uint32_t y = 0; y < height; ++y)
         {
-            const std::size_t offset =
-                (static_cast<std::size_t>(y) * width + x) * 4U;
-            current[offset] ^= std::byte{0x5a};
-            current[offset + 1U] ^= std::byte{0xa5};
+            for (std::uint32_t x = 0; x < width; ++x)
+            {
+                const std::size_t offset =
+                    (static_cast<std::size_t>(y) * width + x) * 4U;
+                current[offset + channel] ^= std::byte{0x5a};
+            }
         }
+        const auto result = verifyVerticalMotion(
+            view(previous, width, height), view(current, width, height),
+            {0, 0, width, height}, -24);
+        success &= check(!result.verified(),
+                         "BGR channel difference was ignored");
     }
-    const auto result = verifyVerticalMotion(
-        view(previous, width, height), view(current, width, height),
-        {0, 0, width, height}, -24);
-    return check(!result.verified(), "unrelated frame was accepted");
+    return success;
 }
 
 bool

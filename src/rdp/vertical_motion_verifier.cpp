@@ -3,8 +3,10 @@
 #include "vertical_motion_verifier.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 
 namespace xrdp_console::rdp
@@ -57,7 +59,27 @@ pixelAt(FramebufferView frame, std::uint32_t x, std::uint32_t y) noexcept
 [[nodiscard]] bool
 sameBgr(const std::byte *left, const std::byte *right) noexcept
 {
-    return left[0] == right[0] && left[1] == right[1] && left[2] == right[2];
+    if constexpr (std::endian::native == std::endian::little)
+    {
+        std::uint32_t leftWord = 0;
+        std::uint32_t rightWord = 0;
+        std::memcpy(&leftWord, left, sizeof(leftWord));
+        std::memcpy(&rightWord, right, sizeof(rightWord));
+        return ((leftWord ^ rightWord) & 0x00ffffffU) == 0;
+    }
+    else if constexpr (std::endian::native == std::endian::big)
+    {
+        std::uint32_t leftWord = 0;
+        std::uint32_t rightWord = 0;
+        std::memcpy(&leftWord, left, sizeof(leftWord));
+        std::memcpy(&rightWord, right, sizeof(rightWord));
+        return ((leftWord ^ rightWord) & 0xffffff00U) == 0;
+    }
+    else
+    {
+        return left[0] == right[0] && left[1] == right[1] &&
+               left[2] == right[2];
+    }
 }
 
 struct SampleSignature final
