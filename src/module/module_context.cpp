@@ -3733,8 +3733,11 @@ ModuleContext::check_h264_gfx() noexcept
     for (std::size_t index = 0; index < h264Count; ++index)
     {
         const Rectangle rectangle = h264Selections[index].rectangle;
-        if (xrdp_console::rdp::alignAvc420Rectangle(
-                rectangle, impl_->h264Frame.geometry()) != rectangle)
+        // Command serialization validates bounds and non-empty rectangles.
+        // Only AVC420's even coordinate/extent requirement is unique here.
+        if ((rectangle.x & 1) != 0 || (rectangle.y & 1) != 0 ||
+            (rectangle.widthPixels & 1U) != 0 ||
+            (rectangle.heightPixels & 1U) != 0)
         {
             return 1;
         }
