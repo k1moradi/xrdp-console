@@ -1,0 +1,1149 @@
+diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
+index 8ce60cb..cc58d7e 100644
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -166,6 +166,7 @@ x-special/gnome-copied-files
+ #include <X11/Xlib.h>
+ #include <X11/Xatom.h>
+ #include <X11/extensions/Xfixes.h>
++#include <limits.h>
+ #include "arch.h"
+ #include "parse.h"
+ #include "os_calls.h"
+@@ -177,6 +178,7 @@ x-special/gnome-copied-files
+ #include "clipboard_file.h"
+ #include "clipboard_common.h"
+ #include "clipboard_retry_policy.h"
++#include "clipboard_image_formats.h"
+ #include "xcommon.h"
+ #include "chansrv_fuse.h"
+ #include "ms-rdpeclip.h"
+@@ -207,6 +209,7 @@ static Atom g_secondary_atom = 0;      /* SECONDARY */
+ static Atom g_get_time_atom = 0;       /* XRDP_GET_TIME_ATOM */
+ static Atom g_utf8_atom = 0;           /* UTF8_STRING */
+ static Atom g_image_bmp_atom = 0;      /* image/bmp */
++static Atom g_image_png_atom = 0;      /* image/png */
+ static Atom g_file_atom1 = 0;          /* text/uri-list */
+ static Atom g_file_atom2 = 0;          /* x-special/gnome-copied-files */
+ static Atom g_incr_atom = 0;           /* INCR */
+@@ -243,6 +246,8 @@ static int g_num_formatIds = 0;
+ 
+ /* Format ID assigned to "FileGroupDescriptorW" by the client */
+ static int g_file_group_descriptor_format_id = -1;
++static int g_dib_format_id = -1;
++static int g_png_format_id = -1;
+ 
+ static char g_last_atom_name[256] = "";
+ 
+@@ -410,6 +415,7 @@ clipboard_init(void)
+         g_utf8_atom = XInternAtom(g_display, "UTF8_STRING", False);
+ 
+         g_image_bmp_atom = XInternAtom(g_display, "image/bmp", False);
++        g_image_png_atom = XInternAtom(g_display, "image/png", False);
+         g_file_atom1 = XInternAtom(g_display, "text/uri-list", False);
+         g_file_atom2 = XInternAtom(g_display, "x-special/gnome-copied-files", False);
+         g_incr_atom = XInternAtom(g_display, "INCR", False);
+@@ -618,6 +624,11 @@ static char windows_native_format[] =
+     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+ };
+ 
++static char windows_png_format[32] =
++{
++    'P', 0, 'N', 0, 'G', 0
++};
++
+ /*****************************************************************************/
+ static int
+ clipboard_send_format_announce(int xrdp_clip_type)
+@@ -650,15 +661,17 @@ clipboard_send_format_announce(int xrdp_clip_type)
+                 break;
+             case XRDP_CB_BITMAP:
+                 LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_send_format_announce: XRDP_CB_BITMAP");
+-                /* canned response for "bitmap" */
+-                out_uint32_le(s, 0x0000c004);
+-                clipboard_out_utf8_as_utf16_le(s, "Native");
+-                out_uint32_le(s, 0x00000003);
+-                clipboard_out_utf8_as_utf16_le(s, "");
+-                out_uint32_le(s, 0x00000008);
+-                clipboard_out_utf8_as_utf16_le(s, "");
+-                out_uint32_le(s, 0x00000011);
+-                clipboard_out_utf8_as_utf16_le(s, "");
++                if (g_clip_s2c.type == g_image_png_atom)
++                {
++                    out_uint32_le(s, XRDP_CLIPBOARD_FORMAT_PNG);
++                    clipboard_out_utf8_as_utf16_le(s, "PNG");
++                }
++                else
++                {
++                    /* CF_DIB is the only bitmap format this path serves. */
++                    out_uint32_le(s, XRDP_CLIPBOARD_CF_DIB);
++                    clipboard_out_utf8_as_utf16_le(s, "");
++                }
+                 break;
+             case XRDP_CB_TEXT:
+                 LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_send_format_announce: XRDP_CB_TEXT");
+@@ -689,15 +702,19 @@ clipboard_send_format_announce(int xrdp_clip_type)
+                 break;
+             case XRDP_CB_BITMAP:
+                 LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_send_format_announce: XRDP_CB_BITMAP");
+-                /* canned response for "bitmap" */
+-                out_uint32_le(s, 0x0000c004);
+-                out_uint8p(s, windows_native_format, sizeof(windows_native_format));
+-                out_uint32_le(s, 0x00000003);
+-                out_uint8p(s, windows_native_format, sizeof(windows_native_format));
+-                out_uint32_le(s, 0x00000008);
+-                out_uint8p(s, windows_native_format, sizeof(windows_native_format));
+-                out_uint32_le(s, 0x00000011);
+-                out_uint8p(s, windows_native_format, sizeof(windows_native_format));
++                if (g_clip_s2c.type == g_image_png_atom)
++                {
++                    out_uint32_le(s, XRDP_CLIPBOARD_FORMAT_PNG);
++                    out_uint8p(s, windows_png_format,
++                               sizeof(windows_png_format));
++                }
++                else
++                {
++                    /* CF_DIB has a standard ID and an empty short name. */
++                    out_uint32_le(s, XRDP_CLIPBOARD_CF_DIB);
++                    out_uint8p(s, windows_native_format,
++                               sizeof(windows_native_format));
++                }
+                 break;
+             case XRDP_CB_TEXT:
+                 LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_send_format_announce: XRDP_CB_TEXT");
+@@ -965,6 +982,9 @@ clipboard_process_format_announce(struct stream *s, int clip_msg_status,
+ 
+     desc[0] = 0;
+     g_num_formatIds = 0;
++    g_file_group_descriptor_format_id = -1;
++    g_dib_format_id = -1;
++    g_png_format_id = -1;
+     while (clip_msg_len > 3)
+     {
+         in_uint32_le(s, formatId);
+@@ -996,6 +1016,25 @@ clipboard_process_format_announce(struct stream *s, int clip_msg_status,
+             LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_format_announce: max formats");
+         }
+ 
++        switch (xrdp_clipboard_image_format_from_announce(
++                    (uint32_t)formatId, desc))
++        {
++            case XRDP_CLIPBOARD_IMAGE_DIB:
++                g_dib_format_id = formatId;
++                break;
++            case XRDP_CLIPBOARD_IMAGE_DIBV5:
++                if (g_dib_format_id < 0)
++                {
++                    g_dib_format_id = formatId;
++                }
++                break;
++            case XRDP_CLIPBOARD_IMAGE_PNG:
++                g_png_format_id = formatId;
++                break;
++            default:
++                break;
++        }
++
+         /* format id for file copy copy is dynamic and announced by the
+          * client */
+         if (g_strcmp(desc, "FileGroupDescriptorW") == 0)
+@@ -1288,7 +1327,11 @@ clipboard_process_data_request(struct stream *s, int clip_msg_status,
+             }
+             break;
+         case CF_DIB:
+-            if ((g_clip_s2c.xrdp_clip_type == XRDP_CB_BITMAP) && g_clip_s2c.converted)
++            if (g_cfg->restrict_outbound_clipboard & CLIP_RESTRICT_IMAGE)
++            {
++                clipboard_send_data_response_failed();
++            }
++            else if ((g_clip_s2c.xrdp_clip_type == XRDP_CB_BITMAP) && g_clip_s2c.converted)
+             {
+                 LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_data_request: CF_DIB");
+                 clipboard_send_data_response(XRDP_CB_BITMAP, g_clip_s2c.data,
+@@ -1301,6 +1344,30 @@ clipboard_process_data_request(struct stream *s, int clip_msg_status,
+                 g_clip_s2c.xrdp_clip_type = XRDP_CB_BITMAP;
+                 XConvertSelection(g_display, g_clipboard_atom, g_image_bmp_atom,
+                                   g_clip_property_atom, g_wnd, CurrentTime);
++                XFlush(g_display);
++            }
++            break;
++        case XRDP_CLIPBOARD_FORMAT_PNG:
++            if (g_cfg->restrict_outbound_clipboard & CLIP_RESTRICT_IMAGE)
++            {
++                clipboard_send_data_response_failed();
++            }
++            else if (g_clip_s2c.type == g_image_png_atom && g_clip_s2c.converted)
++            {
++                clipboard_send_data_response(XRDP_CB_BITMAP, g_clip_s2c.data,
++                                             g_clip_s2c.total_bytes);
++            }
++            else if (g_clip_s2c.type == g_image_png_atom)
++            {
++                LOG_DEVEL(LOG_LEVEL_DEBUG,
++                          "clipboard_process_data_request: requesting image/png");
++                XConvertSelection(g_display, g_clipboard_atom, g_image_png_atom,
++                                  g_clip_property_atom, g_wnd, CurrentTime);
++                XFlush(g_display);
++            }
++            else
++            {
++                clipboard_send_data_response_failed();
+             }
+             break;
+         case CF_UNICODETEXT:
+@@ -1345,6 +1412,8 @@ clipboard_process_data_response_for_image(struct stream *s,
+     XSelectionRequestEvent *lxev;
+     int len;
+     struct stream *bmp_hs;
++    size_t bmp_pixel_offset;
++    const unsigned char *image_data;
+ 
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_data_response_for_image: "
+               "CLIPRDR_DATA_RESPONSE_FOR_IMAGE");
+@@ -1352,6 +1421,32 @@ clipboard_process_data_response_for_image(struct stream *s,
+     len = (int)(s->end - s->p);
+     if (len < 1)
+     {
++        clipboard_refuse_selection(lxev);
++        return 0;
++    }
++    if (g_clip_c2s.type == g_image_png_atom)
++    {
++        image_data = (const unsigned char *)s->p;
++        if (!xrdp_clipboard_png_signature_valid(image_data, (size_t)len))
++        {
++            LOG(LOG_LEVEL_WARNING,
++                "clipboard_process_data_response_for_image: invalid PNG data");
++            clipboard_refuse_selection(lxev);
++            return 0;
++        }
++        g_free(g_clip_c2s.data);
++        g_clip_c2s.data = (char *)g_malloc((size_t)len, 0);
++        if (g_clip_c2s.data == NULL)
++        {
++            g_clip_c2s.total_bytes = 0;
++            clipboard_refuse_selection(lxev);
++            return 0;
++        }
++        g_memcpy(g_clip_c2s.data, s->p, (size_t)len);
++        g_clip_c2s.total_bytes = len;
++        g_clip_c2s.read_bytes_done = len;
++        g_clip_c2s.converted = 1;
++        clipboard_provide_selection_c2s(lxev, lxev->target);
+         return 0;
+     }
+     if (g_clip_c2s.type != g_image_bmp_atom)
+@@ -1359,11 +1454,25 @@ clipboard_process_data_response_for_image(struct stream *s,
+         return 0;
+     }
+ 
++    image_data = (const unsigned char *)s->p;
++    if (len > INT_MAX - BMPFILEHEADER_LEN ||
++            xrdp_clipboard_dib_pixel_offset(image_data, (size_t)len,
++                                             &bmp_pixel_offset) != 0)
++    {
++        LOG(LOG_LEVEL_WARNING,
++            "clipboard_process_data_response_for_image: invalid DIB data");
++        clipboard_refuse_selection(lxev);
++        return 0;
++    }
++
+     g_free(g_clip_c2s.data);
+     g_clip_c2s.data = (char *) g_malloc(len + BMPFILEHEADER_LEN, 0);
+     if (g_clip_c2s.data == 0)
+     {
+         g_clip_c2s.total_bytes = 0;
++        g_clip_c2s.read_bytes_done = 0;
++        g_clip_c2s.converted = 0;
++        clipboard_refuse_selection(lxev);
+         return 0;
+     }
+     g_clip_c2s.total_bytes = len + BMPFILEHEADER_LEN;
+@@ -1377,7 +1486,11 @@ clipboard_process_data_response_for_image(struct stream *s,
+     if (bmp_hs == 0)
+     {
+         g_free(g_clip_c2s.data);
++        g_clip_c2s.data = NULL;
+         g_clip_c2s.total_bytes = 0;
++        g_clip_c2s.read_bytes_done = 0;
++        g_clip_c2s.converted = 0;
++        clipboard_refuse_selection(lxev);
+         return 0;
+     }
+     init_stream(bmp_hs, BMPFILEHEADER_LEN);
+@@ -1386,13 +1499,14 @@ clipboard_process_data_response_for_image(struct stream *s,
+     out_uint32_le(bmp_hs, g_clip_c2s.total_bytes);
+     out_uint16_le(bmp_hs, 0);
+     out_uint16_le(bmp_hs, 0);
+-    out_uint32_le(bmp_hs, BMPFILEHEADER_LEN + BMPINFOHEADER_LEN);
++    out_uint32_le(bmp_hs, (uint32_t)bmp_pixel_offset);
+ 
+     /* Copy header and data to output stream */
+     g_memcpy(g_clip_c2s.data, bmp_hs->data, BMPFILEHEADER_LEN);
+     in_uint8a(s, g_clip_c2s.data + BMPFILEHEADER_LEN, len);
+ 
+     free_stream(bmp_hs);
++    g_clip_c2s.converted = 1;
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_data_response_for_image: calling "
+               "clipboard_provide_selection_c2s");
+     clipboard_provide_selection_c2s(lxev, lxev->target);
+@@ -1910,6 +2024,7 @@ clipboard_event_selection_notify(XEvent *xevent)
+     int got_string;
+     int got_utf8;
+     int got_bmp_image;
++    int got_png_image;
+     int send_format_announce;
+     Atom got_file_atom;
+     Atom atom;
+@@ -1923,6 +2038,7 @@ clipboard_event_selection_notify(XEvent *xevent)
+     got_string = 0;
+     got_utf8 = 0;
+     got_bmp_image = 0;
++    got_png_image = 0;
+     got_file_atom = 0;
+     send_format_announce = 0;
+     rv = 0;
+@@ -2051,6 +2167,10 @@ clipboard_event_selection_notify(XEvent *xevent)
+                         {
+                             got_bmp_image = 1;
+                         }
++                        else if (atom == g_image_png_atom)
++                        {
++                            got_png_image = 1;
++                        }
+                         else if ((atom == g_file_atom1) || (atom == g_file_atom2))
+                         {
+                             LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_notify: file");
+@@ -2140,26 +2260,79 @@ clipboard_event_selection_notify(XEvent *xevent)
+             {
+                 LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_notify: image/bmp "
+                           "data_size %d", data_size);
+-                if ((g_clip_s2c.incr_in_progress == 0) && (data_size > 14))
++                if (g_clip_s2c.incr_in_progress == 0)
+                 {
+-                    g_free(g_clip_s2c.data);
+-
+                     if (g_cfg->restrict_outbound_clipboard & CLIP_RESTRICT_IMAGE)
+                     {
+                         LOG(LOG_LEVEL_DEBUG,
+                             "outbound clipboard(image) image/bmp is restricted because of config");
++                        clipboard_send_data_response_failed();
++                    }
++                    else if (data == NULL || data_size <= 14)
++                    {
++                        clipboard_send_data_response_failed();
+                     }
+                     else
+                     {
+-                        g_clip_s2c.total_bytes = data_size;
+-                        g_clip_s2c.data = (char *) g_malloc(data_size, 0);
+-                        g_memcpy(g_clip_s2c.data, data, data_size);
+-                        clipboard_send_data_response_for_image(g_clip_s2c.data + 14,
+-                                                               data_size - 14);
++                        char *replacement = (char *)g_malloc((size_t)data_size, 0);
++                        if (replacement == NULL)
++                        {
++                            clipboard_send_data_response_failed();
++                        }
++                        else
++                        {
++                            g_free(g_clip_s2c.data);
++                            g_clip_s2c.data = replacement;
++                            g_clip_s2c.total_bytes = data_size;
++                            g_memcpy(g_clip_s2c.data, data, data_size);
++                            clipboard_send_data_response_for_image(
++                                g_clip_s2c.data + 14, data_size - 14);
++                        }
+                     }
+ 
+                 }
+             }
++            else if (lxevent->target == g_image_png_atom)
++            {
++                LOG_DEVEL(LOG_LEVEL_DEBUG,
++                          "clipboard_event_selection_notify: image/png data_size %d",
++                          data_size);
++                if (g_clip_s2c.incr_in_progress == 0)
++                {
++                    if (g_cfg->restrict_outbound_clipboard & CLIP_RESTRICT_IMAGE)
++                    {
++                        LOG(LOG_LEVEL_DEBUG,
++                            "outbound clipboard(image) image/png is restricted");
++                        clipboard_send_data_response_failed();
++                    }
++                    else if (data == NULL ||
++                             !xrdp_clipboard_png_signature_valid(
++                                 (const unsigned char *)data,
++                                 (size_t)data_size))
++                    {
++                        LOG(LOG_LEVEL_WARNING,
++                            "outbound clipboard image/png has invalid signature");
++                        clipboard_send_data_response_failed();
++                    }
++                    else
++                    {
++                        char *replacement = (char *)g_malloc((size_t)data_size, 0);
++                        if (replacement == NULL)
++                        {
++                            clipboard_send_data_response_failed();
++                        }
++                        else
++                        {
++                            g_free(g_clip_s2c.data);
++                            g_clip_s2c.data = replacement;
++                            g_clip_s2c.total_bytes = data_size;
++                            g_memcpy(g_clip_s2c.data, data, (size_t)data_size);
++                            clipboard_send_data_response_for_image(
++                                g_clip_s2c.data, g_clip_s2c.total_bytes);
++                        }
++                    }
++                }
++            }
+             else if (lxevent->target == g_file_atom1)
+             {
+                 LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_notify: text/uri-list "
+@@ -2285,6 +2458,22 @@ clipboard_event_selection_notify(XEvent *xevent)
+         }
+ 
+     }
++    else if (got_png_image)
++    {
++        if (g_cfg->restrict_outbound_clipboard & CLIP_RESTRICT_IMAGE)
++        {
++            LOG(LOG_LEVEL_DEBUG,
++                "outbound clipboard(image/png) is restricted because of config");
++        }
++        else
++        {
++            g_clip_s2c.type = g_image_png_atom;
++            g_clip_s2c.xrdp_clip_type = XRDP_CB_BITMAP;
++            g_clip_s2c.converted = 0;
++            g_clip_s2c.clip_time = lxevent->time;
++            send_format_announce = 1;
++        }
++    }
+     else if (got_bmp_image)
+     {
+ 
+@@ -2387,13 +2576,20 @@ clipboard_event_selection_request(XEvent *xevent)
+                 atom_count++;
+             }
+         }
+-        if (clipboard_find_format_id(CF_DIB) >= 0 &&
++        if (g_dib_format_id >= 0 &&
+                 (g_cfg->restrict_inbound_clipboard & CLIP_RESTRICT_IMAGE) == 0)
+         {
+             LOG_DEVEL(LOG_LEVEL_DEBUG, "  reporting image/bmp");
+             atom_buf[atom_count] = g_image_bmp_atom;
+             atom_count++;
+         }
++        if (g_png_format_id >= 0 &&
++                (g_cfg->restrict_inbound_clipboard & CLIP_RESTRICT_IMAGE) == 0)
++        {
++            LOG_DEVEL(LOG_LEVEL_DEBUG, "  reporting image/png");
++            atom_buf[atom_count] = g_image_png_atom;
++            atom_count++;
++        }
+         if (clipboard_find_format_id(g_file_group_descriptor_format_id) >= 0 &&
+                 (g_cfg->restrict_inbound_clipboard & CLIP_RESTRICT_FILE) == 0)
+         {
+@@ -2514,15 +2710,41 @@ clipboard_event_selection_request(XEvent *xevent)
+         }
+         else
+         {
++            if (g_dib_format_id < 0)
++            {
++                clipboard_refuse_selection(lxev);
++                return 0;
++            }
+             g_memcpy(&g_saved_selection_req_event, lxev,
+                      sizeof(g_saved_selection_req_event));
+             g_clip_c2s.type = g_image_bmp_atom;
+             g_clip_c2s.xrdp_clip_type = XRDP_CB_BITMAP;
+-            clipboard_send_data_request(CF_DIB);
++            clipboard_send_data_request(g_dib_format_id);
+         }
+         return 0;
+ 
+     }
++    else if (lxev->target == g_image_png_atom)
++    {
++        LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: image/png");
++        if (g_png_format_id < 0 ||
++                (g_cfg->restrict_inbound_clipboard & CLIP_RESTRICT_IMAGE))
++        {
++            clipboard_refuse_selection(lxev);
++            return 0;
++        }
++        if ((g_clip_c2s.type == lxev->target) && g_clip_c2s.converted)
++        {
++            clipboard_provide_selection_c2s(lxev, lxev->target);
++            return 0;
++        }
++        g_memcpy(&g_saved_selection_req_event, lxev,
++                 sizeof(g_saved_selection_req_event));
++        g_clip_c2s.type = g_image_png_atom;
++        g_clip_c2s.xrdp_clip_type = XRDP_CB_BITMAP;
++        clipboard_send_data_request(g_png_format_id);
++        return 0;
++    }
+     else if (lxev->target == g_file_atom1)
+     {
+         LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: g_file_atom1");
+@@ -2733,6 +2955,22 @@ clipboard_event_property_notify(XEvent *xevent)
+                                              g_clip_s2c.data + 14,
+                                              g_clip_s2c.total_bytes - 14);
+             }
++            else if (g_clip_s2c.type == g_image_png_atom)
++            {
++                if (xrdp_clipboard_png_signature_valid(
++                            (const unsigned char *)g_clip_s2c.data,
++                            (size_t)g_clip_s2c.total_bytes))
++                {
++                    g_clip_s2c.xrdp_clip_type = XRDP_CB_BITMAP;
++                    clipboard_send_data_response(g_clip_s2c.xrdp_clip_type,
++                                                 g_clip_s2c.data,
++                                                 g_clip_s2c.total_bytes);
++                }
++                else
++                {
++                    clipboard_send_data_response_failed();
++                }
++            }
+             else if ((g_clip_s2c.type == XA_STRING) ||
+                      (g_clip_s2c.type == g_utf8_atom))
+             {
+diff --git a/sesman/chansrv/clipboard_image_formats.h b/sesman/chansrv/clipboard_image_formats.h
+new file mode 100644
+index 0000000..daad931
+--- /dev/null
++++ b/sesman/chansrv/clipboard_image_formats.h
+@@ -0,0 +1,186 @@
++/*
++ * Small, allocation-free helpers for the CLIPRDR image formats supported by
++ * chansrv. Kept separate so the format and DIB bounds can be unit tested.
++ */
++#ifndef XRDP_CLIPBOARD_IMAGE_FORMATS_H
++#define XRDP_CLIPBOARD_IMAGE_FORMATS_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++enum xrdp_clipboard_image_format
++{
++    XRDP_CLIPBOARD_IMAGE_NONE = 0,
++    XRDP_CLIPBOARD_IMAGE_DIB = 1,
++    XRDP_CLIPBOARD_IMAGE_DIBV5 = 2,
++    XRDP_CLIPBOARD_IMAGE_PNG = 3
++};
++
++enum
++{
++    XRDP_CLIPBOARD_CF_DIB = 8,
++    XRDP_CLIPBOARD_CF_DIBV5 = 17,
++    XRDP_CLIPBOARD_FORMAT_PNG = 0xc0bd
++};
++
++static inline int
++xrdp_clipboard_ascii_equal_ignore_case(const char *left, const char *right)
++{
++    unsigned char a;
++    unsigned char b;
++
++    if (left == NULL || right == NULL)
++    {
++        return 0;
++    }
++
++    while (*left != '\0' && *right != '\0')
++    {
++        a = (unsigned char)*left++;
++        b = (unsigned char)*right++;
++        if (a >= 'A' && a <= 'Z')
++        {
++            a = (unsigned char)(a - 'A' + 'a');
++        }
++        if (b >= 'A' && b <= 'Z')
++        {
++            b = (unsigned char)(b - 'A' + 'a');
++        }
++        if (a != b)
++        {
++            return 0;
++        }
++    }
++
++    return *left == '\0' && *right == '\0';
++}
++
++static inline enum xrdp_clipboard_image_format
++xrdp_clipboard_image_format_from_announce(uint32_t format_id,
++        const char *format_name)
++{
++    if (format_id == XRDP_CLIPBOARD_CF_DIB)
++    {
++        return XRDP_CLIPBOARD_IMAGE_DIB;
++    }
++    if (format_id == XRDP_CLIPBOARD_CF_DIBV5)
++    {
++        return XRDP_CLIPBOARD_IMAGE_DIBV5;
++    }
++    if (format_id >= 0xc000 &&
++            (xrdp_clipboard_ascii_equal_ignore_case(format_name, "PNG") ||
++             xrdp_clipboard_ascii_equal_ignore_case(format_name, "image/png")))
++    {
++        return XRDP_CLIPBOARD_IMAGE_PNG;
++    }
++    return XRDP_CLIPBOARD_IMAGE_NONE;
++}
++
++static inline uint32_t
++xrdp_clipboard_read_u32le(const unsigned char *bytes)
++{
++    return (uint32_t)bytes[0] |
++           ((uint32_t)bytes[1] << 8) |
++           ((uint32_t)bytes[2] << 16) |
++           ((uint32_t)bytes[3] << 24);
++}
++
++/* Returns 0 and a BMP-file-relative pixel offset on valid DIB input. */
++static inline int
++xrdp_clipboard_dib_pixel_offset(const unsigned char *dib,
++                                size_t dib_bytes,
++                                size_t *bmp_pixel_offset)
++{
++    uint32_t header_bytes;
++    uint32_t bit_count;
++    uint32_t compression;
++    uint32_t colors_used;
++    size_t offset;
++    size_t palette_entries;
++
++    if (dib == NULL || bmp_pixel_offset == NULL || dib_bytes < 40)
++    {
++        return 1;
++    }
++
++    header_bytes = xrdp_clipboard_read_u32le(dib);
++    if (header_bytes < 40 || (size_t)header_bytes > dib_bytes)
++    {
++        return 1;
++    }
++
++    bit_count = (uint32_t)dib[14] | ((uint32_t)dib[15] << 8);
++    if (bit_count != 1 && bit_count != 2 && bit_count != 4 &&
++            bit_count != 8 && bit_count != 16 && bit_count != 24 &&
++            bit_count != 32)
++    {
++        return 1;
++    }
++    compression = xrdp_clipboard_read_u32le(dib + 16);
++    colors_used = xrdp_clipboard_read_u32le(dib + 32);
++    offset = (size_t)header_bytes;
++
++    if (header_bytes == 40 && compression == 3)
++    {
++        offset += 12; /* BI_BITFIELDS masks following BITMAPINFOHEADER */
++    }
++    else if (header_bytes == 40 && compression == 6)
++    {
++        offset += 16; /* BI_ALPHABITFIELDS masks */
++    }
++    if (offset > dib_bytes)
++    {
++        return 1;
++    }
++
++    if (colors_used != 0)
++    {
++        palette_entries = (size_t)colors_used;
++    }
++    else if (bit_count <= 8)
++    {
++        palette_entries = (size_t)1U << bit_count;
++    }
++    else
++    {
++        palette_entries = 0;
++    }
++
++    if (palette_entries > (dib_bytes - offset) / 4)
++    {
++        return 1;
++    }
++    offset += palette_entries * 4;
++    if (offset > dib_bytes || offset > UINT32_MAX - 14U)
++    {
++        return 1;
++    }
++
++    *bmp_pixel_offset = offset + 14;
++    return 0;
++}
++
++static inline int
++xrdp_clipboard_png_signature_valid(const unsigned char *data, size_t bytes)
++{
++    static const unsigned char signature[8] =
++    {
++        0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a
++    };
++    size_t index;
++
++    if (data == NULL || bytes < sizeof(signature))
++    {
++        return 0;
++    }
++    for (index = 0; index < sizeof(signature); ++index)
++    {
++        if (data[index] != signature[index])
++        {
++            return 0;
++        }
++    }
++    return 1;
++}
++
++#endif /* XRDP_CLIPBOARD_IMAGE_FORMATS_H */
+diff --git a/tests/xrdp/test_xrdp_region.c b/tests/xrdp/test_xrdp_region.c
+index e3fcbc3..8ecb7cd 100644
+--- a/tests/xrdp/test_xrdp_region.c
++++ b/tests/xrdp/test_xrdp_region.c
+@@ -44,6 +44,7 @@
+ #include "test_xrdp.h"
+ #include "xrdp.h"
+ #include "xrdp_egfx.h"
++#include "../../sesman/chansrv/clipboard_image_formats.h"
+ #include <stdarg.h>
+ #include <stddef.h>
+ #include <stdint.h>
+@@ -672,15 +673,115 @@ test_console_dirty_gfx_is_held_during_resize(void **state)
+ {
+     UNUSED(state);
+ 
+-    /* Hold Console dirty pixels until replacement surfaces are mapped. */
++    /* A pending resize always holds Console dirty pixels. */
+     assert_int_equal(0, xrdp_mm_console_dirty_gfx_output_allowed(
+-                            XRDP_CONSOLE_SESSION_CODE, 1));
++                            XRDP_CONSOLE_SESSION_CODE, 1, 1));
++    /* Completing the state machine is insufficient if mapping failed. */
++    assert_int_equal(0, xrdp_mm_console_dirty_gfx_output_allowed(
++                            XRDP_CONSOLE_SESSION_CODE, 0, 0));
++    /* Output resumes only after replacement surfaces are mapped. */
+     assert_int_equal(1, xrdp_mm_console_dirty_gfx_output_allowed(
+-                            XRDP_CONSOLE_SESSION_CODE, 0));
++                            XRDP_CONSOLE_SESSION_CODE, 0, 1));
+ 
+     /* Other module codes retain upstream dirty-output behavior. */
+-    assert_int_equal(1, xrdp_mm_console_dirty_gfx_output_allowed(0, 1));
+-    assert_int_equal(1, xrdp_mm_console_dirty_gfx_output_allowed(1, 1));
++    assert_int_equal(1, xrdp_mm_console_dirty_gfx_output_allowed(0, 1, 0));
++    assert_int_equal(1, xrdp_mm_console_dirty_gfx_output_allowed(1, 1, 0));
++}
++
++static void
++test_clipboard_image_format_negotiation(void **state)
++{
++    UNUSED(state);
++
++    assert_int_equal(XRDP_CLIPBOARD_IMAGE_DIB,
++                     xrdp_clipboard_image_format_from_announce(
++                         XRDP_CLIPBOARD_CF_DIB, ""));
++    assert_int_equal(XRDP_CLIPBOARD_IMAGE_DIBV5,
++                     xrdp_clipboard_image_format_from_announce(
++                         XRDP_CLIPBOARD_CF_DIBV5, ""));
++    assert_int_equal(XRDP_CLIPBOARD_IMAGE_PNG,
++                     xrdp_clipboard_image_format_from_announce(
++                         XRDP_CLIPBOARD_FORMAT_PNG, "PNG"));
++    assert_int_equal(XRDP_CLIPBOARD_IMAGE_PNG,
++                     xrdp_clipboard_image_format_from_announce(
++                         0xc123, "image/PNG"));
++    assert_int_equal(XRDP_CLIPBOARD_IMAGE_NONE,
++                     xrdp_clipboard_image_format_from_announce(
++                         0x1234, "PNG"));
++    assert_int_equal(XRDP_CLIPBOARD_IMAGE_NONE,
++                     xrdp_clipboard_image_format_from_announce(
++                         0xc123, "JPEG"));
++}
++
++static void
++test_clipboard_dib_bounds_and_bmp_offsets(void **state)
++{
++    unsigned char dib[160];
++    size_t pixel_offset;
++
++    UNUSED(state);
++    g_memset(dib, 0, sizeof(dib));
++
++    /* BITMAPINFOHEADER with 24-bpp pixels starts at BMP byte 54. */
++    dib[0] = 40;
++    dib[14] = 24;
++    assert_int_equal(0, xrdp_clipboard_dib_pixel_offset(
++                            dib, 40, &pixel_offset));
++    assert_int_equal(54, pixel_offset);
++
++    /* BITMAPV5HEADER includes its channel masks in the header itself. */
++    dib[0] = 124;
++    dib[14] = 32;
++    assert_int_equal(0, xrdp_clipboard_dib_pixel_offset(
++                            dib, 124, &pixel_offset));
++    assert_int_equal(138, pixel_offset);
++
++    /* Indexed DIBs include their color table before the pixel array. */
++    dib[0] = 40;
++    dib[14] = 8;
++    dib[32] = 16;
++    assert_int_equal(0, xrdp_clipboard_dib_pixel_offset(
++                            dib, 104, &pixel_offset));
++    assert_int_equal(118, pixel_offset);
++
++    /* BITFIELDS masks follow a 40-byte info header. */
++    dib[14] = 24;
++    dib[16] = 3;
++    dib[32] = 0;
++    assert_int_equal(0, xrdp_clipboard_dib_pixel_offset(
++                            dib, 52, &pixel_offset));
++    assert_int_equal(66, pixel_offset);
++
++    assert_int_not_equal(0, xrdp_clipboard_dib_pixel_offset(
++                                dib, 39, &pixel_offset));
++    dib[0] = 124;
++    assert_int_not_equal(0, xrdp_clipboard_dib_pixel_offset(
++                                dib, 123, &pixel_offset));
++    dib[0] = 40;
++    dib[14] = 3; /* invalid bit depth */
++    assert_int_not_equal(0, xrdp_clipboard_dib_pixel_offset(
++                                dib, 40, &pixel_offset));
++}
++
++static void
++test_clipboard_png_signature(void **state)
++{
++    static const unsigned char valid_png_prefix[8] =
++    {
++        0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a
++    };
++    unsigned char invalid_png_prefix[8];
++
++    UNUSED(state);
++    assert_int_equal(1, xrdp_clipboard_png_signature_valid(
++                            valid_png_prefix, sizeof(valid_png_prefix)));
++    assert_int_equal(0, xrdp_clipboard_png_signature_valid(
++                            valid_png_prefix, sizeof(valid_png_prefix) - 1));
++    g_memcpy(invalid_png_prefix, valid_png_prefix, sizeof(invalid_png_prefix));
++    invalid_png_prefix[0] = 0;
++    assert_int_equal(0, xrdp_clipboard_png_signature_valid(
++                            invalid_png_prefix, sizeof(invalid_png_prefix)));
++    assert_int_equal(0, xrdp_clipboard_png_signature_valid(NULL, 8));
+ }
+ 
+ START_TEST(execute_suite)
+@@ -702,6 +803,9 @@ START_TEST(execute_suite)
+         cmocka_unit_test(test_console_interaction_priority_state),
+         cmocka_unit_test(test_console_generic_encoder_policy),
+         cmocka_unit_test(test_console_dirty_gfx_is_held_during_resize),
++        cmocka_unit_test(test_clipboard_image_format_negotiation),
++        cmocka_unit_test(test_clipboard_dib_bounds_and_bmp_offsets),
++        cmocka_unit_test(test_clipboard_png_signature),
+         cmocka_unit_test(
+             test_console_gfx_adaptive_pacing_promotes_immediately),
+         cmocka_unit_test(
+diff --git a/xrdp/xrdp.h b/xrdp/xrdp.h
+index acbdfe1..1fddd85 100644
+--- a/xrdp/xrdp.h
++++ b/xrdp/xrdp.h
+@@ -316,7 +316,8 @@ xrdp_mm_console_generic_encoder_allowed(
+     int session_code, int gfx_enabled, enum xrdp_egfx_flags egfx_flags);
+ int
+ xrdp_mm_console_dirty_gfx_output_allowed(int session_code,
+-                                         int resize_pending);
++                                         int resize_pending,
++                                         int surfaces_ready);
+ void
+ xrdp_mm_console_set_interaction_anchor(
+     struct xrdp_console_interaction_priority *priority, int x, int y);
+diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
+index 5ddb59c..75e4124 100644
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -90,6 +90,7 @@ xrdp_mm_create(struct xrdp_wm *owner)
+     self->resize_queue = list_create();
+     self->resize_queue->auto_free = 1;
+     self->resize_data = NULL;
++    self->console_gfx_surfaces_ready = 0;
+     self->resize_ready = NULL_WAIT_OBJ;
+ 
+     init_libh264_loaded(self);
+@@ -1448,10 +1449,12 @@ xrdp_mm_console_generic_encoder_allowed(
+ 
+ int
+ xrdp_mm_console_dirty_gfx_output_allowed(int session_code,
+-                                         int resize_pending)
++                                         int resize_pending,
++                                         int surfaces_ready)
+ {
+-    /* Retain Console dirty pixels until replacement surfaces are mapped. */
+-    return session_code != XRDP_CONSOLE_SESSION_CODE || !resize_pending;
++    /* Retain Console dirty pixels until current surfaces are mapped. */
++    return session_code != XRDP_CONSOLE_SESSION_CODE ||
++           (!resize_pending && surfaces_ready);
+ }
+ 
+ void
+@@ -2161,7 +2164,17 @@ xrdp_mm_egfx_create_surfaces(struct xrdp_mm *self)
+     int height;
+     struct monitor_info *mi;
+     struct xrdp_bitmap *screen;
++    int error;
+ 
++    if (self == NULL || self->egfx == NULL || self->wm == NULL ||
++            self->wm->screen == NULL || self->wm->client_info == NULL)
++    {
++        return 1;
++    }
++    if (self->code == XRDP_CONSOLE_SESSION_CODE)
++    {
++        self->console_gfx_surfaces_ready = 0;
++    }
+     screen = self->wm->screen;
+     count = self->wm->client_info->display_sizes.monitorCount;
+     LOG_DEVEL(LOG_LEVEL_INFO, "xrdp_mm_egfx_create_surfaces: "
+@@ -2172,14 +2185,24 @@ xrdp_mm_egfx_create_surfaces(struct xrdp_mm *self)
+         top = 0;
+         width = screen->width;
+         height = screen->height;
+-        xrdp_egfx_send_create_surface(self->egfx, self->egfx->surface_id,
+-                                      width, height,
+-                                      XR_PIXEL_FORMAT_XRGB_8888);
+-        xrdp_egfx_send_map_surface(self->egfx, self->egfx->surface_id,
+-                                   left, top);
++        error = xrdp_egfx_send_create_surface(self->egfx,
++                                              self->egfx->surface_id,
++                                              width, height,
++                                              XR_PIXEL_FORMAT_XRGB_8888);
++        if (error == 0)
++        {
++            error = xrdp_egfx_send_map_surface(self->egfx,
++                                               self->egfx->surface_id,
++                                               left, top);
++        }
++        if (error != 0)
++        {
++            return error;
++        }
+         LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_create_surfaces: map "
+             "surface_id %d left %d top %d width %d height %d",
+             self->egfx->surface_id, left, top, width, height);
++        self->console_gfx_surfaces_ready = 1;
+         return 0;
+     }
+     for (index = 0; index < count; index++)
+@@ -2190,14 +2213,23 @@ xrdp_mm_egfx_create_surfaces(struct xrdp_mm *self)
+         top = mi->top;
+         width = mi->right - mi->left + 1;
+         height = mi->bottom - mi->top + 1;
+-        xrdp_egfx_send_create_surface(self->egfx, surface_id,
+-                                      width, height,
+-                                      XR_PIXEL_FORMAT_XRGB_8888);
+-        xrdp_egfx_send_map_surface(self->egfx, surface_id, left, top);
++        error = xrdp_egfx_send_create_surface(self->egfx, surface_id,
++                                              width, height,
++                                              XR_PIXEL_FORMAT_XRGB_8888);
++        if (error == 0)
++        {
++            error = xrdp_egfx_send_map_surface(self->egfx, surface_id,
++                                               left, top);
++        }
++        if (error != 0)
++        {
++            return error;
++        }
+         LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_create_surfaces: map "
+             "surface_id %d left %d top %d width %d height %d",
+             surface_id, left, top, width, height);
+     }
++    self->console_gfx_surfaces_ready = 1;
+     return 0;
+ }
+ 
+@@ -2206,19 +2238,29 @@ static int
+ xrdp_mm_egfx_delete_surfaces(struct xrdp_mm *self)
+ {
+     int index;
++    int error;
+     int count = self->wm->client_info->display_sizes.monitorCount;
+ 
+     LOG_DEVEL(LOG_LEVEL_INFO, "xrdp_mm_egfx_delete_surfaces: "
+               "monitor count %d", count);
+     if (count < 1)
+     {
+-        xrdp_egfx_send_delete_surface(self->egfx, self->egfx->surface_id);
++        error = xrdp_egfx_send_delete_surface(self->egfx,
++                                              self->egfx->surface_id);
++        if (error != 0)
++        {
++            return error;
++        }
+     }
+     else
+     {
+         for (index = 0; index < count; index++)
+         {
+-            xrdp_egfx_send_delete_surface(self->egfx, index);
++            error = xrdp_egfx_send_delete_surface(self->egfx, index);
++            if (error != 0)
++            {
++                return error;
++            }
+         }
+     }
+     return 0;
+@@ -2365,8 +2407,19 @@ xrdp_mm_egfx_caps_advertise(void *user, int caps_count,
+         LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_caps_advertise: xrdp_egfx_send_reset_graphics "
+             "error %d monitorCount %d",
+             error, self->wm->client_info->display_sizes.monitorCount);
++        if (error != 0 && self->code == XRDP_CONSOLE_SESSION_CODE)
++        {
++            g_free(ver_flags);
++            return error;
++        }
+         self->egfx_up = 1;
+-        xrdp_mm_egfx_create_surfaces(self);
++        error = xrdp_mm_egfx_create_surfaces(self);
++        if (error != 0 && self->code == XRDP_CONSOLE_SESSION_CODE)
++        {
++            self->egfx_up = 0;
++            g_free(ver_flags);
++            return error;
++        }
+         if (xrdp_mm_console_generic_encoder_allowed(
+                 self->code, self->wm->client_info->gfx,
+                 self->egfx_flags))
+@@ -2392,6 +2445,7 @@ xrdp_mm_egfx_caps_advertise(void *user, int caps_count,
+         lrect.right = screen->width;
+         lrect.bottom = screen->height;
+         self->wm->client_info->gfx = 0;
++        self->console_gfx_surfaces_ready = 1;
+         xrdp_encoder_delete(self->encoder);
+         if (xrdp_mm_console_generic_encoder_allowed(
+                 self->code, self->wm->client_info->gfx,
+@@ -2723,6 +2777,17 @@ restore_output_after_resize_error(struct xrdp_mm *mm)
+ 
+     wm = mm->wm;
+ 
++    if (mm->code == XRDP_CONSOLE_SESSION_CODE && mm->egfx_up)
++    {
++        /* ResetGraphics invalidated the old surface. Do not resume output
++         * unless the replacement surfaces have been created and mapped. */
++        mm->console_gfx_surfaces_ready = 0;
++        LOG(LOG_LEVEL_ERROR,
++            "Console GFX resize failed; leaving output suppressed because "
++            "the client surface mapping is no longer trustworthy");
++        return;
++    }
++
+     /* WMRZ_ENCODER_DELETE removes the encoder before a resize can fail. */
+     if (mm->encoder == NULL && !mm->egfx_up &&
+             mm->code != XRDP_CONSOLE_SESSION_CODE)
+@@ -2793,6 +2858,10 @@ process_display_control_monitor_layout_data(struct xrdp_wm *wm)
+     switch (description->state)
+     {
+         case WMRZ_ENCODER_DELETE:
++            if (mm->code == XRDP_CONSOLE_SESSION_CODE)
++            {
++                mm->console_gfx_surfaces_ready = 0;
++            }
+             // Stop any output from the module
+             xrdp_rdp_suppress_output(wm->session->rdp,
+                                      1, XSO_REASON_DYNAMIC_RESIZE,
+@@ -2817,7 +2886,14 @@ process_display_control_monitor_layout_data(struct xrdp_wm *wm)
+             // EGFX only. Delete the surfaces and send a 'reset graphics'
+             // command to resize the client. For EGFX, that's all we
+             // need to do.
+-            xrdp_mm_egfx_delete_surfaces(mm);
++            error = xrdp_mm_egfx_delete_surfaces(mm);
++            if (error != 0 && mm->code == XRDP_CONSOLE_SESSION_CODE)
++            {
++                LOG(LOG_LEVEL_ERROR,
++                    "process_display_control_monitor_layout_data: "
++                    "failed deleting old Console GFX surfaces (%d)", error);
++                return advance_error(error, mm);
++            }
+             error = xrdp_egfx_send_reset_graphics(mm->egfx,
+                                                   desc_width, desc_height,
+                                                   description->description.monitorCount,
+@@ -2925,7 +3001,15 @@ process_display_control_monitor_layout_data(struct xrdp_wm *wm)
+         case WMRZ_ENCODER_CREATE:
+             if (mm->egfx_up)
+             {
+-                xrdp_mm_egfx_create_surfaces(mm);
++                error = xrdp_mm_egfx_create_surfaces(mm);
++                if (error != 0 && mm->code == XRDP_CONSOLE_SESSION_CODE)
++                {
++                    LOG(LOG_LEVEL_ERROR,
++                        "process_display_control_monitor_layout_data: "
++                        "failed mapping replacement Console GFX surfaces (%d)",
++                        error);
++                    return advance_error(error, mm);
++                }
+             }
+             if (xrdp_mm_console_generic_encoder_allowed(
+                     mm->code, mm->wm->client_info->gfx,
+@@ -2949,6 +3033,10 @@ process_display_control_monitor_layout_data(struct xrdp_wm *wm)
+                 return advance_error(error, mm);
+             }
+             xrdp_bitmap_invalidate(wm->screen, 0);
++            if (mm->code == XRDP_CONSOLE_SESSION_CODE && !mm->egfx_up)
++            {
++                mm->console_gfx_surfaces_ready = 1;
++            }
+             xrdp_rdp_suppress_output(wm->session->rdp,
+                                      0, XSO_REASON_DYNAMIC_RESIZE,
+                                      0, 0, desc_width, desc_height);
+@@ -5198,6 +5286,7 @@ int
+ xrdp_mm_check_wait_objs(struct xrdp_mm *self)
+ {
+     int rv;
++    int resize_rv;
+ 
+     if (self == 0)
+     {
+@@ -5257,7 +5346,14 @@ xrdp_mm_check_wait_objs(struct xrdp_mm *self)
+     if (g_is_wait_obj_set(self->resize_ready))
+     {
+         g_reset_wait_obj(self->resize_ready);
+-        dynamic_monitor_process_queue(self);
++        resize_rv = dynamic_monitor_process_queue(self);
++        if (resize_rv != 0 &&
++                self->code == XRDP_CONSOLE_SESSION_CODE && self->egfx_up)
++        {
++            /* A failed Console GFX resize cannot safely reuse the old
++             * surface IDs. Fail the session rather than emit stale frames. */
++            return resize_rv;
++        }
+     }
+ 
+     if (self->encoder != NULL)
+@@ -5272,7 +5368,8 @@ xrdp_mm_check_wait_objs(struct xrdp_mm *self)
+     if (self->wm->screen_dirty_region != NULL)
+     {
+         if (xrdp_mm_console_dirty_gfx_output_allowed(
+-                    self->code, self->resize_data != NULL) &&
++                    self->code, self->resize_data != NULL,
++                    self->console_gfx_surfaces_ready) &&
+                 xrdp_region_not_empty(self->wm->screen_dirty_region))
+         {
+             int minimum_flush_ms = xrdp_mm_gfx_minimum_flush_ms(self);
+diff --git a/xrdp/xrdp_types.h b/xrdp/xrdp_types.h
+index b0a2296..d13161c 100644
+--- a/xrdp/xrdp_types.h
++++ b/xrdp/xrdp_types.h
+@@ -491,6 +491,8 @@ struct xrdp_mm
+     int dynamic_monitor_chanid;
+     struct xrdp_egfx *egfx;
+     int egfx_up;
++    /* Set only while GFX surfaces are mapped for the current geometry. */
++    int console_gfx_surfaces_ready;
+     enum xrdp_egfx_flags egfx_flags;
+     /* Last capset sent in a successful CAPS_CONFIRM; zero means none. */
+     int egfx_caps_version;

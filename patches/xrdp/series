@@ -25,3 +25,4 @@
 0025-xrdp-console-quiesce-gfx-during-resize.patch
 0026-xrdp-unsigned-bitmap-channel-extraction.patch
 0027-xrdp-quiesce-encoder-worker-before-destroy.patch
+0028-xrdp-console-resize-fail-closed-and-clipboard-images.patch

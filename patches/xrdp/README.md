@@ -171,13 +171,23 @@ historical fork's commit history:
     signals shutdown but does not join the thread; the handoff ensures the
     worker has finished using encoder state and wait objects before teardown
     closes or frees them.
+28. `0028-xrdp-console-resize-fail-closed-and-clipboard-images.patch` keeps
+    Console GFX output disabled until every replacement surface has been
+    created and mapped, propagates surface/reset failures to session teardown,
+    and never unsuppresses output after an unusable GFX reset. It also
+    advertises only image clipboard formats that chansrv can serve, supports
+    PNG in both directions, accepts incoming CF_DIB/CF_DIBV5 images, and serves
+    Linux images as CF_DIB or PNG. It validates image signatures and DIB
+    offsets and returns explicit clipboard failures for rejected or
+    unallocatable image requests. Focused format/header checks extend the
+    xrdp unit suite.
 
 The activation script requires the `XRDP_CONSOLE_GFX_PLANAR_BATCH_V1` marker
 in the candidate daemon, so an older patched generation cannot be mistaken
 for this Planar batching implementation.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-twenty-seven patches are retained direct-Console production behavior and bounded
+twenty-eight patches are retained direct-Console production behavior and bounded
 operational diagnostics, not benchmark knobs. Code `21` is reserved for the
 direct module; other module codes retain upstream behavior. The old checked-in
 fork contained profiling, parser-quantum, request-ahead,

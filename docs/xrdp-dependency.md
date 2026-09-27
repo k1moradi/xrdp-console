@@ -86,8 +86,9 @@ The series is deliberately small and applies in this order:
 | `0025-xrdp-console-quiesce-gfx-during-resize.patch` | resize surface lifecycle ordering | Holds Console dirty output while resize is pending so it cannot target an invalidated surface; legacy behavior is unchanged. |
 | `0026-xrdp-unsigned-bitmap-channel-extraction.patch` | defined Planar pixel/channel extraction | Removes UBSan-reported signed-shift and unaligned-store undefined behavior without changing encoded bytes. |
 | `0027-xrdp-quiesce-encoder-worker-before-destroy.patch` | encoder worker teardown handoff | Waits until the detached worker has finished using encoder state and wait objects before freeing them; this closes a teardown overlap observed under TSan. |
+| `0028-xrdp-console-resize-fail-closed-and-clipboard-images.patch` | fail-closed Console surface replacement and clipboard images | Keeps Console graphics quiescent until replacement surfaces are mapped, fails the session on unusable GFX resize state, and serves PNG plus DIB/DIBV5 only when announced and supported. |
 
-These twenty-seven patches are retained production-path behavior and bounded
+These twenty-eight patches are retained production-path behavior and bounded
 operational diagnostics, not benchmark knobs.
 The old
 fork's profiling records, incremental parser, request-ahead scheduling,
@@ -96,7 +97,7 @@ experimental GFX flow-control code are intentionally not in the series.
 
 ## Classification of the old fork
 
-* **KEEP:** the twenty-seven patches listed above; they are required by the measured
+* **KEEP:** the twenty-eight patches listed above; they are required by the measured
   fixed-console/direct-console product path and address concrete transport,
   parser, codec, and keyboard-layout correctness issues.
 * **TOOLING:** profiling and benchmark-only changes; these belong in the
