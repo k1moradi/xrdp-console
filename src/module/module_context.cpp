@@ -35,6 +35,7 @@ extern "C" {
 #include "../rdp/gfx_avc420_frame.h"
 #include "../rdp/gfx_bitmap_cache_commands.h"
 #include "../rdp/gfx_bitmap_cache_observer.h"
+#include "../rdp/h264_capture_policy.h"
 #include "../rdp/h264_interaction_scheduler.h"
 #include "../rdp/h264_latest_frame.h"
 #include "../rdp/scroll_motion_observer.h"
@@ -926,6 +927,27 @@ struct PendingH264Tile final
     }
 };
 
+struct PendingH264Snapshot final
+{
+    Rectangle sourceRectangle{};
+    // Non-owning view into X11SharedMemoryCapture's persistent XShm arena.
+    // No later capture may occur until every generation selected from this
+    // snapshot has been converted or the snapshot is discarded.
+    FramebufferView sourcePixels{};
+
+    [[nodiscard]] bool active() const noexcept
+    {
+        return sourceRectangle.widthPixels != 0 &&
+               sourceRectangle.heightPixels != 0 && sourcePixels.valid();
+    }
+
+    void clear() noexcept
+    {
+        sourceRectangle = {};
+        sourcePixels = {};
+    }
+};
+
 struct PendingBitmapCacheHit final
 {
     GenerationTileMap::Selection selection{};
@@ -1025,6 +1047,8 @@ struct ModuleContext::Impl
     std::unique_ptr<RfxEncoder> rfxEncoder{};
     RfxSurfaceSink rfxSurfaceSink{nullptr};
     xrdp_console::rdp::H264LatestFrameState h264Frame{};
+    PendingH264Snapshot pendingH264Snapshot{};
+    bool h264CoherentCaptureAvailable{false};
     xrdp_console::rdp::ScrollMotionObserver scrollMotionObserver{};
     xrdp_console::rdp::BitmapCacheReuseObserver bitmapCacheObserver{};
     xrdp_console::rdp::VerifiedBitmapCache16 verifiedBitmapCache{};
@@ -1066,6 +1090,7 @@ struct ModuleContext::Impl
 
     [[nodiscard]] bool preparePresentationInvalidation() noexcept
     {
+        pendingH264Snapshot.clear();
         pendingH264Tile.clear();
         rfxLetterboxFill.clear();
         if (graphicsTransport == GraphicsTransport::ClassicBitmap)
@@ -1302,7 +1327,9 @@ ModuleContext::connect() noexcept
                 xrdp_console::rdp::makeH264PresentationPlan(
                     sourceGeometry, impl_->state.presentationGeometry,
                     h264Plan);
-            if (h264GeometrySupported &&
+            const bool h264SnapshotPolicySupported =
+                xrdp_console::rdp::h264CoherentSnapshotFits(sourceGeometry);
+            if (h264GeometrySupported && h264SnapshotPolicySupported &&
                 xrdp_console_module_h264_encoder_available(impl_->module) != 0 &&
                 xrdp_console_module_h264_surface_id(impl_->module) >= 0 &&
                 h264Frame.configure(
@@ -1375,6 +1402,8 @@ ModuleContext::connect() noexcept
                 }
                 const char *reason = !h264GeometrySupported
                                          ? "unsupported presentation geometry"
+                                     : !h264SnapshotPolicySupported
+                                         ? "source snapshot exceeds memory budget"
                                      : xrdp_console_module_h264_encoder_available(
                                            impl_->module) == 0
                                          ? "xrdp H.264 encoder unavailable"
@@ -1400,21 +1429,6 @@ ModuleContext::connect() noexcept
             h264Frame.reset();
         }
 
-        const char *firstPartyTransport =
-            graphicsTransport == GraphicsTransport::H264Gfx
-                ? "async-h264"
-                : (graphicsTransport == GraphicsTransport::RemoteFx
-                ? "standard-rfx"
-                : "classic-bitmap");
-        const char *actualOutputPath =
-            graphicsTransport == GraphicsTransport::H264Gfx
-                ? "gfx-h264-avc420"
-                : (negotiatedGraphics.gfx_enabled != 0
-                       ? "gfx-planar"
-                       : (graphicsTransport == GraphicsTransport::RemoteFx
-                              ? "standard-rfx"
-                              : "legacy-bitmap"));
-
         auto damageTracker = std::make_unique<X11DamageTracker>(
             *connection->nativeConnection(), connection->rootWindow(),
             connection->sourceGeometry());
@@ -1428,19 +1442,64 @@ ModuleContext::connect() noexcept
             return 1;
         }
 
+        const std::uint64_t sourcePixelCount =
+            static_cast<std::uint64_t>(sourceGeometry.widthPixels) *
+            sourceGeometry.heightPixels;
+        bool h264CoherentCaptureAvailable =
+            graphicsTransport == GraphicsTransport::H264Gfx &&
+            xrdp_console::rdp::h264CoherentSnapshotFits(sourceGeometry);
+        const std::uint64_t captureArenaPixels =
+            h264CoherentCaptureAvailable
+                ? sourcePixelCount
+                : kMaximumPaintPixelsPerService;
         auto sharedMemoryCapture = std::make_unique<X11SharedMemoryCapture>(
             *connection->nativeConnection(), connection->rootWindow(),
             connection->rootVisual(), connection->rootDepth(), sourceGeometry,
-            kMaximumPaintPixelsPerService);
+            captureArenaPixels);
+        if (!sharedMemoryCapture->valid() && h264CoherentCaptureAvailable)
+        {
+            const char *snapshotFailure =
+                sharedMemoryCapture->failureReason();
+            log_message(
+                LOG_LEVEL_WARNING,
+                "xrdp-console: coherent H.264 source snapshot allocation "
+                "failed (%s); falling back to GFX Planar rather than using "
+                "temporally inconsistent per-tile H.264 captures",
+                snapshotFailure != nullptr ? snapshotFailure : "unknown error");
+            sharedMemoryCapture.reset();
+            h264CoherentCaptureAvailable = false;
+            graphicsTransport = GraphicsTransport::ClassicBitmap;
+            h264Frame.reset();
+            rfxEncoder.reset();
+            sharedMemoryCapture = std::make_unique<X11SharedMemoryCapture>(
+                *connection->nativeConnection(), connection->rootWindow(),
+                connection->rootVisual(), connection->rootDepth(),
+                sourceGeometry, kMaximumPaintPixelsPerService);
+        }
         if (!sharedMemoryCapture->valid())
         {
             log_message(
                 LOG_LEVEL_ERROR, "xrdp-console: XShm capture setup failed: %s",
                 sharedMemoryCapture->failureReason() != nullptr
                     ? sharedMemoryCapture->failureReason()
-                    : "unknown error");
+                : "unknown error");
             return 1;
         }
+
+        const char *firstPartyTransport =
+            graphicsTransport == GraphicsTransport::H264Gfx
+                ? "async-h264"
+                : (graphicsTransport == GraphicsTransport::RemoteFx
+                       ? "standard-rfx"
+                       : "classic-bitmap");
+        const char *actualOutputPath =
+            graphicsTransport == GraphicsTransport::H264Gfx
+                ? "gfx-h264-avc420"
+                : (negotiatedGraphics.gfx_enabled != 0
+                       ? "gfx-planar"
+                       : (graphicsTransport == GraphicsTransport::RemoteFx
+                              ? "standard-rfx"
+                              : "legacy-bitmap"));
 
         auto cursorTracker = std::make_unique<X11CursorTracker>(
             *connection->nativeConnection(), connection->rootWindow());
@@ -1502,6 +1561,7 @@ ModuleContext::connect() noexcept
         }
 
         impl_->pendingPresentation.clear();
+        impl_->pendingH264Snapshot.clear();
         impl_->pendingH264Tile.clear();
         impl_->pendingRfx.clear();
         impl_->rfxLetterboxFill.clear();
@@ -1592,6 +1652,25 @@ ModuleContext::connect() noexcept
         impl_->clipboard = std::move(clipboard);
         impl_->rfxEncoder = std::move(rfxEncoder);
         impl_->graphicsTransport = graphicsTransport;
+        impl_->h264CoherentCaptureAvailable =
+            h264CoherentCaptureAvailable;
+        if (graphicsTransport == GraphicsTransport::H264Gfx)
+        {
+            log_message(
+                LOG_LEVEL_INFO,
+                "XRDP_CONSOLE_H264_CAPTURE coherent_snapshot=%s "
+                "source=%ux%u arena_bytes=%llu maximum_bytes=%llu",
+                h264CoherentCaptureAvailable ? "enabled" : "unavailable",
+                sourceGeometry.widthPixels, sourceGeometry.heightPixels,
+                static_cast<unsigned long long>(
+                    h264CoherentCaptureAvailable
+                        ? sourcePixelCount * sizeof(std::uint32_t)
+                        : kMaximumPaintPixelsPerService *
+                              sizeof(std::uint32_t)),
+                static_cast<unsigned long long>(
+                    xrdp_console::rdp::
+                        kMaximumCoherentH264SnapshotBytes));
+        }
         if (graphicsTransport == GraphicsTransport::RemoteFx)
         {
             impl_->rfxLetterboxFill.regions = letterboxRegions;
@@ -1631,6 +1710,7 @@ ModuleContext::connect() noexcept
         // The C ABI must report allocation/constructor failures as a normal
         // module failure and leave no partially connected state behind.
         impl_->pendingPresentation.clear();
+        impl_->pendingH264Snapshot.clear();
         impl_->pendingH264Tile.clear();
         impl_->pendingRfx.clear();
         impl_->rfxEncoder.reset();
@@ -1801,6 +1881,7 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     }
 
     impl_->pendingPresentation.clear();
+    impl_->pendingH264Snapshot.clear();
     impl_->pendingH264Tile.clear();
     clearInteractionPriority(impl_->interactionPriority);
     impl_->pendingRfx.clear();
@@ -1898,6 +1979,7 @@ ModuleContext::invalidate_presentation(int width, int height) noexcept
         return 1;
     }
     impl_->pendingPresentation.clear();
+    impl_->pendingH264Snapshot.clear();
     impl_->pendingH264Tile.clear();
     clearInteractionPriority(impl_->interactionPriority);
     impl_->pendingRfx.clear();
@@ -1933,6 +2015,7 @@ ModuleContext::suppress_output(bool suppress, int left, int top, int right,
 
     impl_->outputSuppressed = suppress;
     impl_->pendingPresentation.clear();
+    impl_->pendingH264Snapshot.clear();
     impl_->pendingH264Tile.clear();
     clearInteractionPriority(impl_->interactionPriority);
     impl_->pendingRfx.clear();
@@ -2186,6 +2269,7 @@ ModuleContext::end() noexcept
     // X11DisplayConnection destroys the xrdp wait object before disconnecting
     // XCB. Reset it before changing the lifecycle state.
     impl_->pendingPresentation.clear();
+    impl_->pendingH264Snapshot.clear();
     impl_->pendingH264Tile.clear();
     impl_->pendingRfx.clear();
     impl_->rfxLetterboxFill.clear();
@@ -2199,6 +2283,7 @@ ModuleContext::end() noexcept
     impl_->h264SubmittedAt = {};
     impl_->h264SubmittedScrollBaselineSequence = 0;
     impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
+    impl_->h264CoherentCaptureAvailable = false;
     impl_->sharedMemoryCapture.reset();
     impl_->cursorTracker.reset();
     impl_->damageTracker.reset();
@@ -2744,6 +2829,7 @@ ModuleContext::check_h264_gfx() noexcept
     using xrdp_console::rdp::buildGfxSolidFillCommand;
     using xrdp_console::rdp::buildGfxSurfaceToSurfaceCommand;
     using xrdp_console::rdp::updateNv12Rectangle_709FullRange;
+    using xrdp_console::rdp::updateNv12RectangleFromBgraRegion_709FullRange;
 
     if (!valid() || !impl_->h264Frame.valid() ||
         impl_->damageTracker == nullptr || !impl_->damageTracker->valid() ||
@@ -2790,7 +2876,11 @@ ModuleContext::check_h264_gfx() noexcept
         return 0;
     };
 
-    if (impl_->damageTracker->hasPendingDamage())
+    const bool coherentSnapshotMode =
+        impl_->h264CoherentCaptureAvailable;
+    if ((!coherentSnapshotMode ||
+         !impl_->pendingH264Snapshot.active()) &&
+        impl_->damageTracker->hasPendingDamage())
     {
         const std::uint64_t previousSnapshotRectangles =
             impl_->damageTracker->snapshotRectangleCount();
@@ -2811,6 +2901,42 @@ ModuleContext::check_h264_gfx() noexcept
                 previousSnapshotRectangles,
             impl_->damageTracker->snapshotPixelCount() -
                 previousSnapshotPixels);
+    }
+
+    if (coherentSnapshotMode &&
+        !impl_->pendingH264Snapshot.active() &&
+        impl_->h264Frame.capturePending())
+    {
+        const Rectangle fullSource{
+            0, 0, impl_->h264Frame.sourceGeometry().widthPixels,
+            impl_->h264Frame.sourceGeometry().heightPixels};
+        const bool profileH264Timing = impl_->profile.enabled();
+        const auto captureStarted = profileH264Timing
+                                        ? std::chrono::steady_clock::now()
+                                        : std::chrono::steady_clock::time_point{};
+        const FramebufferView snapshot =
+            impl_->sharedMemoryCapture->capture(fullSource);
+        if (profileH264Timing)
+        {
+            impl_->profile.noteH264Capture(
+                std::chrono::steady_clock::now() - captureStarted);
+        }
+        if (!snapshot.valid())
+        {
+            return 1;
+        }
+
+        impl_->pendingH264Snapshot.sourceRectangle = fullSource;
+        impl_->pendingH264Snapshot.sourcePixels = snapshot;
+        impl_->profile.noteCapture(fullSource);
+        if (impl_->scrollMotionObserver.valid() &&
+            !impl_->scrollMotionObserver.stageCapture(snapshot, fullSource))
+        {
+            log_message(LOG_LEVEL_WARNING,
+                        "xrdp-console: disabling scroll motion "
+                        "observation after coherent snapshot update failure");
+            impl_->scrollMotionObserver.reset();
+        }
     }
 
     if (!impl_->pendingH264Tile.active())
@@ -2859,13 +2985,25 @@ ModuleContext::check_h264_gfx() noexcept
                 return 1;
             }
 
-            Rectangle captureRectangle = sourceTile;
             if (mappedFrameRectangle.widthPixels != 0 &&
                 mappedFrameRectangle.heightPixels != 0)
             {
+                // AVC420 regions must be even-aligned. Apply this to both
+                // snapshot and bounded-capture paths before either scaler
+                // validation or NV12 conversion; otherwise scaled source
+                // tiles can produce odd mapped extents and fail conversion.
                 mappedFrameRectangle =
                     xrdp_console::rdp::alignAvc420Rectangle(
                         mappedFrameRectangle, impl_->h264Frame.geometry());
+            }
+
+            Rectangle captureRectangle = coherentSnapshotMode
+                ? impl_->pendingH264Snapshot.sourceRectangle
+                : sourceTile;
+            if (!coherentSnapshotMode &&
+                mappedFrameRectangle.widthPixels != 0 &&
+                mappedFrameRectangle.heightPixels != 0)
+            {
                 Rectangle sourceForOutput{};
                 if (mappedFrameRectangle.widthPixels == 0 ||
                     mappedFrameRectangle.heightPixels == 0 ||
@@ -2903,20 +3041,32 @@ ModuleContext::check_h264_gfx() noexcept
             const std::uint64_t capturePixels =
                 static_cast<std::uint64_t>(captureRectangle.widthPixels) *
                 captureRectangle.heightPixels;
-            if (capturePixels > kMaximumPaintPixelsPerService)
+            if (!coherentSnapshotMode &&
+                capturePixels > kMaximumPaintPixelsPerService)
             {
                 return 1;
             }
-            const bool profileH264Timing = impl_->profile.enabled();
-            const auto captureStarted = profileH264Timing
-                                            ? std::chrono::steady_clock::now()
-                                            : std::chrono::steady_clock::time_point{};
-            const FramebufferView pixels =
-                impl_->sharedMemoryCapture->capture(captureRectangle);
-            if (profileH264Timing)
+            FramebufferView pixels{};
+            if (coherentSnapshotMode)
             {
-                impl_->profile.noteH264Capture(
-                    std::chrono::steady_clock::now() - captureStarted);
+                if (!impl_->pendingH264Snapshot.active())
+                {
+                    return 1;
+                }
+                pixels = impl_->pendingH264Snapshot.sourcePixels;
+            }
+            else
+            {
+                const bool profileH264Timing = impl_->profile.enabled();
+                const auto captureStarted = profileH264Timing
+                                                ? std::chrono::steady_clock::now()
+                                                : std::chrono::steady_clock::time_point{};
+                pixels = impl_->sharedMemoryCapture->capture(captureRectangle);
+                if (profileH264Timing)
+                {
+                    impl_->profile.noteH264Capture(
+                        std::chrono::steady_clock::now() - captureStarted);
+                }
             }
             if (!pixels.valid())
             {
@@ -2971,9 +3121,13 @@ ModuleContext::check_h264_gfx() noexcept
                         fingerprint.value, pixels, localTile));
                 }
             }
-            impl_->profile.noteCapture(captureRectangle);
+            if (!coherentSnapshotMode)
+            {
+                impl_->profile.noteCapture(captureRectangle);
+            }
 
-            if (impl_->scrollMotionObserver.valid() &&
+            if (!coherentSnapshotMode &&
+                impl_->scrollMotionObserver.valid() &&
                 !impl_->scrollMotionObserver.stageCapture(
                     pixels, captureRectangle))
             {
@@ -3018,6 +3172,13 @@ ModuleContext::check_h264_gfx() noexcept
         }
     }
 
+    if (coherentSnapshotMode &&
+        !impl_->pendingH264Tile.active() &&
+        !impl_->h264Frame.capturePending())
+    {
+        impl_->pendingH264Snapshot.clear();
+    }
+
     std::uint64_t presentedPixels = 0;
     if (impl_->pendingH264Tile.active())
     {
@@ -3043,10 +3204,6 @@ ModuleContext::check_h264_gfx() noexcept
         const auto conversionStarted = profileH264Timing
                                            ? std::chrono::steady_clock::now()
                                            : std::chrono::steady_clock::time_point{};
-        const FramebufferView scaled =
-            impl_->presentationScaler.scaleRows(
-                pending.sourcePixels, pending.captureRectangle,
-                pending.frameRectangle, pending.nextFrameRow, rows);
         const Rectangle destination{
             pending.frameRectangle.x,
             pending.frameRectangle.y +
@@ -3054,11 +3211,38 @@ ModuleContext::check_h264_gfx() noexcept
             width,
             rows,
         };
-        const bool converted =
-            scaled.valid() && updateNv12Rectangle_709FullRange(
-                                  scaled, destination,
-                                  impl_->h264Frame.geometry(),
-                                  impl_->h264Frame.frameBytes());
+        const PixelSize sourceGeometry =
+            impl_->h264Frame.sourceGeometry();
+        const bool identitySnapshot =
+            sourceGeometry == impl_->h264Frame.geometry() &&
+            sourceGeometry == impl_->state.presentationGeometry &&
+            impl_->h264Frame.viewport() ==
+                Rectangle{0, 0, sourceGeometry.widthPixels,
+                          sourceGeometry.heightPixels};
+        bool converted = false;
+        if (identitySnapshot)
+        {
+            Rectangle sourceRectangle{};
+            converted =
+                impl_->h264Frame.sourceCaptureForFrameRectangle(
+                    destination, sourceRectangle) &&
+                updateNv12RectangleFromBgraRegion_709FullRange(
+                    pending.sourcePixels, sourceRectangle, destination,
+                    impl_->h264Frame.geometry(),
+                    impl_->h264Frame.frameBytes());
+        }
+        else
+        {
+            const FramebufferView scaled =
+                impl_->presentationScaler.scaleRows(
+                    pending.sourcePixels, pending.captureRectangle,
+                    pending.frameRectangle, pending.nextFrameRow, rows);
+            converted =
+                scaled.valid() && updateNv12Rectangle_709FullRange(
+                                      scaled, destination,
+                                      impl_->h264Frame.geometry(),
+                                      impl_->h264Frame.frameBytes());
+        }
         if (profileH264Timing)
         {
             impl_->profile.noteH264Conversion(
@@ -3083,6 +3267,23 @@ ModuleContext::check_h264_gfx() noexcept
         }
     }
 
+    if (coherentSnapshotMode &&
+        !impl_->pendingH264Tile.active() &&
+        !impl_->h264Frame.capturePending())
+    {
+        impl_->pendingH264Snapshot.clear();
+    }
+    if (coherentSnapshotMode &&
+        (impl_->pendingH264Snapshot.active() ||
+         impl_->h264Frame.capturePending() ||
+         impl_->pendingH264Tile.active()))
+    {
+        // Do not expose one independently captured tile at a time. Once all
+        // tiles from the immutable source snapshot have been converted, the
+        // normal sender emits them together in one RDPGFX logical frame.
+        return finish();
+    }
+
     std::array<xrdp_console::rdp::ExactScrollCopyRun,
                xrdp_console::rdp::kMaximumExactScrollCopyRuns>
         exactScrollCopyRuns{};
@@ -3101,6 +3302,7 @@ ModuleContext::check_h264_gfx() noexcept
             impl_->h264Frame.viewport() ==
                 Rectangle{0, 0, source.widthPixels, source.heightPixels};
         const bool copyCandidate =
+            impl_->h264CoherentCaptureAvailable &&
             xrdp_console::rdp::clientScrollCopyRequested(
                 std::getenv("XRDP_CONSOLE_CLIENT_SCROLL")) &&
             identitySurface &&

@@ -16,7 +16,14 @@ import tempfile
 import time
 from pathlib import Path
 
+from h264_frame_coherence import coherence_problem, parse_frame_sample
+
 PLANAR_PIXEL_LIMIT = 128 * 1024
+COHERENCE_SOURCE_WIDTH = 512
+COHERENCE_SOURCE_HEIGHT = 384
+COHERENCE_TILE_DIMENSION = 64
+COHERENCE_CAPTURE_COUNT = 2000
+COHERENCE_MINIMUM_UNIQUE_FRAMES = 10
 
 
 def free_tcp_port() -> int:
@@ -106,14 +113,17 @@ def read_line(stream, timeout: float) -> bytes:
     return stream.readline() if ready else b""
 
 
-def start_source_xvfb(log_path: Path) -> tuple[subprocess.Popen[bytes], str]:
+def start_source_xvfb(
+        log_path: Path, width: int = 1024, height: int = 768
+) -> tuple[subprocess.Popen[bytes], str]:
     executable = shutil.which("Xvfb")
     if executable is None:
         raise AssertionError("xrdp loader smoke test needs Xvfb")
 
     with log_path.open("w", encoding="utf-8") as log_file:
         process = subprocess.Popen(
-            [executable, "-displayfd", "1", "-screen", "0", "1024x768x24",
+            [executable, "-displayfd", "1", "-screen", "0",
+             f"{width}x{height}x24",
              "-nolisten", "tcp", "-noreset"],
             stdout=subprocess.PIPE,
             stderr=log_file,
@@ -172,9 +182,21 @@ def find_window(display: str, title: str, timeout: float) -> str:
 
 
 def start_stimulus(stimulus_path: Path, display: str,
-                   environment: dict[str, str]) -> subprocess.Popen[bytes]:
+                   environment: dict[str, str],
+                   coherence_mode: bool = False) -> subprocess.Popen[bytes]:
+    command = [str(stimulus_path), display]
+    expected_ready = b"READY 160 100\n"
+    if coherence_mode:
+        command.extend((str(COHERENCE_SOURCE_WIDTH),
+                        str(COHERENCE_SOURCE_HEIGHT)))
+        expected_ready = (
+            f"READY {COHERENCE_SOURCE_WIDTH} {COHERENCE_SOURCE_HEIGHT} "
+            f"columns={COHERENCE_SOURCE_WIDTH // COHERENCE_TILE_DIMENSION} "
+            f"rows={COHERENCE_SOURCE_HEIGHT // COHERENCE_TILE_DIMENSION} "
+            "bits=8\n"
+        ).encode("ascii")
     process = subprocess.Popen(
-        [str(stimulus_path), display], stdin=subprocess.PIPE,
+        command, stdin=subprocess.PIPE,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment,
         bufsize=0, start_new_session=True,
     )
@@ -182,11 +204,217 @@ def start_stimulus(stimulus_path: Path, display: str,
         stop_process(process)
         raise AssertionError("source stimulus pipes were not created")
     ready = read_line(process.stdout, 5.0)
-    if ready != b"READY 160 100\n":
+    if ready != expected_ready:
         stop_process(process)
         details = process.stderr.read().decode(errors="replace") if process.stderr else ""
         raise AssertionError(f"source stimulus did not become ready: {ready!r} {details}")
     return process
+
+
+def set_single_cpu_affinity() -> None:
+    """Pin this test and its children to one CPU for repeatable contention."""
+    if not hasattr(os, "sched_getaffinity") or not hasattr(os, "sched_setaffinity"):
+        raise AssertionError("CPU-contention mode requires Linux CPU affinity")
+    available = os.sched_getaffinity(0)
+    if not available:
+        raise AssertionError("no CPU is available for the coherence stress test")
+    os.sched_setaffinity(0, {min(available)})
+
+
+def read_frame_sample(probe: subprocess.Popen[bytes], timeout: float = 2.0):
+    if probe.stdin is None or probe.stdout is None:
+        raise AssertionError("coherence probe pipes were not created")
+    probe.stdin.write(b"sample\n")
+    probe.stdin.flush()
+    line = read_line(probe.stdout, timeout)
+    if not line:
+        raise AssertionError("client framebuffer probe timed out")
+    expected_tile_count = (
+        (COHERENCE_SOURCE_WIDTH // COHERENCE_TILE_DIMENSION) *
+        (COHERENCE_SOURCE_HEIGHT // COHERENCE_TILE_DIMENSION))
+    parsed = parse_frame_sample(
+        line.decode("ascii", errors="replace"), expected_tile_count)
+    if parsed is None:
+        raise AssertionError(f"client framebuffer probe returned malformed data: {line!r}")
+    return parsed
+
+
+def save_last_coherence_frame(probe: subprocess.Popen[bytes],
+                              artifact_path: Path) -> str:
+    if probe.stdin is None or probe.stdout is None:
+        return "coherence probe pipes were not created"
+    try:
+        probe.stdin.write(f"dump {artifact_path}\n".encode())
+        probe.stdin.flush()
+        response = read_line(probe.stdout, 2.0).decode(errors="replace").strip()
+    except (BrokenPipeError, OSError):
+        return "coherence probe exited before its frame could be saved"
+    return f"{response}: {artifact_path}"
+
+
+def assert_client_frame_coherence(
+        client_display: str,
+        stimulus: subprocess.Popen[bytes],
+        window_title: str,
+        frame_probe: Path,
+        cpu_contention: bool,
+        client_log_path: Path,
+        xrdp_log_path: Path,
+        stdout_path: Path,
+) -> None:
+    window = find_window(client_display, window_title, 8.0)
+    probe = subprocess.Popen(
+        [str(frame_probe), client_display, window],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, env=os.environ.copy(), bufsize=0,
+        start_new_session=True,
+    )
+    cpu_spinner: subprocess.Popen[bytes] | None = None
+    artifact_dir = Path(os.environ.get(
+        "XRDP_CONSOLE_TEST_ARTIFACT_DIR",
+        str(Path.cwd() / "test-artifacts" / "h264-frame-coherence")))
+    artifact_path = artifact_dir / f"incoherent-frame-{os.getpid()}.ppm"
+
+    try:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        if probe.stdin is None or probe.stdout is None:
+            raise AssertionError("client coherence probe pipes were not created")
+        ready = read_line(probe.stdout, 5.0).decode(errors="replace").strip()
+        expected_ready = (
+            f"READY {COHERENCE_SOURCE_WIDTH} {COHERENCE_SOURCE_HEIGHT} "
+            f"{COHERENCE_SOURCE_WIDTH // COHERENCE_TILE_DIMENSION} "
+            f"{COHERENCE_SOURCE_HEIGHT // COHERENCE_TILE_DIMENSION}")
+        if ready != expected_ready:
+            raise AssertionError(
+                f"client window geometry is not the fixed coherence geometry: "
+                f"{ready!r}, expected {expected_ready!r}")
+
+        policy_line = next((line for line in read_text(xrdp_log_path).splitlines()
+                            if "XRDP_CONSOLE_CLIENT_OFFLOAD_POLICY "
+                            "event=connect" in line), "")
+        policy_match = re.search(
+            r"scroll_requested=(\d+) cache_observe_requested=\d+ "
+            r"cache_requested=(\d+) h264_transport=(\d+)",
+            policy_line)
+        expected_scroll = int(
+            os.environ.get("XRDP_CONSOLE_CLIENT_SCROLL") in (None, "1"))
+        expected_cache = int(
+            os.environ.get("XRDP_CONSOLE_CLIENT_CACHE") in (None, "1"))
+        if (policy_match is None or
+                int(policy_match.group(1)) != expected_scroll or
+                int(policy_match.group(2)) != expected_cache or
+                int(policy_match.group(3)) != 1):
+            raise AssertionError(
+                "the server did not apply the requested H.264/A-B policy "
+                f"(scroll={expected_scroll}, cache={expected_cache}):\n"
+                f"{policy_line}\n{xrdp_log_excerpt(xrdp_log_path)}")
+
+        expected_baseline = tuple(
+            row for row in range(
+                COHERENCE_SOURCE_HEIGHT // COHERENCE_TILE_DIMENSION)
+            for _column in range(
+                COHERENCE_SOURCE_WIDTH // COHERENCE_TILE_DIMENSION))
+        baseline_deadline = time.monotonic() + 12.0
+        baseline_samples = 0
+        while time.monotonic() < baseline_deadline:
+            _timestamp, generations = read_frame_sample(probe)
+            baseline_samples += 1
+            if generations == expected_baseline:
+                break
+            time.sleep(0.02)
+        else:
+            saved = save_last_coherence_frame(probe, artifact_path)
+            raise AssertionError(
+                "the static H.264 baseline never reached a coherent client "
+                f"frame after {baseline_samples} samples; artifact {saved}\n"
+                f"[xrdp process stdout]\n{read_text(stdout_path)}\n"
+                f"{xrdp_log_excerpt(xrdp_log_path)}\n"
+                f"[FreeRDP client]\n{read_text(client_log_path)}")
+
+        if cpu_contention:
+            cpu_spinner = subprocess.Popen(
+                [sys.executable, "-c", "while True: pass"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True)
+
+        if stimulus.stdin is None or stimulus.stdout is None:
+            raise AssertionError("scroll coherence stimulus pipes were not created")
+        stimulus.stdin.write(b"start 16\n")
+        stimulus.stdin.flush()
+        started = read_line(stimulus.stdout, 3.0)
+        if started != b"STARTED interval_ms=16\n":
+            raise AssertionError(f"scroll stimulus did not start: {started!r}")
+
+        previous: tuple[int, ...] | None = None
+        unique_frames = 0
+        for sample_index in range(COHERENCE_CAPTURE_COUNT):
+            try:
+                _timestamp, generations = read_frame_sample(probe)
+            except AssertionError as error:
+                saved = save_last_coherence_frame(probe, artifact_path)
+                raise AssertionError(
+                    f"client capture {sample_index} failed: {error}; "
+                    f"artifact={saved}\n"
+                    f"[xrdp log]\n{xrdp_log_excerpt(xrdp_log_path)}\n"
+                    f"[FreeRDP client]\n{read_text(client_log_path)}") from error
+
+            problem = coherence_problem(
+                generations,
+                COHERENCE_SOURCE_WIDTH // COHERENCE_TILE_DIMENSION,
+                COHERENCE_SOURCE_HEIGHT // COHERENCE_TILE_DIMENSION)
+            if problem is not None:
+                saved = save_last_coherence_frame(probe, artifact_path)
+                raise AssertionError(
+                    f"incoherent H.264 client frame at capture={sample_index}: "
+                    f"{problem}; tile generations={generations}; artifact={saved}\n"
+                    f"[xrdp process stdout]\n{read_text(stdout_path)}\n"
+                    f"{xrdp_log_excerpt(xrdp_log_path)}\n"
+                    f"[FreeRDP client]\n{read_text(client_log_path)}")
+            if generations != previous:
+                unique_frames += 1
+                previous = generations
+
+        stimulus.stdin.write(b"stop\n")
+        stimulus.stdin.flush()
+        stopped = read_line(stimulus.stdout, 3.0).decode(
+            "ascii", errors="replace").strip()
+        match = re.fullmatch(r"STOPPED updates=(\d+) generation=(\d+)", stopped)
+        if match is None or int(match.group(1)) < 10:
+            raise AssertionError(
+                f"coherence stress did not move enough source frames: {stopped!r}")
+        if unique_frames < COHERENCE_MINIMUM_UNIQUE_FRAMES:
+            raise AssertionError(
+                "the client did not present enough distinct scroll frames: "
+                f"{unique_frames} unique from {COHERENCE_CAPTURE_COUNT} captures")
+
+        print(
+            "H264_FRAME_COHERENCE "
+            f"cpu_contention={int(cpu_contention)} "
+            f"captures={COHERENCE_CAPTURE_COUNT} "
+            f"unique_frames={unique_frames} source_updates={match.group(1)} "
+            f"baseline_samples={baseline_samples} incoherent_frames=0")
+        summary_path = artifact_dir / "coherence-summary.txt"
+        summary_path.write_text(
+            "H264_FRAME_COHERENCE\n"
+            f"cpu_contention={int(cpu_contention)}\n"
+            f"scroll_requested={expected_scroll}\n"
+            f"cache_requested={expected_cache}\n"
+            f"captures={COHERENCE_CAPTURE_COUNT}\n"
+            f"unique_frames={unique_frames}\n"
+            f"source_updates={match.group(1)}\n"
+            f"baseline_samples={baseline_samples}\n"
+            "incoherent_frames=0\n",
+            encoding="utf-8")
+    finally:
+        if cpu_spinner is not None:
+            stop_process(cpu_spinner)
+        if probe.stdin is not None:
+            try:
+                probe.stdin.write(b"quit\n")
+                probe.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+        stop_process(probe)
 
 
 def assert_client_pixel(client_display: str,
@@ -465,29 +693,46 @@ def main() -> int:
     rfx_mode = False
     gfx_planar_mode = False
     gfx_h264_mode = False
+    coherence_mode = False
+    cpu_contention = False
     mode_options = [option for option in (
-        "--rfx", "--gfx-planar", "--gfx-h264")
+        "--rfx", "--gfx-planar", "--gfx-h264",
+        "--gfx-h264-coherence")
                     if option in arguments]
     if mode_options:
         if (len(mode_options) != 1 or arguments[-1] != mode_options[0] or
                 arguments.count(mode_options[0]) != 1):
             raise SystemExit(
-                "--rfx, --gfx-planar, or --gfx-h264 must be the final, "
+                "the graphics mode must be the final, "
                 "sole loader-smoke option")
-        arguments.pop()
-        rfx_mode = mode_options[0] == "--rfx"
-        gfx_planar_mode = mode_options[0] == "--gfx-planar"
-        gfx_h264_mode = mode_options[0] == "--gfx-h264"
+        selected_mode = arguments.pop()
+        rfx_mode = selected_mode == "--rfx"
+        gfx_planar_mode = selected_mode == "--gfx-planar"
+        gfx_h264_mode = selected_mode in (
+            "--gfx-h264", "--gfx-h264-coherence")
+        coherence_mode = selected_mode == "--gfx-h264-coherence"
+
+    if "--cpu-contention" in arguments:
+        if arguments.count("--cpu-contention") != 1:
+            raise SystemExit("--cpu-contention may be specified only once")
+        arguments.remove("--cpu-contention")
+        cpu_contention = True
+    if cpu_contention and not coherence_mode:
+        raise SystemExit("--cpu-contention requires --gfx-h264-coherence")
 
     if len(arguments) not in (6, 8):
         raise SystemExit(
             f"usage: {sys.argv[0]} MODULE XRDP INSTALL_ROOT FREERDP "
-            "PIXEL_PROBE STIMULUS [PRESENTATION_WIDTH PRESENTATION_HEIGHT] "
-            "[--rfx|--gfx-planar|--gfx-h264]"
+            "PIXEL_OR_FRAME_PROBE STIMULUS "
+            "[PRESENTATION_WIDTH PRESENTATION_HEIGHT] "
+            "[--rfx|--gfx-planar|--gfx-h264|--gfx-h264-coherence] "
+            "[--cpu-contention before the graphics-mode option]"
         )
 
-    presentation_width = 1024
-    presentation_height = 768
+    presentation_width = (
+        COHERENCE_SOURCE_WIDTH if coherence_mode else 1024)
+    presentation_height = (
+        COHERENCE_SOURCE_HEIGHT if coherence_mode else 768)
     if len(arguments) == 8:
         try:
             presentation_width = int(arguments[6])
@@ -496,6 +741,15 @@ def main() -> int:
             raise AssertionError("presentation geometry must be numeric") from error
         if presentation_width <= 0 or presentation_height <= 0:
             raise AssertionError("presentation geometry must be positive")
+
+    if coherence_mode and (
+            presentation_width != COHERENCE_SOURCE_WIDTH or
+            presentation_height != COHERENCE_SOURCE_HEIGHT):
+        raise SystemExit(
+            "the H.264 coherence test uses fixed 512x384 source/client geometry")
+
+    if cpu_contention:
+        set_single_cpu_affinity()
 
     ensure_test_display(presentation_width, presentation_height)
 
@@ -541,7 +795,10 @@ def main() -> int:
         source_xvfb_log_path = root / "source-xvfb.log"
         config_path = root / "xrdp.ini"
         port = free_tcp_port()
-        source_xvfb, source_display = start_source_xvfb(source_xvfb_log_path)
+        source_xvfb, source_display = start_source_xvfb(
+            source_xvfb_log_path,
+            COHERENCE_SOURCE_WIDTH if coherence_mode else 1024,
+            COHERENCE_SOURCE_HEIGHT if coherence_mode else 768)
 
         module_dir = install_root / "lib" / "xrdp"
         module_dir.mkdir(parents=True, exist_ok=True)
@@ -602,7 +859,8 @@ password=smoke
             # installs root XDamage. This excludes map/expose churn from the
             # sparse-rectangle acceptance assertion.
             stimulus = start_stimulus(
-                stimulus_path, source_display, os.environ.copy())
+                stimulus_path, source_display, os.environ.copy(),
+                coherence_mode=coherence_mode)
             with stdout_path.open("w", encoding="utf-8") as server_stdout:
                 server = subprocess.Popen(
                     [
@@ -730,22 +988,46 @@ password=smoke
                             stdout_path,
                             client_log_path,
                         )
-                    assert_client_pixel(
-                        os.environ["DISPLAY"], stimulus, window_title,
-                        pixel_probe, log_path, stdout_path,
-                        probe_x, probe_y,
-                        assert_sparse_planar_batch=gfx_planar_mode,
-                        scaled_presentation=(
-                            presentation_width != 1024 or
-                            presentation_height != 768),
-                        presentation_width=presentation_width,
-                        presentation_height=presentation_height,
-                        client_log_path=client_log_path)
+                    if coherence_mode:
+                        assert_client_frame_coherence(
+                            os.environ["DISPLAY"], stimulus, window_title,
+                            pixel_probe, cpu_contention,
+                            client_log_path, log_path, stdout_path)
+                    else:
+                        assert_client_pixel(
+                            os.environ["DISPLAY"], stimulus, window_title,
+                            pixel_probe, log_path, stdout_path,
+                            probe_x, probe_y,
+                            assert_sparse_planar_batch=gfx_planar_mode,
+                            scaled_presentation=(
+                                presentation_width != 1024 or
+                                presentation_height != 768),
+                            presentation_width=presentation_width,
+                            presentation_height=presentation_height,
+                            client_log_path=client_log_path)
         finally:
             stop_process(client)
             stop_process(server)
             stop_process(stimulus)
             stop_process(source_xvfb)
+            if coherence_mode:
+                artifact_dir = Path(os.environ.get(
+                    "XRDP_CONSOLE_TEST_ARTIFACT_DIR",
+                    str(Path.cwd() / "test-artifacts" /
+                        "h264-frame-coherence")))
+                try:
+                    artifact_dir.mkdir(parents=True, exist_ok=True)
+                    for source_log, artifact_name in (
+                            (log_path, "xrdp.log"),
+                            (stdout_path, "xrdp-stdout.log"),
+                            (client_log_path, "freerdp-client.log")):
+                        if source_log.is_file():
+                            shutil.copyfile(
+                                source_log, artifact_dir / artifact_name)
+                except OSError as error:
+                    print(
+                        f"WARNING: could not preserve coherence diagnostics: "
+                        f"{error}", file=sys.stderr)
             try:
                 module_link.unlink()
             except FileNotFoundError:

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "rdp/h264_latest_frame.h"
+#include "rdp/h264_capture_policy.h"
 #include "rdp/h264_interaction_scheduler.h"
 #include "core/presentation_scaler.h"
 
@@ -861,6 +862,28 @@ bool scaled_newer_source_damage_blocks_stale_frame_tile()
     return success;
 }
 
+bool coherent_snapshot_capture_budget_is_bounded()
+{
+    using xrdp_console::rdp::h264CoherentSnapshotFits;
+
+    bool success = true;
+    success &= check(!h264CoherentSnapshotFits({0, 768}),
+                     "coherent snapshot accepted zero width");
+    success &= check(!h264CoherentSnapshotFits({1366, 0}),
+                     "coherent snapshot accepted zero height");
+    success &= check(h264CoherentSnapshotFits({1366, 768}),
+                     "coherent snapshot rejected desktop geometry");
+    success &= check(h264CoherentSnapshotFits({2560, 1440}),
+                     "coherent snapshot rejected 1440p geometry");
+    success &= check(h264CoherentSnapshotFits({3840, 2160}),
+                     "coherent snapshot rejected 4K geometry");
+    success &= check(!h264CoherentSnapshotFits({4096, 2160}),
+                     "coherent snapshot exceeded its 32 MiB budget");
+    success &= check(!h264CoherentSnapshotFits({8192, 8192}),
+                     "coherent snapshot accepted maximum presentation size");
+    return success;
+}
+
 } // namespace
 
 int main()
@@ -886,5 +909,6 @@ int main()
     success &= downscaled_unrepresented_source_interval_is_empty_not_invalid();
     success &= oversized_nv12_frame_is_rejected_before_allocation();
     success &= scaled_newer_source_damage_blocks_stale_frame_tile();
+    success &= coherent_snapshot_capture_budget_is_bounded();
     return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

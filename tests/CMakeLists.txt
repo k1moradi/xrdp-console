@@ -10,7 +10,9 @@ set(PYTHON_SOURCES
     ${CMAKE_SOURCE_DIR}/tools/diagnostics/vscode_gpu_probe.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_display_power.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_direct_presentation_geometry.py
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_memory_pressure.py)
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_memory_pressure.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/h264_frame_coherence.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_h264_frame_coherence.py)
 
 if(TARGET xrdp-console)
     add_test(NAME xrdp-clipboard-padding-source-contract
@@ -99,6 +101,12 @@ add_test(NAME memory-pressure-unit
 set_tests_properties(memory-pressure-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
     TIMEOUT 20)
+
+add_test(NAME h264-frame-coherence-oracle-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_h264_frame_coherence.py)
+set_tests_properties(h264-frame-coherence-oracle-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
 add_test(NAME rfb-client-unit
     COMMAND ${Python3_EXECUTABLE} -B
@@ -706,6 +714,23 @@ if(TARGET xrdp-console)
     endif()
     if(XRDP_CONSOLE_FREERDP_EXECUTABLE AND
        TARGET x11-pixel-probe AND TARGET x11-latency-stimulus)
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(TEST_X11 REQUIRED IMPORTED_TARGET x11)
+
+        add_executable(x11-scroll-coherence-stimulus
+            helpers/x11_scroll_coherence_stimulus.c)
+        target_link_libraries(x11-scroll-coherence-stimulus PRIVATE
+            PkgConfig::TEST_X11)
+        target_compile_options(x11-scroll-coherence-stimulus PRIVATE
+            -Wall -Wextra -Wpedantic -Werror)
+
+        add_executable(x11-frame-coherence-probe
+            helpers/x11_frame_coherence_probe.c)
+        target_link_libraries(x11-frame-coherence-probe PRIVATE
+            PkgConfig::TEST_X11)
+        target_compile_options(x11-frame-coherence-probe PRIVATE
+            -Wall -Wextra -Wpedantic -Werror)
+
         add_test(NAME xrdp-loader-smoke
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
@@ -822,6 +847,51 @@ if(TARGET xrdp-console)
         set_tests_properties(xrdp-loader-rfx-downscaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 30)
+
+        set(coherence_loader_arguments
+            ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-frame-coherence-probe>
+            $<TARGET_FILE:x11-scroll-coherence-stimulus>)
+
+        function(add_h264_coherence_test test_name cpu_contention scroll cache)
+            set(mode_arguments)
+            if(cpu_contention)
+                list(APPEND mode_arguments --cpu-contention)
+            endif()
+            list(APPEND mode_arguments --gfx-h264-coherence)
+            add_test(NAME ${test_name}
+                COMMAND ${coherence_loader_arguments} ${mode_arguments})
+
+            set(test_environment
+                "PYTHONDONTWRITEBYTECODE=1"
+                "XRDP_CONSOLE_PROFILE=1"
+                "XRDP_CONSOLE_CLIENT_SCROLL=${scroll}"
+                "XRDP_CONSOLE_CLIENT_CACHE=${cache}"
+                "XRDP_CONSOLE_TEST_ARTIFACT_DIR=${CMAKE_BINARY_DIR}/test-artifacts/${test_name}")
+            set_tests_properties(${test_name} PROPERTIES
+                ENVIRONMENT "${test_environment}"
+                TIMEOUT 240
+                RESOURCE_LOCK xrdp_console_loader_display
+                RUN_SERIAL TRUE
+                LABELS "h264;visual-coherence;integration")
+        endfunction()
+
+        add_h264_coherence_test(
+            xrdp-loader-gfx-h264-coherence FALSE 1 1)
+        add_h264_coherence_test(
+            xrdp-loader-gfx-h264-coherence-cpu-contention TRUE 1 1)
+        add_h264_coherence_test(
+            xrdp-loader-gfx-h264-coherence-scroll-off TRUE 0 1)
+        add_h264_coherence_test(
+            xrdp-loader-gfx-h264-coherence-cache-off TRUE 1 0)
+        add_h264_coherence_test(
+            xrdp-loader-gfx-h264-coherence-offloads-off TRUE 0 0)
+
         set_tests_properties(
             xrdp-loader-smoke
             xrdp-loader-scaled-smoke

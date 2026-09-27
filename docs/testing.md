@@ -34,6 +34,25 @@ Do not override that negotiated restriction. FreeRDP loader tests do not
 replace manual Windows/macOS validation, especially for scroll tearing, input
 responsiveness, clipboard, resize, and reconnect.
 
+The `xrdp-loader-gfx-h264-coherence*` tests are a temporal correctness stress
+test, not a timing benchmark. A 512x384 X11 stimulus scrolls per-tile 8-bit
+generation markers at 60 Hz; the H.264 FreeRDP client's complete framebuffer
+is sampled 2,000 times per run. Each snapshot must have matching generations
+across columns and consecutive generations down rows. The matrix includes an
+unloaded default-policy run and single-CPU-contention runs with default policy,
+scroll reuse disabled, cache disabled, and both disabled. Every run checks the
+server's requested policy log so the A/B arms cannot silently collapse to the
+same configuration. First-failure PPM screenshots and per-run xrdp/FreeRDP
+logs are retained under `build-direct-console/test-artifacts/`.
+
+For direct AVC420, the module captures one immutable full-source XShm snapshot
+for each pending H.264 damage batch and derives tile fingerprints and NV12
+updates from that same view. It does not issue another source capture until
+all selected tiles from the snapshot have been converted. The snapshot arena
+is capped at 32 MiB; if the geometry exceeds that budget or the arena cannot
+be allocated, direct H.264 is not used and the negotiated GFX path falls back
+to Planar rather than reverting to mixed-time per-tile captures.
+
 The canonical `scripts/build-direct-console.sh` first builds the pinned client
 with `scripts/build-test-freerdp.sh` if it is not already present, then passes
 that private executable to CMake. CMake never discovers a client from `PATH`.
@@ -53,6 +72,7 @@ they do not exercise or provide a production display transport.
 | --- | --- |
 | `network-unit` | namespace command construction, cached-sudo failure boundary, and localhost no-privilege behavior |
 | `measurement-profile-unit` | valid profile parsing, malformed records, marker-state matching, failed-flush filtering, stale/out-of-window points, reordered logs, and timestamp-count errors |
+| `h264-frame-coherence-oracle-unit` | generation-sample parsing, modulo wrap, horizontal partial updates, vertical discontinuity, and malformed marker/grid rejection |
 | `rfb-client-unit` | legacy benchmark-only RFB KeyEvent encoding |
 | `proxy-backpressure-unit` | legacy benchmark-only bounded RFB relay buffering and cleanup |
 | `python-syntax` | source compilation for the installed Python helpers |
@@ -70,6 +90,7 @@ they do not exercise or provide a production display transport.
 | `xrdp-upstream-unit` | serial pinned-xrdp `make check`, including Console dirty-region, pacing, and RDPGFX acknowledgement telemetry regressions |
 | `xrdp-loader-smoke` | generated xrdp loading the module through FreeRDP, accepting the initial cursor update, then drawing a known red/blue source marker and asserting that the expected pixel reaches the FreeRDP framebuffer |
 | `xrdp-loader-gfx-h264-odd-scaled-smoke` | standard H.264 GFX AVC420 loader/pixel smoke at odd scaled presentation geometry; CMake requires the selected FreeRDP's H.264 decoder before registering the test |
+| `xrdp-loader-gfx-h264-coherence*` | repeated whole-client-frame H.264 coherence checks under normal/contended CPU and a four-arm scroll/cache A/B; preserves first torn-frame screenshots and server/client diagnostics |
 
 The marker correlation contract is:
 
