@@ -3575,7 +3575,9 @@ ModuleContext::check_h264_gfx() noexcept
 
     // Scroll reuse may already have removed authoritative work from this list.
     // Cache reuse is a second refinement of the remaining H.264 transmissions.
-    const auto submittedSelections = transmissionSelections;
+    // transmissionSelections is not modified below; alias it instead of
+    // copying the full fixed-capacity selection array every submitted frame.
+    const auto &submittedSelections = transmissionSelections;
     const std::size_t submittedCount = transmissionCount;
     std::array<GenerationTileMap::Selection, kMaximumH264Selections>
         h264Selections{};
