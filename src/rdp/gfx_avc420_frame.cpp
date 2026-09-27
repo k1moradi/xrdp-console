@@ -76,22 +76,27 @@ ssse3ConversionAvailable() noexcept
     return enabled;
 }
 
-__attribute__((target("ssse3")))
-[[nodiscard]] FourPixelYuv16
+[[nodiscard]] __attribute__((target("ssse3"))) FourPixelYuv16
 convertFourBgraPixelsSsse3(const std::uint8_t *source) noexcept
 {
     const __m128i pixels =
         _mm_loadu_si128(reinterpret_cast<const __m128i *>(source));
-    const __m128i channelMask = _mm_set1_epi32(0xff);
     const __m128i zero = _mm_setzero_si128();
-    const __m128i blue32 = _mm_and_si128(pixels, channelMask);
-    const __m128i green32 =
-        _mm_and_si128(_mm_srli_epi32(pixels, 8), channelMask);
-    const __m128i red32 =
-        _mm_and_si128(_mm_srli_epi32(pixels, 16), channelMask);
-    const __m128i blue16 = _mm_packs_epi32(blue32, zero);
-    const __m128i green16 = _mm_packs_epi32(green32, zero);
-    const __m128i red16 = _mm_packs_epi32(red32, zero);
+    // Gather each BGRA channel directly into the 16-bit lanes consumed by
+    // the conversion arithmetic instead of shifting/masking 32-bit pixels
+    // and packing them down afterward.
+    const __m128i blue16 = _mm_shuffle_epi8(
+        pixels,
+        _mm_setr_epi8(0, -1, 4, -1, 8, -1, 12, -1,
+                      -1, -1, -1, -1, -1, -1, -1, -1));
+    const __m128i green16 = _mm_shuffle_epi8(
+        pixels,
+        _mm_setr_epi8(1, -1, 5, -1, 9, -1, 13, -1,
+                      -1, -1, -1, -1, -1, -1, -1, -1));
+    const __m128i red16 = _mm_shuffle_epi8(
+        pixels,
+        _mm_setr_epi8(2, -1, 6, -1, 10, -1, 14, -1,
+                      -1, -1, -1, -1, -1, -1, -1, -1));
 
     __m128i y = _mm_add_epi16(
         _mm_add_epi16(_mm_mullo_epi16(red16, _mm_set1_epi16(54)),

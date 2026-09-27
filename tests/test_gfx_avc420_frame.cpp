@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 #include <span>
 #include <vector>
@@ -144,6 +145,50 @@ bool rectangle_conversion_matches_scalar_reference()
     return success;
 }
 
+bool ssse3_channel_gather_matches_scalar_zero_ff_patterns()
+{
+    constexpr std::uint32_t kPatterns = 1U << 16U;
+    constexpr std::uint32_t kWidthPixels = 4;
+    constexpr std::uint32_t kHeightPixels = kPatterns * 2U;
+    constexpr std::size_t kStrideBytes = kWidthPixels * 4U;
+    const std::size_t sourceBytes =
+        kStrideBytes * static_cast<std::size_t>(kHeightPixels);
+    std::vector<std::uint8_t> bgra(sourceBytes);
+
+    for (std::uint32_t pattern = 0; pattern < kPatterns; ++pattern)
+    {
+        std::array<std::uint8_t, kStrideBytes> pixels{};
+        for (std::uint32_t byte = 0; byte < pixels.size(); ++byte)
+        {
+            pixels[byte] = ((pattern >> byte) & 1U) != 0 ? 0xffU : 0U;
+        }
+
+        const std::size_t topOffset =
+            static_cast<std::size_t>(pattern) * 2U * kStrideBytes;
+        std::memcpy(bgra.data() + topOffset, pixels.data(), pixels.size());
+        std::memcpy(bgra.data() + topOffset + kStrideBytes,
+                    pixels.data(), pixels.size());
+    }
+
+    const FramebufferView source{
+        std::as_bytes(std::span<const std::uint8_t>(bgra)),
+        kWidthPixels, kHeightPixels, kStrideBytes};
+    std::vector<std::byte> scalar(nv12FrameBytes({kWidthPixels, kHeightPixels}));
+    std::vector<std::byte> candidate(scalar.size());
+    const Rectangle fullRectangle{0, 0, kWidthPixels, kHeightPixels};
+    const bool scalarConverted =
+        convertBgraToNv12_709FullRange(source, scalar);
+    const bool candidateConverted =
+        updateNv12RectangleFromBgraRegion_709FullRange(
+            source, fullRectangle, fullRectangle,
+            {kWidthPixels, kHeightPixels}, candidate);
+
+    return check(scalarConverted && candidateConverted,
+                 "exhaustive SSSE3 channel-gather conversion failed") &&
+           check(candidate == scalar,
+                 "SSSE3 channel gather diverged on a zero/255 byte pattern");
+}
+
 bool rectangle_alignment_matches_avc420_requirements()
 {
     bool success = true;
@@ -258,6 +303,7 @@ int main()
     success &= conversion_matches_xorgxrdp_reference();
     success &= conversion_validates_geometry_and_stride();
     success &= rectangle_conversion_matches_scalar_reference();
+    success &= ssse3_channel_gather_matches_scalar_zero_ff_patterns();
     success &= rectangle_alignment_matches_avc420_requirements();
     success &= command_layout_matches_xrdp_encoder_contract();
     success &= command_rejects_invalid_input();
