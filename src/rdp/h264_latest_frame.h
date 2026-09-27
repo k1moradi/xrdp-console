@@ -137,6 +137,7 @@ private:
     std::vector<std::byte> nv12Frame_{};
     std::uint32_t nextFrameId_{1};
     std::uint32_t submittedFrameId_{};
+    bool identityMapping_{};
     bool frameInFlight_{};
     bool baselineSubmitted_{};
 };

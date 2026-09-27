@@ -61,6 +61,23 @@ bool identity_rectangle_mapping_is_exact_after_bounds_validation()
                              {1365, 767, 2, 1}, mapped) &&
                          mapped == Rectangle{},
                      "identity frame fast path bypassed bounds validation");
+
+    success &= check(state.configure({4, 4}, {8, 8}, {8, 8},
+                                     {0, 0, 8, 8}),
+                     "scaled reconfiguration failed");
+    mapped = {};
+    success &= check(state.mapSourceRectangle({1, 1, 1, 1}, mapped) &&
+                         mapped == Rectangle{2, 2, 2, 2},
+                     "identity mapping state remained cached after resize");
+
+    state.reset();
+    success &= check(!state.valid(), "reset left H264 state configured");
+    success &= check(state.configure({4, 4}),
+                     "identity reconfiguration after reset failed");
+    mapped = {};
+    success &= check(state.mapSourceRectangle({1, 1, 1, 1}, mapped) &&
+                         mapped == Rectangle{1, 1, 1, 1},
+                     "reset identity mapping state was not recomputed");
     return success;
 }
 

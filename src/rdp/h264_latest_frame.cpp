@@ -178,6 +178,10 @@ H264LatestFrameState::configure(PixelSize sourceGeometry,
     presentationGeometry_ = presentationGeometry;
     viewport_ = viewport;
     geometry_ = frameGeometry;
+    identityMapping_ =
+        sourceGeometry_ == geometry_ &&
+        viewport_ == Rectangle{0, 0, geometry_.widthPixels,
+                               geometry_.heightPixels};
     captureDamage_ = std::move(captureDamage);
     initializationDamage_ = std::move(initializationDamage);
     transmissionDamage_ = std::move(transmissionDamage);
@@ -207,6 +211,7 @@ H264LatestFrameState::reset() noexcept
     nv12Frame_.clear();
     nextFrameId_ = 1;
     submittedFrameId_ = 0;
+    identityMapping_ = false;
     frameInFlight_ = false;
     baselineSubmitted_ = false;
 }
@@ -263,9 +268,7 @@ H264LatestFrameState::mapSourceRectangle(
     // Native-size H.264 is the common path. Once the ordinary source bounds
     // validation above succeeds, an identity viewport maps the rectangle
     // exactly and does not need the scaled-path divisions below.
-    if (sourceGeometry_ == geometry_ &&
-        viewport_ == Rectangle{0, 0, geometry_.widthPixels,
-                               geometry_.heightPixels})
+    if (identityMapping_)
     {
         frameRectangle = sourceRectangle;
         return true;
@@ -328,9 +331,7 @@ H264LatestFrameState::mapFrameRectangleToSource(
     // Native-size H.264 is the common path. Once the ordinary frame bounds
     // validation above succeeds, an identity viewport maps the rectangle
     // exactly and does not need the scaled-path clipping and divisions below.
-    if (sourceGeometry_ == geometry_ &&
-        viewport_ == Rectangle{0, 0, geometry_.widthPixels,
-                               geometry_.heightPixels})
+    if (identityMapping_)
     {
         sourceRectangle = frameRectangle;
         return true;
@@ -898,8 +899,7 @@ H264LatestFrameState::commitCapturedUnchanged(
         return false;
     }
 
-    if (sourceGeometry_ == geometry_ && viewport_ ==
-            Rectangle{0, 0, geometry_.widthPixels, geometry_.heightPixels})
+    if (identityMapping_)
     {
         const Rectangle frameRectangle =
             alignAvc420Rectangle(selection.rectangle, geometry_);
@@ -1047,10 +1047,7 @@ H264LatestFrameState::noteSubmitted(
     {
         return false;
     }
-    const bool identitySurface =
-        sourceGeometry_ == geometry_ &&
-        viewport_ ==
-            Rectangle{0, 0, geometry_.widthPixels, geometry_.heightPixels};
+    const bool identitySurface = identityMapping_;
     if (!clientCopiedRectangles.empty() &&
         (baselineFrame || !identitySurface))
     {
