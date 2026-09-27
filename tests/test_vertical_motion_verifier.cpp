@@ -2,6 +2,7 @@
 
 #include "rdp/vertical_motion_verifier.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -299,6 +300,12 @@ all_sample_budgets_preserve_exact_motion()
         success &= check(result.samplesCompared != 0 &&
                              result.samplesCompared <= budget,
                          "sample budget sweep exceeded its configured limit");
+        const auto expectedColumns = static_cast<std::uint32_t>(
+            std::sqrt(static_cast<double>(budget)));
+        const std::uint32_t expectedRows = budget / expectedColumns;
+        success &= check(
+            result.samplesCompared == expectedColumns * expectedRows,
+            "sample budget used an incorrect square-root grid width");
     }
 
     config.maximumSamples = 5000U;

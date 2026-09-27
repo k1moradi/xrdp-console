@@ -123,7 +123,8 @@ signatureInformative(const SampleSignature &signature) noexcept
 floorSqrt(std::uint32_t value) noexcept
 {
     std::uint32_t root = 0;
-    while ((root + 1U) <= value / (root + 1U))
+    while (static_cast<std::uint64_t>(root + 1U) * (root + 1U) <=
+           value)
     {
         ++root;
     }
