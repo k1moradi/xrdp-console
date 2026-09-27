@@ -1,0 +1,65 @@
+--- a/common/log.h
++++ b/common/log.h
+@@ -102,8 +102,8 @@
+  * @param msg, the log text as a printf format c-string
+  * @param ... the arguments for the printf format c-string
+  */
+-#define LOG_DEVEL(log_level, args...) \
+-    log_message_with_location(__func__, __FILE__, __LINE__, log_level, args)
++#define LOG_DEVEL(log_level, ...) \
++    log_message_with_location(__func__, __FILE__, __LINE__, log_level, __VA_ARGS__)
+
+ /**
+  * @brief Logging macro for messages that are for a system administrator to
+@@ -117,8 +117,8 @@
+  * @param msg, the log text as a printf format c-string
+  * @param ... the arguments for the printf format c-string
+  */
+-#define LOG(log_level, args...) \
+-    log_message_with_location(__func__, __FILE__, __LINE__, log_level, args)
++#define LOG(log_level, ...) \
++    log_message_with_location(__func__, __FILE__, __LINE__, log_level, __VA_ARGS__)
+
+ /**
+  * @brief Logging macro for logging the contents of a byte array using a hex
+@@ -152,14 +152,14 @@
+ #define LOG_DEVEL_LEAKING_FDS(exe,min,max) log_devel_leaking_fds(exe,min,max)
+
+ #else
+-#define LOG(log_level, args...) log_message(log_level, args)
++#define LOG(log_level, ...) log_message(log_level, __VA_ARGS__)
+ #define LOG_HEXDUMP(log_level, message, buffer, length)  \
+     log_hexdump(log_level, message, buffer, length)
+
+ /* Since log_message() returns a value ensure that the elided versions of
+  * LOG_DEVEL and LOG_DEVEL_HEXDUMP also "fake" returning the success value
+  */
+-#define LOG_DEVEL(log_level, args...) UNUSED_VAR(LOG_STARTUP_OK)
++#define LOG_DEVEL(log_level, ...) UNUSED_VAR(LOG_STARTUP_OK)
+ #define LOG_DEVEL_HEXDUMP(log_level, message, buffer, length) UNUSED_VAR(LOG_STARTUP_OK)
+
+ #define LOG_DEVEL_LEAKING_FDS(exe,min,max)
+--- a/xrdp/xrdp_types.h
++++ b/xrdp/xrdp_types.h
+@@ -842,21 +842,9 @@
+     struct xrdp_ls_dimensions ls_scaled;
+ };
+
+-struct xrdp_cfg_logging
+-{
+-
+-};
+-
+-struct xrdp_cfg_channels
+-{
+-
+-};
+-
+ struct xrdp_config
+ {
+     struct xrdp_cfg_globals   cfg_globals;
+-    struct xrdp_cfg_logging   cfg_logging;
+-    struct xrdp_cfg_channels  cfg_channels;
+ };
+
+ #endif

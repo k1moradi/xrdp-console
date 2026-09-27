@@ -12,7 +12,8 @@ set(PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/test_direct_presentation_geometry.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_memory_pressure.py
     ${CMAKE_CURRENT_SOURCE_DIR}/h264_frame_coherence.py
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_h264_frame_coherence.py)
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_h264_frame_coherence.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_build_direct_console_script.py)
 
 if(TARGET xrdp-console)
     add_test(NAME xrdp-clipboard-padding-source-contract
@@ -70,6 +71,13 @@ endif()
 add_test(NAME python-syntax
     COMMAND ${Python3_EXECUTABLE} -B -m py_compile ${PYTHON_SOURCES})
 set_tests_properties(python-syntax PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+add_test(NAME build-direct-console-script-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_build_direct_console_script.py
+    ${CMAKE_SOURCE_DIR}/scripts/build-direct-console.sh)
+set_tests_properties(build-direct-console-script-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
 add_test(NAME network-unit

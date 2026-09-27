@@ -98,6 +98,9 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         CXX_VISIBILITY_PRESET hidden
         VISIBILITY_INLINES_HIDDEN ON)
     target_compile_features(xrdp-console PRIVATE cxx_std_23)
+    # The production module must stay warning-clean under the project's
+    # -Wall/-Wextra/-Wpedantic policy, including the pinned xrdp headers.
+    target_compile_options(xrdp-console PRIVATE -Werror)
     target_include_directories(xrdp-console PRIVATE
         "${CMAKE_BINARY_DIR}/generated"
         "${XRDP_CONSOLE_XRDP_SOURCE_DIR}"

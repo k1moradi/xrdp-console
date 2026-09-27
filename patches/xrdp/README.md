@@ -181,13 +181,18 @@ historical fork's commit history:
     offsets and returns explicit clipboard failures for rejected or
     unallocatable image requests. Focused format/header checks extend the
     xrdp unit suite.
+29. `0029-xrdp-pedantic-header-cleanup.patch` replaces xrdp's GNU named
+    variadic logging macros with standard C99/C++ variadic macros and removes
+    two unused zero-member configuration placeholder types. This fixes the
+    production module's `-Wpedantic` warnings at their source without disabling
+    diagnostics or adding layout-changing dummy members.
 
 The activation script requires the `XRDP_CONSOLE_GFX_PLANAR_BATCH_V1` marker
 in the candidate daemon, so an older patched generation cannot be mistaken
 for this Planar batching implementation.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-twenty-eight patches are retained direct-Console production behavior and bounded
+twenty-nine patches are retained direct-Console production behavior and bounded
 operational diagnostics, not benchmark knobs. Code `21` is reserved for the
 direct module; other module codes retain upstream behavior. The old checked-in
 fork contained profiling, parser-quantum, request-ahead,
