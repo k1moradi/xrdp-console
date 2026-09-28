@@ -133,6 +133,36 @@ encoder_rebuilds_plan_for_changed_continuation_geometry()
 }
 
 bool
+encoder_rebuilds_continuation_plan_after_reset()
+{
+    RfxEncoder encoder;
+    if (!check(encoder.configure({128, 64}, RfxEncoder::kMaximumPayloadBytes),
+               "reset-plan encoder configure failed"))
+    {
+        return false;
+    }
+
+    std::vector<std::uint32_t> pixels(128U * 64U);
+    const FramebufferView view = view_of(pixels, 128, 64);
+    const RfxEncodedBatch first = encoder.encode(view, 0, 1);
+    if (!check(first.valid() && first.tilesEncoded == 1,
+               "reset-plan initial batch was not encoded"))
+    {
+        return false;
+    }
+
+    encoder.reset();
+    if (!check(encoder.configure({128, 64}, RfxEncoder::kMaximumPayloadBytes),
+               "reset-plan reconfigure failed"))
+    {
+        return false;
+    }
+    const RfxEncodedBatch continuation = encoder.encode(view, 1, 1);
+    return check(continuation.valid() && continuation.tilesEncoded == 1,
+                 "continuation did not rebuild the reset tile plan");
+}
+
+bool
 encoder_batches_across_rows_and_partial_edges()
 {
     constexpr std::uint32_t widthPixels = 130;
@@ -338,6 +368,10 @@ main()
         success = false;
     }
     if (!encoder_rebuilds_plan_for_changed_continuation_geometry())
+    {
+        success = false;
+    }
+    if (!encoder_rebuilds_continuation_plan_after_reset())
     {
         success = false;
     }

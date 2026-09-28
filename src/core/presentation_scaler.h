@@ -64,6 +64,7 @@ private:
     bool areaFilterY_{false};
     bool fastBoxFilter_{false};
     bool fastDiagonalFilter_{false};
+    bool fastVerticalFilter_{false};
     std::uint64_t normalizationX_{1};
     std::uint64_t normalizationY_{1};
     std::uint64_t normalizationReciprocal_{};

@@ -719,6 +719,60 @@ chunked_scaler_tests()
         return false;
     }
 
+    constexpr PixelSize verticalDownscaleSourceSize{9, 5};
+    constexpr PixelSize verticalDownscalePresentationSize{13, 4};
+    const Rectangle verticalDownscaleViewport{2, 0, 9, 4};
+    const Rectangle verticalDownscaleSourceRectangle{3, 0, 5, 5};
+    const Rectangle verticalDownscaleOutputRectangle{5, 0, 5, 4};
+    PresentationScaler verticalDownscale;
+    if (!check(verticalDownscale.configure(
+                   verticalDownscaleSourceSize,
+                   verticalDownscalePresentationSize,
+                   verticalDownscaleViewport),
+               "vertical downscale configuration failed"))
+    {
+        return false;
+    }
+    const std::vector<std::uint32_t> verticalDownscaleSource =
+        make_source(verticalDownscaleSourceSize);
+    const std::vector<std::uint32_t> verticalDownscaleCrop = crop_pixels(
+        verticalDownscaleSource, verticalDownscaleSourceSize.widthPixels,
+        verticalDownscaleSourceRectangle);
+    const FramebufferView verticalDownscaleOutput = verticalDownscale.scaleRows(
+        view_of(verticalDownscaleCrop,
+                verticalDownscaleSourceRectangle.widthPixels,
+                verticalDownscaleSourceRectangle.heightPixels),
+        verticalDownscaleSourceRectangle, verticalDownscaleOutputRectangle,
+        0, verticalDownscaleOutputRectangle.heightPixels);
+    const std::vector<std::uint32_t> verticalDownscalePixels =
+        pixels_of(verticalDownscaleOutput);
+    if (!check(verticalDownscalePixels.size() == 20U,
+               "vertical downscale output has the wrong size"))
+    {
+        return false;
+    }
+    for (std::uint32_t y = 0; y < 4U; ++y)
+    {
+        for (std::uint32_t x = 0; x < 5U; ++x)
+        {
+            const std::uint32_t expected = reference_diagonal_pixel(
+                verticalDownscaleSource,
+                verticalDownscaleSourceSize.widthPixels,
+                verticalDownscaleSourceSize.heightPixels,
+                verticalDownscaleViewport.widthPixels,
+                verticalDownscaleViewport.heightPixels,
+                static_cast<std::uint32_t>(
+                    verticalDownscaleSourceRectangle.x) + x,
+                y);
+            if (!check(verticalDownscalePixels[
+                           static_cast<std::size_t>(y) * 5U + x] == expected,
+                       "vertical downscale partial row changed pixels"))
+            {
+                return false;
+            }
+        }
+    }
+
     PresentationScaler scaler;
     const Rectangle sourceRectangle{0, 0, 5, 3};
     const Rectangle destinationRectangle{0, 0, 7, 4};

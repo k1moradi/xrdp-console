@@ -103,9 +103,18 @@ RfxEncoder::encode(FramebufferView pixels, std::size_t firstTile,
         return {};
     }
 
-    const std::size_t count = rfx_tile_count(
-        static_cast<int>(pixels.widthPixels),
-        static_cast<int>(pixels.heightPixels));
+    const PixelSize tilePlanGeometry{pixels.widthPixels, pixels.heightPixels};
+    // A cached plan was installed only after rfx_make_tiles() produced the
+    // same count as rfx_tile_count() for this exact geometry. Continuations
+    // can therefore reuse the deterministic count with the plan itself.
+    const bool reuseTilePlan =
+        firstTile != 0 && tilePlanGeometry_ == tilePlanGeometry &&
+        tilePlanCount_ != 0;
+    const std::size_t count = reuseTilePlan
+                                  ? tilePlanCount_
+                                  : rfx_tile_count(
+                                        static_cast<int>(pixels.widthPixels),
+                                        static_cast<int>(pixels.heightPixels));
     if (count == 0 || count > kMaximumTilesPerChunk || firstTile >= count)
     {
         return {};
@@ -113,9 +122,7 @@ RfxEncoder::encode(FramebufferView pixels, std::size_t firstTile,
 
     const std::size_t requested =
         std::min(maximumTiles, count - firstTile);
-    const PixelSize tilePlanGeometry{pixels.widthPixels, pixels.heightPixels};
-    if (firstTile == 0 || tilePlanGeometry_ != tilePlanGeometry ||
-        tilePlanCount_ != count)
+    if (!reuseTilePlan)
     {
         size_t plannedCount = 0;
         if (rfx_make_tiles(static_cast<int>(pixels.widthPixels),

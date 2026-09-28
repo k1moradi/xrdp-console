@@ -28,6 +28,20 @@ divideUsingReciprocal(std::uint64_t numerator, std::uint32_t denominator,
     return quotient;
 }
 
+[[nodiscard]] std::uint64_t
+mapSourceCoordinate(std::uint32_t coordinate, std::uint32_t sourcePixels,
+                    std::uint32_t viewportPixels,
+                    std::uint64_t sourceReciprocal) noexcept
+{
+    // floor(((2*x + 1) * V) / (2*S)) equals
+    // floor((x*V + floor(V/2)) / S). The reduced numerator avoids the
+    // doubled denominator and is exact for all uint32_t coordinate/extents.
+    const std::uint64_t numerator =
+        static_cast<std::uint64_t>(coordinate) * viewportPixels +
+        viewportPixels / 2U;
+    return divideUsingReciprocal(numerator, sourcePixels, sourceReciprocal);
+}
+
 [[nodiscard]] constexpr std::uint64_t
 ceilDivide(std::uint64_t numerator, std::uint64_t denominator) noexcept
 {
@@ -125,6 +139,10 @@ PresentationTransform::configure(PixelSize source, PixelSize presentation,
     identity_ = source == presentation &&
                 viewport == Rectangle{0, 0, source.widthPixels,
                                       source.heightPixels};
+    sourceWidthReciprocal_ =
+        std::numeric_limits<std::uint64_t>::max() / source.widthPixels;
+    sourceHeightReciprocal_ =
+        std::numeric_limits<std::uint64_t>::max() / source.heightPixels;
     if (identity_)
     {
         viewportWidthReciprocal_ = 0;
@@ -331,14 +349,12 @@ PresentationTransform::mapSourcePoint(
     // Map the center of each source pixel into the aspect-fit viewport. This
     // agrees with inverse mapping for representable pixels and avoids
     // systematic drift when source and presentation sizes differ.
-    const std::uint64_t mappedX =
-        ((static_cast<std::uint64_t>(sourceX) * 2U + 1U) *
-         viewport_.widthPixels) /
-        (static_cast<std::uint64_t>(sourceGeometry_.widthPixels) * 2U);
-    const std::uint64_t mappedY =
-        ((static_cast<std::uint64_t>(sourceY) * 2U + 1U) *
-         viewport_.heightPixels) /
-        (static_cast<std::uint64_t>(sourceGeometry_.heightPixels) * 2U);
+    const std::uint64_t mappedX = mapSourceCoordinate(
+        static_cast<std::uint32_t>(sourceX), sourceGeometry_.widthPixels,
+        viewport_.widthPixels, sourceWidthReciprocal_);
+    const std::uint64_t mappedY = mapSourceCoordinate(
+        static_cast<std::uint32_t>(sourceY), sourceGeometry_.heightPixels,
+        viewport_.heightPixels, sourceHeightReciprocal_);
 
     presentationPoint = {
         viewport_.x + static_cast<std::int32_t>(std::min<std::uint64_t>(

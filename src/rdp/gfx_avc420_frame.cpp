@@ -211,11 +211,10 @@ rectangleFitsFrame(Rectangle rectangle, PixelSize frame) noexcept
         static_cast<std::uint64_t>(rectangle.x) + rectangle.widthPixels;
     const std::uint64_t bottom =
         static_cast<std::uint64_t>(rectangle.y) + rectangle.heightPixels;
-    return right <= frame.widthPixels && bottom <= frame.heightPixels &&
-           static_cast<std::uint64_t>(rectangle.x) <= UINT16_MAX &&
-           static_cast<std::uint64_t>(rectangle.y) <= UINT16_MAX &&
-           rectangle.widthPixels <= UINT16_MAX &&
-           rectangle.heightPixels <= UINT16_MAX;
+    // buildGfxAvc420Command rejects frame dimensions above UINT16_MAX before
+    // validating rectangles. Any nonnegative rectangle contained by that
+    // frame therefore has protocol-representable coordinates and extents.
+    return right <= frame.widthPixels && bottom <= frame.heightPixels;
 }
 
 class LittleEndianWriter final

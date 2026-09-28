@@ -1070,6 +1070,11 @@ struct ModuleContext::Impl
     bool presentationDeadlineArmed{false};
     bool clientScaledOutputResizeRearmPending{false};
     Clock::time_point presentationDeadline{};
+    // Scroll refinement only reads the prefix returned by the collector. Keep
+    // this fixed-capacity scratch in session state instead of constructing a
+    // 24 KiB temporary array for every H.264 submission.
+    std::array<GenerationTileMap::Selection, kMaximumH264Selections>
+        h264ScrollResidualSelections{};
 
     void armPresentationImmediately() noexcept
     {
@@ -3490,13 +3495,14 @@ ModuleContext::check_h264_gfx() noexcept
      * The current interaction scheduler is authoritative. Scroll reuse may
      * only remove complete copied tiles from the selections it already chose.
      */
-    // Keep the authoritative view aliased until scroll reuse actually
-    // replaces the scheduler output. Most frames avoid a 24 KiB array copy.
-    std::array<GenerationTileMap::Selection, kMaximumH264Selections>
-        authoritativeSelectionStorage;
+    // Keep the scheduler output in place as the authoritative view. Scroll
+    // refinement writes only its residual prefix into reusable session scratch.
     const GenerationTileMap::Selection *authoritativeSelections =
         transmissionSelections.data();
     const std::size_t authoritativeCount = transmissionCount;
+    const GenerationTileMap::Selection *submittedSelections =
+        transmissionSelections.data();
+    std::size_t submittedCount = transmissionCount;
     if (exactScrollCopyRunCount != 0 &&
         !impl_->h264Frame.baselineSubmissionPending())
     {
@@ -3568,8 +3574,6 @@ ModuleContext::check_h264_gfx() noexcept
 
         if (clientCopiedRectangleCount != 0)
         {
-            std::array<GenerationTileMap::Selection, kMaximumH264Selections>
-                residualSelections{};
             const std::size_t residualCount =
                 impl_->h264Frame.collectReadyTransmissionSelectionsExcluding(
                     std::span<const GenerationTileMap::Selection>(
@@ -3577,14 +3581,12 @@ ModuleContext::check_h264_gfx() noexcept
                     std::span<const Rectangle>(
                         clientCopiedRectangles.data(),
                         clientCopiedRectangleCount),
-                    residualSelections);
+                    impl_->h264ScrollResidualSelections);
             if (residualCount != 0)
             {
-                authoritativeSelectionStorage = transmissionSelections;
-                authoritativeSelections =
-                    authoritativeSelectionStorage.data();
-                transmissionSelections = residualSelections;
-                transmissionCount = residualCount;
+                submittedSelections =
+                    impl_->h264ScrollResidualSelections.data();
+                submittedCount = residualCount;
                 useScrollCopy = true;
             }
             else
@@ -3595,12 +3597,8 @@ ModuleContext::check_h264_gfx() noexcept
         }
     }
 
-    // Scroll reuse may already have removed authoritative work from this list.
-    // Cache reuse is a second refinement of the remaining H.264 transmissions.
-    // transmissionSelections is not modified below; alias it instead of
-    // copying the full fixed-capacity selection array every submitted frame.
-    const auto &submittedSelections = transmissionSelections;
-    const std::size_t submittedCount = transmissionCount;
+    // Cache reuse is a second refinement of the H.264 selections that remain
+    // after optional scroll reuse. Only submittedCount entries are readable.
     std::array<GenerationTileMap::Selection, kMaximumH264Selections>
         h264Selections{};
     std::size_t cacheHitIndex = submittedCount;
@@ -3961,7 +3959,7 @@ ModuleContext::check_h264_gfx() noexcept
             scrollCopyDisplacementY,
             static_cast<unsigned long long>(clientCopiedRectangleCount),
             static_cast<unsigned long long>(exactScrollCopyPixels),
-            static_cast<unsigned long long>(transmissionCount));
+            static_cast<unsigned long long>(submittedCount));
     }
     if (profileH264Timing)
     {

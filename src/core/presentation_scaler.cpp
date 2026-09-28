@@ -272,9 +272,13 @@ PresentationScaler::configure(PixelSize source, PixelSize presentation,
         smallDownscale && replacementAreaFilterX && replacementAreaFilterY &&
         source.widthPixels == viewport.widthPixels * 2U &&
         source.heightPixels == viewport.heightPixels * 2U;
-    const bool replacementFastDiagonalFilter =
+    const bool replacementTwoSampleFilter =
         smallDownscale && (replacementAreaFilterX || replacementAreaFilterY) &&
         !replacementFastBoxFilter;
+    const bool replacementFastVerticalFilter =
+        replacementTwoSampleFilter && !replacementAreaFilterX;
+    const bool replacementFastDiagonalFilter =
+        replacementTwoSampleFilter && !replacementFastVerticalFilter;
 
     std::vector<std::uint32_t> replacementPixels;
     std::vector<PresentationAxisSpan> replacementHorizontalSpans;
@@ -309,6 +313,7 @@ PresentationScaler::configure(PixelSize source, PixelSize presentation,
     areaFilterY_ = replacementAreaFilterY;
     fastBoxFilter_ = replacementFastBoxFilter;
     fastDiagonalFilter_ = replacementFastDiagonalFilter;
+    fastVerticalFilter_ = replacementFastVerticalFilter;
     normalizationX_ = areaFilterX_ ? source.widthPixels : 1U;
     normalizationY_ = areaFilterY_ ? source.heightPixels : 1U;
     const std::uint64_t normalization = normalizationX_ * normalizationY_;
@@ -733,6 +738,65 @@ PresentationScaler::scaleRows(FramebufferView source,
                 destinationRow[x] = averageBoxPixel(
                     sourceRow0 + localSourceX,
                     sourceRow1 + localSourceX);
+            }
+        }
+
+        return {
+            std::span<const std::byte>(
+                reinterpret_cast<const std::byte *>(pixels_.data()),
+                static_cast<std::size_t>(presentationRowCount) *
+                    destinationStride),
+            outputWidth,
+            presentationRowCount,
+            destinationStride,
+        };
+    }
+
+    if (fastVerticalFilter_)
+    {
+        // Horizontal identity makes both samples use the same X. Average
+        // contiguous BGRA pixels four at a time, then handle the short tail.
+        const std::uint32_t horizontalSourceOffset =
+            firstHorizontal.firstSourcePixel - sourceLeft;
+        for (std::uint32_t localY = 0; localY < presentationRowCount;
+             ++localY)
+        {
+            const std::uint32_t viewportY = viewportLocalTop +
+                                            firstPresentationRow + localY;
+            const std::uint32_t sourceY =
+                verticalSpans_[viewportY].firstSourcePixel;
+            const std::uint32_t sourceY2 = sourceY + 1U;
+            const auto *sourceRow0 =
+                reinterpret_cast<const std::uint32_t *>(
+                    source.pixels.data() +
+                    static_cast<std::size_t>(sourceY - sourceTop) *
+                        source.strideBytes) +
+                horizontalSourceOffset;
+            const auto *sourceRow1 =
+                reinterpret_cast<const std::uint32_t *>(
+                    source.pixels.data() +
+                    static_cast<std::size_t>(sourceY2 - sourceTop) *
+                        source.strideBytes) +
+                horizontalSourceOffset;
+            auto *destinationRow = pixels_.data() +
+                                   static_cast<std::size_t>(localY) * outputWidth;
+            std::uint32_t x = 0;
+#if defined(__SSE2__)
+            for (; x + 3U < outputWidth; x += 4U)
+            {
+                const __m128i firstPixels = _mm_loadu_si128(
+                    reinterpret_cast<const __m128i *>(sourceRow0 + x));
+                const __m128i secondPixels = _mm_loadu_si128(
+                    reinterpret_cast<const __m128i *>(sourceRow1 + x));
+                _mm_storeu_si128(
+                    reinterpret_cast<__m128i *>(destinationRow + x),
+                    _mm_avg_epu8(firstPixels, secondPixels));
+            }
+#endif
+            for (; x < outputWidth; ++x)
+            {
+                destinationRow[x] =
+                    averagePixel(sourceRow0[x], sourceRow1[x]);
             }
         }
 

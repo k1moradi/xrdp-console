@@ -237,15 +237,6 @@
  clipboard_finish_selection_conversion(Atom target)
  {
      if (clipboard_retry_policy_active(&g_selection_retry.policy) &&
-@@ -1439,8 +1620,6 @@
-         if (g_clip_c2s.data == NULL)
-         {
-             g_clip_c2s.total_bytes = 0;
--            g_clip_c2s.read_bytes_done = 0;
--            g_clip_c2s.converted = 0;
-             clipboard_refuse_selection(lxev);
-             return 0;
-         }
 @@ -1661,28 +1840,67 @@
                                  int clip_msg_len)
  {
