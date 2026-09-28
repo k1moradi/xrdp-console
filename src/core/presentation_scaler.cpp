@@ -85,16 +85,12 @@ PresentationScaler::configure(PixelSize source, PixelSize presentation,
 bool
 PresentationScaler::valid() const noexcept
 {
+    // configure() commits geometry only after validating every dimension and
+    // successfully preparing any scaled-path storage. Those fields are private
+    // and immutable afterward, so committed source geometry is the validity
+    // sentinel; only movable scaled-path storage still needs checking.
     return sourceGeometry_.widthPixels != 0 &&
            sourceGeometry_.heightPixels != 0 &&
-           presentationGeometry_.widthPixels != 0 &&
-           presentationGeometry_.heightPixels != 0 &&
-           viewport_.x >= 0 && viewport_.y >= 0 &&
-           viewport_.widthPixels != 0 && viewport_.heightPixels != 0 &&
-           static_cast<std::uint64_t>(viewport_.x) + viewport_.widthPixels <=
-               presentationGeometry_.widthPixels &&
-           static_cast<std::uint64_t>(viewport_.y) + viewport_.heightPixels <=
-               presentationGeometry_.heightPixels &&
            (identity_ ||
             (pixels_.size() == kScratchPixelCapacity &&
              sourceXForViewportColumn_.size() == viewport_.widthPixels));
