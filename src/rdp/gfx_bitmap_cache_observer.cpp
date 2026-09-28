@@ -216,7 +216,9 @@ BitmapCacheReuseObserver::note(
     entry.sightings = observation.sightings;
     entry.lastSequence = sequence_;
 
-    if (entry.lastRectangle == tile)
+    // insertionIndex() already matched the cached width and height.
+    if (entry.lastRectangle.x == tile.x &&
+        entry.lastRectangle.y == tile.y)
     {
         observation.kind =
             BitmapCacheReuseObservationKind::RepeatedSamePosition;

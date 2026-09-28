@@ -96,6 +96,15 @@ main()
     assert(stats.candidateBytes ==
            (64ULL * 64ULL + 22ULL * 64ULL) * 4ULL);
 
+    BitmapCacheReuseObserver dimensions;
+    assert(dimensions.configure(large));
+    assert(dimensions.note(tileA, 0x3333U).kind ==
+           BitmapCacheReuseObservationKind::FirstSeen);
+    assert(dimensions.note(Rectangle{0, 0, 32, 64}, 0x3333U).kind ==
+           BitmapCacheReuseObservationKind::FirstSeen);
+    assert(dimensions.note(tileA, 0x3333U).kind ==
+           BitmapCacheReuseObservationKind::RepeatedSamePosition);
+
     observer.reset();
     assert(!observer.valid());
 
