@@ -53,5 +53,7 @@ private:
     PixelSize sourceGeometry_{};
     PixelSize presentationGeometry_{};
     Rectangle viewport_{};
+    std::uint64_t viewportWidthReciprocal_{};
+    std::uint64_t viewportHeightReciprocal_{};
     bool identity_{false};
 };

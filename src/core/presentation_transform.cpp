@@ -4,11 +4,29 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 
 namespace
 {
 
 using WideCoordinate = std::int64_t;
+
+__extension__ typedef unsigned __int128 WideUnsigned;
+
+[[nodiscard]] std::uint64_t
+divideUsingReciprocal(std::uint64_t numerator, std::uint32_t denominator,
+                      std::uint64_t reciprocal) noexcept
+{
+    // floor((2^64 - 1) / denominator) can underestimate the quotient by
+    // at most one; correct that single step without a hardware divide.
+    std::uint64_t quotient = static_cast<std::uint64_t>(
+        (static_cast<WideUnsigned>(numerator) * reciprocal) >> 64U);
+    if (numerator - quotient * denominator >= denominator)
+    {
+        ++quotient;
+    }
+    return quotient;
+}
 
 [[nodiscard]] constexpr std::uint64_t
 ceilDivide(std::uint64_t numerator, std::uint64_t denominator) noexcept
@@ -107,6 +125,18 @@ PresentationTransform::configure(PixelSize source, PixelSize presentation,
     identity_ = source == presentation &&
                 viewport == Rectangle{0, 0, source.widthPixels,
                                       source.heightPixels};
+    if (identity_)
+    {
+        viewportWidthReciprocal_ = 0;
+        viewportHeightReciprocal_ = 0;
+    }
+    else
+    {
+        viewportWidthReciprocal_ =
+            std::numeric_limits<std::uint64_t>::max() / viewport.widthPixels;
+        viewportHeightReciprocal_ =
+            std::numeric_limits<std::uint64_t>::max() / viewport.heightPixels;
+    }
     return true;
 }
 
@@ -262,12 +292,14 @@ PresentationTransform::mapPresentationPoint(
     sourcePoint = {
         static_cast<std::int32_t>(std::min<std::uint64_t>(
             sourceGeometry_.widthPixels - 1U,
-            (localX * sourceGeometry_.widthPixels) /
-                viewport_.widthPixels)),
+            divideUsingReciprocal(
+                localX * sourceGeometry_.widthPixels, viewport_.widthPixels,
+                viewportWidthReciprocal_))),
         static_cast<std::int32_t>(std::min<std::uint64_t>(
             sourceGeometry_.heightPixels - 1U,
-            (localY * sourceGeometry_.heightPixels) /
-                viewport_.heightPixels)),
+            divideUsingReciprocal(
+                localY * sourceGeometry_.heightPixels, viewport_.heightPixels,
+                viewportHeightReciprocal_))),
     };
     return true;
 }

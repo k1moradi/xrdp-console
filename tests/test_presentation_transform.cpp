@@ -265,6 +265,32 @@ transform_tests()
         return false;
     }
 
+    PresentationTransform scaledInverse;
+    if (!check(scaledInverse.configure({13, 11}, {17, 13}, {2, 3, 11, 7}),
+               "scaled inverse configuration failed"))
+    {
+        return false;
+    }
+    for (std::int32_t y = 3; y < 10; ++y)
+    {
+        for (std::int32_t x = 2; x < 13; ++x)
+        {
+            const PresentationPoint expected{
+                static_cast<std::int32_t>(
+                    (static_cast<std::uint64_t>(x - 2) * 13U) / 11U),
+                static_cast<std::int32_t>(
+                    (static_cast<std::uint64_t>(y - 3) * 11U) / 7U),
+            };
+            PresentationPoint actual{};
+            if (!check(scaledInverse.mapPresentationPoint(x, y, actual) &&
+                           actual == expected,
+                       "scaled inverse mapping changed integer result"))
+            {
+                return false;
+            }
+        }
+    }
+
     PresentationPoint presentationPoint{};
     if (!check(transform.mapSourcePoint(0, 0, presentationPoint) &&
                    presentationPoint == PresentationPoint{0, 49},
