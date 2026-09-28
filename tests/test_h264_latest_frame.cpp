@@ -407,6 +407,51 @@ bool newest_generation_replaces_stale_unsent_tile()
     return success;
 }
 
+bool ready_identity_tiles_skip_mapping_without_changing_staleness()
+{
+    H264LatestFrameState state;
+    std::array<GenerationTileMap::Selection, 8> selections{};
+    bool success = true;
+
+    success &= check(state.configure({128, 64}), "configuration failed");
+    success &= check(state.identityMapping(),
+                     "native geometry did not select identity mapping");
+    success &= check(state.collectCaptureSelections(selections) == 1 &&
+                         state.commitCaptured(selections[0]),
+                     "baseline capture failed");
+    const GenerationTileMap::Selection baseline{
+        {0, 0, 128, 64}, UINT64_MAX};
+    success &= check(state.noteSubmitted(1, std::span(&baseline, 1)) &&
+                         state.releaseSubmission(1),
+                     "baseline submission failed");
+
+    state.markDamage({0, 0, 1, 1});
+    success &= check(state.collectCaptureSelections(selections) == 1 &&
+                         state.commitCaptured(selections[0]),
+                     "first incremental capture failed");
+    state.markDamage({64, 0, 1, 1});
+    success &= check(state.collectCaptureSelections(selections) == 1 &&
+                         state.commitCaptured(selections[0]),
+                     "second incremental capture failed");
+
+    // Keep the second tile stale while the first tile remains ready. This
+    // makes the readiness scan exercise its frame-to-source coordinate path.
+    state.markDamage({65, 1, 1, 1});
+    const std::size_t readyCount =
+        state.collectReadyTransmissionSelections(selections);
+    success &= check(readyCount == 1 &&
+                         selections[0].rectangle == Rectangle{0, 0, 64, 64},
+                     "identity readiness scan changed ready/stale selection");
+
+    const std::size_t clippedCount =
+        state.collectReadyTransmissionSelectionsIntersecting(
+            {0, 0, 128, 64}, selections);
+    success &= check(clippedCount == 1 &&
+                         selections[0].rectangle == Rectangle{0, 0, 64, 64},
+                     "identity intersecting scan changed ready selection");
+    return success;
+}
+
 bool producer_window_holds_one_async_frame()
 {
     H264LatestFrameState state;
@@ -1295,6 +1340,7 @@ int main()
     success &= baseline_requires_every_tile_then_submits_full_frame();
     success &= baseline_submission_is_not_starved_by_newer_damage();
     success &= newest_generation_replaces_stale_unsent_tile();
+    success &= ready_identity_tiles_skip_mapping_without_changing_staleness();
     success &= producer_window_holds_one_async_frame();
     success &= client_surface_copy_commits_only_copied_tiles();
     success &= aligned_wide_single_exclusion_splits_and_preserves_capacity();

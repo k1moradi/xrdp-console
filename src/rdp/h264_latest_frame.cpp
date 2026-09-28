@@ -598,9 +598,19 @@ H264LatestFrameState::collectReadyTransmissionSelections(
         GenerationTileMap::kTileHeightPixels;
     std::array<GenerationTileMap::Selection, kMaximumTileRows> runs{};
     const std::size_t runCount = transmissionDamage_.collectSelections(runs);
+    const auto currentRuns = std::span<const GenerationTileMap::Selection>(
+        runs.data(), runCount);
+    if (identityMapping_)
+    {
+        return collectCurrentTransmissionRuns(
+            captureDamage_, currentRuns, output,
+            [](Rectangle frame, Rectangle &source) noexcept {
+                source = frame;
+                return true;
+            });
+    }
     return collectCurrentTransmissionRuns(
-        captureDamage_, std::span<const GenerationTileMap::Selection>(
-                            runs.data(), runCount), output,
+        captureDamage_, currentRuns, output,
         [this](Rectangle frame, Rectangle &source) noexcept {
             return mapFrameRectangleToSource(frame, source);
         });
@@ -797,9 +807,19 @@ H264LatestFrameState::collectReadyTransmissionSelectionsIntersecting(
     std::array<GenerationTileMap::Selection, kMaximumTileRows> runs{};
     const std::size_t runCount =
         transmissionDamage_.collectSelectionsIntersecting(clip, runs);
+    const auto currentRuns = std::span<const GenerationTileMap::Selection>(
+        runs.data(), runCount);
+    if (identityMapping_)
+    {
+        return collectCurrentTransmissionRuns(
+            captureDamage_, currentRuns, output,
+            [](Rectangle frame, Rectangle &source) noexcept {
+                source = frame;
+                return true;
+            });
+    }
     return collectCurrentTransmissionRuns(
-        captureDamage_, std::span<const GenerationTileMap::Selection>(
-                            runs.data(), runCount), output,
+        captureDamage_, currentRuns, output,
         [this](Rectangle frame, Rectangle &source) noexcept {
             return mapFrameRectangleToSource(frame, source);
         });
