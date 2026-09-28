@@ -507,20 +507,25 @@ collectCurrentTransmissionRuns(
     std::span<GenerationTileMap::Selection> output,
     FrameToSource frameToSource) noexcept
 {
-    std::size_t outputCount = 0;
     if (captureDamage.empty())
     {
-        for (const GenerationTileMap::Selection &run : runs)
+        // GenerationTileMap::collect*() returns only valid selections in its
+        // initialized prefix, so this ready fast path only needs the output
+        // capacity bound rather than revalidating every generated run.
+        const std::size_t count = std::min(runs.size(), output.size());
+        if (count == 1)
         {
-            if (!run.valid() || outputCount == output.size())
-            {
-                break;
-            }
-            output[outputCount++] = run;
+            output[0] = runs[0];
+            return 1;
         }
-        return outputCount;
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            output[index] = runs[index];
+        }
+        return count;
     }
 
+    std::size_t outputCount = 0;
     for (const GenerationTileMap::Selection &run : runs)
     {
         if (!run.valid() || outputCount == output.size())
