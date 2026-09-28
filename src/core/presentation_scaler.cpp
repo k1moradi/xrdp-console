@@ -6,6 +6,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <vector>
 #if defined(__SSE2__)
@@ -594,6 +595,10 @@ PresentationScaler::scaleRows(FramebufferView source,
 
     if (!areaFilterX_ && !areaFilterY_)
     {
+        const bool horizontalIdentity =
+            sourceGeometry_.widthPixels == viewport_.widthPixels;
+        const std::uint32_t horizontalSourceOffset =
+            firstHorizontal.firstSourcePixel - sourceLeft;
         for (std::uint32_t localY = 0; localY < presentationRowCount;
              ++localY)
         {
@@ -611,6 +616,13 @@ PresentationScaler::scaleRows(FramebufferView source,
                     source.strideBytes);
             auto *destinationRow = pixels_.data() +
                                    static_cast<std::size_t>(localY) * outputWidth;
+            if (horizontalIdentity)
+            {
+                std::memcpy(destinationRow,
+                            sourceRow + horizontalSourceOffset,
+                            destinationStride);
+                continue;
+            }
             for (std::uint32_t x = 0; x < outputWidth; ++x)
             {
                 destinationRow[x] = sourceRow[

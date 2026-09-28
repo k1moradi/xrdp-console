@@ -694,6 +694,31 @@ chunked_scaler_tests()
         return false;
     }
 
+    PresentationScaler verticalOnly;
+    if (!check(verticalOnly.configure({6, 2}, {10, 5}, {2, 0, 6, 5}),
+               "vertical-only scaler configuration failed"))
+    {
+        return false;
+    }
+    const std::vector<std::uint32_t> verticalSourcePixels{
+        30U, 40U, 50U,
+        130U, 140U, 150U,
+    };
+    const FramebufferView verticalOutput = verticalOnly.scaleRows(
+        view_of(verticalSourcePixels, 3, 2), {2, 0, 3, 2}, {4, 1, 3, 3},
+        0, 3);
+    if (!check(
+            pixels_of(verticalOutput) ==
+                std::vector<std::uint32_t>{
+                    30U, 40U, 50U,
+                    30U, 40U, 50U,
+                    130U, 140U, 150U,
+                },
+            "vertical-only partial scaling changed horizontal pixels"))
+    {
+        return false;
+    }
+
     PresentationScaler scaler;
     const Rectangle sourceRectangle{0, 0, 5, 3};
     const Rectangle destinationRectangle{0, 0, 7, 4};
