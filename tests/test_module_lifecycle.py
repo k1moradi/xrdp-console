@@ -239,6 +239,7 @@ def start_private_xvfb(
             "-screen",
             "0",
             "1024x768x24",
+            "-noreset",
             "-nolisten",
             "tcp",
         ],
