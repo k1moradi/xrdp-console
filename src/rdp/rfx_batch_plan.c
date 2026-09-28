@@ -117,12 +117,9 @@ rfx_bounding_region(const struct rfx_tile *tiles, size_t tile_count)
         return region;
     }
 
-    for (index = 0; index < tile_count; ++index)
+    if (!valid_tile(&tiles[0]))
     {
-        if (!valid_tile(&tiles[index]))
-        {
-            return region;
-        }
+        return region;
     }
 
     left = tiles[0].x;
@@ -130,11 +127,28 @@ rfx_bounding_region(const struct rfx_tile *tiles, size_t tile_count)
     right = left + tiles[0].cx;
     bottom = top + tiles[0].cy;
 
+    if (tile_count == 1)
+    {
+        region.x = (int)left;
+        region.y = (int)top;
+        region.cx = (int)(right - left);
+        region.cy = (int)(bottom - top);
+        return region;
+    }
+
     for (index = 1; index < tile_count; ++index)
     {
         const struct rfx_tile *tile = &tiles[index];
-        const int64_t tile_right = (int64_t)tile->x + tile->cx;
-        const int64_t tile_bottom = (int64_t)tile->y + tile->cy;
+        int64_t tile_right;
+        int64_t tile_bottom;
+
+        if (!valid_tile(tile))
+        {
+            return region;
+        }
+
+        tile_right = (int64_t)tile->x + tile->cx;
+        tile_bottom = (int64_t)tile->y + tile->cy;
 
         if (tile->x < left)
         {

@@ -127,6 +127,20 @@ test_bounding_regions(void)
         return 1;
     }
 
+    {
+        struct rfx_tile invalid_span[] = {
+            {0, 0, 64, 64, 0, 0, 0},
+            {64, 0, 0, 64, 0, 0, 0},
+        };
+
+        region = rfx_bounding_region(invalid_span, 2);
+        if (region.x != 0 || region.y != 0 || region.cx != 0 ||
+            region.cy != 0)
+        {
+            return 1;
+        }
+    }
+
     region = rfx_bounding_region(NULL, 0);
     if (region.x != 0 || region.y != 0 || region.cx != 0 || region.cy != 0)
     {

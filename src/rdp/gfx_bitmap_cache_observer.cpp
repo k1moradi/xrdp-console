@@ -147,7 +147,6 @@ BitmapCacheReuseObserver::insertionIndex(
         tile.heightPixels;
     const std::size_t first =
         static_cast<std::size_t>(mixed % kMaximumEntries);
-    std::size_t firstVacant = kMaximumEntries;
     std::size_t oldest = first;
     std::uint64_t oldestSequence =
         std::numeric_limits<std::uint64_t>::max();
@@ -158,11 +157,7 @@ BitmapCacheReuseObserver::insertionIndex(
         const Entry &entry = entries_[index];
         if (!entry.occupied)
         {
-            if (firstVacant == kMaximumEntries)
-            {
-                firstVacant = index;
-            }
-            continue;
+            return index;
         }
         if (entry.fingerprint == fingerprint &&
             entry.widthPixels == tile.widthPixels &&
@@ -177,7 +172,7 @@ BitmapCacheReuseObserver::insertionIndex(
             oldestSequence = entry.lastSequence;
         }
     }
-    return firstVacant != kMaximumEntries ? firstVacant : oldest;
+    return oldest;
 }
 
 BitmapCacheReuseObservation
