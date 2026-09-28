@@ -123,13 +123,6 @@ GenerationTileMap::tileBounds(Rectangle rectangle) const noexcept
     };
 }
 
-std::size_t
-GenerationTileMap::tileIndex(std::uint32_t column,
-                             std::uint32_t row) const noexcept
-{
-    return static_cast<std::size_t>(row) * columns_ + column;
-}
-
 void
 GenerationTileMap::mark(Rectangle rectangle) noexcept
 {
@@ -180,12 +173,6 @@ GenerationTileMap::markFull() noexcept
     dirtyTileCount_ = tileGenerations_.size();
 }
 
-bool
-GenerationTileMap::empty() const noexcept
-{
-    return dirtyTileCount_ == 0;
-}
-
 std::size_t
 GenerationTileMap::dirtyTileCount() const noexcept
 {
@@ -218,14 +205,6 @@ GenerationTileMap::intersects(Rectangle rectangle) const noexcept
         }
     }
     return false;
-}
-
-bool
-GenerationTileMap::tileDirty(std::uint32_t column,
-                             std::uint32_t row) const noexcept
-{
-    return column < columns_ && row < rows_ &&
-           tileGenerations_[tileIndex(column, row)] != 0;
 }
 
 Rectangle

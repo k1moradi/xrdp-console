@@ -34,13 +34,20 @@ public:
     void mark(Rectangle rectangle) noexcept;
     void markFull() noexcept;
 
-    [[nodiscard]] bool empty() const noexcept;
+    [[nodiscard]] bool empty() const noexcept
+    {
+        return dirtyTileCount_ == 0;
+    }
     [[nodiscard]] std::size_t dirtyTileCount() const noexcept;
     [[nodiscard]] std::uint64_t generation() const noexcept;
     [[nodiscard]] bool intersects(Rectangle rectangle) const noexcept;
     // Column and row are map tile coordinates; out-of-range queries are clean.
     [[nodiscard]] bool tileDirty(std::uint32_t column,
-                                 std::uint32_t row) const noexcept;
+                                 std::uint32_t row) const noexcept
+    {
+        return column < columns_ && row < rows_ &&
+               tileGenerations_[tileIndex(column, row)] != 0;
+    }
 
     [[nodiscard]] std::size_t collectSelections(
         std::span<Selection> output) const noexcept;
@@ -68,7 +75,10 @@ private:
     [[nodiscard]] std::size_t collect(
         TileBounds bounds, std::span<Selection> output) const noexcept;
     [[nodiscard]] std::size_t tileIndex(
-        std::uint32_t column, std::uint32_t row) const noexcept;
+        std::uint32_t column, std::uint32_t row) const noexcept
+    {
+        return static_cast<std::size_t>(row) * columns_ + column;
+    }
 
     PixelSize bounds_{};
     std::uint32_t columns_{};
