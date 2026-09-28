@@ -3734,10 +3734,10 @@ ModuleContext::check_h264_gfx() noexcept
         rectangles[index] = rectangle;
     }
 
-    // These serializers likewise write exact returned prefixes before any
-    // read. Keep the 64 KiB of per-frame scratch storage uninitialized.
+    // The submission buffer is written only through exact returned prefixes.
+    // Keep it uninitialized; the splice-only scratch below is likewise
+    // created only when cache commands actually need insertion.
     std::array<std::byte, kMaximumH264CommandBytes> commandBytes;
-    std::array<std::byte, kMaximumH264CommandBytes> frameCommandBytes;
     std::size_t commandPrefixBytes = 0;
     if (impl_->h264Frame.baselineSubmissionPending())
     {
@@ -3790,16 +3790,29 @@ ModuleContext::check_h264_gfx() noexcept
                   preWireCommands.data(), preWireCommandBytes)
             : std::span<const std::byte>{},
     };
-    const std::size_t baseCommandBytes =
-        buildGfxAvc420Command(command, frameCommandBytes);
-    const std::size_t encodedCommandBytes =
-        baseCommandBytes == 0
-            ? 0
-            : xrdp_console::rdp::spliceGfxFrameCommands(
-                  std::span(frameCommandBytes).first(baseCommandBytes),
-                  std::span(cacheBefore).first(cacheBeforeBytes),
-                  std::span(cacheAfter).first(cacheAfterBytes),
-                  std::span(commandBytes).subspan(commandPrefixBytes));
+    std::size_t encodedCommandBytes = 0;
+    if (cacheBeforeBytes == 0 && cacheAfterBytes == 0)
+    {
+        // With no cache commands to insert, splicing would only validate and
+        // copy this exact frame into the submission buffer. Serialize there
+        // directly instead.
+        encodedCommandBytes = buildGfxAvc420Command(
+            command, std::span(commandBytes).subspan(commandPrefixBytes));
+    }
+    else
+    {
+        std::array<std::byte, kMaximumH264CommandBytes> frameCommandBytes;
+        const std::size_t baseCommandBytes =
+            buildGfxAvc420Command(command, frameCommandBytes);
+        encodedCommandBytes =
+            baseCommandBytes == 0
+                ? 0
+                : xrdp_console::rdp::spliceGfxFrameCommands(
+                      std::span(frameCommandBytes).first(baseCommandBytes),
+                      std::span(cacheBefore).first(cacheBeforeBytes),
+                      std::span(cacheAfter).first(cacheAfterBytes),
+                      std::span(commandBytes).subspan(commandPrefixBytes));
+    }
     if (encodedCommandBytes == 0 ||
         encodedCommandBytes + commandPrefixBytes > INT_MAX)
     {
