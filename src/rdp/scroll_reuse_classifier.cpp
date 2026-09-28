@@ -18,9 +18,9 @@ namespace
 constexpr std::size_t kBytesPerPixel = 4U;
 
 [[nodiscard]] bool
-rectangleFits(Rectangle rectangle, FramebufferView frame) noexcept
+rectangleFitsValidatedFrame(Rectangle rectangle, FramebufferView frame) noexcept
 {
-    if (!frame.valid() || rectangle.x < 0 || rectangle.y < 0 ||
+    if (rectangle.x < 0 || rectangle.y < 0 ||
         rectangle.widthPixels == 0 || rectangle.heightPixels == 0)
     {
         return false;
@@ -97,7 +97,7 @@ classifyExactVerticalScrollReuse(
         currentFrame.strideBytes <
             static_cast<std::size_t>(currentFrame.widthPixels) *
                 kBytesPerPixel ||
-        !rectangleFits(viewport, previousFrame))
+        !rectangleFitsValidatedFrame(viewport, previousFrame))
     {
         return result;
     }
@@ -112,8 +112,8 @@ classifyExactVerticalScrollReuse(
         motion.destinationPoint.x, motion.destinationPoint.y,
         motion.sourceRectangle.widthPixels,
         motion.sourceRectangle.heightPixels};
-    if (!rectangleFits(motion.sourceRectangle, previousFrame) ||
-        !rectangleFits(reusableDestination, currentFrame))
+    if (!rectangleFitsValidatedFrame(motion.sourceRectangle, previousFrame) ||
+        !rectangleFitsValidatedFrame(reusableDestination, currentFrame))
     {
         return result;
     }

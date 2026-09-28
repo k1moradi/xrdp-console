@@ -174,6 +174,36 @@ bool exact_reuse_fails_closed_on_run_overflow()
                  "exact reuse returned a partial plan on overflow");
 }
 
+bool exact_reuse_rejects_invalid_framebuffers()
+{
+    constexpr std::uint32_t width = 320;
+    constexpr std::uint32_t height = 240;
+    constexpr Rectangle full{0, 0, width, height};
+    const auto previous = makeTextured(width, height);
+    const auto current = scroll(previous, width, height, -37);
+    std::array<ExactScrollCopyRun, kMaximumExactScrollCopyRuns> runs{};
+
+    auto truncatedPrevious = view(previous, width, height);
+    truncatedPrevious.pixels = truncatedPrevious.pixels.first(
+        truncatedPrevious.pixels.size() - 1U);
+    const auto invalidPrevious = classifyExactVerticalScrollReuse(
+        truncatedPrevious, view(current, width, height), full, -37, runs);
+
+    auto truncatedCurrent = view(current, width, height);
+    truncatedCurrent.pixels = truncatedCurrent.pixels.first(
+        truncatedCurrent.pixels.size() - 1U);
+    const auto invalidCurrent = classifyExactVerticalScrollReuse(
+        view(previous, width, height), truncatedCurrent, full, -37, runs);
+
+    return check(invalidPrevious.runCount == 0 &&
+                     invalidPrevious.reusablePixels == 0 &&
+                     !invalidPrevious.overflow &&
+                     invalidCurrent.runCount == 0 &&
+                     invalidCurrent.reusablePixels == 0 &&
+                     !invalidCurrent.overflow,
+                 "exact reuse accepted a truncated framebuffer view");
+}
+
 bool small_episode_is_not_searched()
 {
     constexpr std::uint32_t width = 320;
@@ -275,6 +305,7 @@ int main()
     success &= snapshot_memory_is_bounded();
     success &= invalid_capture_does_not_start_an_episode();
     success &= exact_reuse_fails_closed_on_run_overflow();
+    success &= exact_reuse_rejects_invalid_framebuffers();
     success &= check(clientScrollCopyRequested(nullptr) &&
                          clientScrollCopyRequested("1") &&
                          !clientScrollCopyRequested("0") &&
