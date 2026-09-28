@@ -1198,6 +1198,9 @@ ModuleContext::start(int width, int height, int bpp) noexcept
     };
     impl_->state.bitsPerPixel = static_cast<std::uint32_t>(bpp);
     impl_->state.started = true;
+    log_message(LOG_LEVEL_INFO,
+                "XRDP_CONSOLE_GEOMETRY event=start presentation=%dx%d bpp=%d",
+                width, height, bpp);
     return 0;
 }
 
@@ -1246,6 +1249,14 @@ ModuleContext::connect() noexcept
         }
 
         const PixelSize sourceGeometry = connection->sourceGeometry();
+        log_message(
+            LOG_LEVEL_INFO,
+            "XRDP_CONSOLE_GEOMETRY event=connect source=%ux%u "
+            "presentation=%ux%u bpp=%u",
+            sourceGeometry.widthPixels, sourceGeometry.heightPixels,
+            impl_->state.presentationGeometry.widthPixels,
+            impl_->state.presentationGeometry.heightPixels,
+            impl_->state.bitsPerPixel);
         PresentationTransform presentationTransform;
         if (!presentationTransform.configure(
                 sourceGeometry, impl_->state.presentationGeometry))
@@ -1753,6 +1764,13 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     {
         return 1;
     }
+    log_message(
+        LOG_LEVEL_INFO,
+        "XRDP_CONSOLE_GEOMETRY event=resize source=%ux%u "
+        "requested_presentation=%dx%d monitors=%d",
+        impl_->state.sourceGeometry.widthPixels,
+        impl_->state.sourceGeometry.heightPixels, width, height,
+        num_monitors);
     impl_->clientScaledOutputResizeRearmPending = false;
     if (xrdp_console_module_clear_scaled_output_aux_surfaces(
             impl_->module) != 0)

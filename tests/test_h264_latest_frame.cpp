@@ -1127,6 +1127,34 @@ bool odd_presentation_uses_even_coded_viewport_and_black_fringe()
     return success;
 }
 
+bool native_resolution_keeps_identity_h264_geometry()
+{
+    constexpr PixelSize desktop{1366, 768};
+    H264PresentationPlan plan{};
+    bool success = true;
+    success &= check(makeH264PresentationPlan(desktop, desktop, plan),
+                     "native-size H264 plan failed");
+    success &= check(plan.frameGeometry == desktop,
+                     "native-size H264 plan changed the coded geometry");
+    success &= check(plan.viewport == Rectangle{0, 0, 1366, 768},
+                     "native-size H264 plan changed the presentation viewport");
+
+    H264LatestFrameState state;
+    success &= check(state.configure(desktop, desktop, plan.frameGeometry,
+                                     plan.viewport),
+                     "native-size H264 state configuration failed");
+    success &= check(state.identityMapping(),
+                     "native-size H264 state did not retain identity mapping");
+
+    H264PresentationPlan narrowerPlan{};
+    success &= check(makeH264PresentationPlan(desktop, {1364, 768},
+                                              narrowerPlan),
+                     "1364x768 client-requested H264 plan failed");
+    success &= check(narrowerPlan.frameGeometry == PixelSize{1364, 768},
+                     "H264 planner silently enlarged client-requested geometry");
+    return success;
+}
+
 bool scaled_capture_maps_to_global_nv12_pixels()
 {
     const std::array<std::uint32_t, 8> sourcePixels{{
@@ -1357,6 +1385,7 @@ int main()
     success &= full_invalidation_forgets_fingerprint_baseline();
     success &= grouped_capture_can_convert_only_changed_subtile();
     success &= odd_presentation_uses_even_coded_viewport_and_black_fringe();
+    success &= native_resolution_keeps_identity_h264_geometry();
     success &= scaled_capture_maps_to_global_nv12_pixels();
     success &= downscaled_filter_coverage_includes_unselected_source_pixels();
     success &= oversized_nv12_frame_is_rejected_before_allocation();

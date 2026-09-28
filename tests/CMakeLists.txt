@@ -355,6 +355,18 @@ if(TARGET xrdp-console)
     add_test(NAME clipboard-selection-retry-policy-unit
         COMMAND clipboard-selection-retry-policy-unit)
 
+    add_executable(clipboard-image-retry-policy-unit
+        test_clipboard_image_retry_policy.c)
+    set_target_properties(clipboard-image-retry-policy-unit PROPERTIES
+        C_STANDARD 11
+        C_STANDARD_REQUIRED ON
+        C_EXTENSIONS OFF)
+    target_include_directories(clipboard-image-retry-policy-unit PRIVATE
+        ${XRDP_CONSOLE_XRDP_SOURCE_DIR}/sesman/chansrv)
+    add_dependencies(clipboard-image-retry-policy-unit xrdp_upstream)
+    add_test(NAME clipboard-image-retry-policy-unit
+        COMMAND clipboard-image-retry-policy-unit)
+
     add_executable(classic-graphics-scheduler-unit
         test_classic_graphics_scheduler.cpp)
     set_target_properties(classic-graphics-scheduler-unit PROPERTIES
