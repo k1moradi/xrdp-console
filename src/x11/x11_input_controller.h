@@ -65,6 +65,9 @@ private:
     xcb_window_t rootWindow_{XCB_WINDOW_NONE};
     PixelSize bounds_{};
     std::vector<KeyMapping> keyMappings_{};
+    std::array<xcb_keycode_t, 256> latin1Keycodes_{};
+    std::array<xcb_keycode_t, 256> functionKeycodes_{};
+    bool hasDirectKeycodes_{false};
     std::array<xcb_keycode_t, 512> activeKeycodes_{};
     std::array<bool, 10> pressedButtons_{};
     std::array<xcb_keycode_t, 3> lockKeycodes_{};

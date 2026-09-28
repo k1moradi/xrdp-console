@@ -143,6 +143,7 @@ X11InputController::X11InputController(xcb_connection_t &connection,
     const int symbolCount = xcb_get_keyboard_mapping_keysyms_length(keyboard);
     const xcb_keysym_t *symbols = xcb_get_keyboard_mapping_keysyms(keyboard);
     keyMappings_.reserve(static_cast<std::size_t>(symbolCount));
+    bool haveKeyMapping = false;
     for (xcb_keycode_t keycode = setup->min_keycode;
          keycode <= setup->max_keycode; ++keycode)
     {
@@ -152,11 +153,40 @@ X11InputController::X11InputController(xcb_connection_t &connection,
         {
             const int symbolIndex =
                 keycodeOffset * keyboard->keysyms_per_keycode + level;
-            if (symbolIndex >= symbolCount || symbols[symbolIndex] == XCB_NO_SYMBOL)
+            if (symbolIndex >= symbolCount)
             {
                 continue;
             }
-            keyMappings_.push_back({symbols[symbolIndex], keycode});
+            const xcb_keysym_t keysym = symbols[symbolIndex];
+            if (keysym == XCB_NO_SYMBOL)
+            {
+                continue;
+            }
+            haveKeyMapping = true;
+            if (keysym <= 0xffU)
+            {
+                xcb_keycode_t &direct =
+                    latin1Keycodes_[static_cast<std::size_t>(keysym)];
+                if (direct == XCB_NO_SYMBOL)
+                {
+                    direct = keycode;
+                }
+                hasDirectKeycodes_ = true;
+            }
+            else if ((keysym & 0xffffff00U) == 0xff00U)
+            {
+                xcb_keycode_t &direct = functionKeycodes_[
+                    static_cast<std::size_t>(keysym & 0xffU)];
+                if (direct == XCB_NO_SYMBOL)
+                {
+                    direct = keycode;
+                }
+                hasDirectKeycodes_ = true;
+            }
+            else
+            {
+                keyMappings_.push_back({keysym, keycode});
+            }
         }
         if (keycode == setup->max_keycode)
         {
@@ -203,7 +233,7 @@ X11InputController::X11InputController(xcb_connection_t &connection,
     std::free(modifierError);
     std::free(modifierMapping);
 
-    if (keyMappings_.empty() || xcb_connection_has_error(connection_) != 0 ||
+    if (!haveKeyMapping || xcb_connection_has_error(connection_) != 0 ||
         xcb_flush(connection_) <= 0)
     {
         fail("X11 keyboard input setup failed");
@@ -348,6 +378,19 @@ X11InputController::releaseAll() noexcept
 xcb_keycode_t
 X11InputController::keycodeFor(xcb_keysym_t keysym) const noexcept
 {
+    if (hasDirectKeycodes_)
+    {
+        if (keysym <= 0xffU)
+        {
+            return latin1Keycodes_[static_cast<std::size_t>(keysym)];
+        }
+        if ((keysym & 0xffffff00U) == 0xff00U)
+        {
+            return functionKeycodes_[
+                static_cast<std::size_t>(keysym & 0xffU)];
+        }
+    }
+
     for (const KeyMapping &mapping : keyMappings_)
     {
         if (mapping.keysym == keysym)
