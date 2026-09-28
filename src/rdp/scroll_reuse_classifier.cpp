@@ -138,6 +138,17 @@ classifyExactVerticalScrollReuse(
         (currentFrame.heightPixels +
          GenerationTileMap::kTileHeightPixels - 1U) /
         GenerationTileMap::kTileHeightPixels;
+    // Only complete framebuffer tile rows wholly inside the reusable
+    // destination can produce copy runs. Bound the outer scan accordingly.
+    const std::uint32_t firstTileRow = static_cast<std::uint32_t>(
+        (static_cast<std::uint64_t>(reusableTop) +
+         GenerationTileMap::kTileHeightPixels - 1U) /
+        GenerationTileMap::kTileHeightPixels);
+    const std::uint32_t endTileRow =
+        reusableBottom == currentFrame.heightPixels
+            ? tileRows
+            : static_cast<std::uint32_t>(
+                  reusableBottom / GenerationTileMap::kTileHeightPixels);
 
     const auto appendRow = [&](std::uint32_t tileRow) noexcept {
         const std::uint32_t y =
@@ -145,15 +156,8 @@ classifyExactVerticalScrollReuse(
         const std::uint32_t height = std::min(
             GenerationTileMap::kTileHeightPixels,
             currentFrame.heightPixels - y);
-        const std::uint64_t bottom =
-            static_cast<std::uint64_t>(y) + height;
         const std::int64_t sourceY =
             static_cast<std::int64_t>(y) - displacementY;
-        if (y < reusableTop || bottom > reusableBottom || sourceY < 0 ||
-            sourceY > std::numeric_limits<std::int32_t>::max())
-        {
-            return true;
-        }
 
         ExactScrollCopyRun pending{};
         bool pendingActive = false;
@@ -227,7 +231,7 @@ classifyExactVerticalScrollReuse(
      */
     if (displacementY < 0)
     {
-        for (std::uint32_t row = 0; row < tileRows; ++row)
+        for (std::uint32_t row = firstTileRow; row < endTileRow; ++row)
         {
             if (!appendRow(row))
             {
@@ -237,7 +241,7 @@ classifyExactVerticalScrollReuse(
     }
     else
     {
-        for (std::uint32_t row = tileRows; row > 0; --row)
+        for (std::uint32_t row = endTileRow; row > firstTileRow; --row)
         {
             if (!appendRow(row - 1U))
             {
