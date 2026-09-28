@@ -145,25 +145,13 @@ VerifiedBitmapCache16::configure(
 void
 VerifiedBitmapCache16::clear() noexcept
 {
-    // Slot state and seed validity gate every read of retained snapshots.
-    // Reset the logical metadata without scrubbing the inactive pixel arrays.
+    // Slot state and seed validity gate every read of retained snapshots and
+    // metadata. A reused slot/seed is fully overwritten before either gate is
+    // made visible again, so clearing hidden fields only adds cache traffic.
     for (Slot &slot : slots_)
     {
-        slot.bitmap.sizeBytes = 0;
-        slot.bitmap.fingerprint = 0;
-        slot.bitmap.widthPixels = 0;
-        slot.bitmap.heightPixels = 0;
         slot.state = SlotState::Empty;
-        slot.pendingFrameId = 0;
-        slot.lastUse = 0;
-        slot.cacheKey = 0;
     }
-    seed_.bitmap.sizeBytes = 0;
-    seed_.bitmap.fingerprint = 0;
-    seed_.bitmap.widthPixels = 0;
-    seed_.bitmap.heightPixels = 0;
-    seed_.sourceRectangle = {};
-    seed_.sourceGeneration = 0;
     seed_.valid = false;
     useSequence_ = 0;
     nextCacheKey_ = 1;
