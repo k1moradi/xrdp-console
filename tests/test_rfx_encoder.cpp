@@ -93,6 +93,46 @@ encoder_lifecycle_and_batches()
 }
 
 bool
+encoder_rebuilds_plan_for_changed_continuation_geometry()
+{
+    RfxEncoder encoder;
+    if (!check(encoder.configure({128, 128}, RfxEncoder::kMaximumPayloadBytes),
+               "geometry-change encoder configure failed"))
+    {
+        return false;
+    }
+
+    std::vector<std::uint32_t> horizontalPixels(128U * 64U);
+    std::vector<std::uint32_t> verticalPixels(64U * 128U);
+    for (std::size_t index = 0; index < horizontalPixels.size(); ++index)
+    {
+        const std::uint32_t pixel =
+            static_cast<std::uint32_t>(index * 2654435761U);
+        horizontalPixels[index] = pixel;
+        verticalPixels[index] = pixel;
+    }
+
+    const FramebufferView horizontal = view_of(horizontalPixels, 128, 64);
+    const FramebufferView vertical = view_of(verticalPixels, 64, 128);
+    if (!check(encoder.tileCount(horizontal) == 2 &&
+                   encoder.tileCount(vertical) == 2,
+               "geometry-change views did not produce two tiles"))
+    {
+        return false;
+    }
+
+    const RfxEncodedBatch first = encoder.encode(horizontal, 0, 1);
+    const RfxEncodedBatch changed = encoder.encode(vertical, 1, 1);
+    const RfxEncodedBatch restored = encoder.encode(horizontal, 1, 1);
+    return check(first.valid() && first.tilesEncoded == 1,
+                 "initial horizontal batch was not encoded") &&
+           check(changed.valid() && changed.tilesEncoded == 1,
+                 "changed-geometry continuation was not encoded") &&
+           check(restored.valid() && restored.tilesEncoded == 1,
+                 "restored-geometry continuation was not encoded");
+}
+
+bool
 encoder_batches_across_rows_and_partial_edges()
 {
     constexpr std::uint32_t widthPixels = 130;
@@ -294,6 +334,10 @@ main()
 {
     bool success = true;
     if (!encoder_lifecycle_and_batches())
+    {
+        success = false;
+    }
+    if (!encoder_rebuilds_plan_for_changed_continuation_geometry())
     {
         success = false;
     }

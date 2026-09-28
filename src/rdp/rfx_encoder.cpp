@@ -65,6 +65,8 @@ RfxEncoder::reset() noexcept
     }
     geometry_ = {};
     payloadCapacityBytes_ = 0;
+    tilePlanGeometry_ = {};
+    tilePlanCount_ = 0;
 }
 
 std::size_t
@@ -111,13 +113,22 @@ RfxEncoder::encode(FramebufferView pixels, std::size_t firstTile,
 
     const std::size_t requested =
         std::min(maximumTiles, count - firstTile);
-    size_t plannedCount = 0;
-    if (rfx_make_tiles(static_cast<int>(pixels.widthPixels),
-                       static_cast<int>(pixels.heightPixels), tiles_.data(),
-                       tiles_.size(), &plannedCount) != 0 ||
-        plannedCount != count)
+    const PixelSize tilePlanGeometry{pixels.widthPixels, pixels.heightPixels};
+    if (firstTile == 0 || tilePlanGeometry_ != tilePlanGeometry ||
+        tilePlanCount_ != count)
     {
-        return {};
+        size_t plannedCount = 0;
+        if (rfx_make_tiles(static_cast<int>(pixels.widthPixels),
+                           static_cast<int>(pixels.heightPixels), tiles_.data(),
+                           tiles_.size(), &plannedCount) != 0 ||
+            plannedCount != count)
+        {
+            tilePlanGeometry_ = {};
+            tilePlanCount_ = 0;
+            return {};
+        }
+        tilePlanGeometry_ = tilePlanGeometry;
+        tilePlanCount_ = plannedCount;
     }
 
     const rfx_tile *batchTiles = tiles_.data() + firstTile;

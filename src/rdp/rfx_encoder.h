@@ -83,6 +83,9 @@ private:
     void *handle_{nullptr};
     PixelSize geometry_{};
     std::size_t payloadCapacityBytes_{};
+    // Key of the last successfully generated geometry-only tile plan.
+    PixelSize tilePlanGeometry_{};
+    std::size_t tilePlanCount_{};
     std::array<rfx_tile, kMaximumTilesPerChunk> tiles_{};
     std::array<std::byte, kSurfacePrefixBytes + kMaximumPayloadBytes>
         output_{};
