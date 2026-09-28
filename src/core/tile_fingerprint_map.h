@@ -40,6 +40,10 @@ public:
                             std::uint64_t &fingerprint) const noexcept;
     [[nodiscard]] bool promoteInitialized(
         Rectangle tile, TileFingerprintMap &destination) noexcept;
+    // Move initialized fingerprints for every tile intersecting rectangle.
+    // Both maps must have identical configured geometry.
+    [[nodiscard]] bool promoteInitializedIntersecting(
+        Rectangle rectangle, TileFingerprintMap &destination) noexcept;
     [[nodiscard]] bool store(Rectangle tile,
                              std::uint64_t fingerprint) noexcept;
     [[nodiscard]] bool clear(Rectangle tile) noexcept;

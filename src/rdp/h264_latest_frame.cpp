@@ -855,56 +855,6 @@ H264LatestFrameState::collectReadyTransmissionSelectionsIntersecting(
 namespace
 {
 
-template <typename Callback>
-bool
-forEachTile(Rectangle rectangle, PixelSize geometry, Callback callback) noexcept
-{
-    if (rectangle.x < 0 || rectangle.y < 0 ||
-        rectangle.widthPixels == 0 || rectangle.heightPixels == 0)
-    {
-        return false;
-    }
-    const std::uint64_t right =
-        static_cast<std::uint64_t>(rectangle.x) + rectangle.widthPixels;
-    const std::uint64_t bottom =
-        static_cast<std::uint64_t>(rectangle.y) + rectangle.heightPixels;
-    if (right > geometry.widthPixels || bottom > geometry.heightPixels)
-    {
-        return false;
-    }
-
-    const std::uint32_t firstTileX =
-        static_cast<std::uint32_t>(rectangle.x) /
-        GenerationTileMap::kTileWidthPixels *
-        GenerationTileMap::kTileWidthPixels;
-    const std::uint32_t firstTileY =
-        static_cast<std::uint32_t>(rectangle.y) /
-        GenerationTileMap::kTileHeightPixels *
-        GenerationTileMap::kTileHeightPixels;
-    for (std::uint32_t y = firstTileY;
-         y < bottom; y += GenerationTileMap::kTileHeightPixels)
-    {
-        const std::uint32_t tileHeight = std::min(
-            GenerationTileMap::kTileHeightPixels,
-            geometry.heightPixels - y);
-        for (std::uint32_t x = firstTileX;
-             x < right; x += GenerationTileMap::kTileWidthPixels)
-        {
-            const std::uint32_t tileWidth = std::min(
-                GenerationTileMap::kTileWidthPixels,
-                geometry.widthPixels - x);
-            if (!callback(Rectangle{
-                    static_cast<std::int32_t>(x),
-                    static_cast<std::int32_t>(y),
-                    tileWidth, tileHeight}))
-            {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
 [[nodiscard]] bool
 completeTileRegion(Rectangle rectangle, PixelSize geometry) noexcept
 {
@@ -1174,12 +1124,8 @@ H264LatestFrameState::noteSubmitted(
 
     const auto promotePendingFingerprints =
         [this](Rectangle sourceRectangle) noexcept {
-            return forEachTile(
-                sourceRectangle, sourceGeometry_,
-                [this](Rectangle tile) noexcept {
-                    return pendingFingerprints_.promoteInitialized(
-                        tile, committedFingerprints_);
-                });
+            return pendingFingerprints_.promoteInitializedIntersecting(
+                sourceRectangle, committedFingerprints_);
         };
 
     if (!identitySurface)

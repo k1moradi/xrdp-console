@@ -156,6 +156,56 @@ bool initialized_fingerprint_promotes_transactionally()
     return success;
 }
 
+bool initialized_fingerprint_range_promotes_intersecting_tiles()
+{
+    TileFingerprintMap pending;
+    TileFingerprintMap committed;
+    TileFingerprintMap mismatched;
+    bool success = check(pending.configure({130, 130}),
+                         "pending range map configure failed") &&
+                   check(committed.configure({130, 130}),
+                         "committed range map configure failed") &&
+                   check(mismatched.configure({128, 130}),
+                         "mismatched range map configure failed");
+    constexpr std::array<Rectangle, 9> tiles{{
+        {0, 0, 64, 64}, {64, 0, 64, 64}, {128, 0, 2, 64},
+        {0, 64, 64, 64}, {64, 64, 64, 64}, {128, 64, 2, 64},
+        {0, 128, 64, 2}, {64, 128, 64, 2}, {128, 128, 2, 2},
+    }};
+    for (std::size_t index = 0; index < tiles.size(); ++index)
+    {
+        success &= check(pending.store(tiles[index], 100U + index),
+                         "range fingerprint store failed");
+    }
+
+    success &= check(
+        pending.promoteInitializedIntersecting({63, 63, 2, 2}, committed),
+        "intersecting fingerprint promotion failed");
+    constexpr std::array<bool, 9> promoted{{
+        true, true, false, true, true, false, false, false, false,
+    }};
+    for (std::size_t index = 0; index < tiles.size(); ++index)
+    {
+        const std::uint64_t fingerprint = 100U + index;
+        success &= check(
+            committed.matches(tiles[index], fingerprint) == promoted[index] &&
+                pending.matches(tiles[index], fingerprint) != promoted[index],
+            "range promotion selected the wrong tile set");
+    }
+
+    const Rectangle retained = tiles[2];
+    success &= check(
+        !pending.promoteInitializedIntersecting({128, 0, 2, 64}, mismatched),
+        "range promotion accepted incompatible geometry");
+    success &= check(pending.matches(retained, 102U),
+                     "failed range promotion consumed a fingerprint");
+    success &= check(
+        !pending.promoteInitializedIntersecting({-1, 0, 1, 1}, committed) &&
+            pending.matches(retained, 102U),
+        "invalid range promotion mutated fingerprint state");
+    return success;
+}
+
 bool invalid_non_tile_rectangle_is_rejected()
 {
     TileFingerprintMap map;
@@ -177,6 +227,7 @@ int main()
     success &= odd_width_visible_bytes_are_mixed_and_padding_is_ignored();
     success &= edge_tile_and_reset_behave_transactionally();
     success &= initialized_fingerprint_promotes_transactionally();
+    success &= initialized_fingerprint_range_promotes_intersecting_tiles();
     success &= invalid_non_tile_rectangle_is_rejected();
     return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

@@ -254,6 +254,56 @@ TileFingerprintMap::promoteInitialized(
 }
 
 bool
+TileFingerprintMap::promoteInitializedIntersecting(
+    Rectangle rectangle, TileFingerprintMap &destination) noexcept
+{
+    if (!valid() || !destination.valid() || geometry_ != destination.geometry_ ||
+        rectangle.x < 0 || rectangle.y < 0 || rectangle.widthPixels == 0 ||
+        rectangle.heightPixels == 0)
+    {
+        return false;
+    }
+
+    const std::uint64_t right =
+        static_cast<std::uint64_t>(rectangle.x) + rectangle.widthPixels;
+    const std::uint64_t bottom =
+        static_cast<std::uint64_t>(rectangle.y) + rectangle.heightPixels;
+    if (right > geometry_.widthPixels || bottom > geometry_.heightPixels)
+    {
+        return false;
+    }
+
+    const std::uint32_t firstColumn =
+        static_cast<std::uint32_t>(rectangle.x) / kTileWidthPixels;
+    const std::uint32_t firstRow =
+        static_cast<std::uint32_t>(rectangle.y) / kTileHeightPixels;
+    const std::uint32_t pastLastColumn =
+        static_cast<std::uint32_t>((right - 1U) / kTileWidthPixels) + 1U;
+    const std::uint32_t pastLastRow =
+        static_cast<std::uint32_t>((bottom - 1U) / kTileHeightPixels) + 1U;
+
+    for (std::uint32_t row = firstRow; row < pastLastRow; ++row)
+    {
+        std::size_t index = static_cast<std::size_t>(row) * columns_ +
+                            firstColumn;
+        const std::size_t endIndex =
+            static_cast<std::size_t>(row) * columns_ + pastLastColumn;
+        for (; index < endIndex; ++index)
+        {
+            if (initialized_[index] == 0)
+            {
+                continue;
+            }
+            destination.fingerprints_[index] = fingerprints_[index];
+            destination.initialized_[index] = 1;
+            fingerprints_[index] = 0;
+            initialized_[index] = 0;
+        }
+    }
+    return true;
+}
+
+bool
 TileFingerprintMap::store(Rectangle tile,
                           std::uint64_t fingerprint) noexcept
 {
