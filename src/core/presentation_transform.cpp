@@ -104,6 +104,9 @@ PresentationTransform::configure(PixelSize source, PixelSize presentation,
     sourceGeometry_ = source;
     presentationGeometry_ = presentation;
     viewport_ = viewport;
+    identity_ = source == presentation &&
+                viewport == Rectangle{0, 0, source.widthPixels,
+                                      source.heightPixels};
     return true;
 }
 
@@ -163,6 +166,17 @@ PresentationTransform::mapSourceRectangle(
     {
         presentationRectangle = {};
         return RectangleMapResult::Invalid;
+    }
+
+    if (identity_)
+    {
+        presentationRectangle = {
+            static_cast<std::int32_t>(sourceLeft),
+            static_cast<std::int32_t>(sourceTop),
+            static_cast<std::uint32_t>(sourceRight - sourceLeft),
+            static_cast<std::uint32_t>(sourceBottom - sourceTop),
+        };
+        return RectangleMapResult::Mapped;
     }
 
     const std::uint64_t sourceWidth = sourceGeometry_.widthPixels;
@@ -225,6 +239,12 @@ PresentationTransform::mapPresentationPoint(
         return false;
     }
 
+    if (identity_)
+    {
+        sourcePoint = {presentationX, presentationY};
+        return true;
+    }
+
     const std::uint64_t localX =
         static_cast<std::uint64_t>(presentationX - viewport_.x);
     const std::uint64_t localY =
@@ -252,6 +272,12 @@ PresentationTransform::mapSourcePoint(
         static_cast<std::uint32_t>(sourceY) >= sourceGeometry_.heightPixels)
     {
         return false;
+    }
+
+    if (identity_)
+    {
+        presentationPoint = {sourceX, sourceY};
+        return true;
     }
 
     // Map the center of each source pixel into the aspect-fit viewport. This

@@ -53,4 +53,5 @@ private:
     PixelSize sourceGeometry_{};
     PixelSize presentationGeometry_{};
     Rectangle viewport_{};
+    bool identity_{false};
 };

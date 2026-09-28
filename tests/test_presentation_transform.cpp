@@ -250,6 +250,40 @@ transform_tests()
         return false;
     }
 
+    PresentationTransform identity;
+    if (!check(identity.configure({1366, 768}, {1366, 768}),
+               "identity transform configuration failed"))
+    {
+        return false;
+    }
+    if (!check(identity.mapSourceRectangle({-10, -5, 20, 15}, mapped) ==
+                   RectangleMapResult::Mapped &&
+                   mapped == Rectangle{0, 0, 10, 10},
+               "identity transform did not preserve clipped rectangle"))
+    {
+        return false;
+    }
+    if (!check(identity.mapPresentationPoint(1365, 767, sourcePoint) &&
+                   sourcePoint == PresentationPoint{1365, 767},
+               "identity inverse point mapping changed coordinates"))
+    {
+        return false;
+    }
+    if (!check(identity.mapSourcePoint(123, 456, presentationPoint) &&
+                   presentationPoint == PresentationPoint{123, 456},
+               "identity source point mapping changed coordinates"))
+    {
+        return false;
+    }
+    if (!check(identity.configure({1366, 768}, {1364, 768}) &&
+                   identity.mapSourceRectangle({0, 0, 1366, 768}, mapped) ==
+                       RectangleMapResult::Mapped &&
+                   mapped.widthPixels == 1364,
+               "scaled reconfiguration retained identity mapping"))
+    {
+        return false;
+    }
+
     PresentationTransform partition;
     if (!check(partition.configure({5, 3}, {7, 4}),
                "partition transform configuration failed"))
