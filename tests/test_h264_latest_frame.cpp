@@ -192,6 +192,8 @@ bool identity_rectangle_mapping_is_exact_after_bounds_validation()
     H264LatestFrameState state;
     bool success = check(state.configure({1366, 768}),
                          "identity mapping configuration failed");
+    success &= check(state.identityMapping(),
+                     "identity mapping state was not cached");
 
     constexpr std::array<Rectangle, 4> rectangles{{
         {0, 0, 1, 1},
@@ -224,6 +226,8 @@ bool identity_rectangle_mapping_is_exact_after_bounds_validation()
     success &= check(state.configure({4, 4}, {8, 8}, {8, 8},
                                      {0, 0, 8, 8}),
                      "scaled reconfiguration failed");
+    success &= check(!state.identityMapping(),
+                     "scaled mapping was incorrectly marked identity");
     mapped = {};
     success &= check(state.mapSourceRectangle({1, 1, 1, 1}, mapped) &&
                          mapped == Rectangle{2, 2, 2, 2},
@@ -231,8 +235,12 @@ bool identity_rectangle_mapping_is_exact_after_bounds_validation()
 
     state.reset();
     success &= check(!state.valid(), "reset left H264 state configured");
+    success &= check(!state.identityMapping(),
+                     "reset left identity mapping state cached");
     success &= check(state.configure({4, 4}),
                      "identity reconfiguration after reset failed");
+    success &= check(state.identityMapping(),
+                     "identity mapping was not recached after reset");
     mapped = {};
     success &= check(state.mapSourceRectangle({1, 1, 1, 1}, mapped) &&
                          mapped == Rectangle{1, 1, 1, 1},

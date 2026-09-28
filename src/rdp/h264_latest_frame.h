@@ -44,6 +44,10 @@ public:
     [[nodiscard]] PixelSize sourceGeometry() const noexcept;
     [[nodiscard]] PixelSize presentationGeometry() const noexcept;
     [[nodiscard]] Rectangle viewport() const noexcept;
+    [[nodiscard]] bool identityMapping() const noexcept
+    {
+        return identityMapping_;
+    }
 
     [[nodiscard]] bool mapSourceRectangle(
         Rectangle sourceRectangle,

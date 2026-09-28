@@ -146,11 +146,7 @@ bitmapCacheObservationRequested() noexcept
 h264BitmapCacheIdentityGeometry(
     const xrdp_console::rdp::H264LatestFrameState &frame) noexcept
 {
-    const PixelSize source = frame.sourceGeometry();
-    return source.widthPixels != 0 && source.heightPixels != 0 &&
-           source == frame.geometry() &&
-           frame.viewport() ==
-               Rectangle{0, 0, source.widthPixels, source.heightPixels};
+    return frame.identityMapping();
 }
 
 void
@@ -3259,11 +3255,8 @@ ModuleContext::check_h264_gfx() noexcept
         const PixelSize sourceGeometry =
             impl_->h264Frame.sourceGeometry();
         const bool identitySnapshot =
-            sourceGeometry == impl_->h264Frame.geometry() &&
-            sourceGeometry == impl_->state.presentationGeometry &&
-            impl_->h264Frame.viewport() ==
-                Rectangle{0, 0, sourceGeometry.widthPixels,
-                          sourceGeometry.heightPixels};
+            impl_->h264Frame.identityMapping() &&
+            sourceGeometry == impl_->state.presentationGeometry;
         bool converted = false;
         if (identitySnapshot)
         {
@@ -3342,10 +3335,7 @@ ModuleContext::check_h264_gfx() noexcept
         !impl_->damageTracker->hasPendingDamage())
     {
         const PixelSize source = impl_->h264Frame.sourceGeometry();
-        const bool identitySurface =
-            source == impl_->h264Frame.geometry() &&
-            impl_->h264Frame.viewport() ==
-                Rectangle{0, 0, source.widthPixels, source.heightPixels};
+        const bool identitySurface = impl_->h264Frame.identityMapping();
         const bool copyCandidate =
             impl_->h264CoherentCaptureAvailable &&
             xrdp_console::rdp::clientScrollCopyRequested(
