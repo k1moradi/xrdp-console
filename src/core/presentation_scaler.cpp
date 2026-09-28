@@ -12,6 +12,9 @@ namespace
 
 constexpr std::size_t kBytesPerPixel = sizeof(std::uint32_t);
 
+static_assert(PresentationScaler::kMaximumDimension <=
+              PresentationScaler::kScratchPixelCapacity);
+
 } // namespace
 
 bool
@@ -156,8 +159,11 @@ PresentationScaler::scaleRows(FramebufferView source,
         return {};
     }
 
-    const std::uint32_t maximumRows =
-        maximumRowsForWidth(presentationRectangle.widthPixels);
+    // configure() caps the viewport width below scratch capacity, and the
+    // checks above prove this rectangle lies inside that viewport. Avoid
+    // maximumRowsForWidth(), which would validate the scaler a second time.
+    const std::uint32_t maximumRows = static_cast<std::uint32_t>(
+        kScratchPixelCapacity / presentationRectangle.widthPixels);
     if (presentationRowCount > maximumRows)
     {
         return {};
