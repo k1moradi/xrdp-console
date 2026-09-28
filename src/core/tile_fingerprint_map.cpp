@@ -10,9 +10,29 @@ namespace xrdp_console
 namespace
 {
 
-constexpr std::uint64_t kFnvOffset = 14695981039346656037ULL;
-constexpr std::uint64_t kFnvPrime = 1099511628211ULL;
+constexpr std::uint64_t kFingerprintOffset = 14695981039346656037ULL;
+constexpr std::uint64_t kFingerprintPrime = 1099511628211ULL;
 constexpr std::size_t kBytesPerPixel = 4U;
+
+[[nodiscard]] std::uint32_t
+loadLittleEndian32(const std::byte *bytes) noexcept
+{
+    return static_cast<std::uint32_t>(static_cast<std::uint8_t>(bytes[0])) |
+           (static_cast<std::uint32_t>(static_cast<std::uint8_t>(bytes[1]))
+            << 8U) |
+           (static_cast<std::uint32_t>(static_cast<std::uint8_t>(bytes[2]))
+            << 16U) |
+           (static_cast<std::uint32_t>(static_cast<std::uint8_t>(bytes[3]))
+            << 24U);
+}
+
+[[nodiscard]] std::uint64_t
+loadLittleEndian64(const std::byte *bytes) noexcept
+{
+    return static_cast<std::uint64_t>(loadLittleEndian32(bytes)) |
+           (static_cast<std::uint64_t>(loadLittleEndian32(bytes + 4U))
+            << 32U);
+}
 
 [[nodiscard]] constexpr std::uint32_t
 divideRoundUp(std::uint32_t value, std::uint32_t divisor) noexcept
@@ -48,9 +68,8 @@ fingerprintBgraRectangle(FramebufferView framebuffer,
     if (x > framebuffer.widthPixels || y > framebuffer.heightPixels ||
         rectangle.widthPixels > framebuffer.widthPixels - x ||
         rectangle.heightPixels > framebuffer.heightPixels - y ||
-        framebuffer.widthPixels >
-            std::numeric_limits<std::size_t>::max() / kBytesPerPixel ||
-        static_cast<std::size_t>(framebuffer.widthPixels) * kBytesPerPixel >
+        static_cast<std::uint64_t>(framebuffer.widthPixels) *
+                kBytesPerPixel >
             framebuffer.strideBytes)
     {
         return {};
@@ -60,17 +79,28 @@ fingerprintBgraRectangle(FramebufferView framebuffer,
         static_cast<std::size_t>(rectangle.widthPixels) * kBytesPerPixel;
     const std::size_t xBytes = static_cast<std::size_t>(x) * kBytesPerPixel;
 
-    std::uint64_t hash = kFnvOffset;
+    // Fingerprints are process-local equality tokens. Mix eight visible BGRA
+    // bytes per dependent multiply instead of one byte at a time, then retain
+    // the existing final avalanche for cross-bit diffusion. BGRA rows are a
+    // multiple of four bytes, so only a four-byte tail is possible.
+    std::uint64_t hash = kFingerprintOffset;
     std::size_t rowOffset =
         static_cast<std::size_t>(y) * framebuffer.strideBytes + xBytes;
     for (std::uint32_t row = 0; row < rectangle.heightPixels; ++row)
     {
-        const std::byte *rowBegin = framebuffer.pixels.data() + rowOffset;
-        const std::byte *rowEnd = rowBegin + rowBytes;
-        for (const std::byte *byte = rowBegin; byte != rowEnd; ++byte)
+        const std::byte *bytes = framebuffer.pixels.data() + rowOffset;
+        std::size_t remaining = rowBytes;
+        while (remaining >= sizeof(std::uint64_t))
         {
-            hash ^= static_cast<std::uint8_t>(*byte);
-            hash *= kFnvPrime;
+            hash ^= loadLittleEndian64(bytes);
+            hash *= kFingerprintPrime;
+            bytes += sizeof(std::uint64_t);
+            remaining -= sizeof(std::uint64_t);
+        }
+        if (remaining != 0)
+        {
+            hash ^= loadLittleEndian32(bytes);
+            hash *= kFingerprintPrime;
         }
         rowOffset += framebuffer.strideBytes;
     }

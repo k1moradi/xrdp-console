@@ -54,6 +54,59 @@ bool one_pixel_change_is_detected()
                  "one-pixel change was not detected");
 }
 
+bool odd_width_visible_bytes_are_mixed_and_padding_is_ignored()
+{
+    constexpr std::size_t strideBytes = 16U;
+    constexpr std::size_t visibleRowBytes = 12U;
+    std::array<std::byte, strideBytes * 2U> pixels{};
+    for (std::size_t index = 0; index < pixels.size(); ++index)
+    {
+        pixels[index] = std::byte{static_cast<unsigned char>(index * 17U)};
+    }
+
+    const auto baseline = fingerprintBgraRectangle(
+        {pixels, 3, 2, strideBytes}, {0, 0, 3, 2});
+    if (!check(baseline.valid, "odd-width baseline fingerprint was invalid"))
+    {
+        return false;
+    }
+
+    auto padded = pixels;
+    for (std::size_t row = 0; row < 2U; ++row)
+    {
+        for (std::size_t byte = visibleRowBytes; byte < strideBytes; ++byte)
+        {
+            padded[row * strideBytes + byte] ^= std::byte{0xff};
+        }
+    }
+    const auto paddedFingerprint = fingerprintBgraRectangle(
+        {padded, 3, 2, strideBytes}, {0, 0, 3, 2});
+    if (!check(paddedFingerprint.valid &&
+                   paddedFingerprint.value == baseline.value,
+               "odd-width stride padding affected fingerprint"))
+    {
+        return false;
+    }
+
+    for (std::size_t row = 0; row < 2U; ++row)
+    {
+        for (std::size_t byte = 0; byte < visibleRowBytes; ++byte)
+        {
+            auto changed = pixels;
+            changed[row * strideBytes + byte] ^= std::byte{1};
+            const auto changedFingerprint = fingerprintBgraRectangle(
+                {changed, 3, 2, strideBytes}, {0, 0, 3, 2});
+            if (!check(changedFingerprint.valid &&
+                           changedFingerprint.value != baseline.value,
+                       "visible odd-width byte did not affect fingerprint"))
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool edge_tile_and_reset_behave_transactionally()
 {
     TileFingerprintMap map;
@@ -121,6 +174,7 @@ int main()
     bool success = true;
     success &= visible_pixels_are_stable_and_padding_is_ignored();
     success &= one_pixel_change_is_detected();
+    success &= odd_width_visible_bytes_are_mixed_and_padding_is_ignored();
     success &= edge_tile_and_reset_behave_transactionally();
     success &= initialized_fingerprint_promotes_transactionally();
     success &= invalid_non_tile_rectangle_is_rejected();
