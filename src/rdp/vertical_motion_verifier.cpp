@@ -244,11 +244,30 @@ verifyVerticalMotion(FramebufferView previousFrame,
     const std::size_t currentXOffset =
         static_cast<std::size_t>(destinationRectangle.x) * kBytesPerPixel;
 
+    const std::uint64_t rowDenominator =
+        static_cast<std::uint64_t>(rows) * 2U;
+    std::uint64_t sampleY = yPositions / rowDenominator;
+    std::uint64_t rowRemainder = yPositions % rowDenominator;
+    const std::uint64_t doubledRowRemainder = rowRemainder * 2U;
+    const bool rowStepCarries = doubledRowRemainder >= rowDenominator;
+    const std::uint64_t sampleYStep =
+        sampleY * 2U + (rowStepCarries ? 1U : 0U);
+    const std::uint64_t rowRemainderStep =
+        rowStepCarries ? doubledRowRemainder - rowDenominator
+                       : doubledRowRemainder;
+
+    // Row sample numerators form the same arithmetic progression as columns.
+    // Reuse one quotient/remainder instead of dividing once per sampled row.
     for (std::uint32_t row = 0; row < rows; ++row)
     {
-        const std::uint32_t localY = static_cast<std::uint32_t>(
-            (static_cast<std::uint64_t>(2U * row + 1U) * yPositions) /
-            (2U * rows));
+        const std::uint32_t localY = static_cast<std::uint32_t>(sampleY);
+        sampleY += sampleYStep;
+        rowRemainder += rowRemainderStep;
+        if (rowRemainder >= rowDenominator)
+        {
+            ++sampleY;
+            rowRemainder -= rowDenominator;
+        }
         const std::uint32_t oldY =
             static_cast<std::uint32_t>(plan.sourceRectangle.y) + localY;
         const std::uint32_t newY =
