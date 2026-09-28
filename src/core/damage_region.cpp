@@ -128,6 +128,16 @@ DamageRegion::add(Rectangle rectangle, PixelSize bounds) noexcept
         return;
     }
 
+    // A single clipped non-full-screen rectangle cannot coalesce with
+    // anything or cover the complete bounds. Avoid the merge and represented-
+    // area scans until a second rectangle actually exists.
+    if (count_ == 0)
+    {
+        rectangles_[0] = clipped;
+        count_ = 1;
+        return;
+    }
+
     // Once a complete frame is pending, later damage is already covered by
     // it. This is the only case where new damage can be discarded locally.
     if (fullScreenRequired_ && count_ == 1 &&

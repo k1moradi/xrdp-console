@@ -28,7 +28,8 @@ test_clipping_and_merging() noexcept
     DamageRegion region;
 
     region.add({-5, -4, 20, 10}, bounds);
-    if (!contains(region.rectangles(), {0, 0, 15, 6}))
+    if (region.rectangles().size() != 1 || region.fullScreenRequired() ||
+        !contains(region.rectangles(), {0, 0, 15, 6}))
     {
         return 1;
     }
