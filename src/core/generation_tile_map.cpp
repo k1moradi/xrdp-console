@@ -139,6 +139,13 @@ GenerationTileMap::mark(Rectangle rectangle) noexcept
         return;
     }
 
+    if (affected.left == 0 && affected.top == 0 &&
+        affected.right == columns_ && affected.bottom == rows_)
+    {
+        markFull();
+        return;
+    }
+
     // Saturation is preferable to wraparound. Reaching this point would
     // require centuries even at billions of marks per second; preserving
     // ordering for every realistic runtime is more useful than adding an

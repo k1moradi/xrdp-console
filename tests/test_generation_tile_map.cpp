@@ -139,6 +139,40 @@ full_invalidation_and_reset_are_bounded()
     return success;
 }
 
+bool
+clipped_damage_covering_every_tile_uses_full_invalidation()
+{
+    GenerationTileMap map;
+    std::array<GenerationTileMap::Selection, 32> selections{};
+    bool success = true;
+
+    success &= check(map.configure({1366, 768}), "configuration failed");
+    map.mark({1, 1, 1, 1});
+    success &= check(map.collectSelections(selections) == 1,
+                     "old tile selection missing");
+    const GenerationTileMap::Selection oldSelection = selections[0];
+
+    // This omits the top/left framebuffer edges but intersects every 64x64
+    // tile, including the partial rightmost column.
+    map.mark({1, 1, 1365, 767});
+    success &= check(map.generation() == oldSelection.generation + 1U,
+                     "full-tile coverage did not advance one generation");
+    success &= check(map.dirtyTileCount() == 22U * 12U,
+                     "clipped full-tile coverage missed tracked tiles");
+    const std::size_t count = map.collectSelections(selections);
+    success &= check(count == 12,
+                     "full-tile coverage did not select every tile row");
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        success &= check(selections[index].generation == map.generation(),
+                         "full-tile coverage left an older tile generation");
+    }
+    success &= check(map.commit(oldSelection) &&
+                         map.dirtyTileCount() == 22U * 12U,
+                     "stale commit cleared clipped full invalidation");
+    return success;
+}
+
 } // namespace
 
 int
@@ -149,5 +183,6 @@ main()
     success &= newer_generation_survives_old_commit();
     success &= priority_collection_selects_only_intersecting_tiles();
     success &= full_invalidation_and_reset_are_bounded();
+    success &= clipped_damage_covering_every_tile_uses_full_invalidation();
     return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }
