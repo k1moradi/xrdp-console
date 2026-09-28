@@ -1070,6 +1070,14 @@ struct ModuleContext::Impl
     bool presentationDeadlineArmed{false};
     bool clientScaledOutputResizeRearmPending{false};
     Clock::time_point presentationDeadline{};
+    // H.264 submission consumes only prefixes written during the current
+    // check. Retain fixed-capacity metadata scratch in session state instead
+    // of zero-initializing roughly 64 KiB of local arrays every frame.
+    std::array<GenerationTileMap::Selection, kMaximumH264Selections>
+        h264TransmissionSelections{};
+    std::array<GenerationTileMap::Selection, kMaximumH264Selections>
+        h264FilteredSelections{};
+    std::array<Rectangle, kMaximumH264Selections> h264Rectangles{};
     // Scroll refinement only reads the prefix returned by the collector. Keep
     // this fixed-capacity scratch in session state instead of constructing a
     // 24 KiB temporary array for every H.264 submission.
@@ -3439,8 +3447,7 @@ ModuleContext::check_h264_gfx() noexcept
         return 1;
     }
 
-    std::array<GenerationTileMap::Selection, kMaximumH264Selections>
-        transmissionSelections{};
+    auto &transmissionSelections = impl_->h264TransmissionSelections;
     std::size_t transmissionCount = 0;
     Rectangle priorityFrameRectangle{};
     bool priorityFrameRectangleValid = false;
@@ -3599,8 +3606,7 @@ ModuleContext::check_h264_gfx() noexcept
 
     // Cache reuse is a second refinement of the H.264 selections that remain
     // after optional scroll reuse. Only submittedCount entries are readable.
-    std::array<GenerationTileMap::Selection, kMaximumH264Selections>
-        h264Selections{};
+    auto &h264Selections = impl_->h264FilteredSelections;
     std::size_t cacheHitIndex = submittedCount;
     xrdp_console::rdp::VerifiedBitmapCacheHitSplit cacheHitSplit{};
     if (!impl_->h264Frame.baselineSubmissionPending() &&
@@ -3741,7 +3747,7 @@ ModuleContext::check_h264_gfx() noexcept
         return 1;
     }
 
-    std::array<Rectangle, kMaximumH264Selections> rectangles{};
+    auto &rectangles = impl_->h264Rectangles;
     for (std::size_t index = 0; index < h264Count; ++index)
     {
         const Rectangle rectangle = h264Selections[index].rectangle;
