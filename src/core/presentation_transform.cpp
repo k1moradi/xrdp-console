@@ -229,6 +229,22 @@ PresentationTransform::mapPresentationPoint(
     std::int32_t presentationX, std::int32_t presentationY,
     PresentationPoint &sourcePoint) const noexcept
 {
+    // identity_ is installed only by a successful configure(), so native-size
+    // point mappings need only validate the caller's coordinates.
+    if (identity_)
+    {
+        if (presentationX < 0 || presentationY < 0 ||
+            static_cast<std::uint32_t>(presentationX) >=
+                sourceGeometry_.widthPixels ||
+            static_cast<std::uint32_t>(presentationY) >=
+                sourceGeometry_.heightPixels)
+        {
+            return false;
+        }
+        sourcePoint = {presentationX, presentationY};
+        return true;
+    }
+
     if (!valid() || presentationX < viewport_.x ||
         presentationY < viewport_.y ||
         static_cast<std::uint64_t>(presentationX) >=
@@ -237,12 +253,6 @@ PresentationTransform::mapPresentationPoint(
             static_cast<std::uint64_t>(viewport_.y) + viewport_.heightPixels)
     {
         return false;
-    }
-
-    if (identity_)
-    {
-        sourcePoint = {presentationX, presentationY};
-        return true;
     }
 
     const std::uint64_t localX =
@@ -267,17 +277,23 @@ PresentationTransform::mapSourcePoint(
     std::int32_t sourceX, std::int32_t sourceY,
     PresentationPoint &presentationPoint) const noexcept
 {
+    if (identity_)
+    {
+        if (sourceX < 0 || sourceY < 0 ||
+            static_cast<std::uint32_t>(sourceX) >= sourceGeometry_.widthPixels ||
+            static_cast<std::uint32_t>(sourceY) >= sourceGeometry_.heightPixels)
+        {
+            return false;
+        }
+        presentationPoint = {sourceX, sourceY};
+        return true;
+    }
+
     if (!valid() || sourceX < 0 || sourceY < 0 ||
         static_cast<std::uint32_t>(sourceX) >= sourceGeometry_.widthPixels ||
         static_cast<std::uint32_t>(sourceY) >= sourceGeometry_.heightPixels)
     {
         return false;
-    }
-
-    if (identity_)
-    {
-        presentationPoint = {sourceX, sourceY};
-        return true;
     }
 
     // Map the center of each source pixel into the aspect-fit viewport. This

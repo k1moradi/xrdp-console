@@ -275,6 +275,22 @@ transform_tests()
     {
         return false;
     }
+    if (!check(!identity.mapPresentationPoint(-1, 0, sourcePoint) &&
+                   !identity.mapPresentationPoint(0, -1, sourcePoint) &&
+                   !identity.mapPresentationPoint(1366, 0, sourcePoint) &&
+                   !identity.mapPresentationPoint(0, 768, sourcePoint),
+               "identity inverse mapping accepted out-of-range coordinates"))
+    {
+        return false;
+    }
+    if (!check(!identity.mapSourcePoint(-1, 0, presentationPoint) &&
+                   !identity.mapSourcePoint(0, -1, presentationPoint) &&
+                   !identity.mapSourcePoint(1366, 0, presentationPoint) &&
+                   !identity.mapSourcePoint(0, 768, presentationPoint),
+               "identity forward mapping accepted out-of-range coordinates"))
+    {
+        return false;
+    }
     if (!check(identity.configure({1366, 768}, {1364, 768}) &&
                    identity.mapSourceRectangle({0, 0, 1366, 768}, mapped) ==
                        RectangleMapResult::Mapped &&
