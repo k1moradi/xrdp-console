@@ -120,8 +120,26 @@ RfxEncoder::encode(FramebufferView pixels, std::size_t firstTile,
         return {};
     }
 
-    const struct rfx_rect region =
-        rfx_bounding_region(tiles_.data() + firstTile, requested);
+    const rfx_tile *batchTiles = tiles_.data() + firstTile;
+    const rfx_tile &first = batchTiles[0];
+    const rfx_tile &last = batchTiles[requested - 1U];
+    struct rfx_rect region{
+        first.x,
+        first.y,
+        0,
+        last.y + last.cy - first.y,
+    };
+    if (first.y == last.y)
+    {
+        region.cx = last.x + last.cx - first.x;
+    }
+    else
+    {
+        // rfx_make_tiles() emits a contiguous row-major plan. Crossing a row
+        // therefore covers x=0 through the framebuffer's right edge.
+        region.x = 0;
+        region.cx = static_cast<int>(pixels.widthPixels);
+    }
     if (region.cx <= 0 || region.cy <= 0)
     {
         return {};

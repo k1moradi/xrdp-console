@@ -93,6 +93,44 @@ encoder_lifecycle_and_batches()
 }
 
 bool
+encoder_batches_across_rows_and_partial_edges()
+{
+    constexpr std::uint32_t widthPixels = 130;
+    constexpr std::uint32_t heightPixels = 65;
+    RfxEncoder encoder;
+    if (!check(encoder.configure(
+                   {widthPixels, heightPixels},
+                   RfxEncoder::kMaximumPayloadBytes),
+               "partial-edge encoder configure failed"))
+    {
+        return false;
+    }
+
+    std::vector<std::uint32_t> pixels(
+        static_cast<std::size_t>(widthPixels) * heightPixels);
+    for (std::size_t index = 0; index < pixels.size(); ++index)
+    {
+        pixels[index] = static_cast<std::uint32_t>(index * 2654435761U);
+    }
+    const FramebufferView view = view_of(pixels, widthPixels, heightPixels);
+
+    // Begin at the rightmost tile of row zero, cross into row one, and stop
+    // before its right edge. The bounding region must still span the frame.
+    const RfxEncodedBatch crossing = encoder.encode(view, 2, 2);
+    if (!check(crossing.valid() && crossing.tilesEncoded == 2,
+               "right-edge-to-next-row batch did not encode both tiles"))
+    {
+        return false;
+    }
+
+    // Start within row zero, cross the boundary, and end on the partial
+    // bottom row. This exercises both horizontal and vertical edge tiles.
+    const RfxEncodedBatch widerCrossing = encoder.encode(view, 1, 4);
+    return check(widerCrossing.valid() && widerCrossing.tilesEncoded == 4,
+                 "partial-edge row-crossing batch was not encoded");
+}
+
+bool
 encoder_rejects_invalid_views_and_preserves_configuration()
 {
     RfxEncoder encoder;
@@ -256,6 +294,10 @@ main()
 {
     bool success = true;
     if (!encoder_lifecycle_and_batches())
+    {
+        success = false;
+    }
+    if (!encoder_batches_across_rows_and_partial_edges())
     {
         success = false;
     }
