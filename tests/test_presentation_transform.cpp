@@ -944,6 +944,69 @@ chunked_scaler_tests()
 }
 
 bool
+near_identity_downscale_preserves_sharp_pixels()
+{
+    constexpr PixelSize sourceSize{1366, 768};
+    constexpr PixelSize presentationSize{1364, 768};
+    const Rectangle viewport{0, 2, 1364, 766};
+    const Rectangle sourceRectangle{0, 0, sourceSize.widthPixels, 1};
+    const Rectangle presentationRectangle{0, 2, viewport.widthPixels, 1};
+
+    std::vector<std::uint32_t> sourcePixels(sourceSize.widthPixels);
+    for (std::uint32_t x = 0; x < sourceSize.widthPixels; ++x)
+    {
+        sourcePixels[x] =
+            x % 2U == 0 ? 0xff000000U : 0xffffffffU;
+    }
+
+    PresentationScaler scaler;
+    if (!check(scaler.configure(sourceSize, presentationSize, viewport),
+               "near-identity downscale configuration failed"))
+    {
+        return false;
+    }
+
+    const FramebufferView output = scaler.scaleRows(
+        view_of(sourcePixels, sourceSize.widthPixels, 1), sourceRectangle,
+        presentationRectangle, 0, 1);
+    const std::vector<std::uint32_t> pixels = pixels_of(output);
+    if (!check(pixels.size() == viewport.widthPixels,
+               "near-identity downscale produced the wrong row width"))
+    {
+        return false;
+    }
+    for (std::uint32_t x = 0; x < viewport.widthPixels; ++x)
+    {
+        const std::uint32_t sourceX = static_cast<std::uint32_t>(
+            (static_cast<std::uint64_t>(x) * sourceSize.widthPixels) /
+            viewport.widthPixels);
+        if (!check(pixels[x] == sourcePixels[sourceX],
+                   "near-identity downscale blended a sharp source edge"))
+        {
+            return false;
+        }
+    }
+
+    // Two pixels is not intrinsically a tiny shrink. A small 6-to-4 axis is
+    // a real downscale and must retain area filtering rather than aliasing.
+    PresentationScaler materialDownscale;
+    const std::vector<std::uint32_t> smallPixels{
+        0xff000000U, 0xffffffffU, 0xff000000U,
+        0xffffffffU, 0xff000000U, 0xffffffffU};
+    if (!check(materialDownscale.configure({6, 1}, {4, 1}, {0, 0, 4, 1}),
+               "material two-pixel downscale configuration failed"))
+    {
+        return false;
+    }
+    const auto filtered = pixels_of(materialDownscale.scaleRows(
+        view_of(smallPixels, 6, 1), {0, 0, 6, 1}, {0, 0, 4, 1}, 0, 1));
+    return check(!filtered.empty() &&
+                     filtered[0] != 0xff000000U &&
+                     filtered[0] != 0xffffffffU,
+                 "material downscale unexpectedly disabled filtering");
+}
+
+bool
 fullhd_area_downscale_and_partial_update_tests()
 {
     constexpr std::uint32_t sourceWidth = 1920;
@@ -1246,6 +1309,10 @@ main()
         success = false;
     }
     if (!chunked_scaler_tests())
+    {
+        success = false;
+    }
+    if (!near_identity_downscale_preserves_sharp_pixels())
     {
         success = false;
     }

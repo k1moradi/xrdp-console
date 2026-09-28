@@ -28,14 +28,31 @@ ceilDivide(std::uint64_t numerator, std::uint64_t denominator) noexcept
            static_cast<std::uint64_t>(numerator % denominator != 0);
 }
 
+[[nodiscard]] constexpr bool
+shouldAreaFilter(std::uint32_t sourcePixels,
+                 std::uint32_t outputPixels) noexcept
+{
+    if (sourcePixels <= outputPixels)
+    {
+        return false;
+    }
+
+    // A one- or two-pixel negotiation mismatch on a desktop-sized axis is
+    // visually closer to identity than to a real downscale. Preserve sharp
+    // UI/text edges instead of blending adjacent pixels for that tiny shrink.
+    const std::uint32_t removedPixels = sourcePixels - outputPixels;
+    return removedPixels > 2U ||
+           static_cast<std::uint64_t>(removedPixels) * 100U > sourcePixels;
+}
+
 [[nodiscard]] bool
 buildAxisSpans(std::uint32_t sourcePixels, std::uint32_t outputPixels,
+               bool areaFilter,
                std::vector<PresentationAxisSpan> &spans) noexcept
 {
     try
     {
         spans.resize(outputPixels);
-        const bool areaFilter = sourcePixels > outputPixels;
         for (std::uint32_t output = 0; output < outputPixels; ++output)
         {
             if (!areaFilter)
@@ -260,9 +277,9 @@ PresentationScaler::configure(PixelSize source, PixelSize presentation,
         viewport.y == 0 && viewport.widthPixels == presentation.widthPixels &&
         viewport.heightPixels == presentation.heightPixels;
     const bool replacementAreaFilterX =
-        source.widthPixels > viewport.widthPixels;
+        shouldAreaFilter(source.widthPixels, viewport.widthPixels);
     const bool replacementAreaFilterY =
-        source.heightPixels > viewport.heightPixels;
+        shouldAreaFilter(source.heightPixels, viewport.heightPixels);
     const bool smallDownscale =
         (!replacementAreaFilterX ||
          source.widthPixels <= viewport.widthPixels * 2U) &&
@@ -294,8 +311,10 @@ PresentationScaler::configure(PixelSize source, PixelSize presentation,
             return false;
         }
         if (!buildAxisSpans(source.widthPixels, viewport.widthPixels,
+                            replacementAreaFilterX,
                             replacementHorizontalSpans) ||
             !buildAxisSpans(source.heightPixels, viewport.heightPixels,
+                            replacementAreaFilterY,
                             replacementVerticalSpans))
         {
             return false;
