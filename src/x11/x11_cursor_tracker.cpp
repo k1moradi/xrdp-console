@@ -88,14 +88,13 @@ X11CursorTracker::failureReason() const noexcept
 bool
 X11CursorTracker::handles(const xcb_generic_event_t &event) const noexcept
 {
-    if (!valid())
-    {
-        return false;
-    }
-
     const std::uint8_t responseType = event.response_type & 0x7f;
     if (responseType !=
         static_cast<std::uint8_t>(firstEvent_ + XCB_XFIXES_CURSOR_NOTIFY))
+    {
+        return false;
+    }
+    if (!valid())
     {
         return false;
     }

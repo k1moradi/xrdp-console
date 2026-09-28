@@ -118,7 +118,7 @@ bool
 X11PointerPositionTracker::handles(
     const xcb_generic_event_t &event) const noexcept
 {
-    if (!valid() || event.response_type != XCB_GE_GENERIC)
+    if (event.response_type != XCB_GE_GENERIC || !valid())
     {
         return false;
     }

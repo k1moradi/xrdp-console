@@ -149,13 +149,12 @@ X11DamageTracker::snapshotPixelCount() const noexcept
 bool
 X11DamageTracker::handles(const xcb_generic_event_t &event) const noexcept
 {
-    if (!valid())
+    const std::uint8_t responseType = event.response_type & 0x7f;
+    if (responseType != firstEvent_)
     {
         return false;
     }
-
-    const std::uint8_t responseType = event.response_type & 0x7f;
-    if (responseType != firstEvent_)
+    if (!valid())
     {
         return false;
     }
