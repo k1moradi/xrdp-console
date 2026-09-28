@@ -178,6 +178,27 @@ averageBoxPixel(const std::uint32_t *firstRow,
 #endif
 }
 
+#if defined(__SSE2__)
+void
+averageBoxPixelPair(const std::uint32_t *firstRow,
+                    const std::uint32_t *secondRow,
+                    std::uint32_t *destination) noexcept
+{
+    const __m128i firstPixels = _mm_loadu_si128(
+        reinterpret_cast<const __m128i *>(firstRow));
+    const __m128i secondPixels = _mm_loadu_si128(
+        reinterpret_cast<const __m128i *>(secondRow));
+    const __m128i verticalAverage = _mm_avg_epu8(firstPixels, secondPixels);
+    const __m128i swappedPairs = _mm_shuffle_epi32(
+        verticalAverage, _MM_SHUFFLE(2, 3, 0, 1));
+    const __m128i horizontalAverage =
+        _mm_avg_epu8(verticalAverage, swappedPairs);
+    const __m128i packed = _mm_shuffle_epi32(
+        horizontalAverage, _MM_SHUFFLE(2, 2, 2, 0));
+    _mm_storel_epi64(reinterpret_cast<__m128i *>(destination), packed);
+}
+#endif
+
 [[nodiscard]] Rectangle
 unionRectangles(Rectangle first, Rectangle second) noexcept
 {
@@ -668,7 +689,7 @@ PresentationScaler::scaleRows(FramebufferView source,
             const std::uint32_t sourceY =
                 verticalSpans_[viewportY].firstSourcePixel;
             const std::uint32_t sourceY2 =
-                sourceY + static_cast<std::uint32_t>(areaFilterY_);
+                sourceY + 1U;
             const auto *sourceRow0 =
                 reinterpret_cast<const std::uint32_t *>(
                     source.pixels.data() +
@@ -681,28 +702,25 @@ PresentationScaler::scaleRows(FramebufferView source,
                         source.strideBytes);
             auto *destinationRow = pixels_.data() +
                                    static_cast<std::size_t>(localY) * outputWidth;
-            for (std::uint32_t x = 0; x < outputWidth; ++x)
+            // fastBoxFilter_ is only enabled for an exact 2:1 downscale on
+            // both axes, so adjacent output pixels consume four consecutive
+            // source pixels. Process two output pixels per SSE2 iteration.
+            std::uint32_t x = 0;
+            std::uint32_t localSourceX =
+                firstHorizontal.firstSourcePixel - sourceLeft;
+#if defined(__SSE2__)
+            for (; x + 1U < outputWidth; x += 2U, localSourceX += 4U)
             {
-                const std::uint32_t sourceX =
-                    horizontalSpans_[viewportLocalLeft + x].firstSourcePixel;
-                const std::uint32_t localSourceX = sourceX - sourceLeft;
-                if (areaFilterX_ && areaFilterY_)
-                {
-                    destinationRow[x] = averageBoxPixel(
-                        sourceRow0 + localSourceX,
-                        sourceRow1 + localSourceX);
-                }
-                else if (areaFilterX_)
-                {
-                    destinationRow[x] = averagePixel(
-                        sourceRow0[localSourceX],
-                        sourceRow0[localSourceX + 1U]);
-                }
-                else
-                {
-                    destinationRow[x] = averagePixel(
-                        sourceRow0[localSourceX], sourceRow1[localSourceX]);
-                }
+                averageBoxPixelPair(sourceRow0 + localSourceX,
+                                    sourceRow1 + localSourceX,
+                                    destinationRow + x);
+            }
+#endif
+            for (; x < outputWidth; ++x, localSourceX += 2U)
+            {
+                destinationRow[x] = averageBoxPixel(
+                    sourceRow0 + localSourceX,
+                    sourceRow1 + localSourceX);
             }
         }
 

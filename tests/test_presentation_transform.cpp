@@ -762,6 +762,35 @@ chunked_scaler_tests()
         return false;
     }
 
+    // Exercise the exact-2x SSE2 pair loop with an odd output width and a
+    // presentation subrectangle whose first source pixel is not source X=0.
+    constexpr PixelSize oddBoxSourceSize{10, 4};
+    constexpr PixelSize oddBoxPresentationSize{5, 2};
+    const Rectangle oddBoxOutputRectangle{1, 0, 3, 2};
+    PresentationScaler oddBoxDownscale;
+    if (!check(oddBoxDownscale.configure(
+                   oddBoxSourceSize, oddBoxPresentationSize,
+                   {0, 0, oddBoxPresentationSize.widthPixels,
+                    oddBoxPresentationSize.heightPixels}),
+               "odd-width box downscale configuration failed"))
+    {
+        return false;
+    }
+    const std::vector<std::uint32_t> oddBoxSource =
+        make_source(oddBoxSourceSize);
+    const FramebufferView oddBoxOutput = oddBoxDownscale.scaleRows(
+        view_of(oddBoxSource, oddBoxSourceSize.widthPixels,
+                oddBoxSourceSize.heightPixels),
+        {0, 0, oddBoxSourceSize.widthPixels, oddBoxSourceSize.heightPixels},
+        oddBoxOutputRectangle, 0, oddBoxOutputRectangle.heightPixels);
+    if (!check(pixels_of(oddBoxOutput) == std::vector<std::uint32_t>{
+                   0xa57c5a7aU, 0x60665c85U, 0x5389ca80U,
+                   0x666a9c7dU, 0xa0675a64U, 0xa06ca055U},
+               "odd-width box downscale produced wrong pixels"))
+    {
+        return false;
+    }
+
     PresentationScaler widerDownscale;
     const std::vector<std::uint32_t> widerPixels{10U, 20U, 30U, 40U, 50U};
     if (!check(widerDownscale.configure({5, 1}, {2, 1}, {0, 0, 2, 1}),
