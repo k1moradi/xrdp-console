@@ -1155,13 +1155,8 @@ H264LatestFrameState::noteSubmitted(
             return forEachTile(
                 sourceRectangle, sourceGeometry_,
                 [this](Rectangle tile) noexcept {
-                    std::uint64_t fingerprint = 0;
-                    if (!pendingFingerprints_.load(tile, fingerprint))
-                    {
-                        return true;
-                    }
-                    return committedFingerprints_.store(tile, fingerprint) &&
-                           pendingFingerprints_.clear(tile);
+                    return pendingFingerprints_.promoteInitialized(
+                        tile, committedFingerprints_);
                 });
         };
 

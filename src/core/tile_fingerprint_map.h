@@ -38,6 +38,8 @@ public:
                                std::uint64_t fingerprint) const noexcept;
     [[nodiscard]] bool load(Rectangle tile,
                             std::uint64_t &fingerprint) const noexcept;
+    [[nodiscard]] bool promoteInitialized(
+        Rectangle tile, TileFingerprintMap &destination) noexcept;
     [[nodiscard]] bool store(Rectangle tile,
                              std::uint64_t fingerprint) noexcept;
     [[nodiscard]] bool clear(Rectangle tile) noexcept;

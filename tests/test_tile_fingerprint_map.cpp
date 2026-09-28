@@ -72,6 +72,37 @@ bool edge_tile_and_reset_behave_transactionally()
     return success;
 }
 
+bool initialized_fingerprint_promotes_transactionally()
+{
+    TileFingerprintMap pending;
+    TileFingerprintMap committed;
+    TileFingerprintMap mismatched;
+    bool success = check(pending.configure({70, 66}),
+                         "pending map configure failed") &&
+                   check(committed.configure({70, 66}),
+                         "committed map configure failed") &&
+                   check(mismatched.configure({64, 64}),
+                         "mismatched map configure failed");
+    const Rectangle edge{64, 64, 6, 2};
+    success &= check(pending.store(edge, 123),
+                     "pending fingerprint store failed");
+    success &= check(pending.promoteInitialized(edge, committed),
+                     "fingerprint promotion failed");
+    success &= check(!pending.matches(edge, 123) &&
+                         committed.matches(edge, 123),
+                     "fingerprint promotion did not transfer visibility");
+    success &= check(pending.promoteInitialized(edge, committed),
+                     "uninitialized promotion was not a no-op");
+
+    success &= check(pending.store(edge, 456),
+                     "second pending fingerprint store failed");
+    success &= check(!pending.promoteInitialized(edge, mismatched),
+                     "promotion accepted an incompatible destination");
+    success &= check(pending.matches(edge, 456),
+                     "failed promotion consumed the pending fingerprint");
+    return success;
+}
+
 bool invalid_non_tile_rectangle_is_rejected()
 {
     TileFingerprintMap map;
@@ -91,6 +122,7 @@ int main()
     success &= visible_pixels_are_stable_and_padding_is_ignored();
     success &= one_pixel_change_is_detected();
     success &= edge_tile_and_reset_behave_transactionally();
+    success &= initialized_fingerprint_promotes_transactionally();
     success &= invalid_non_tile_rectangle_is_rejected();
     return success ? EXIT_SUCCESS : EXIT_FAILURE;
 }

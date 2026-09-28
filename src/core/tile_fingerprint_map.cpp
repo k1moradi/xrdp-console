@@ -201,6 +201,29 @@ TileFingerprintMap::load(Rectangle tile,
 }
 
 bool
+TileFingerprintMap::promoteInitialized(
+    Rectangle tile, TileFingerprintMap &destination) noexcept
+{
+    std::size_t sourceIndex = 0;
+    if (!tileIndex(tile, sourceIndex) || initialized_[sourceIndex] == 0)
+    {
+        return true;
+    }
+
+    std::size_t destinationIndex = 0;
+    if (!destination.tileIndex(tile, destinationIndex))
+    {
+        return false;
+    }
+
+    destination.fingerprints_[destinationIndex] = fingerprints_[sourceIndex];
+    destination.initialized_[destinationIndex] = 1;
+    fingerprints_[sourceIndex] = 0;
+    initialized_[sourceIndex] = 0;
+    return true;
+}
+
+bool
 TileFingerprintMap::store(Rectangle tile,
                           std::uint64_t fingerprint) noexcept
 {
