@@ -507,13 +507,13 @@ H264LatestFrameState::collectCaptureSelectionsIntersecting(
 namespace
 {
 
-template <typename FrameToSource>
+template <typename TileIsCurrent>
 std::size_t
 collectCurrentTransmissionRuns(
     const GenerationTileMap &captureDamage,
     std::span<const GenerationTileMap::Selection> runs,
     std::span<GenerationTileMap::Selection> output,
-    FrameToSource frameToSource) noexcept
+    TileIsCurrent tileIsCurrent) noexcept
 {
     if (captureDamage.empty())
     {
@@ -552,11 +552,7 @@ collectCurrentTransmissionRuns(
             const Rectangle tile{
                 run.rectangle.x + static_cast<std::int32_t>(offset),
                 run.rectangle.y, tileWidth, run.rectangle.heightPixels};
-            Rectangle sourceRectangle{};
-            const bool mapped = frameToSource(tile, sourceRectangle);
-            const bool current = mapped &&
-                (sourceRectangle.widthPixels == 0 ||
-                 !captureDamage.intersects(sourceRectangle));
+            const bool current = tileIsCurrent(tile);
 
             if (current)
             {
@@ -615,17 +611,26 @@ H264LatestFrameState::collectReadyTransmissionSelections(
         runs.data(), runCount);
     if (identityMapping_)
     {
+        // transmissionDamage_ and captureDamage_ use the same tile grid
+        // for identity mapping, so map-generated run coordinates identify the
+        // corresponding capture tile directly.
         return collectCurrentTransmissionRuns(
             captureDamage_, currentRuns, output,
-            [](Rectangle frame, Rectangle &source) noexcept {
-                source = frame;
-                return true;
+            [&captureDamage = captureDamage_](Rectangle tile) noexcept {
+                return !captureDamage.tileDirty(
+                    static_cast<std::uint32_t>(tile.x) /
+                        GenerationTileMap::kTileWidthPixels,
+                    static_cast<std::uint32_t>(tile.y) /
+                        GenerationTileMap::kTileHeightPixels);
             });
     }
     return collectCurrentTransmissionRuns(
         captureDamage_, currentRuns, output,
-        [this](Rectangle frame, Rectangle &source) noexcept {
-            return mapFrameRectangleToSource(frame, source);
+        [this](Rectangle frame) noexcept {
+            Rectangle source{};
+            return mapFrameRectangleToSource(frame, source) &&
+                   (source.widthPixels == 0 ||
+                    !captureDamage_.intersects(source));
         });
 }
 
@@ -824,17 +829,26 @@ H264LatestFrameState::collectReadyTransmissionSelectionsIntersecting(
         runs.data(), runCount);
     if (identityMapping_)
     {
+        // transmissionDamage_ and captureDamage_ use the same tile grid
+        // for identity mapping, so map-generated run coordinates identify the
+        // corresponding capture tile directly.
         return collectCurrentTransmissionRuns(
             captureDamage_, currentRuns, output,
-            [](Rectangle frame, Rectangle &source) noexcept {
-                source = frame;
-                return true;
+            [&captureDamage = captureDamage_](Rectangle tile) noexcept {
+                return !captureDamage.tileDirty(
+                    static_cast<std::uint32_t>(tile.x) /
+                        GenerationTileMap::kTileWidthPixels,
+                    static_cast<std::uint32_t>(tile.y) /
+                        GenerationTileMap::kTileHeightPixels);
             });
     }
     return collectCurrentTransmissionRuns(
         captureDamage_, currentRuns, output,
-        [this](Rectangle frame, Rectangle &source) noexcept {
-            return mapFrameRectangleToSource(frame, source);
+        [this](Rectangle frame) noexcept {
+            Rectangle source{};
+            return mapFrameRectangleToSource(frame, source) &&
+                   (source.widthPixels == 0 ||
+                    !captureDamage_.intersects(source));
         });
 }
 

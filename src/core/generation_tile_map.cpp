@@ -220,6 +220,14 @@ GenerationTileMap::intersects(Rectangle rectangle) const noexcept
     return false;
 }
 
+bool
+GenerationTileMap::tileDirty(std::uint32_t column,
+                             std::uint32_t row) const noexcept
+{
+    return column < columns_ && row < rows_ &&
+           tileGenerations_[tileIndex(column, row)] != 0;
+}
+
 Rectangle
 GenerationTileMap::tileRunRectangle(std::uint32_t row,
                                     std::uint32_t firstColumn,

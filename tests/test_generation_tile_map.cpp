@@ -109,6 +109,39 @@ priority_collection_selects_only_intersecting_tiles()
 }
 
 bool
+tile_coordinate_query_tracks_dirty_state()
+{
+    GenerationTileMap map;
+    std::array<GenerationTileMap::Selection, 1> selections{};
+    bool success = true;
+
+    success &= check(!map.tileDirty(0, 0),
+                     "unconfigured map reported a dirty tile");
+    success &= check(map.configure({130, 65}), "configuration failed");
+    success &= check(!map.tileDirty(0, 0),
+                     "clean tile was reported dirty");
+    success &= check(!map.tileDirty(3, 0) && !map.tileDirty(0, 2),
+                     "out-of-range tile coordinate was accepted");
+
+    map.mark({64, 0, 1, 1});
+    success &= check(map.tileDirty(1, 0),
+                     "marked tile was not reported dirty");
+    success &= check(!map.tileDirty(0, 0) && !map.tileDirty(2, 0),
+                     "adjacent clean tile was reported dirty");
+    success &= check(map.collectSelections(selections) == 1 &&
+                         map.commit(selections[0]) && !map.tileDirty(1, 0),
+                     "committed tile remained dirty");
+
+    map.mark({129, 64, 1, 1});
+    success &= check(map.tileDirty(2, 1),
+                     "partial edge tile was not reported dirty");
+    map.reset();
+    success &= check(!map.tileDirty(2, 1),
+                     "reset tile remained dirty");
+    return success;
+}
+
+bool
 full_invalidation_and_reset_are_bounded()
 {
     GenerationTileMap map;
@@ -182,6 +215,7 @@ main()
     success &= selection_is_tile_bounded();
     success &= newer_generation_survives_old_commit();
     success &= priority_collection_selects_only_intersecting_tiles();
+    success &= tile_coordinate_query_tracks_dirty_state();
     success &= full_invalidation_and_reset_are_bounded();
     success &= clipped_damage_covering_every_tile_uses_full_invalidation();
     return success ? EXIT_SUCCESS : EXIT_FAILURE;
