@@ -103,7 +103,14 @@ encoder_rejects_invalid_views_and_preserves_configuration()
     }
 
     std::vector<std::uint32_t> pixels(64U * 64U);
+    std::vector<std::uint32_t> oversizedPixels(
+        (RfxEncoder::kMaximumTilesPerChunk + 1U) * 64U);
     const FramebufferView valid = view_of(pixels, 64, 64);
+    const FramebufferView oversized = view_of(
+        oversizedPixels,
+        static_cast<std::uint32_t>(
+            (RfxEncoder::kMaximumTilesPerChunk + 1U) * 64U),
+        1U);
     const FramebufferView badStride{
         valid.pixels, 64, 64, 64U * sizeof(std::uint32_t) - 1U};
     const FramebufferView truncated{
@@ -120,7 +127,9 @@ encoder_rejects_invalid_views_and_preserves_configuration()
                     .valid(),
                "batch larger than the synchronous limit was accepted") ||
         !check(!encoder.encode(badStride, 0, 1).valid(),
-               "encode accepted an invalid stride"))
+               "encode accepted an invalid stride") ||
+        !check(!encoder.encode(oversized, 0, 1).valid(),
+               "encode accepted a tile plan above the chunk bound"))
     {
         return false;
     }

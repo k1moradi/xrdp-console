@@ -101,8 +101,10 @@ RfxEncoder::encode(FramebufferView pixels, std::size_t firstTile,
         return {};
     }
 
-    const std::size_t count = tileCount(pixels);
-    if (count == 0 || firstTile >= count)
+    const std::size_t count = rfx_tile_count(
+        static_cast<int>(pixels.widthPixels),
+        static_cast<int>(pixels.heightPixels));
+    if (count == 0 || count > kMaximumTilesPerChunk || firstTile >= count)
     {
         return {};
     }
