@@ -213,13 +213,31 @@ verifyVerticalMotion(FramebufferView previousFrame,
     }
 
     std::array<std::size_t, kMaximumSampleColumns> columnByteOffsets{};
+    const std::uint64_t columnDenominator =
+        static_cast<std::uint64_t>(columns) * 2U;
+    std::uint64_t sampleX = xPositions / columnDenominator;
+    std::uint64_t columnRemainder = xPositions % columnDenominator;
+    const std::uint64_t doubledRemainder = columnRemainder * 2U;
+    const bool stepCarries = doubledRemainder >= columnDenominator;
+    const std::uint64_t sampleXStep =
+        sampleX * 2U + (stepCarries ? 1U : 0U);
+    const std::uint64_t remainderStep =
+        stepCarries ? doubledRemainder - columnDenominator
+                    : doubledRemainder;
+
+    // Sample numerators form an arithmetic progression. Reuse the first
+    // division's quotient/remainder instead of dividing once per column.
     for (std::uint32_t column = 0; column < columns; ++column)
     {
-        const std::uint32_t localX = static_cast<std::uint32_t>(
-            (static_cast<std::uint64_t>(2U * column + 1U) * xPositions) /
-            (2U * columns));
         columnByteOffsets[column] =
-            static_cast<std::size_t>(localX) * kBytesPerPixel;
+            static_cast<std::size_t>(sampleX) * kBytesPerPixel;
+        sampleX += sampleXStep;
+        columnRemainder += remainderStep;
+        if (columnRemainder >= columnDenominator)
+        {
+            ++sampleX;
+            columnRemainder -= columnDenominator;
+        }
     }
     const std::size_t previousXOffset =
         static_cast<std::size_t>(plan.sourceRectangle.x) * kBytesPerPixel;
