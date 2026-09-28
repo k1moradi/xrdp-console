@@ -635,10 +635,41 @@ def assert_client_pixel(client_display: str,
         stop_process(probe)
 
 
-def presentation_probe_point(width: int, height: int) -> tuple[int, int]:
+def assert_client_stays_connected(client: subprocess.Popen[object],
+                                  client_display: str,
+                                  window_title: str,
+                                  client_log_path: Path,
+                                  log_path: Path,
+                                  stdout_path: Path) -> None:
+    """Require the H.264 client process and its rendered window to persist."""
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        status = client.poll()
+        if status is not None:
+            raise AssertionError(
+                f"FreeRDP disconnected during the stability interval "
+                f"(status={status}):\n{xrdp_log_excerpt(log_path)}\n"
+                f"[xrdp stdout]\n{read_text(stdout_path)}\n"
+                f"[FreeRDP client]\n{read_text(client_log_path)}")
+        time.sleep(0.1)
+
+    try:
+        find_window(client_display, window_title, 1.0)
+    except AssertionError as error:
+        raise AssertionError(
+            f"FreeRDP window disappeared after rendering content: {error}\n"
+            f"{xrdp_log_excerpt(log_path)}\n"
+            f"[FreeRDP client]\n{read_text(client_log_path)}") from error
+    if client.poll() is not None:
+        raise AssertionError(
+            "FreeRDP exited after its window check:\n"
+            f"[FreeRDP client]\n{read_text(client_log_path)}")
+
+
+def presentation_probe_point(width: int, height: int,
+                             source_width: int = 1024,
+                             source_height: int = 768) -> tuple[int, int]:
     """Map the stimulus pixel through the loader's aspect-fit transform."""
-    source_width = 1024
-    source_height = 768
     source_x = 30
     source_y = 30
     if width * source_height <= height * source_width:
@@ -721,10 +752,11 @@ def main() -> int:
     gfx_planar_mode = False
     gfx_h264_mode = False
     coherence_mode = False
+    fullhd_source_mode = False
     cpu_contention = False
     mode_options = [option for option in (
         "--rfx", "--gfx-planar", "--gfx-h264",
-        "--gfx-h264-coherence")
+        "--gfx-h264-coherence", "--gfx-h264-fullhd")
                     if option in arguments]
     if mode_options:
         if (len(mode_options) != 1 or arguments[-1] != mode_options[0] or
@@ -736,8 +768,9 @@ def main() -> int:
         rfx_mode = selected_mode == "--rfx"
         gfx_planar_mode = selected_mode == "--gfx-planar"
         gfx_h264_mode = selected_mode in (
-            "--gfx-h264", "--gfx-h264-coherence")
+            "--gfx-h264", "--gfx-h264-coherence", "--gfx-h264-fullhd")
         coherence_mode = selected_mode == "--gfx-h264-coherence"
+        fullhd_source_mode = selected_mode == "--gfx-h264-fullhd"
 
     if "--cpu-contention" in arguments:
         if arguments.count("--cpu-contention") != 1:
@@ -752,14 +785,17 @@ def main() -> int:
             f"usage: {sys.argv[0]} MODULE XRDP INSTALL_ROOT FREERDP "
             "PIXEL_OR_FRAME_PROBE STIMULUS "
             "[PRESENTATION_WIDTH PRESENTATION_HEIGHT] "
-            "[--rfx|--gfx-planar|--gfx-h264|--gfx-h264-coherence] "
+            "[--rfx|--gfx-planar|--gfx-h264|--gfx-h264-coherence|"
+            "--gfx-h264-fullhd] "
             "[--cpu-contention before the graphics-mode option]"
         )
 
     presentation_width = (
-        COHERENCE_SOURCE_WIDTH if coherence_mode else 1024)
+        COHERENCE_SOURCE_WIDTH if coherence_mode else
+        1512 if fullhd_source_mode else 1024)
     presentation_height = (
-        COHERENCE_SOURCE_HEIGHT if coherence_mode else 768)
+        COHERENCE_SOURCE_HEIGHT if coherence_mode else
+        949 if fullhd_source_mode else 768)
     if len(arguments) == 8:
         try:
             presentation_width = int(arguments[6])
@@ -806,8 +842,14 @@ def main() -> int:
                 "build it with scripts/build-test-freerdp.sh",
                 file=sys.stderr)
             return 1
+    source_width = (
+        COHERENCE_SOURCE_WIDTH if coherence_mode else
+        1920 if fullhd_source_mode else 1024)
+    source_height = (
+        COHERENCE_SOURCE_HEIGHT if coherence_mode else
+        1080 if fullhd_source_mode else 768)
     probe_x, probe_y = presentation_probe_point(
-        presentation_width, presentation_height)
+        presentation_width, presentation_height, source_width, source_height)
     window_title = f"xrdp-console-loader-{os.getpid()}"
     for required in (
             module_path, xrdp_path, freerdp_path, pixel_probe, stimulus_path):
@@ -824,8 +866,7 @@ def main() -> int:
         port = free_tcp_port()
         source_xvfb, source_display = start_source_xvfb(
             source_xvfb_log_path,
-            COHERENCE_SOURCE_WIDTH if coherence_mode else 1024,
-            COHERENCE_SOURCE_HEIGHT if coherence_mode else 768)
+            source_width, source_height)
 
         module_dir = install_root / "lib" / "xrdp"
         module_dir.mkdir(parents=True, exist_ok=True)
@@ -1015,6 +1056,11 @@ password=smoke
                             stdout_path,
                             client_log_path,
                         )
+                        if fullhd_source_mode:
+                            wait_for_log(
+                                server, log_path,
+                                "source=1920x1080 presentation=1512x949",
+                                4.0, stdout_path, client_log_path)
                     if coherence_mode:
                         assert_client_frame_coherence(
                             os.environ["DISPLAY"], stimulus, window_title,
@@ -1032,6 +1078,10 @@ password=smoke
                             presentation_width=presentation_width,
                             presentation_height=presentation_height,
                             client_log_path=client_log_path)
+                        if fullhd_source_mode:
+                            assert_client_stays_connected(
+                                client, os.environ["DISPLAY"], window_title,
+                                client_log_path, log_path, stdout_path)
         finally:
             stop_process(client)
             stop_process(server)

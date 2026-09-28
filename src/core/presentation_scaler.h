@@ -8,7 +8,16 @@
 
 #include "framebuffer_view.h"
 #include "geometry.h"
+#include "presentation_transform.h"
 #include "rectangle.h"
+
+struct PresentationAxisSpan
+{
+    std::uint32_t firstSourcePixel{};
+    std::uint32_t sampleCount{};
+    std::uint32_t firstWeight{};
+    std::uint32_t lastWeight{};
+};
 
 class PresentationScaler final
 {
@@ -25,6 +34,13 @@ public:
                                   Rectangle viewport) noexcept;
     [[nodiscard]] bool valid() const noexcept;
 
+    // Maps changed source pixels to every output pixel whose sampling area
+    // overlaps them, and returns the source rectangle needed to recompute
+    // those output pixels without seams.
+    [[nodiscard]] RectangleMapResult mapSourceRectangle(
+        Rectangle sourceRectangle, Rectangle &presentationRectangle,
+        Rectangle &requiredSourceRectangle) const noexcept;
+
     [[nodiscard]] std::uint32_t maximumRowsForWidth(
         std::uint32_t widthPixels) const noexcept;
 
@@ -36,10 +52,22 @@ public:
         std::uint32_t presentationRowCount) noexcept;
 
 private:
+    [[nodiscard]] bool sourceCoverageForPresentationRectangle(
+        Rectangle presentationRectangle,
+        Rectangle &sourceRectangle) const noexcept;
+
     PixelSize sourceGeometry_{};
     PixelSize presentationGeometry_{};
     Rectangle viewport_{};
     bool identity_{false};
+    bool areaFilterX_{false};
+    bool areaFilterY_{false};
+    bool fastBoxFilter_{false};
+    bool fastDiagonalFilter_{false};
+    std::uint64_t normalizationX_{1};
+    std::uint64_t normalizationY_{1};
+    std::uint64_t normalizationReciprocal_{};
     std::vector<std::uint32_t> pixels_{};
-    std::vector<std::uint32_t> sourceXForViewportColumn_{};
+    std::vector<PresentationAxisSpan> horizontalSpans_{};
+    std::vector<PresentationAxisSpan> verticalSpans_{};
 };

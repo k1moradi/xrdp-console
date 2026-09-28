@@ -816,6 +816,20 @@ if(TARGET xrdp-console)
         set_tests_properties(xrdp-loader-gfx-h264-odd-scaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 40)
+        add_test(NAME xrdp-loader-gfx-h264-fullhd-source-smoke
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11-latency-stimulus>
+            1512 949 --gfx-h264-fullhd)
+        set_tests_properties(xrdp-loader-gfx-h264-fullhd-source-smoke PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 60
+            LABELS "h264;integration")
         add_test(NAME xrdp-loader-rfx-smoke
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
@@ -907,6 +921,7 @@ if(TARGET xrdp-console)
             xrdp-loader-gfx-planar-smoke
             xrdp-loader-gfx-planar-scaled-smoke
             xrdp-loader-gfx-h264-odd-scaled-smoke
+            xrdp-loader-gfx-h264-fullhd-source-smoke
             xrdp-loader-rfx-smoke
             xrdp-loader-rfx-scaled-smoke
             xrdp-loader-rfx-downscaled-smoke

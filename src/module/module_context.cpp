@@ -866,7 +866,10 @@ struct ModuleState
 
 struct PendingPresentation
 {
+    // sourceRectangle is the captured area needed by the scaler. Damage may
+    // cover a smaller stripe because area filtering also needs its neighbours.
     Rectangle sourceRectangle{};
+    Rectangle damageRectangle{};
     Rectangle presentationRectangle{};
     FramebufferView sourcePixels{};
     std::uint32_t nextPresentationRow{};
@@ -887,6 +890,7 @@ struct PendingPresentation
     void clear() noexcept
     {
         sourceRectangle = {};
+        damageRectangle = {};
         presentationRectangle = {};
         sourcePixels = {};
         nextPresentationRow = 0;
@@ -2694,9 +2698,10 @@ ModuleContext::check_remote_fx() noexcept
             }
 
             Rectangle presentationRectangle{};
+            Rectangle samplingRectangle{};
             const RectangleMapResult mapping =
-                impl_->presentationTransform.mapSourceRectangle(
-                    captureRectangle, presentationRectangle);
+                impl_->presentationScaler.mapSourceRectangle(
+                    captureRectangle, presentationRectangle, samplingRectangle);
             if (mapping == RectangleMapResult::Invalid)
             {
                 return 1;
@@ -2711,13 +2716,14 @@ ModuleContext::check_remote_fx() noexcept
             }
 
             const FramebufferView sourcePixels =
-                impl_->sharedMemoryCapture->capture(captureRectangle);
+                impl_->sharedMemoryCapture->capture(samplingRectangle);
             if (!sourcePixels.valid())
             {
                 return 1;
             }
-            impl_->profile.noteCapture(captureRectangle);
-            impl_->pendingPresentation.sourceRectangle = captureRectangle;
+            impl_->profile.noteCapture(samplingRectangle);
+            impl_->pendingPresentation.sourceRectangle = samplingRectangle;
+            impl_->pendingPresentation.damageRectangle = captureRectangle;
             impl_->pendingPresentation.presentationRectangle =
                 presentationRectangle;
             impl_->pendingPresentation.sourcePixels = sourcePixels;
@@ -2830,7 +2836,7 @@ ModuleContext::check_remote_fx() noexcept
         if (presentation.nextPresentationRow ==
             presentation.presentationRectangle.heightPixels)
         {
-            const Rectangle completedSource = presentation.sourceRectangle;
+            const Rectangle completedSource = presentation.damageRectangle;
             presentation.clear();
             if (!impl_->damageRegion.consume_front(completedSource))
             {
@@ -4160,10 +4166,11 @@ ModuleContext::check_wait_objs() noexcept
         impl_->pendingPresentation.clear();
 
         Rectangle presentationRectangle{};
+        Rectangle samplingRectangle{};
         const Rectangle sourceRectangle = impl_->interactionPriority.rectangle;
         const RectangleMapResult mapping =
-            impl_->presentationTransform.mapSourceRectangle(
-                sourceRectangle, presentationRectangle);
+            impl_->presentationScaler.mapSourceRectangle(
+                sourceRectangle, presentationRectangle, samplingRectangle);
         if (mapping == RectangleMapResult::Invalid)
         {
             return 1;
@@ -4175,13 +4182,14 @@ ModuleContext::check_wait_objs() noexcept
         else
         {
             const FramebufferView pixels =
-                impl_->sharedMemoryCapture->capture(sourceRectangle);
+                impl_->sharedMemoryCapture->capture(samplingRectangle);
             if (!pixels.valid())
             {
                 return 1;
             }
-            impl_->profile.noteCapture(sourceRectangle);
-            impl_->pendingPresentation.sourceRectangle = sourceRectangle;
+            impl_->profile.noteCapture(samplingRectangle);
+            impl_->pendingPresentation.sourceRectangle = samplingRectangle;
+            impl_->pendingPresentation.damageRectangle = {};
             impl_->pendingPresentation.presentationRectangle =
                 presentationRectangle;
             impl_->pendingPresentation.sourcePixels = pixels;
@@ -4271,9 +4279,11 @@ ModuleContext::check_wait_objs() noexcept
             }
 
             Rectangle presentationRectangle{};
+            Rectangle samplingRectangle{};
             const RectangleMapResult mapping =
-                impl_->presentationTransform.mapSourceRectangle(
-                    captureRectangle, presentationRectangle);
+                impl_->presentationScaler.mapSourceRectangle(
+                    captureRectangle, presentationRectangle,
+                    samplingRectangle);
             if (mapping == RectangleMapResult::Invalid)
             {
                 success = false;
@@ -4297,17 +4307,18 @@ ModuleContext::check_wait_objs() noexcept
             }
 
             const FramebufferView pixels =
-                impl_->sharedMemoryCapture->capture(captureRectangle);
+                impl_->sharedMemoryCapture->capture(samplingRectangle);
             if (!pixels.valid())
             {
                 success = false;
                 break;
             }
-            impl_->profile.noteCapture(captureRectangle);
+            impl_->profile.noteCapture(samplingRectangle);
             processedSourcePixels +=
                 static_cast<std::uint64_t>(captureRectangle.widthPixels) *
                 captureRectangle.heightPixels;
-            impl_->pendingPresentation.sourceRectangle = captureRectangle;
+            impl_->pendingPresentation.sourceRectangle = samplingRectangle;
+            impl_->pendingPresentation.damageRectangle = captureRectangle;
             impl_->pendingPresentation.presentationRectangle =
                 presentationRectangle;
             impl_->pendingPresentation.sourcePixels = pixels;
@@ -4387,7 +4398,7 @@ ModuleContext::check_wait_objs() noexcept
         if (pending.nextPresentationRow ==
             pending.presentationRectangle.heightPixels)
         {
-            const Rectangle completedSource = pending.sourceRectangle;
+            const Rectangle completedSource = pending.damageRectangle;
             const bool consumeDamageRegion = pending.consumeDamageRegion;
             const bool interactionPriority = pending.interactionPriority;
             pending.clear();

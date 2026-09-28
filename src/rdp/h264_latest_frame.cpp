@@ -279,16 +279,24 @@ H264LatestFrameState::mapSourceRectangle(
         return numerator / denominator +
                static_cast<std::uint64_t>(numerator % denominator != 0);
     };
-    const std::uint64_t left =
-        static_cast<std::uint64_t>(viewport_.x) + ceilDivide(
-            static_cast<std::uint64_t>(sourceRectangle.x) *
-                viewport_.widthPixels,
-            sourceGeometry_.widthPixels);
-    const std::uint64_t top =
-        static_cast<std::uint64_t>(viewport_.y) + ceilDivide(
-            static_cast<std::uint64_t>(sourceRectangle.y) *
-                viewport_.heightPixels,
-            sourceGeometry_.heightPixels);
+    const auto mapStart = [&ceilDivide](std::uint64_t coordinate,
+                                        std::uint32_t destinationPixels,
+                                        std::uint32_t sourcePixels) noexcept {
+        const std::uint64_t numerator = coordinate * destinationPixels;
+        return sourcePixels > destinationPixels
+                   ? numerator / sourcePixels
+                   : ceilDivide(numerator, sourcePixels);
+    };
+    const std::uint64_t left = static_cast<std::uint64_t>(viewport_.x) +
+                               mapStart(
+                                   static_cast<std::uint64_t>(sourceRectangle.x),
+                                   viewport_.widthPixels,
+                                   sourceGeometry_.widthPixels);
+    const std::uint64_t top = static_cast<std::uint64_t>(viewport_.y) +
+                              mapStart(
+                                  static_cast<std::uint64_t>(sourceRectangle.y),
+                                  viewport_.heightPixels,
+                                  sourceGeometry_.heightPixels);
     const std::uint64_t right =
         static_cast<std::uint64_t>(viewport_.x) + ceilDivide(
             (static_cast<std::uint64_t>(sourceRectangle.x) +

@@ -116,6 +116,55 @@ copy_rows_to_canvas(std::vector<std::uint32_t> &canvas,
     return true;
 }
 
+std::vector<std::uint32_t>
+crop_pixels(const std::vector<std::uint32_t> &pixels,
+            std::uint32_t sourceWidth, Rectangle rectangle)
+{
+    std::vector<std::uint32_t> result(
+        static_cast<std::size_t>(rectangle.widthPixels) *
+        rectangle.heightPixels);
+    for (std::uint32_t row = 0; row < rectangle.heightPixels; ++row)
+    {
+        std::copy_n(
+            pixels.data() +
+                (static_cast<std::size_t>(rectangle.y) + row) * sourceWidth +
+                rectangle.x,
+            rectangle.widthPixels,
+            result.data() + static_cast<std::size_t>(row) *
+                                rectangle.widthPixels);
+    }
+    return result;
+}
+
+std::uint32_t
+reference_diagonal_pixel(const std::vector<std::uint32_t> &pixels,
+                         std::uint32_t sourceWidth,
+                         std::uint32_t sourceHeight,
+                         std::uint32_t outputWidth,
+                         std::uint32_t outputHeight,
+                         std::uint32_t outputX, std::uint32_t outputY)
+{
+    const std::uint32_t sourceX = static_cast<std::uint32_t>(
+        static_cast<std::uint64_t>(outputX) * sourceWidth / outputWidth);
+    const std::uint32_t sourceY = static_cast<std::uint32_t>(
+        static_cast<std::uint64_t>(outputY) * sourceHeight / outputHeight);
+    const std::uint32_t sourceX2 = std::min(
+        sourceX + static_cast<std::uint32_t>(sourceWidth > outputWidth),
+        sourceWidth - 1U);
+    const std::uint32_t sourceY2 = std::min(
+        sourceY + static_cast<std::uint32_t>(sourceHeight > outputHeight),
+        sourceHeight - 1U);
+    const auto pixel = [&](std::uint32_t x, std::uint32_t y) {
+        return pixels[static_cast<std::size_t>(y) * sourceWidth + x];
+    };
+    const auto average = [](std::uint32_t first, std::uint32_t second) {
+        const std::uint32_t difference = first ^ second;
+        return (first & second) + ((difference & 0xfefefefeU) >> 1U) +
+               (difference & 0x01010101U);
+    };
+    return average(pixel(sourceX, sourceY), pixel(sourceX2, sourceY2));
+}
+
 bool
 render_mapped_rectangle(PresentationScaler &scaler,
                         FramebufferView source,
@@ -706,9 +755,25 @@ chunked_scaler_tests()
     }
     const auto *downscalePixels = reinterpret_cast<const std::uint32_t *>(
         downscaleOutput.pixels.data());
-    if (!check(downscalePixels[0] == 1U && downscalePixels[1] == 3U &&
-                   downscalePixels[2] == 9U && downscalePixels[3] == 11U,
-               "downscale produced wrong pixels"))
+    if (!check(downscalePixels[0] == 4U && downscalePixels[1] == 6U &&
+                   downscalePixels[2] == 12U && downscalePixels[3] == 14U,
+               "area downscale produced wrong pixels"))
+    {
+        return false;
+    }
+
+    PresentationScaler widerDownscale;
+    const std::vector<std::uint32_t> widerPixels{10U, 20U, 30U, 40U, 50U};
+    if (!check(widerDownscale.configure({5, 1}, {2, 1}, {0, 0, 2, 1}),
+               "wide-ratio downscale configuration failed"))
+    {
+        return false;
+    }
+    const FramebufferView widerOutput = widerDownscale.scaleRows(
+        view_of(widerPixels, 5, 1), {0, 0, 5, 1}, {0, 0, 2, 1}, 0, 1);
+    if (!check(pixels_of(widerOutput) ==
+                   std::vector<std::uint32_t>{18U, 42U},
+               "wide-ratio downscale did not weight partial pixel coverage"))
     {
         return false;
     }
@@ -745,6 +810,184 @@ chunked_scaler_tests()
 }
 
 bool
+fullhd_area_downscale_and_partial_update_tests()
+{
+    constexpr std::uint32_t sourceWidth = 1920;
+    constexpr std::uint32_t sourceHeight = 1080;
+    constexpr std::uint32_t outputWidth = 1512;
+    constexpr std::uint32_t outputHeight = 850;
+    const Rectangle sourceRectangle{0, 0, sourceWidth, sourceHeight};
+    const Rectangle outputRectangle{0, 0, outputWidth, outputHeight};
+    std::vector<std::uint32_t> sourcePixels(
+        static_cast<std::size_t>(sourceWidth) * sourceHeight);
+    for (std::uint32_t y = 0; y < sourceHeight; ++y)
+    {
+        for (std::uint32_t x = 0; x < sourceWidth; ++x)
+        {
+            sourcePixels[static_cast<std::size_t>(y) * sourceWidth + x] =
+                x % 2U == 0 ? 0xff000000U : 0xffffffffU;
+        }
+    }
+
+    PresentationScaler scaler;
+    if (!check(scaler.configure({sourceWidth, sourceHeight},
+                                {outputWidth, outputHeight}, outputRectangle),
+               "Full HD downscale configuration failed"))
+    {
+        return false;
+    }
+    Rectangle mapped{};
+    Rectangle requiredSource{};
+    if (!check(scaler.mapSourceRectangle(sourceRectangle, mapped,
+                                         requiredSource) ==
+                       RectangleMapResult::Mapped &&
+                   mapped == outputRectangle &&
+                   requiredSource == sourceRectangle,
+               "Full HD source did not map to its complete output area"))
+    {
+        return false;
+    }
+
+    const FramebufferView source =
+        view_of(sourcePixels, sourceWidth, sourceHeight);
+    std::vector<std::uint32_t> chunkedOutput;
+    for (std::uint32_t firstRow = 0; firstRow < outputHeight;)
+    {
+        const std::uint32_t rowCount = std::min<std::uint32_t>(
+            37U, outputHeight - firstRow);
+        if (!append_rows(chunkedOutput, scaler.scaleRows(
+                             source, sourceRectangle, outputRectangle,
+                             firstRow, rowCount)))
+        {
+            return check(false, "Full HD chunked downscale failed");
+        }
+        firstRow += rowCount;
+    }
+    if (!check(chunkedOutput.size() ==
+                   static_cast<std::size_t>(outputWidth) * outputHeight,
+               "Full HD chunked output had the wrong size"))
+    {
+        return false;
+    }
+
+    bool blendedFineEdges = false;
+    for (const std::uint32_t y : {1U, 247U, 424U, 849U})
+    {
+        for (const std::uint32_t x : {1U, 333U, 756U, 1199U, 1511U})
+        {
+            const std::uint32_t actual =
+                chunkedOutput[static_cast<std::size_t>(y) * outputWidth + x];
+            const std::uint32_t expected = reference_diagonal_pixel(
+                sourcePixels, sourceWidth, sourceHeight, outputWidth,
+                outputHeight, x, y);
+            if (actual != expected)
+            {
+                return check(false,
+                             "Full HD downscale differed from filter reference");
+            }
+            blendedFineEdges |= actual != 0xff000000U &&
+                                actual != 0xffffffffU;
+        }
+    }
+    if (!check(blendedFineEdges,
+               "Full HD fine text-like edges were not antialiased"))
+    {
+        return false;
+    }
+
+    const PixelSize smallSourceSize{7, 5};
+    const PixelSize smallOutputSize{5, 4};
+    const Rectangle smallOutputRectangle{0, 0, 5, 4};
+    PresentationScaler partialScaler;
+    if (!check(partialScaler.configure(smallSourceSize, smallOutputSize,
+                                       smallOutputRectangle),
+               "partial downscale configuration failed"))
+    {
+        return false;
+    }
+    std::vector<std::uint32_t> beforePixels(35);
+    for (std::size_t index = 0; index < beforePixels.size(); ++index)
+    {
+        beforePixels[index] = 0xff000000U |
+                              (static_cast<std::uint32_t>(index * 7U) << 16U) |
+                              (static_cast<std::uint32_t>(index * 3U) << 8U) |
+                              static_cast<std::uint32_t>(index);
+    }
+    std::vector<std::uint32_t> afterPixels = beforePixels;
+    afterPixels[smallSourceSize.widthPixels + 2U] = 0xffff00ffU;
+    const Rectangle changedSource{2, 1, 1, 1};
+    Rectangle changedOutput{};
+    Rectangle captureRectangle{};
+    if (!check(partialScaler.mapSourceRectangle(
+                       changedSource, changedOutput, captureRectangle) ==
+                   RectangleMapResult::Mapped &&
+                   captureRectangle.x <= changedSource.x &&
+                   captureRectangle.y <= changedSource.y &&
+                   static_cast<std::uint64_t>(captureRectangle.x) +
+                           captureRectangle.widthPixels >=
+                       static_cast<std::uint64_t>(changedSource.x) +
+                           changedSource.widthPixels &&
+                   static_cast<std::uint64_t>(captureRectangle.y) +
+                           captureRectangle.heightPixels >=
+                       static_cast<std::uint64_t>(changedSource.y) +
+                           changedSource.heightPixels,
+               "partial update did not expand to filter coverage"))
+    {
+        return false;
+    }
+
+    std::vector<std::uint32_t> beforeOutput(20);
+    std::vector<std::uint32_t> afterOutput(20);
+    std::vector<std::uint32_t> reconstructed(20);
+    const FramebufferView beforeSource =
+        view_of(beforePixels, smallSourceSize.widthPixels,
+                smallSourceSize.heightPixels);
+    const FramebufferView afterSource =
+        view_of(afterPixels, smallSourceSize.widthPixels,
+                smallSourceSize.heightPixels);
+    if (!render_mapped_rectangle(
+            partialScaler, beforeSource, {0, 0, 7, 5}, smallOutputRectangle,
+            beforeOutput, smallOutputSize) ||
+        !render_mapped_rectangle(
+            partialScaler, afterSource, {0, 0, 7, 5}, smallOutputRectangle,
+            afterOutput, smallOutputSize))
+    {
+        return check(false, "partial downscale reference render failed");
+    }
+    reconstructed = beforeOutput;
+    const std::vector<std::uint32_t> capturedPixels =
+        crop_pixels(afterPixels, smallSourceSize.widthPixels,
+                    captureRectangle);
+    const FramebufferView captured = view_of(
+        capturedPixels, captureRectangle.widthPixels,
+        captureRectangle.heightPixels);
+    const std::uint32_t maximumRows =
+        partialScaler.maximumRowsForWidth(changedOutput.widthPixels);
+    for (std::uint32_t firstRow = 0;
+         firstRow < changedOutput.heightPixels;)
+    {
+        const std::uint32_t rowCount = std::min(
+            maximumRows, changedOutput.heightPixels - firstRow);
+        const FramebufferView output = partialScaler.scaleRows(
+            captured, captureRectangle, changedOutput, firstRow, rowCount);
+        if (!output.valid() ||
+            !copy_rows_to_canvas(
+                reconstructed, smallOutputSize.widthPixels,
+                smallOutputSize.heightPixels,
+                {changedOutput.x,
+                 changedOutput.y + static_cast<std::int32_t>(firstRow),
+                 changedOutput.widthPixels, rowCount},
+                output))
+        {
+            return check(false, "partial downscale output update failed");
+        }
+        firstRow += rowCount;
+    }
+    return check(reconstructed == afterOutput,
+                 "partial downscale left seams around updated pixels");
+}
+
+bool
 global_reconstruction_case(PixelSize sourceSize,
                            PixelSize presentationSize,
                            const std::vector<std::uint32_t> &boundaries)
@@ -775,9 +1018,12 @@ global_reconstruction_case(PixelSize sourceSize,
     const Rectangle fullSourceRectangle{
         0, 0, sourceSize.widthPixels, sourceSize.heightPixels};
     Rectangle fullPresentationRectangle{};
-    if (!check(transform.mapSourceRectangle(fullSourceRectangle,
-                                            fullPresentationRectangle) ==
+    Rectangle fullCaptureRectangle{};
+    if (!check(scaler.mapSourceRectangle(fullSourceRectangle,
+                                         fullPresentationRectangle,
+                                         fullCaptureRectangle) ==
                    RectangleMapResult::Mapped &&
+                   fullCaptureRectangle == fullSourceRectangle &&
                    render_mapped_rectangle(
                        scaler, fullSource, fullSourceRectangle,
                        fullPresentationRectangle, reference,
@@ -800,9 +1046,10 @@ global_reconstruction_case(PixelSize sourceSize,
             0, static_cast<std::int32_t>(first), sourceSize.widthPixels,
             last - first};
         Rectangle presentationRectangle{};
+        Rectangle captureRectangle{};
         const RectangleMapResult result =
-            transform.mapSourceRectangle(sourceRectangle,
-                                          presentationRectangle);
+            scaler.mapSourceRectangle(sourceRectangle, presentationRectangle,
+                                      captureRectangle);
         if (result == RectangleMapResult::Invalid)
         {
             return check(false, "valid reconstruction stripe was rejected");
@@ -812,23 +1059,12 @@ global_reconstruction_case(PixelSize sourceSize,
             continue;
         }
 
-        std::vector<std::uint32_t> stripePixels(
-            static_cast<std::size_t>(sourceSize.widthPixels) *
-            sourceRectangle.heightPixels);
-        for (std::uint32_t row = 0; row < sourceRectangle.heightPixels; ++row)
-        {
-            std::copy_n(
-                sourcePixels.data() +
-                    (static_cast<std::size_t>(first) + row) *
-                        sourceSize.widthPixels,
-                sourceSize.widthPixels,
-                stripePixels.data() +
-                    static_cast<std::size_t>(row) * sourceSize.widthPixels);
-        }
+        const std::vector<std::uint32_t> stripePixels = crop_pixels(
+            sourcePixels, sourceSize.widthPixels, captureRectangle);
         if (!render_mapped_rectangle(
                 scaler, view_of(stripePixels, sourceSize.widthPixels,
-                                sourceRectangle.heightPixels),
-                sourceRectangle, presentationRectangle, reconstructed,
+                                captureRectangle.heightPixels),
+                captureRectangle, presentationRectangle, reconstructed,
                 presentationSize))
         {
             return check(false, "striped reconstruction rendering failed");
@@ -876,6 +1112,10 @@ main()
         success = false;
     }
     if (!chunked_scaler_tests())
+    {
+        success = false;
+    }
+    if (!fullhd_area_downscale_and_partial_update_tests())
     {
         success = false;
     }

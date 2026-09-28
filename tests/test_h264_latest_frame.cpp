@@ -1202,7 +1202,7 @@ bool scaled_capture_maps_to_global_nv12_pixels()
     return success;
 }
 
-bool downscaled_unrepresented_source_interval_is_empty_not_invalid()
+bool downscaled_filter_coverage_includes_unselected_source_pixels()
 {
     H264LatestFrameState state;
     bool success = check(state.configure({4, 4}, {2, 2}, {2, 2},
@@ -1211,8 +1211,8 @@ bool downscaled_unrepresented_source_interval_is_empty_not_invalid()
     Rectangle mapped{};
     success &= check(state.mapSourceRectangle({1, 1, 1, 1}, mapped),
                      "valid downscaled source interval was rejected");
-    success &= check(mapped == Rectangle{},
-                     "unrepresented source interval produced output pixels");
+    success &= check(mapped == Rectangle{0, 0, 1, 1},
+                     "area filter ignored changed source pixels");
     return success;
 }
 
@@ -1358,7 +1358,7 @@ int main()
     success &= grouped_capture_can_convert_only_changed_subtile();
     success &= odd_presentation_uses_even_coded_viewport_and_black_fringe();
     success &= scaled_capture_maps_to_global_nv12_pixels();
-    success &= downscaled_unrepresented_source_interval_is_empty_not_invalid();
+    success &= downscaled_filter_coverage_includes_unselected_source_pixels();
     success &= oversized_nv12_frame_is_rejected_before_allocation();
     success &= scaled_newer_source_damage_blocks_stale_frame_tile();
     success &= coherent_snapshot_capture_budget_is_bounded();
