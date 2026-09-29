@@ -296,7 +296,9 @@ TileFingerprintMap::promoteInitializedIntersecting(
             }
             destination.fingerprints_[index] = fingerprints_[index];
             destination.initialized_[index] = 1;
-            fingerprints_[index] = 0;
+            // initialized_ gates every read of the source payload. Leave the
+            // now-hidden fingerprint untouched; store() overwrites it before
+            // making this tile visible again.
             initialized_[index] = 0;
         }
     }

@@ -193,6 +193,11 @@ bool initialized_fingerprint_range_promotes_intersecting_tiles()
             "range promotion selected the wrong tile set");
     }
 
+    success &= check(pending.store(tiles[0], 999U) &&
+                         pending.matches(tiles[0], 999U) &&
+                         !pending.matches(tiles[0], 100U),
+                     "store did not replace a promoted hidden fingerprint");
+
     const Rectangle retained = tiles[2];
     success &= check(
         !pending.promoteInitializedIntersecting({128, 0, 2, 64}, mismatched),
