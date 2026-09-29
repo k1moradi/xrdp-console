@@ -186,13 +186,26 @@ historical fork's commit history:
     two unused zero-member configuration placeholder types. This fixes the
     production module's `-Wpedantic` warnings at their source without disabling
     diagnostics or adding layout-changing dummy members.
+30. `0030-xrdp-chansrv-retry-image-clipboard-data.patch` retries a failed
+    inbound image clipboard data request once after 50 ms, without changing the
+    negotiated formats or retrying text/file requests. It emits bounded INFO
+    diagnostics for image format, selection, request, response, retry, and
+    terminal failure events.
+31. `0031-xrdp-chansrv-coalesce-image-selection-requests.patch` queues up to
+    eight duplicate X11 requests for the same image target and clipboard
+    format generation behind the single outstanding CLIPRDR image request.
+    Queued waiters survive the bounded retry delay, but are refused on format
+    generation change, selection invalidation, teardown, or terminal failure.
+    Successful responses reuse the converted image; large INCR responses are
+    drained serially after the requestor acknowledges each zero-length
+    terminator, so one global chansrv INCR transfer state is never overwritten.
 
 The activation script requires the `XRDP_CONSOLE_GFX_PLANAR_BATCH_V1` marker
 in the candidate daemon, so an older patched generation cannot be mistaken
 for this Planar batching implementation.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-twenty-nine patches are retained direct-Console production behavior and bounded
+thirty-one patches are retained direct-Console production behavior and bounded
 operational diagnostics, not benchmark knobs. Code `21` is reserved for the
 direct module; other module codes retain upstream behavior. The old checked-in
 fork contained profiling, parser-quantum, request-ahead,

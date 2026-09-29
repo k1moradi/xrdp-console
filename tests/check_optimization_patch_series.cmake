@@ -5,8 +5,11 @@ endif()
 set(series_file "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/series")
 set(h264_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0019-xrdp-console-h264-async-encoder.patch")
 set(pacing_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0020-xrdp-console-adaptive-gfx-pacing.patch")
+set(image_retry_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0030-xrdp-chansrv-retry-image-clipboard-data.patch")
+set(image_waiters_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0031-xrdp-chansrv-coalesce-image-selection-requests.patch")
 
-foreach(required IN ITEMS "${series_file}" "${h264_patch}" "${pacing_patch}")
+foreach(required IN ITEMS "${series_file}" "${h264_patch}" "${pacing_patch}"
+        "${image_retry_patch}" "${image_waiters_patch}")
     if(NOT EXISTS "${required}")
         message(FATAL_ERROR "required optimization patch input is missing: ${required}")
     endif()
@@ -23,6 +26,16 @@ if(NOT pacing_index EQUAL expected_pacing_index)
     message(FATAL_ERROR "adaptive pacing patch must immediately follow the H.264 encoder patch")
 endif()
 
+list(FIND series_lines "0030-xrdp-chansrv-retry-image-clipboard-data.patch" image_retry_index)
+list(FIND series_lines "0031-xrdp-chansrv-coalesce-image-selection-requests.patch" image_waiters_index)
+if(image_retry_index LESS 0 OR image_waiters_index LESS 0)
+    message(FATAL_ERROR "xrdp image clipboard patches 0030/0031 are not both in series")
+endif()
+math(EXPR expected_image_waiters_index "${image_retry_index} + 1")
+if(NOT image_waiters_index EQUAL expected_image_waiters_index)
+    message(FATAL_ERROR "image selection coalescing patch must immediately follow image retry patch")
+endif()
+
 file(READ "${h264_patch}" h264_text)
 foreach(marker IN ITEMS
         "xrdp_mm_console_generic_encoder_allowed"
@@ -31,6 +44,21 @@ foreach(marker IN ITEMS
     string(FIND "${h264_text}" "${marker}" marker_index)
     if(marker_index LESS 0)
         message(FATAL_ERROR "H.264 xrdp patch is missing contract/test marker: ${marker}")
+    endif()
+endforeach()
+
+file(READ "${image_waiters_patch}" image_waiters_text)
+foreach(marker IN ITEMS
+        "clipboard_image_waiter_request_matches"
+        "clipboard_image_waiters_add"
+        "event=request-coalesced"
+        "event=waiter-served"
+        "image-waiter-capacity"
+        "g_image_retry.retry_timeout_pending"
+        "g_image_incr_terminator_pending")
+    string(FIND "${image_waiters_text}" "${marker}" marker_index)
+    if(marker_index LESS 0)
+        message(FATAL_ERROR "image waiter xrdp patch is missing behavior marker: ${marker}")
     endif()
 endforeach()
 

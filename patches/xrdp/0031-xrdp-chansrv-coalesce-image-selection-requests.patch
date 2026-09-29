@@ -1,0 +1,666 @@
+diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
+index c399134..99faed4 100644
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -180,6 +180,7 @@ x-special/gnome-copied-files
+ #include "clipboard_retry_policy.h"
+ #include "clipboard_image_retry_policy.h"
+ #include "clipboard_image_formats.h"
++#include "clipboard_image_waiters.h"
+ #include "xcommon.h"
+ #include "chansrv_fuse.h"
+ #include "ms-rdpeclip.h"
+@@ -285,8 +286,18 @@ struct clipboard_image_retry_timeout
+ };
+ 
+ static struct clipboard_image_retry g_image_retry;
++static struct clipboard_image_waiters g_image_waiters;
++static uint64_t g_image_cached_generation;
++static int g_image_request_invalidated;
++static int g_image_original_refused;
++static int g_image_incr_terminator_pending;
++static Window g_image_incr_terminator_window;
++static Atom g_image_incr_terminator_property;
+ 
+ static void clipboard_cancel_pending_image_retry(const char *reason);
++static void clipboard_invalidate_image_request(const char *reason);
++static void clipboard_refuse_image_waiters(void);
++static void clipboard_drain_image_waiters(void);
+ 
+ /*
+  * Values for the named formats we send to the client in
+@@ -395,6 +406,13 @@ clipboard_init(void)
+     g_incr_max_req_size = XMaxRequestSize(g_display) * 4 - 24;
+     g_memset(&g_clip_c2s, 0, sizeof(g_clip_c2s));
+     g_memset(&g_clip_s2c, 0, sizeof(g_clip_s2c));
++    clipboard_image_waiters_clear(&g_image_waiters);
++    g_image_cached_generation = 0;
++    g_image_request_invalidated = 0;
++    g_image_original_refused = 0;
++    g_image_incr_terminator_pending = 0;
++    g_image_incr_terminator_window = 0;
++    g_image_incr_terminator_property = None;
+     clipboard_image_retry_cancel(&g_image_retry.policy);
+     g_image_retry.format_id = -1;
+     g_image_retry.format_generation = 0;
+@@ -538,10 +556,18 @@ clipboard_deinit(void)
+     g_selection_retry.time = CurrentTime;
+     g_selection_retry.data_response_expected = 0;
+     g_selection_retry.retry_timeout_pending = 0;
++    clipboard_invalidate_image_request("clipboard-deinit");
+     clipboard_image_retry_cancel(&g_image_retry.policy);
+     g_image_retry.format_id = -1;
+     g_image_retry.format_generation = 0;
+     g_image_retry.retry_timeout_pending = 0;
++    clipboard_image_waiters_clear(&g_image_waiters);
++    g_image_cached_generation = 0;
++    g_image_request_invalidated = 0;
++    g_image_original_refused = 0;
++    g_image_incr_terminator_pending = 0;
++    g_image_incr_terminator_window = 0;
++    g_image_incr_terminator_property = None;
+     if (g_wnd != 0)
+     {
+         XDestroyWindow(g_display, g_wnd);
+@@ -988,6 +1014,142 @@ clipboard_refuse_selection(XSelectionRequestEvent *req)
+     return 0;
+ }
+ 
++static const char *
++clipboard_image_target_name(Atom target)
++{
++    if (target == g_image_bmp_atom)
++    {
++        return "image/bmp";
++    }
++    if (target == g_image_png_atom)
++    {
++        return "image/png";
++    }
++    return "unknown";
++}
++
++static void
++clipboard_refuse_image_waiters(void)
++{
++    XSelectionRequestEvent event;
++
++    while (clipboard_image_waiters_take(&g_image_waiters, &event))
++    {
++        clipboard_refuse_selection(&event);
++    }
++}
++
++static int
++clipboard_queue_image_waiter(XSelectionRequestEvent *event, Atom target,
++                             uint64_t format_generation)
++{
++    enum clipboard_image_waiter_result result;
++
++    result = clipboard_image_waiters_add(&g_image_waiters, event, target,
++                                         format_generation);
++    if (result == CLIPBOARD_IMAGE_WAITER_ADDED)
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=request-coalesced target=%s "
++            "waiters=%u",
++            clipboard_image_target_name(target),
++            (unsigned int)g_image_waiters.count);
++        return 1;
++    }
++
++    if (result == CLIPBOARD_IMAGE_WAITER_FULL)
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=request-refused "
++            "reason=image-waiter-capacity target=%s",
++            clipboard_image_target_name(target));
++    }
++    else
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=request-refused "
++            "reason=image-waiter-mismatch target=%s",
++            clipboard_image_target_name(target));
++    }
++    clipboard_refuse_selection(event);
++    return 0;
++}
++
++static void
++clipboard_drain_image_waiters(void)
++{
++    XSelectionRequestEvent event;
++
++    if (g_clip_c2s.incr_in_progress || g_image_incr_terminator_pending)
++    {
++        return;
++    }
++    if (g_image_waiters.count == 0)
++    {
++        return;
++    }
++    if (!g_clip_c2s.converted ||
++            g_image_waiters.target != g_clip_c2s.type ||
++            g_image_waiters.format_generation != g_clipboard_format_generation ||
++            g_image_cached_generation != g_clipboard_format_generation)
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=waiters-refused "
++            "reason=stale-generation waiters=%u",
++            (unsigned int)g_image_waiters.count);
++        clipboard_refuse_image_waiters();
++        return;
++    }
++
++    while (!g_clip_c2s.incr_in_progress &&
++            clipboard_image_waiters_take(&g_image_waiters, &event))
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=waiter-served target=%s "
++            "remaining=%u",
++            clipboard_image_target_name(event.target),
++            (unsigned int)g_image_waiters.count);
++        clipboard_provide_selection_c2s(&event, event.target);
++    }
++}
++
++static void
++clipboard_invalidate_image_request(const char *reason)
++{
++    if (clipboard_image_retry_active(&g_image_retry.policy) &&
++            g_clip_c2s.xrdp_clip_type == XRDP_CB_BITMAP &&
++            g_clip_c2s.in_request != 0)
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=request-invalidated reason=%s "
++            "format_id=%d",
++            reason, g_image_retry.format_id);
++        if (!g_image_original_refused)
++        {
++            clipboard_refuse_selection(&g_saved_selection_req_event);
++            g_image_original_refused = 1;
++        }
++        g_image_request_invalidated = 1;
++        clipboard_refuse_image_waiters();
++    }
++    else if (clipboard_image_retry_active(&g_image_retry.policy) &&
++             g_image_retry.retry_timeout_pending)
++    {
++        clipboard_cancel_pending_image_retry(reason);
++    }
++    else
++    {
++        clipboard_refuse_image_waiters();
++    }
++
++    if (g_clip_c2s.xrdp_clip_type == XRDP_CB_BITMAP ||
++            g_image_waiters.count > 0)
++    {
++        g_image_cached_generation = 0;
++        g_clip_c2s.converted = 0;
++    }
++}
++
+ /*****************************************************************************/
+ /* sent by client or server when its local system clipboard is
+    updated with new clipboard data; contains Clipboard Format ID
+@@ -1003,7 +1165,7 @@ clipboard_process_format_announce(struct stream *s, int clip_msg_status,
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_format_announce: "
+               "CLIPRDR_FORMAT_ANNOUNCE");
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_format_announce %d", clip_msg_len);
+-    clipboard_cancel_pending_image_retry("new-format-list");
++    clipboard_invalidate_image_request("new-format-list");
+     g_clipboard_format_generation =
+         clipboard_image_retry_next_generation(g_clipboard_format_generation);
+     clipboard_send_format_ack();
+@@ -1133,24 +1295,31 @@ clipboard_finish_image_retry(void)
+     g_image_retry.format_id = -1;
+     g_image_retry.format_generation = 0;
+     g_image_retry.retry_timeout_pending = 0;
++    g_image_request_invalidated = 0;
++    g_image_original_refused = 0;
+ }
+ 
+ static void
+ clipboard_fail_image_retry(const char *reason)
+ {
+-    if (!clipboard_image_retry_active(&g_image_retry.policy))
++    if (clipboard_image_retry_active(&g_image_retry.policy))
+     {
+-        return;
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=retry-failed reason=%s "
++            "format_id=%d attempts=%u",
++            reason, g_image_retry.format_id, g_image_retry.policy.attempt);
+     }
+-    LOG(LOG_LEVEL_INFO,
+-        "XRDP_CONSOLE_CLIPBOARD_IMAGE event=retry-failed reason=%s "
+-        "format_id=%d attempts=%u",
+-        reason, g_image_retry.format_id, g_image_retry.policy.attempt);
+-    clipboard_refuse_selection(&g_saved_selection_req_event);
++    if (!g_image_original_refused)
++    {
++        clipboard_refuse_selection(&g_saved_selection_req_event);
++    }
++    clipboard_refuse_image_waiters();
+     clipboard_image_retry_cancel(&g_image_retry.policy);
+     g_image_retry.format_id = -1;
+     g_image_retry.format_generation = 0;
+     g_image_retry.retry_timeout_pending = 0;
++    g_image_request_invalidated = 0;
++    g_image_original_refused = 0;
+ }
+ 
+ static int
+@@ -1239,6 +1408,10 @@ clipboard_begin_image_data_request(int format_id)
+     g_image_retry.format_id = format_id;
+     g_image_retry.format_generation = g_clipboard_format_generation;
+     g_image_retry.retry_timeout_pending = 0;
++    g_image_request_invalidated = 0;
++    g_image_original_refused = 0;
++    g_image_cached_generation = 0;
++    g_clip_c2s.converted = 0;
+     LOG(LOG_LEVEL_INFO,
+         "XRDP_CONSOLE_CLIPBOARD_IMAGE event=request format_id=%d target=%s "
+         "attempt=1",
+@@ -1264,11 +1437,17 @@ clipboard_cancel_pending_image_retry(const char *reason)
+         "XRDP_CONSOLE_CLIPBOARD_IMAGE event=retry-cancelled reason=%s "
+         "format_id=%d",
+         reason, g_image_retry.format_id);
+-    clipboard_refuse_selection(&g_saved_selection_req_event);
++    if (!g_image_original_refused)
++    {
++        clipboard_refuse_selection(&g_saved_selection_req_event);
++    }
++    clipboard_refuse_image_waiters();
+     clipboard_image_retry_cancel(&g_image_retry.policy);
+     g_image_retry.format_id = -1;
+     g_image_retry.format_generation = 0;
+     g_image_retry.retry_timeout_pending = 0;
++    g_image_request_invalidated = 0;
++    g_image_original_refused = 0;
+ }
+ 
+ static void
+@@ -1856,12 +2035,30 @@ clipboard_process_data_response(struct stream *s, int clip_msg_status,
+             g_image_retry.policy.attempt);
+     }
+ 
++    if (is_image &&
++            (g_image_request_invalidated ||
++             g_image_retry.format_generation != g_clipboard_format_generation))
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=response-discarded "
++            "reason=stale-generation format_id=%d",
++            g_image_retry.format_id);
++        if (!g_image_original_refused)
++        {
++            clipboard_refuse_selection(lxev);
++        }
++        clipboard_refuse_image_waiters();
++        g_clip_c2s.converted = 0;
++        clipboard_finish_image_retry();
++        return rv;
++    }
++
+     if ((clip_msg_status & CB_RESPONSE_FAIL) != 0)
+     {
+-        if (is_image &&
+-                clipboard_image_retry_active(&g_image_retry.policy))
++        if (is_image)
+         {
+-            if (g_image_retry.format_generation ==
++            if (clipboard_image_retry_active(&g_image_retry.policy) &&
++                    g_image_retry.format_generation ==
+                         g_clipboard_format_generation &&
+                     clipboard_image_retry_can_retry(&g_image_retry.policy) &&
+                     clipboard_schedule_image_retry())
+@@ -1874,10 +2071,11 @@ clipboard_process_data_response(struct stream *s, int clip_msg_status,
+                 return rv;
+             }
+             clipboard_fail_image_retry(
+-                g_image_retry.format_generation ==
++                clipboard_image_retry_active(&g_image_retry.policy) &&
++                        g_image_retry.format_generation ==
+                         g_clipboard_format_generation
+                     ? "explicit-failure-exhausted"
+-                    : "format-list-changed");
++                    : "format-list-changed-or-missing-state");
+         }
+         else
+         {
+@@ -1894,15 +2092,27 @@ clipboard_process_data_response(struct stream *s, int clip_msg_status,
+         LOG(LOG_LEVEL_ERROR, "CLIPRDR_FORMAT_DATA_RESPONSE is badly formed");
+         if (is_image)
+         {
+-            clipboard_finish_image_retry();
++            clipboard_fail_image_retry("malformed-response");
++        }
++        else
++        {
++            clipboard_refuse_selection(lxev);
+         }
+-        clipboard_refuse_selection(lxev);
+     }
+     else if (is_image)
+     {
+         clipboard_finish_image_retry();
+         clipboard_process_data_response_for_image(s, clip_msg_status,
+                 clip_msg_len);
++        if (g_clip_c2s.converted)
++        {
++            g_image_cached_generation = g_clipboard_format_generation;
++            clipboard_drain_image_waiters();
++        }
++        else
++        {
++            clipboard_refuse_image_waiters();
++        }
+     }
+     else if (g_clip_c2s.xrdp_clip_type == XRDP_CB_FILE)
+     {
+@@ -2110,6 +2320,7 @@ clipboard_event_selection_owner_notify(XEvent *xevent)
+         return 0;
+     }
+ 
++    clipboard_invalidate_image_request("selection-owner-changed");
+     g_got_selection = 0;
+     if (lxevent->owner != 0) /* nil owner comes when selection */
+     {
+@@ -2773,8 +2984,20 @@ clipboard_event_selection_request(XEvent *xevent)
+               get_atom_text(lxev->selection),
+               lxev->target, lxev->property);
+ 
+-    if (g_image_retry.retry_timeout_pending && lxev->property != None &&
+-            clipboard_is_data_selection_target(lxev->target))
++    if (g_image_retry.retry_timeout_pending &&
++            g_clip_c2s.xrdp_clip_type == XRDP_CB_BITMAP &&
++            clipboard_image_waiter_request_matches(
++                lxev, lxev->target, g_clip_c2s.type, g_image_bmp_atom,
++                g_image_png_atom, g_clipboard_format_generation,
++                g_image_retry.format_generation,
++                !g_image_request_invalidated))
++    {
++        clipboard_queue_image_waiter(lxev, g_clip_c2s.type,
++                                     g_image_retry.format_generation);
++        return 0;
++    }
++    else if (g_image_retry.retry_timeout_pending && lxev->property != None &&
++             clipboard_is_data_selection_target(lxev->target))
+     {
+         /* The previous image owner explicitly failed. Do not let another
+          * X selection request replace the saved event during the retry
+@@ -2787,6 +3010,16 @@ clipboard_event_selection_request(XEvent *xevent)
+     {
+         /* CLIPRDR has no request identifier and chansrv retains one saved
+          * X event. Preserve the image request already in flight. */
++        if (clipboard_image_waiter_request_matches(
++                    lxev, lxev->target, g_clip_c2s.type, g_image_bmp_atom,
++                    g_image_png_atom, g_clipboard_format_generation,
++                    g_image_retry.format_generation,
++                    !g_image_request_invalidated))
++        {
++            clipboard_queue_image_waiter(lxev, g_clip_c2s.type,
++                                         g_image_retry.format_generation);
++            return 0;
++        }
+         LOG(LOG_LEVEL_INFO,
+             "XRDP_CONSOLE_CLIPBOARD_IMAGE event=request-refused "
+             "reason=image-request-in-flight target=%s",
+@@ -2807,6 +3040,31 @@ clipboard_event_selection_request(XEvent *xevent)
+         return 0;
+     }
+ 
++    if ((g_clip_c2s.incr_in_progress || g_image_incr_terminator_pending) &&
++            g_clip_c2s.xrdp_clip_type == XRDP_CB_BITMAP &&
++            clipboard_is_data_selection_target(lxev->target))
++    {
++        if (clipboard_image_waiter_request_matches(
++                    lxev, lxev->target, g_clip_c2s.type, g_image_bmp_atom,
++                    g_image_png_atom, g_clipboard_format_generation,
++                    g_image_cached_generation,
++                    clipboard_image_waiters_cached_image_matches(
++                        lxev->target, g_clip_c2s.type,
++                        g_clipboard_format_generation,
++                        g_image_cached_generation, g_clip_c2s.converted)))
++        {
++            clipboard_queue_image_waiter(lxev, g_clip_c2s.type,
++                                         g_image_cached_generation);
++            return 0;
++        }
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=request-refused "
++            "reason=image-transfer-in-flight target=%s",
++            clipboard_image_target_name(lxev->target));
++        clipboard_refuse_selection(lxev);
++        return 0;
++    }
++
+     if (lxev->property == None)
+     {
+         LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: "
+@@ -2950,7 +3208,10 @@ clipboard_event_selection_request(XEvent *xevent)
+             "XRDP_CONSOLE_CLIPBOARD_IMAGE event=selection target=image/bmp "
+             "format_id=%d",
+             g_dib_format_id);
+-        if ((g_clip_c2s.type == lxev->target) && g_clip_c2s.converted)
++        if (clipboard_image_waiters_cached_image_matches(
++                    lxev->target, g_clip_c2s.type,
++                    g_clipboard_format_generation,
++                    g_image_cached_generation, g_clip_c2s.converted))
+         {
+             LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: -------------------------------------------");
+ 
+@@ -3003,7 +3264,10 @@ clipboard_event_selection_request(XEvent *xevent)
+             clipboard_refuse_selection(lxev);
+             return 0;
+         }
+-        if ((g_clip_c2s.type == lxev->target) && g_clip_c2s.converted)
++        if (clipboard_image_waiters_cached_image_matches(
++                    lxev->target, g_clip_c2s.type,
++                    g_clipboard_format_generation,
++                    g_image_cached_generation, g_clip_c2s.converted))
+         {
+             clipboard_provide_selection_c2s(lxev, lxev->target);
+             return 0;
+@@ -3114,6 +3378,12 @@ clipboard_event_selection_request(XEvent *xevent)
+ static int
+ clipboard_event_selection_clear(XEvent *xevent)
+ {
++    if (xevent->xselectionclear.window == g_wnd &&
++            xevent->xselectionclear.selection == g_clipboard_atom)
++    {
++        clipboard_invalidate_image_request("selection-clear");
++        g_got_selection = 0;
++    }
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_clear:");
+     return 0;
+ }
+@@ -3161,6 +3431,11 @@ clipboard_event_property_notify(XEvent *xevent)
+         if ((g_clip_c2s.data == 0) || (g_clip_c2s.total_bytes < 1))
+         {
+             LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_property_notify: INCR error");
++            g_clip_c2s.incr_in_progress = 0;
++            clipboard_refuse_image_waiters();
++            g_image_incr_terminator_pending = 0;
++            XSelectInput(xevent->xproperty.display, xevent->xproperty.window,
++                         NoEventMask);
+             return 0;
+         }
+         data = (tui8 *)(g_clip_c2s.data + g_clip_c2s.incr_bytes_done);
+@@ -3169,6 +3444,12 @@ clipboard_event_property_notify(XEvent *xevent)
+                 (g_clip_c2s.read_bytes_done < g_clip_c2s.total_bytes))
+         {
+             g_clip_c2s.incr_in_progress = 0;
++            clipboard_refuse_image_waiters();
++            g_image_incr_terminator_pending = 0;
++            g_clip_c2s.converted = 0;
++            g_image_cached_generation = 0;
++            XSelectInput(xevent->xproperty.display, xevent->xproperty.window,
++                         NoEventMask);
+             return 0;
+         }
+         if (data_bytes > g_incr_max_req_size)
+@@ -3184,12 +3465,35 @@ clipboard_event_property_notify(XEvent *xevent)
+         {
+             LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_property_notify: INCR done");
+             g_clip_c2s.incr_in_progress = 0;
+-            /* we no longer need property notify */
+-            XSelectInput(xevent->xproperty.display, xevent->xproperty.window,
+-                         NoEventMask);
+             g_clip_c2s.converted = 1;
++            if (g_clip_c2s.xrdp_clip_type == XRDP_CB_BITMAP)
++            {
++                /* Wait for the requestor to delete the final zero-length
++                 * INCR property before reusing its property for another
++                 * queued response. */
++                g_image_incr_terminator_pending = 1;
++                g_image_incr_terminator_window = xevent->xproperty.window;
++                g_image_incr_terminator_property = xevent->xproperty.atom;
++            }
++            else
++            {
++                XSelectInput(xevent->xproperty.display,
++                             xevent->xproperty.window, NoEventMask);
++            }
+         }
+     }
++    if (g_image_incr_terminator_pending &&
++            xevent->xproperty.window == g_image_incr_terminator_window &&
++            xevent->xproperty.atom == g_image_incr_terminator_property &&
++            xevent->xproperty.state == PropertyDelete)
++    {
++        g_image_incr_terminator_pending = 0;
++        g_image_incr_terminator_window = 0;
++        g_image_incr_terminator_property = None;
++        XSelectInput(xevent->xproperty.display, xevent->xproperty.window,
++                     NoEventMask);
++        clipboard_drain_image_waiters();
++    }
+     if (g_clip_s2c.incr_in_progress &&
+             (xevent->xproperty.window == g_wnd) &&
+             (xevent->xproperty.atom == g_clip_s2c.property) &&
+diff --git a/sesman/chansrv/clipboard_image_waiters.h b/sesman/chansrv/clipboard_image_waiters.h
+new file mode 100644
+index 0000000..110c0f5
+--- /dev/null
++++ b/sesman/chansrv/clipboard_image_waiters.h
+@@ -0,0 +1,116 @@
++/* Bounded storage for duplicate X11 image selection requests. */
++
++#ifndef CLIPBOARD_IMAGE_WAITERS_H
++#define CLIPBOARD_IMAGE_WAITERS_H
++
++#include <X11/Xlib.h>
++
++#include <stddef.h>
++#include <stdint.h>
++
++#define CLIPBOARD_IMAGE_WAITER_CAPACITY 8
++
++struct clipboard_image_waiters
++{
++    XSelectionRequestEvent events[CLIPBOARD_IMAGE_WAITER_CAPACITY];
++    Atom target;
++    uint64_t format_generation;
++    size_t count;
++};
++
++enum clipboard_image_waiter_result
++{
++    CLIPBOARD_IMAGE_WAITER_ADDED = 0,
++    CLIPBOARD_IMAGE_WAITER_INVALID,
++    CLIPBOARD_IMAGE_WAITER_MISMATCH,
++    CLIPBOARD_IMAGE_WAITER_FULL
++};
++
++static inline int
++clipboard_image_waiter_request_matches(
++    const XSelectionRequestEvent *event, Atom target, Atom current_target,
++    Atom image_bmp, Atom image_png, uint64_t format_generation,
++    uint64_t request_generation, int request_is_current)
++{
++    return event != NULL && event->property != None &&
++           (target == image_bmp || target == image_png) &&
++           event->target == target && target == current_target &&
++           format_generation != 0 &&
++           format_generation == request_generation && request_is_current;
++}
++
++static inline int
++clipboard_image_waiters_cached_image_matches(
++    Atom target, Atom cached_target, uint64_t format_generation,
++    uint64_t cached_generation, int converted)
++{
++    return (target == cached_target) && format_generation != 0 &&
++           format_generation == cached_generation && converted;
++}
++
++static inline void
++clipboard_image_waiters_clear(struct clipboard_image_waiters *waiters)
++{
++    if (waiters != NULL)
++    {
++        waiters->target = None;
++        waiters->format_generation = 0;
++        waiters->count = 0;
++    }
++}
++
++static inline enum clipboard_image_waiter_result
++clipboard_image_waiters_add(struct clipboard_image_waiters *waiters,
++                            const XSelectionRequestEvent *event,
++                            Atom target, uint64_t format_generation)
++{
++    if (waiters == NULL || event == NULL || event->property == None ||
++            target == None || event->target != target ||
++            format_generation == 0)
++    {
++        return CLIPBOARD_IMAGE_WAITER_INVALID;
++    }
++    if (waiters->count != 0 &&
++            (waiters->target != target ||
++             waiters->format_generation != format_generation))
++    {
++        return CLIPBOARD_IMAGE_WAITER_MISMATCH;
++    }
++    if (waiters->count >= CLIPBOARD_IMAGE_WAITER_CAPACITY)
++    {
++        return CLIPBOARD_IMAGE_WAITER_FULL;
++    }
++
++    if (waiters->count == 0)
++    {
++        waiters->target = target;
++        waiters->format_generation = format_generation;
++    }
++    waiters->events[waiters->count++] = *event;
++    return CLIPBOARD_IMAGE_WAITER_ADDED;
++}
++
++static inline int
++clipboard_image_waiters_take(struct clipboard_image_waiters *waiters,
++                             XSelectionRequestEvent *event)
++{
++    size_t index;
++
++    if (waiters == NULL || event == NULL || waiters->count == 0)
++    {
++        return 0;
++    }
++    *event = waiters->events[0];
++    --waiters->count;
++    for (index = 0; index < waiters->count; ++index)
++    {
++        waiters->events[index] = waiters->events[index + 1];
++    }
++    if (waiters->count == 0)
++    {
++        clipboard_image_waiters_clear(waiters);
++    }
++    return 1;
++}
++
++#endif /* CLIPBOARD_IMAGE_WAITERS_H */

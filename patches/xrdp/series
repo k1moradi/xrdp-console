@@ -28,3 +28,4 @@
 0028-xrdp-console-resize-fail-closed-and-clipboard-images.patch
 0029-xrdp-pedantic-header-cleanup.patch
 0030-xrdp-chansrv-retry-image-clipboard-data.patch
+0031-xrdp-chansrv-coalesce-image-selection-requests.patch
