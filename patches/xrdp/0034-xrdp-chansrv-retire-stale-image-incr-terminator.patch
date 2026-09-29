@@ -1,0 +1,76 @@
+diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
+index 70b0b94..516697b 100644
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -6,6 +6,7 @@ static int g_image_original_refused;
+ static int g_image_incr_terminator_pending;
+ static Window g_image_incr_terminator_window;
+ static Atom g_image_incr_terminator_property;
++static uint64_t g_image_incr_terminator_generation;
+ 
+ static void clipboard_cancel_pending_image_retry(const char *reason);
+ static void clipboard_invalidate_image_request(const char *reason);
+@@ -29,6 +30,28 @@ static void clipboard_drain_image_waiters(void);
+     clipboard_invalidate_image_request("new-format-list");
+     g_clipboard_format_generation =
+         clipboard_image_retry_next_generation(g_clipboard_format_generation);
++    if (clipboard_image_incr_terminator_is_stale(
++            g_image_incr_terminator_pending,
++            g_image_incr_terminator_generation,
++            g_clipboard_format_generation))
++    {
++        /*
++         * The zero-length INCR terminator for the previous clipboard was
++         * already written. Waiting for that old requestor to delete it is
++         * useful only while serving queued requests from the same format
++         * generation. It must not block a newly announced clipboard.
++         */
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=incr-terminator-retired "
++            "reason=new-format-list old_generation=%llu new_generation=%llu",
++            (unsigned long long)g_image_incr_terminator_generation,
++            (unsigned long long)g_clipboard_format_generation);
++        XSelectInput(g_display, g_image_incr_terminator_window, NoEventMask);
++        g_image_incr_terminator_pending = 0;
++        g_image_incr_terminator_window = 0;
++        g_image_incr_terminator_property = None;
++        g_image_incr_terminator_generation = 0;
++    }
+     clipboard_send_format_ack();
+ 
+     xfuse_clear_clip_dir();
+@@ -55,6 +78,8 @@ static void clipboard_drain_image_waiters(void);
+                 g_image_incr_terminator_pending = 1;
+                 g_image_incr_terminator_window = xevent->xproperty.window;
+                 g_image_incr_terminator_property = xevent->xproperty.atom;
++                g_image_incr_terminator_generation =
++                    g_clipboard_format_generation;
+             }
+             else
+             {
+@@ -81,6 +106,7 @@ static void clipboard_drain_image_waiters(void);
+         g_image_incr_terminator_pending = 0;
+         g_image_incr_terminator_window = 0;
+         g_image_incr_terminator_property = None;
++        g_image_incr_terminator_generation = 0;
+         XSelectInput(xevent->xproperty.display, xevent->xproperty.window,
+                      NoEventMask);
+         clipboard_drain_image_waiters();
+diff --git a/sesman/chansrv/clipboard_image_waiters.h b/sesman/chansrv/clipboard_image_waiters.h
+index 5e8d546..8492e60 100644
+--- a/sesman/chansrv/clipboard_image_waiters.h
++++ b/sesman/chansrv/clipboard_image_waiters.h
+@@ -7,6 +7,13 @@ clipboard_image_waiters_cached_image_matches(
+            format_generation == cached_generation && converted;
+ }
+ 
++static inline int
++clipboard_image_incr_terminator_is_stale(
++    int pending, uint64_t terminator_generation, uint64_t format_generation)
++{
++    return pending && terminator_generation != format_generation;
++}
++
+ static inline void
+ clipboard_image_waiters_clear(struct clipboard_image_waiters *waiters)
+ {

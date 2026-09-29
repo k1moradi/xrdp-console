@@ -31,3 +31,4 @@
 0031-xrdp-chansrv-coalesce-image-selection-requests.patch
 0032-xrdp-chansrv-wait-for-image-incr-terminator-delete.patch
 0033-xrdp-chansrv-accept-peer-named-png.patch
+0034-xrdp-chansrv-retire-stale-image-incr-terminator.patch

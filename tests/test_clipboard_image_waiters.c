@@ -208,6 +208,14 @@ test_cached_image_and_invalid_events(void)
     success &= check(!clipboard_image_waiters_cached_image_matches(
                          101, 101, 15, 15, 0),
                      "unconverted image was treated as cached data");
+    success &= check(!clipboard_image_incr_terminator_is_stale(0, 15, 16),
+                     "inactive INCR terminator was treated as blocking");
+    success &= check(!clipboard_image_incr_terminator_is_stale(1, 15, 15),
+                     "same-generation INCR terminator was retired early");
+    success &= check(clipboard_image_incr_terminator_is_stale(1, 15, 16),
+                     "old-generation INCR terminator remained blocking");
+    success &= check(clipboard_image_incr_terminator_is_stale(1, 0, 16),
+                     "unowned pending INCR terminator remained blocking");
     success &= check(!clipboard_image_waiter_request_matches(
                          &no_property, 101, 101, 101, 102, 15, 15, 1),
                      "request without a property qualified for coalescing");
