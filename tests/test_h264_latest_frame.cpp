@@ -452,6 +452,74 @@ bool ready_identity_tiles_skip_mapping_without_changing_staleness()
     return success;
 }
 
+bool reused_ready_run_scratch_ignores_stale_tail()
+{
+    H264LatestFrameState large;
+    H264LatestFrameState small;
+    std::array<GenerationTileMap::Selection, 8> selections{};
+    bool success = true;
+
+    success &= check(large.configure({128, 192}),
+                     "large scratch-reuse state configuration failed");
+    std::size_t count = large.collectCaptureSelections(selections);
+    success &= check(count == 3,
+                     "large scratch-reuse baseline did not produce three rows");
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        success &= check(large.commitCaptured(selections[index]),
+                         "large scratch-reuse baseline capture failed");
+    }
+    const GenerationTileMap::Selection largeBaseline{
+        {0, 0, 128, 192}, UINT64_MAX};
+    success &= check(large.noteSubmitted(1, std::span(&largeBaseline, 1)) &&
+                         large.releaseSubmission(1),
+                     "large scratch-reuse baseline submission failed");
+
+    large.markDamage({0, 0, 128, 192});
+    count = large.collectCaptureSelections(selections);
+    success &= check(count == 3,
+                     "large scratch-reuse damage did not produce three rows");
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        success &= check(large.commitCaptured(selections[index]),
+                         "large scratch-reuse incremental capture failed");
+    }
+    success &= check(large.collectReadyTransmissionSelections(selections) == 3,
+                     "large ready query did not populate the reusable prefix");
+
+    success &= check(small.configure({64, 64}),
+                     "small scratch-reuse state configuration failed");
+    count = small.collectCaptureSelections(selections);
+    success &= check(count == 1 && small.commitCaptured(selections[0]),
+                     "small scratch-reuse baseline capture failed");
+    const GenerationTileMap::Selection smallBaseline{
+        {0, 0, 64, 64}, UINT64_MAX};
+    success &= check(small.noteSubmitted(1, std::span(&smallBaseline, 1)) &&
+                         small.releaseSubmission(1),
+                     "small scratch-reuse baseline submission failed");
+
+    const GenerationTileMap::Selection sentinel{
+        {7, 9, 11, 13}, 0x123456789ULL};
+    std::fill(selections.begin(), selections.end(), sentinel);
+    small.markDamage({0, 0, 1, 1});
+    success &= check(
+        small.collectReadyTransmissionSelectionsIntersecting(
+            {0, 0, 64, 64}, selections) == 0,
+        "empty ready query leaked a stale reusable run");
+    success &= check(selections[0].rectangle == sentinel.rectangle &&
+                         selections[0].generation == sentinel.generation,
+                     "empty ready query overwrote output from stale scratch");
+
+    count = small.collectCaptureSelections(selections);
+    success &= check(count == 1 && small.commitCaptured(selections[0]),
+                     "small scratch-reuse incremental capture failed");
+    count = small.collectReadyTransmissionSelections(selections);
+    success &= check(count == 1 &&
+                         selections[0].rectangle == Rectangle{0, 0, 64, 64},
+                     "short ready prefix included stale reusable runs");
+    return success;
+}
+
 bool producer_window_holds_one_async_frame()
 {
     H264LatestFrameState state;
@@ -1369,6 +1437,7 @@ int main()
     success &= baseline_submission_is_not_starved_by_newer_damage();
     success &= newest_generation_replaces_stale_unsent_tile();
     success &= ready_identity_tiles_skip_mapping_without_changing_staleness();
+    success &= reused_ready_run_scratch_ignores_stale_tail();
     success &= producer_window_holds_one_async_frame();
     success &= client_surface_copy_commits_only_copied_tiles();
     success &= aligned_wide_single_exclusion_splits_and_preserves_capacity();

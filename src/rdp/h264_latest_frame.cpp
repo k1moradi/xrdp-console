@@ -507,6 +507,23 @@ H264LatestFrameState::collectCaptureSelectionsIntersecting(
 namespace
 {
 
+constexpr std::size_t kMaximumTransmissionRunRows =
+    (UINT16_MAX + GenerationTileMap::kTileHeightPixels - 1U) /
+    GenerationTileMap::kTileHeightPixels;
+using TransmissionRunScratch =
+    std::array<GenerationTileMap::Selection, kMaximumTransmissionRunRows>;
+
+[[nodiscard]] TransmissionRunScratch &
+transmissionRunScratch() noexcept
+{
+    // GenerationTileMap collectors overwrite every entry in their returned
+    // prefix. Reuse one buffer per thread instead of clearing roughly 24 KiB
+    // before every ready-selection query; concurrent session threads retain
+    // independent scratch storage.
+    thread_local TransmissionRunScratch runs{};
+    return runs;
+}
+
 template <typename TileIsCurrent>
 std::size_t
 collectCurrentTransmissionRuns(
@@ -602,10 +619,7 @@ H264LatestFrameState::collectReadyTransmissionSelections(
         return 0;
     }
 
-    constexpr std::size_t kMaximumTileRows =
-        (UINT16_MAX + GenerationTileMap::kTileHeightPixels - 1U) /
-        GenerationTileMap::kTileHeightPixels;
-    std::array<GenerationTileMap::Selection, kMaximumTileRows> runs{};
+    auto &runs = transmissionRunScratch();
     const std::size_t runCount = transmissionDamage_.collectSelections(runs);
     const auto currentRuns = std::span<const GenerationTileMap::Selection>(
         runs.data(), runCount);
@@ -819,10 +833,7 @@ H264LatestFrameState::collectReadyTransmissionSelectionsIntersecting(
         return 0;
     }
 
-    constexpr std::size_t kMaximumTileRows =
-        (UINT16_MAX + GenerationTileMap::kTileHeightPixels - 1U) /
-        GenerationTileMap::kTileHeightPixels;
-    std::array<GenerationTileMap::Selection, kMaximumTileRows> runs{};
+    auto &runs = transmissionRunScratch();
     const std::size_t runCount =
         transmissionDamage_.collectSelectionsIntersecting(clip, runs);
     const auto currentRuns = std::span<const GenerationTileMap::Selection>(
