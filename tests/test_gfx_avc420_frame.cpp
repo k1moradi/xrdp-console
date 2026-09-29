@@ -241,12 +241,28 @@ bool command_layout_matches_xrdp_encoder_contract()
     success &= check(readU16(view, 69) == kGfxEndFrameCommand &&
                          readU32(view, 77) == 0x12345678U,
                      "ENDFRAME layout changed");
+
+    constexpr std::array<Rectangle, 2> sharedRectangles{{
+        {0, 0, 64, 64}, {64, 64, 64, 64}}};
+    const GfxAvc420Command sharedCommand{
+        0, 0x12345678U, 0, {128, 128}, sharedRectangles, sharedRectangles};
+    std::array<std::byte, 128> genericSharedBytes{};
+    std::array<std::byte, 128> sharedBytes{};
+    const std::size_t genericSharedWritten =
+        buildGfxAvc420Command(sharedCommand, genericSharedBytes);
+    const std::size_t sharedWritten = buildGfxAvc420CommandSharedRectangles(
+        sharedCommand, sharedBytes);
+    success &= check(sharedWritten == genericSharedWritten &&
+                         sharedWritten != 0 &&
+                         sharedBytes == genericSharedBytes,
+                     "shared AVC420 rectangle builder changed wire bytes");
     return success;
 }
 
 bool command_rejects_invalid_input()
 {
     constexpr std::array<Rectangle, 1> valid{{{0, 0, 64, 64}}};
+    constexpr std::array<Rectangle, 1> validCopy{{{0, 0, 64, 64}}};
     constexpr std::array<Rectangle, 1> invalid{{{63, 63, 2, 2}}};
     std::array<std::byte, 128> bytes{};
     bool success = true;
@@ -260,6 +276,12 @@ bool command_rejects_invalid_input()
                          {0, 1, 0, {64, 64}, valid, valid},
                          std::span<std::byte>(bytes.data(), 8)) == 0,
                      "undersized command buffer was accepted");
+    success &= check(buildGfxAvc420CommandSharedRectangles(
+                         {0, 1, 0, {64, 64}, valid, validCopy}, bytes) == 0,
+                     "shared builder accepted separate rectangle storage");
+    success &= check(buildGfxAvc420CommandSharedRectangles(
+                         {0, 1, 0, {64, 64}, invalid, invalid}, bytes) == 0,
+                     "shared builder accepted an out-of-frame rectangle");
     return success;
 }
 

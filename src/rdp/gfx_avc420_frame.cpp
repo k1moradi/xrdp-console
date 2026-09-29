@@ -627,9 +627,13 @@ buildGfxSolidFillCommand(const GfxSolidFillCommand &command,
     return writer.position() == totalBytes ? totalBytes : 0;
 }
 
-std::size_t
-buildGfxAvc420Command(const GfxAvc420Command &command,
-                      std::span<std::byte> output) noexcept
+namespace
+{
+
+template <bool SharedRectangles>
+[[nodiscard]] std::size_t
+buildGfxAvc420CommandImpl(const GfxAvc420Command &command,
+                          std::span<std::byte> output) noexcept
 {
     const std::size_t baseBytes = gfxAvc420CommandBytes(
         command.dirtyRectangles.size(), command.encodeRectangles.size());
@@ -655,11 +659,14 @@ buildGfxAvc420Command(const GfxAvc420Command &command,
             return 0;
         }
     }
-    for (const Rectangle rectangle : command.encodeRectangles)
+    if constexpr (!SharedRectangles)
     {
-        if (!rectangleFitsFrame(rectangle, command.frameGeometry))
+        for (const Rectangle rectangle : command.encodeRectangles)
         {
-            return 0;
+            if (!rectangleFitsFrame(rectangle, command.frameGeometry))
+            {
+                return 0;
+            }
         }
     }
 
@@ -707,6 +714,28 @@ buildGfxAvc420Command(const GfxAvc420Command &command,
     writer.u32(command.frameId);
 
     return writer.position() == totalBytes ? totalBytes : 0;
+}
+
+} // namespace
+
+std::size_t
+buildGfxAvc420Command(const GfxAvc420Command &command,
+                      std::span<std::byte> output) noexcept
+{
+    return buildGfxAvc420CommandImpl<false>(command, output);
+}
+
+std::size_t
+buildGfxAvc420CommandSharedRectangles(
+    const GfxAvc420Command &command,
+    std::span<std::byte> output) noexcept
+{
+    if (command.dirtyRectangles.data() != command.encodeRectangles.data() ||
+        command.dirtyRectangles.size() != command.encodeRectangles.size())
+    {
+        return 0;
+    }
+    return buildGfxAvc420CommandImpl<true>(command, output);
 }
 
 } // namespace xrdp_console::rdp

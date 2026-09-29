@@ -84,4 +84,11 @@ struct GfxSolidFillCommand final
     const GfxAvc420Command &command,
     std::span<std::byte> output) noexcept;
 
+// The direct H.264 path uses the same backing span for the dirty and encode
+// lists. This checked specialization validates that shared list once while
+// preserving the two lists required by the AVC420 wire format.
+[[nodiscard]] std::size_t buildGfxAvc420CommandSharedRectangles(
+    const GfxAvc420Command &command,
+    std::span<std::byte> output) noexcept;
+
 } // namespace xrdp_console::rdp

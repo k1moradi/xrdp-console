@@ -2890,7 +2890,7 @@ ModuleContext::check_h264_gfx() noexcept
     using xrdp_console::rdp::GfxAvc420Command;
     using xrdp_console::rdp::GfxSolidFillCommand;
     using xrdp_console::rdp::GfxSurfaceToSurfaceCommand;
-    using xrdp_console::rdp::buildGfxAvc420Command;
+    using xrdp_console::rdp::buildGfxAvc420CommandSharedRectangles;
     using xrdp_console::rdp::buildGfxSolidFillCommand;
     using xrdp_console::rdp::buildGfxSurfaceToSurfaceCommand;
     using xrdp_console::rdp::updateNv12Rectangle_709FullRange;
@@ -3824,14 +3824,14 @@ ModuleContext::check_h264_gfx() noexcept
         // With no cache commands to insert, splicing would only validate and
         // copy this exact frame into the submission buffer. Serialize there
         // directly instead.
-        encodedCommandBytes = buildGfxAvc420Command(
+        encodedCommandBytes = buildGfxAvc420CommandSharedRectangles(
             command, std::span(commandBytes).subspan(commandPrefixBytes));
     }
     else
     {
         std::array<std::byte, kMaximumH264CommandBytes> frameCommandBytes;
         const std::size_t baseCommandBytes =
-            buildGfxAvc420Command(command, frameCommandBytes);
+            buildGfxAvc420CommandSharedRectangles(command, frameCommandBytes);
         encodedCommandBytes =
             baseCommandBytes == 0
                 ? 0
