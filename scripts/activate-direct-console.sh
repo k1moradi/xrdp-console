@@ -9,7 +9,9 @@ usage()
     cat <<EOF
 Usage:
   sudo $0
+  sudo $0 --backup
   sudo $0 --preflight
+  sudo $0 --preflight --backup
   sudo $0 --rollback BACKUP_DIRECTORY
 
 Activation preserves the RDP listener configuration on port 3389. It can
@@ -27,7 +29,9 @@ Client scaled-output, scroll-reuse, and verified bitmap caching are
 requested by default, subject to negotiated capabilities and per-path safety checks.
 Cache observation is diagnostic-only and opt-in. Set an individual
 XRDP_CONSOLE_CLIENT_* variable to exactly 0 in the xrdp service environment
-to disable that path. A root-only backup is printed for explicit rollback.
+to disable that path. A rollback backup is disabled by default; pass --backup
+to save the current configuration, binaries, service overrides, and service
+state for explicit rollback.
 EOF
 }
 
@@ -264,29 +268,38 @@ rollback()
 }
 
 preflight_only=0
-case "${1:-}" in
-    --help|-h)
-        usage
-        exit 0
-        ;;
-    --rollback)
-        [ "$#" -eq 2 ] || { usage >&2; exit 2; }
-        [ "$(id -u)" -eq 0 ] ||
-            fail "run rollback as root (for example, with sudo)"
-        rollback "$2"
-        exit 0
-        ;;
-    --preflight)
-        [ "$#" -eq 1 ] || { usage >&2; exit 2; }
-        preflight_only=1
-        ;;
-    "")
-        ;;
-    *)
-        usage >&2
-        exit 2
-        ;;
-esac
+backup_enabled=0
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --help|-h)
+            [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+            usage
+            exit 0
+            ;;
+        --preflight)
+            [ "$preflight_only" -eq 0 ] || { usage >&2; exit 2; }
+            preflight_only=1
+            ;;
+        --backup)
+            [ "$backup_enabled" -eq 0 ] || { usage >&2; exit 2; }
+            backup_enabled=1
+            ;;
+        --rollback)
+            [ "$#" -eq 2 ] &&
+                [ "$preflight_only" -eq 0 ] &&
+                [ "$backup_enabled" -eq 0 ] || { usage >&2; exit 2; }
+            [ "$(id -u)" -eq 0 ] ||
+                fail "run rollback as root (for example, with sudo)"
+            rollback "$2"
+            exit 0
+            ;;
+        *)
+            usage >&2
+            exit 2
+            ;;
+    esac
+    shift
+done
 
 [ "$(id -u)" -eq 0 ] || fail "run as root (for example, with sudo)"
 [ -x "$daemon" ] || fail "missing pinned xrdp daemon: $daemon"
@@ -405,41 +418,51 @@ if [ "$preflight_only" -eq 1 ]; then
     else
         echo "No previous chansrv target exists; activation will install: $chansrv_target"
     fi
+    if [ "$backup_enabled" -eq 1 ]; then
+        echo "Rollback backup: requested; it will be created only if activation proceeds."
+    else
+        echo "Rollback backup: disabled (default); use --backup to save the current state."
+    fi
     exit 0
 fi
 
-stamp=$(date +%Y%m%d-%H%M%S)
-install -d -m 0700 "$backup_root"
-backup_directory=$(mktemp -d "$backup_root/direct-console-$stamp.XXXXXX") ||
-    fail "could not create a unique rollback directory under $backup_root"
-cp -a -- "$config" "$backup_directory/xrdp.ini"
-: >"$backup_directory/service-state-v2"
-if systemctl is-active --quiet xrdp.service; then
-    : >"$backup_directory/xrdp-was-active"
+backup_directory=
+if [ "$backup_enabled" -eq 1 ]; then
+    stamp=$(date +%Y%m%d-%H%M%S)
+    install -d -m 0700 "$backup_root"
+    backup_directory=$(mktemp -d "$backup_root/direct-console-$stamp.XXXXXX") ||
+        fail "could not create a unique rollback directory under $backup_root"
+    cp -a -- "$config" "$backup_directory/xrdp.ini"
+    : >"$backup_directory/service-state-v2"
+    if systemctl is-active --quiet xrdp.service; then
+        : >"$backup_directory/xrdp-was-active"
+    fi
+    if systemctl is-active --quiet xrdp-sesman.service; then
+        : >"$backup_directory/sesman-was-active"
+    fi
+    if systemctl is-active --quiet xrdp-console-chansrv.service; then
+        : >"$backup_directory/chansrv-was-active"
+    fi
+    if [ -e "$module_target" ] || [ -L "$module_target" ]; then
+        cp -a -- "$module_target" "$backup_directory/libxrdp_console.so"
+        : >"$backup_directory/module-existed"
+    fi
+    if [ -e "$chansrv_target" ] || [ -L "$chansrv_target" ]; then
+        cp -a -- "$chansrv_target" "$backup_directory/xrdp-chansrv"
+        : >"$backup_directory/chansrv-existed"
+    fi
+    if [ -e "$dropin" ]; then
+        cp -a -- "$dropin" "$backup_directory/upstream-local.conf"
+        : >"$backup_directory/dropin-existed"
+    fi
+    if [ -e "$sesman_dropin" ]; then
+        cp -a -- "$sesman_dropin" "$backup_directory/sesman-upstream-local.conf"
+        : >"$backup_directory/sesman-dropin-existed"
+    fi
+    echo "Rollback backup: $backup_directory"
+else
+    echo "Rollback backup disabled; activation failures will not be automatically rolled back."
 fi
-if systemctl is-active --quiet xrdp-sesman.service; then
-    : >"$backup_directory/sesman-was-active"
-fi
-if systemctl is-active --quiet xrdp-console-chansrv.service; then
-    : >"$backup_directory/chansrv-was-active"
-fi
-if [ -e "$module_target" ] || [ -L "$module_target" ]; then
-    cp -a -- "$module_target" "$backup_directory/libxrdp_console.so"
-    : >"$backup_directory/module-existed"
-fi
-if [ -e "$chansrv_target" ] || [ -L "$chansrv_target" ]; then
-    cp -a -- "$chansrv_target" "$backup_directory/xrdp-chansrv"
-    : >"$backup_directory/chansrv-existed"
-fi
-if [ -e "$dropin" ]; then
-    cp -a -- "$dropin" "$backup_directory/upstream-local.conf"
-    : >"$backup_directory/dropin-existed"
-fi
-if [ -e "$sesman_dropin" ]; then
-    cp -a -- "$sesman_dropin" "$backup_directory/sesman-upstream-local.conf"
-    : >"$backup_directory/sesman-dropin-existed"
-fi
-echo "Rollback backup: $backup_directory"
 
 activation_finalized=0
 rollback_failed_activation()
@@ -447,9 +470,13 @@ rollback_failed_activation()
     result=$?
     if [ "$result" -ne 0 ] && [ "$activation_finalized" -eq 0 ]; then
         trap - EXIT HUP INT TERM
-        echo "Activation failed; restoring the previous xrdp state." >&2
-        rollback "$backup_directory" ||
-            echo "Automatic rollback failed; backup remains at $backup_directory" >&2
+        if [ "$backup_enabled" -eq 1 ]; then
+            echo "Activation failed; restoring the previous xrdp state." >&2
+            rollback "$backup_directory" ||
+                echo "Automatic rollback failed; backup remains at $backup_directory" >&2
+        else
+            echo "Activation failed without a rollback backup; manual recovery may be required." >&2
+        fi
     fi
 }
 trap rollback_failed_activation EXIT
@@ -686,5 +713,9 @@ echo "RemoteFX is negotiated only when the client supports the module's standard
 echo "Client scaled-output, scroll-reuse, and verified-cache optimizations default to enabled when negotiated capabilities permit."
 echo "Bitmap-cache observation is diagnostic-only and remains disabled unless XRDP_CONSOLE_CLIENT_CACHE_OBSERVE=1 is set."
 echo "No client capabilities are forced or advertised by this setting; set an individual XRDP_CONSOLE_CLIENT_* variable to exactly 0 to disable that path."
-echo "Rollback: sudo $0 --rollback $backup_directory"
+if [ "$backup_enabled" -eq 1 ]; then
+    echo "Rollback: sudo $0 --rollback $backup_directory"
+else
+    echo "No rollback backup was created (default); pass --backup on activation to enable rollback."
+fi
 systemctl --no-pager --full status xrdp | sed -n '1,18p'

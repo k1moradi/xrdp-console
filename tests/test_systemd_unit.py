@@ -27,10 +27,14 @@ class DirectConsoleServiceTests(unittest.TestCase):
         )
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
         self.assertIn("--preflight", help_result.stdout)
+        self.assertIn("--backup", help_result.stdout)
 
         for arguments in (
             ("--unknown",),
             ("--preflight", "extra"),
+            ("--backup", "extra"),
+            ("--preflight", "--preflight"),
+            ("--backup", "--backup"),
             ("--rollback",),
         ):
             with self.subTest(arguments=arguments):
@@ -100,6 +104,18 @@ class DirectConsoleServiceTests(unittest.TestCase):
         self.assertIn("requested by default", text)
         self.assertIn("diagnostic-only", text)
         self.assertIn("No client capabilities are forced", text)
+
+    def test_activation_rollback_backup_is_opt_in(self):
+        text = ACTIVATION.read_text(encoding="utf-8")
+        self.assertIn("backup_enabled=0", text)
+        backup_guard = text.index('if [ "$backup_enabled" -eq 1 ]; then\n    stamp=')
+        backup_creation = text.index('install -d -m 0700 "$backup_root"')
+        self.assertLess(backup_guard, backup_creation)
+        self.assertIn(
+            "Rollback backup disabled; activation failures will not be automatically rolled back.",
+            text,
+        )
+        self.assertIn("manual recovery may be required", text)
 
     def test_activation_can_repair_stopped_runtime_transactionally(self):
         activation = ACTIVATION.read_text(encoding="utf-8")

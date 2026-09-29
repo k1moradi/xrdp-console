@@ -292,22 +292,31 @@ sudo env XRDP_CONSOLE_BUILD_DIR="$PWD/build-direct-console" \
   scripts/activate-direct-console.sh
 ```
 
+By default, activation does not make a persistent rollback backup. To save the
+current configuration, installed module/chansrv binaries, service overrides,
+and prior service state for rollback, opt in explicitly:
+
+```sh
+sudo env XRDP_CONSOLE_BUILD_DIR="$PWD/build-direct-console" \
+  scripts/activate-direct-console.sh --backup
+```
+
 Activation validates the built daemon/sesman/module, checks the embedded build
-revision, preserves port `3389`, backs up the existing configuration, runtime
-files, xrdp and sesman service drop-ins, and prior active/inactive service
-state, installs the tested module plus matching pinned chansrv, updates the
+revision, preserves port `3389`, installs the tested module plus matching pinned
+chansrv, updates the
 `[Console]` profile to module code `21`, starts the pinned sesman dependency
 with xrdp, then starts chansrv and verifies the complete runtime plus the RDP
 listener. A missing previous `/usr/local/sbin/xrdp-chansrv` is treated as a
 first install, not as an error.
 
-The script prints a root-only backup directory such as:
+With `--backup`, the script prints a root-only backup directory such as:
 
 ```text
 /var/backups/xrdp-console/direct-console-YYYYMMDD-HHMMSS
 ```
 
-Keep that exact path for rollback.
+Keep that exact path for rollback. Without `--backup`, activation failures are
+not automatically rolled back and manual recovery may be required.
 
 ### Roll back
 
