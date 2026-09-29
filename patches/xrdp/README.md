@@ -199,13 +199,18 @@ historical fork's commit history:
     Successful responses reuse the converted image; large INCR responses are
     drained serially after the requestor acknowledges each zero-length
     terminator, so one global chansrv INCR transfer state is never overwritten.
+32. `0032-xrdp-chansrv-wait-for-image-incr-terminator-delete.patch` prevents
+    the `PropertyDelete` that causes chansrv to write an INCR zero-length
+    terminator from also being mistaken for the requestor's acknowledgement
+    of that terminator. Queued image selections are drained only after the
+    subsequent matching property deletion.
 
 The activation script requires the `XRDP_CONSOLE_GFX_PLANAR_BATCH_V1` marker
 in the candidate daemon, so an older patched generation cannot be mistaken
 for this Planar batching implementation.
 
 Do not add benchmark instrumentation or first-party runtime code here. These
-thirty-one patches are retained direct-Console production behavior and bounded
+thirty-two patches are retained direct-Console production behavior and bounded
 operational diagnostics, not benchmark knobs. Code `21` is reserved for the
 direct module; other module codes retain upstream behavior. The old checked-in
 fork contained profiling, parser-quantum, request-ahead,

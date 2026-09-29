@@ -1,0 +1,13 @@
+diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -3482,7 +3482,7 @@ clipboard_event_property_notify(XEvent *xevent)
+             }
+         }
+     }
+-    if (g_image_incr_terminator_pending &&
++    else if (g_image_incr_terminator_pending &&
+             xevent->xproperty.window == g_image_incr_terminator_window &&
+             xevent->xproperty.atom == g_image_incr_terminator_property &&
+             xevent->xproperty.state == PropertyDelete)
+     {

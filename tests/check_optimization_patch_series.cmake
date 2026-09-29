@@ -7,9 +7,11 @@ set(h264_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0019-xrdp-console-h264-a
 set(pacing_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0020-xrdp-console-adaptive-gfx-pacing.patch")
 set(image_retry_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0030-xrdp-chansrv-retry-image-clipboard-data.patch")
 set(image_waiters_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0031-xrdp-chansrv-coalesce-image-selection-requests.patch")
+set(image_incr_terminator_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0032-xrdp-chansrv-wait-for-image-incr-terminator-delete.patch")
 
 foreach(required IN ITEMS "${series_file}" "${h264_patch}" "${pacing_patch}"
-        "${image_retry_patch}" "${image_waiters_patch}")
+        "${image_retry_patch}" "${image_waiters_patch}"
+        "${image_incr_terminator_patch}")
     if(NOT EXISTS "${required}")
         message(FATAL_ERROR "required optimization patch input is missing: ${required}")
     endif()
@@ -28,12 +30,18 @@ endif()
 
 list(FIND series_lines "0030-xrdp-chansrv-retry-image-clipboard-data.patch" image_retry_index)
 list(FIND series_lines "0031-xrdp-chansrv-coalesce-image-selection-requests.patch" image_waiters_index)
-if(image_retry_index LESS 0 OR image_waiters_index LESS 0)
-    message(FATAL_ERROR "xrdp image clipboard patches 0030/0031 are not both in series")
+list(FIND series_lines "0032-xrdp-chansrv-wait-for-image-incr-terminator-delete.patch" image_incr_terminator_index)
+if(image_retry_index LESS 0 OR image_waiters_index LESS 0 OR
+        image_incr_terminator_index LESS 0)
+    message(FATAL_ERROR "xrdp image clipboard patches 0030/0031/0032 are not all in series")
 endif()
 math(EXPR expected_image_waiters_index "${image_retry_index} + 1")
 if(NOT image_waiters_index EQUAL expected_image_waiters_index)
     message(FATAL_ERROR "image selection coalescing patch must immediately follow image retry patch")
+endif()
+math(EXPR expected_image_incr_terminator_index "${image_waiters_index} + 1")
+if(NOT image_incr_terminator_index EQUAL expected_image_incr_terminator_index)
+    message(FATAL_ERROR "INCR terminator ordering fix must immediately follow image waiter patch")
 endif()
 
 file(READ "${h264_patch}" h264_text)
@@ -46,6 +54,13 @@ foreach(marker IN ITEMS
         message(FATAL_ERROR "H.264 xrdp patch is missing contract/test marker: ${marker}")
     endif()
 endforeach()
+
+file(READ "${image_incr_terminator_patch}" image_incr_terminator_text)
+string(FIND "${image_incr_terminator_text}"
+    "else if (g_image_incr_terminator_pending &&" image_incr_terminator_marker_index)
+if(image_incr_terminator_marker_index LESS 0)
+    message(FATAL_ERROR "image INCR terminator patch must make the acknowledgement check an else-if")
+endif()
 
 file(READ "${image_waiters_patch}" image_waiters_text)
 foreach(marker IN ITEMS
