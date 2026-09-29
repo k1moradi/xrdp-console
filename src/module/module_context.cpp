@@ -1056,6 +1056,12 @@ struct ModuleContext::Impl
     std::uint32_t h264SubmittedFrameId{};
     Clock::time_point h264SubmittedAt{};
     std::uint64_t h264SubmittedScrollBaselineSequence{};
+    // A direct H.264 service failure is recoverable until a frame has been
+    // accepted by xrdp but not recorded in our generation bookkeeping.
+    bool h264FailureFallbackSafe{false};
+    // If an older H.264 frame is still in flight, defer the transport switch
+    // until its acknowledgement releases the producer slot.
+    bool h264FallbackPending{false};
     // A non-owning sourcePixels view pins the XShm arena until all bounded
     // scaled output rows for this source tile have been written to NV12.
     PendingH264Tile pendingH264Tile{};
@@ -1099,6 +1105,70 @@ struct ModuleContext::Impl
     void disarmPresentation() noexcept
     {
         presentationDeadlineArmed = false;
+    }
+
+    [[nodiscard]] bool fallbackH264ToServerGraphics() noexcept
+    {
+        if (!h264FailureFallbackSafe ||
+            graphicsTransport != GraphicsTransport::H264Gfx ||
+            !h264Frame.valid() || h264Frame.frameInFlight() ||
+            h264Frame.presentationGeometry() != state.presentationGeometry ||
+            state.sourceGeometry.widthPixels == 0 ||
+            state.sourceGeometry.heightPixels == 0 ||
+            state.presentationGeometry.widthPixels == 0 ||
+            state.presentationGeometry.heightPixels == 0 ||
+            !rdpUpdateSink.available())
+        {
+            return false;
+        }
+
+        // Direct H.264 normally uses xrdp's primary presentation-sized GFX
+        // surface. If its geometry still matches the client presentation,
+        // xrdp's existing server-selected graphics path can take over without
+        // recreating the RDP connection. Client-scaled mode configures a
+        // different H.264 presentation geometry and is rejected above.
+        PresentationTransform fallbackTransform;
+        if (!fallbackTransform.configure(state.sourceGeometry,
+                                         state.presentationGeometry))
+        {
+            return false;
+        }
+        PresentationScaler fallbackScaler;
+        if (!fallbackScaler.configure(state.sourceGeometry,
+                                      state.presentationGeometry,
+                                      fallbackTransform.viewport()))
+        {
+            return false;
+        }
+
+        pendingPresentation.clear();
+        pendingH264Snapshot.clear();
+        pendingH264Tile.clear();
+        pendingRfx.clear();
+        rfxLetterboxFill.clear();
+        verifiedBitmapCache.disable();
+        pendingBitmapCacheHit.clear();
+        scrollMotionObserver.reset();
+        bitmapCacheObserver.reset();
+        h264Frame.reset();
+        h264SubmittedFrameId = 0;
+        h264SubmittedAt = {};
+        h264SubmittedScrollBaselineSequence = 0;
+        clientScaledOutputResizeRearmPending = false;
+        presentationTransform = std::move(fallbackTransform);
+        presentationScaler = std::move(fallbackScaler);
+        graphicsTransport = GraphicsTransport::ClassicBitmap;
+
+        damageRegion.clear();
+        damageRegion.add(
+            {0, 0, state.sourceGeometry.widthPixels,
+             state.sourceGeometry.heightPixels},
+            state.sourceGeometry);
+        fullPresentationInvalidation = true;
+        h264FallbackPending = false;
+        h264FailureFallbackSafe = false;
+        armPresentationImmediately();
+        return true;
     }
 
     [[nodiscard]] bool preparePresentationInvalidation() noexcept
@@ -2306,7 +2376,8 @@ ModuleContext::frame_ack(int flags, int frame_id) noexcept
         impl_->h264SubmittedAt = {};
 
         if (!impl_->outputSuppressed &&
-            (impl_->h264Frame.capturePending() ||
+            (impl_->h264FallbackPending ||
+             impl_->h264Frame.capturePending() ||
              impl_->h264Frame.transmissionPending() ||
              impl_->h264Frame.baselineSubmissionPending() ||
              (impl_->damageTracker != nullptr &&
@@ -2345,6 +2416,8 @@ ModuleContext::end() noexcept
     impl_->h264SubmittedFrameId = 0;
     impl_->h264SubmittedAt = {};
     impl_->h264SubmittedScrollBaselineSequence = 0;
+    impl_->h264FailureFallbackSafe = false;
+    impl_->h264FallbackPending = false;
     impl_->graphicsTransport = GraphicsTransport::ClassicBitmap;
     impl_->h264CoherentCaptureAvailable = false;
     impl_->sharedMemoryCapture.reset();
@@ -2895,6 +2968,10 @@ ModuleContext::check_h264_gfx() noexcept
     using xrdp_console::rdp::buildGfxSurfaceToSurfaceCommand;
     using xrdp_console::rdp::updateNv12Rectangle_709FullRange;
     using xrdp_console::rdp::updateNv12RectangleFromBgraRegion_709FullRange;
+
+    // Until xrdp accepts a new asynchronous submission, any failure in this
+    // service pass can safely abandon direct H.264 and repaint via GFX Planar.
+    impl_->h264FailureFallbackSafe = true;
 
     if (!valid() || !impl_->h264Frame.valid() ||
         impl_->damageTracker == nullptr || !impl_->damageTracker->valid() ||
@@ -3873,6 +3950,10 @@ ModuleContext::check_h264_gfx() noexcept
     {
         return 1;
     }
+
+    // xrdp now owns an accepted asynchronous frame. If local submission
+    // bookkeeping fails below, switching producers would be unsafe.
+    impl_->h264FailureFallbackSafe = false;
     if (!impl_->h264Frame.noteSubmitted(
             frameId,
             std::span<const GenerationTileMap::Selection>(
@@ -4119,7 +4200,65 @@ ModuleContext::check_wait_objs() noexcept
 
     if (impl_->graphicsTransport == GraphicsTransport::H264Gfx)
     {
-        return check_h264_gfx();
+        if (impl_->h264FallbackPending)
+        {
+            if (impl_->h264Frame.frameInFlight())
+            {
+                impl_->profile.maybeLog();
+                return 0;
+            }
+            if (impl_->fallbackH264ToServerGraphics())
+            {
+                log_message(
+                    LOG_LEVEL_ERROR,
+                    "XRDP_CONSOLE_H264_RECOVERY event=deferred-failure "
+                    "action=fallback-gfx-planar");
+                return 0;
+            }
+            log_message(
+                LOG_LEVEL_ERROR,
+                "XRDP_CONSOLE_H264_RECOVERY event=deferred-failure "
+                "action=disconnect reason=fallback-unavailable");
+            return 1;
+        }
+
+        const int h264Result = check_h264_gfx();
+        if (h264Result == 0)
+        {
+            return 0;
+        }
+        if (!impl_->h264FailureFallbackSafe)
+        {
+            log_message(
+                LOG_LEVEL_ERROR,
+                "XRDP_CONSOLE_H264_RECOVERY event=service-failure "
+                "action=disconnect reason=submission-state-uncertain");
+            return h264Result;
+        }
+
+        impl_->h264FallbackPending = true;
+        if (impl_->h264Frame.frameInFlight())
+        {
+            log_message(
+                LOG_LEVEL_ERROR,
+                "XRDP_CONSOLE_H264_RECOVERY event=service-failure "
+                "action=defer-gfx-planar reason=frame-in-flight");
+            impl_->profile.maybeLog();
+            return 0;
+        }
+        if (impl_->fallbackH264ToServerGraphics())
+        {
+            log_message(
+                LOG_LEVEL_ERROR,
+                "XRDP_CONSOLE_H264_RECOVERY event=service-failure "
+                "action=fallback-gfx-planar");
+            return 0;
+        }
+        log_message(
+            LOG_LEVEL_ERROR,
+            "XRDP_CONSOLE_H264_RECOVERY event=service-failure "
+            "action=disconnect reason=fallback-unavailable");
+        return h264Result;
     }
     if (impl_->graphicsTransport == GraphicsTransport::RemoteFx)
     {
