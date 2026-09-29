@@ -1,0 +1,38 @@
+diff --git a/sesman/chansrv/clipboard_image_formats.h b/sesman/chansrv/clipboard_image_formats.h
+--- a/sesman/chansrv/clipboard_image_formats.h
++++ b/sesman/chansrv/clipboard_image_formats.h
+@@ -64,9 +64,14 @@ xrdp_clipboard_image_format_from_announce(uint32_t format_id,
+     {
+         return XRDP_CLIPBOARD_IMAGE_DIBV5;
+     }
+-    if (format_id >= 0xc000 &&
+-            (xrdp_clipboard_ascii_equal_ignore_case(format_name, "PNG") ||
+-             xrdp_clipboard_ascii_equal_ignore_case(format_name, "image/png")))
++    /*
++     * CLIPRDR long-format IDs are assigned by the peer. Cross-platform
++     * clients are not required to mirror the local Win32 registered-format
++     * numeric range, so the exact long format name is authoritative here.
++     * Standard CF_DIB/CF_DIBV5 IDs were handled above and keep precedence.
++     */
++    if (xrdp_clipboard_ascii_equal_ignore_case(format_name, "PNG") ||
++            xrdp_clipboard_ascii_equal_ignore_case(format_name, "image/png"))
+     {
+         return XRDP_CLIPBOARD_IMAGE_PNG;
+     }
+diff --git a/tests/xrdp/test_xrdp_region.c b/tests/xrdp/test_xrdp_region.c
+--- a/tests/xrdp/test_xrdp_region.c
++++ b/tests/xrdp/test_xrdp_region.c
+@@ -706,9 +706,12 @@ test_clipboard_image_format_negotiation(void **state)
+     assert_int_equal(XRDP_CLIPBOARD_IMAGE_PNG,
+                      xrdp_clipboard_image_format_from_announce(
+                          0xc123, "image/PNG"));
+-    assert_int_equal(XRDP_CLIPBOARD_IMAGE_NONE,
++    assert_int_equal(XRDP_CLIPBOARD_IMAGE_PNG,
+                      xrdp_clipboard_image_format_from_announce(
+                          0x1234, "PNG"));
++    assert_int_equal(XRDP_CLIPBOARD_IMAGE_PNG,
++                     xrdp_clipboard_image_format_from_announce(
++                         42, "image/png"));
+     assert_int_equal(XRDP_CLIPBOARD_IMAGE_NONE,
+                      xrdp_clipboard_image_format_from_announce(
+                          0xc123, "JPEG"));
