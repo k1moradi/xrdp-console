@@ -293,7 +293,8 @@ PresentationScaler::configure(PixelSize source, PixelSize presentation,
         smallDownscale && (replacementAreaFilterX || replacementAreaFilterY) &&
         !replacementFastBoxFilter;
     const bool replacementFastVerticalFilter =
-        replacementTwoSampleFilter && !replacementAreaFilterX;
+        replacementTwoSampleFilter && !replacementAreaFilterX &&
+        source.widthPixels == viewport.widthPixels;
     const bool replacementFastDiagonalFilter =
         replacementTwoSampleFilter && !replacementFastVerticalFilter;
 
@@ -619,6 +620,87 @@ PresentationScaler::scaleRows(FramebufferView source,
 
     if (!areaFilterX_ && !areaFilterY_)
     {
+        // A sharp near-identity horizontal shrink can only remove one or two
+        // source pixels. Its nearest-neighbour mapping is therefore one
+        // contiguous run for a one-pixel shrink, or two contiguous runs split
+        // at ceil(viewportWidth / 2) for a two-pixel shrink. Copy wide output
+        // slices in bulk; keep narrow slices on the scalar gather below, where
+        // one or two memcpy calls cost more than the saved span lookups.
+        const bool tinyHorizontalShrink =
+            sourceGeometry_.widthPixels > viewport_.widthPixels &&
+            sourceGeometry_.widthPixels - viewport_.widthPixels <= 2U;
+        if (tinyHorizontalShrink && outputWidth >= 64U)
+        {
+            const std::uint32_t horizontalShrink =
+                sourceGeometry_.widthPixels - viewport_.widthPixels;
+            const std::uint32_t outputPast = viewportLocalLeft + outputWidth;
+            const std::uint32_t split =
+                horizontalShrink == 2U
+                    ? (viewport_.widthPixels + 1U) / 2U
+                    : viewport_.widthPixels;
+
+            for (std::uint32_t localY = 0; localY < presentationRowCount;
+                 ++localY)
+            {
+                const std::uint32_t viewportY = viewportLocalTop +
+                                                firstPresentationRow + localY;
+                const std::uint32_t globalY =
+                    verticalSpans_[viewportY].firstSourcePixel;
+                if (globalY < sourceTop || globalY >= sourceBottom)
+                {
+                    return {};
+                }
+                const auto *sourceRow =
+                    reinterpret_cast<const std::uint32_t *>(
+                        source.pixels.data() +
+                        static_cast<std::size_t>(globalY - sourceTop) *
+                            source.strideBytes);
+                auto *destinationRow =
+                    pixels_.data() +
+                    static_cast<std::size_t>(localY) * outputWidth;
+
+                const std::uint32_t firstRunPast =
+                    std::min(outputPast, split);
+                if (viewportLocalLeft < firstRunPast)
+                {
+                    const std::uint32_t firstSourceOffset =
+                        firstHorizontal.firstSourcePixel - sourceLeft;
+                    std::memcpy(
+                        destinationRow,
+                        sourceRow + firstSourceOffset,
+                        static_cast<std::size_t>(firstRunPast -
+                                                 viewportLocalLeft) *
+                            kBytesPerPixel);
+                }
+
+                const std::uint32_t secondRunFirst =
+                    std::max(viewportLocalLeft, split);
+                if (secondRunFirst < outputPast)
+                {
+                    const std::uint32_t destinationOffset =
+                        secondRunFirst - viewportLocalLeft;
+                    const std::uint32_t secondSourceOffset =
+                        horizontalSpans_[secondRunFirst].firstSourcePixel -
+                        sourceLeft;
+                    std::memcpy(
+                        destinationRow + destinationOffset,
+                        sourceRow + secondSourceOffset,
+                        static_cast<std::size_t>(outputPast - secondRunFirst) *
+                            kBytesPerPixel);
+                }
+            }
+
+            return {
+                std::span<const std::byte>(
+                    reinterpret_cast<const std::byte *>(pixels_.data()),
+                    static_cast<std::size_t>(presentationRowCount) *
+                        destinationStride),
+                outputWidth,
+                presentationRowCount,
+                destinationStride,
+            };
+        }
+
         const bool horizontalIdentity =
             sourceGeometry_.widthPixels == viewport_.widthPixels;
         const std::uint32_t horizontalSourceOffset =

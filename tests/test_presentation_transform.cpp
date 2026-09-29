@@ -987,6 +987,103 @@ near_identity_downscale_preserves_sharp_pixels()
         }
     }
 
+    // Exercise the bulk-copy path on a partial capture whose 64 output pixels
+    // straddle the one internal source-pixel gap in the 1366-to-1364 mapping.
+    // A nonzero source origin verifies that each run is rebased correctly.
+    const Rectangle partialSourceRectangle{651, 0, 65, 1};
+    const Rectangle partialPresentationRectangle{651, 2, 64, 1};
+    const std::vector<std::uint32_t> partialSourcePixels(
+        sourcePixels.begin() + 651, sourcePixels.begin() + 716);
+    const std::vector<std::uint32_t> partialPixels = pixels_of(
+        scaler.scaleRows(view_of(partialSourcePixels, 65, 1),
+                         partialSourceRectangle, partialPresentationRectangle,
+                         0, 1));
+    if (!check(partialPixels.size() == 64,
+               "near-identity partial row produced the wrong width"))
+    {
+        return false;
+    }
+    for (std::uint32_t x = 0; x < 64U; ++x)
+    {
+        const std::uint32_t outputX = 651U + x;
+        const std::uint32_t sourceX = static_cast<std::uint32_t>(
+            (static_cast<std::uint64_t>(outputX) * sourceSize.widthPixels) /
+            viewport.widthPixels);
+        if (!check(partialPixels[x] == sourcePixels[sourceX],
+                   "near-identity partial copy crossed a source gap"))
+        {
+            return false;
+        }
+    }
+
+    // A capture can begin after the skipped source pixel. Its first viewport
+    // coordinate is then smaller than sourceRectangle.x; base the source row
+    // on the validated mapped span rather than subtracting absolute values in
+    // pointer arithmetic.
+    const Rectangle postGapSourceRectangle{683, 0, 64, 1};
+    const Rectangle postGapPresentationRectangle{682, 2, 64, 1};
+    const std::vector<std::uint32_t> postGapSourcePixels(
+        sourcePixels.begin() + 683, sourcePixels.begin() + 747);
+    const std::vector<std::uint32_t> postGapPixels = pixels_of(
+        scaler.scaleRows(view_of(postGapSourcePixels, 64, 1),
+                         postGapSourceRectangle, postGapPresentationRectangle,
+                         0, 1));
+    if (!check(postGapPixels.size() == 64,
+               "post-gap near-identity partial row produced the wrong width"))
+    {
+        return false;
+    }
+    for (std::uint32_t x = 0; x < 64U; ++x)
+    {
+        const std::uint32_t outputX = 682U + x;
+        const std::uint32_t sourceX = static_cast<std::uint32_t>(
+            (static_cast<std::uint64_t>(outputX) * sourceSize.widthPixels) /
+            viewport.widthPixels);
+        if (!check(postGapPixels[x] == sourcePixels[sourceX],
+                   "post-gap partial copy used an invalid source offset"))
+        {
+            return false;
+        }
+    }
+
+    // The vertical SIMD path requires true horizontal identity. A sharp tiny
+    // horizontal shrink must still honor its nearest-neighbour X mapping when
+    // the vertical axis uses the two-sample filter.
+    PresentationScaler mixedAxisScaler;
+    std::vector<std::uint32_t> mixedAxisSource(1366U * 2U);
+    for (std::uint32_t y = 0; y < 2U; ++y)
+    {
+        for (std::uint32_t x = 0; x < 1366U; ++x)
+        {
+            mixedAxisSource[static_cast<std::size_t>(y) * 1366U + x] =
+                0xff000000U | x;
+        }
+    }
+    if (!check(mixedAxisScaler.configure({1366, 4}, {1364, 2},
+                                         {0, 0, 1364, 2}),
+               "mixed-axis near-identity configuration failed"))
+    {
+        return false;
+    }
+    const std::vector<std::uint32_t> mixedAxisPixels = pixels_of(
+        mixedAxisScaler.scaleRows(view_of(mixedAxisSource, 1366, 2),
+                                  {0, 0, 1366, 2}, {0, 0, 1364, 1}, 0, 1));
+    if (!check(mixedAxisPixels.size() == 1364,
+               "mixed-axis near-identity row produced the wrong width"))
+    {
+        return false;
+    }
+    for (std::uint32_t x = 0; x < 1364U; ++x)
+    {
+        const std::uint32_t sourceX = static_cast<std::uint32_t>(
+            (static_cast<std::uint64_t>(x) * 1366U) / 1364U);
+        if (!check(mixedAxisPixels[x] == (0xff000000U | sourceX),
+                   "mixed-axis vertical filter changed horizontal mapping"))
+        {
+            return false;
+        }
+    }
+
     // Two pixels is not intrinsically a tiny shrink. A small 6-to-4 axis is
     // a real downscale and must retain area filtering rather than aliasing.
     PresentationScaler materialDownscale;
