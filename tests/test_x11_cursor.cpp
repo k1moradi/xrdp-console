@@ -9,10 +9,43 @@
 #include <cstdio>
 #include <cstdlib>
 #include <poll.h>
+#include <sys/socket.h>
 #include <vector>
 
 namespace
 {
+
+struct CursorImageReplyFault
+{
+    bool injectProtocolError{false};
+};
+
+xcb_xfixes_get_cursor_image_reply_t *
+cursor_image_reply_with_fault(
+    xcb_connection_t *connection,
+    xcb_xfixes_get_cursor_image_cookie_t cookie,
+    xcb_generic_error_t **error,
+    void *context)
+{
+    auto *fault = static_cast<CursorImageReplyFault *>(context);
+    auto *reply = xcb_xfixes_get_cursor_image_reply(connection, cookie, error);
+    if (fault == nullptr || !fault->injectProtocolError || reply == nullptr ||
+        error == nullptr || *error != nullptr)
+    {
+        return reply;
+    }
+
+    std::free(reply);
+    auto *syntheticError = static_cast<xcb_generic_error_t *>(
+        std::calloc(1U, sizeof(xcb_generic_error_t)));
+    if (syntheticError != nullptr)
+    {
+        syntheticError->error_code = XCB_WINDOW;
+        syntheticError->sequence = cookie.sequence;
+    }
+    *error = syntheticError;
+    return nullptr;
+}
 
 bool
 check_request(xcb_connection_t *connection, xcb_void_cookie_t cookie,
@@ -207,16 +240,52 @@ run() noexcept
     }
     const xcb_screen_t *screen = screens.data;
 
-    X11CursorTracker tracker(*connection, screen->root);
-    if (!tracker.valid() || !tracker.pending() || !tracker.refresh())
+    CursorImageReplyFault cursorImageReplyFault{true};
+    X11CursorTracker tracker(*connection, screen->root,
+                             cursor_image_reply_with_fault,
+                             &cursorImageReplyFault);
+    if (!tracker.valid() || !tracker.pending())
     {
-        std::fprintf(stderr, "XFixes cursor setup/capture failed: %s\n",
+        std::fprintf(stderr, "XFixes cursor setup failed: %s\n",
                      tracker.failureReason() != nullptr
                          ? tracker.failureReason()
                          : "unknown error");
         xcb_disconnect(connection);
         return 1;
     }
+
+    // A failure on the first refresh must preserve the client's default
+    // cursor without invalidating the tracker. A later refresh must recover.
+    const bool firstRefreshDegraded = tracker.refresh() && tracker.valid() &&
+        !tracker.hasImage() && tracker.widthPixels() == 0 &&
+        tracker.heightPixels() == 0 &&
+        tracker.refreshFailureReason() != nullptr &&
+        tracker.refreshErrorCode() == XCB_WINDOW &&
+        tracker.refreshConnectionError() == 0 &&
+        tracker.takeRefreshFailureWarning();
+    if (!firstRefreshDegraded)
+    {
+        std::fprintf(stderr,
+                     "initial cursor-image error invalidated the tracker "
+                     "or failed to retain the default cursor\n");
+        xcb_disconnect(connection);
+        return 1;
+    }
+
+    cursorImageReplyFault.injectProtocolError = false;
+    if (!tracker.refresh() || !tracker.valid() || !tracker.hasImage() ||
+        tracker.refreshFailureReason() != nullptr ||
+        tracker.refreshErrorCode() != 0 ||
+        tracker.refreshConnectionError() != 0 ||
+        tracker.takeRefreshFailureWarning())
+    {
+        std::fprintf(stderr,
+                     "cursor tracker did not recover after its initial "
+                     "refresh failure\n");
+        xcb_disconnect(connection);
+        return 1;
+    }
+
     const std::uint64_t area = static_cast<std::uint64_t>(tracker.widthPixels()) *
                                tracker.heightPixels();
     if (tracker.widthPixels() == 0 || tracker.heightPixels() == 0 ||
@@ -239,6 +308,58 @@ run() noexcept
                                                 tracker.pixels().end());
     const std::vector<std::byte> previousMask(tracker.mask().begin(),
                                               tracker.mask().end());
+
+    // A protocol-level cursor-image error must keep the X connection and
+    // session usable, retaining the last good cursor (or the default cursor
+    // before one has been captured). The diagnostic is emitted once until a
+    // later refresh succeeds.
+    cursorImageReplyFault.injectProtocolError = true;
+    const bool cursorErrorRecovered = tracker.refresh() && tracker.valid() &&
+        tracker.hasImage() && tracker.widthPixels() == previousWidth &&
+        tracker.heightPixels() == previousHeight &&
+        tracker.pixels().size() == previousPixels.size() &&
+        tracker.mask().size() == previousMask.size() &&
+        std::equal(tracker.pixels().begin(), tracker.pixels().end(),
+                   previousPixels.begin(), previousPixels.end()) &&
+        std::equal(tracker.mask().begin(), tracker.mask().end(),
+                   previousMask.begin(), previousMask.end()) &&
+        tracker.takeRefreshFailureWarning() &&
+        tracker.refreshFailureReason() != nullptr &&
+        tracker.refreshErrorCode() == XCB_WINDOW &&
+        tracker.refreshConnectionError() == 0;
+    if (!cursorErrorRecovered)
+    {
+        std::fprintf(stderr,
+                     "cursor-image protocol error invalidated the tracker "
+                     "or discarded the last good cursor\n");
+        xcb_disconnect(connection);
+        return 1;
+    }
+
+    const bool repeatedCursorErrorSuppressed = tracker.refresh() &&
+        tracker.valid() && !tracker.takeRefreshFailureWarning();
+    if (!repeatedCursorErrorSuppressed)
+    {
+        std::fprintf(stderr,
+                     "repeated cursor-image errors were not safely "
+                     "rate-limited\n");
+        xcb_disconnect(connection);
+        return 1;
+    }
+
+    cursorImageReplyFault.injectProtocolError = false;
+    if (!tracker.refresh() || !tracker.valid() ||
+        tracker.refreshFailureReason() != nullptr ||
+        tracker.refreshErrorCode() != 0 ||
+        tracker.refreshConnectionError() != 0 ||
+        tracker.takeRefreshFailureWarning())
+    {
+        std::fprintf(stderr,
+                     "successful cursor refresh did not clear its "
+                     "recoverable failure state\n");
+        xcb_disconnect(connection);
+        return 1;
+    }
 
     // A core cursor can be larger than the fixed classic xrdp pointer canvas.
     // Verify that this is treated as a non-fatal fallback and that the last
@@ -325,8 +446,24 @@ run() noexcept
     xcb_free_cursor(connection, cursor);
     const bool flushed = xcb_flush(connection) > 0;
     const bool healthy = xcb_connection_has_error(connection) == 0;
+
+    // A genuine transport loss remains fatal; only recoverable XFixes
+    // request errors are downgraded to a stale/default-cursor fallback.
+    const int connectionFd = xcb_get_file_descriptor(connection);
+    const bool transportClosed = connectionFd >= 0 &&
+        shutdown(connectionFd, SHUT_RDWR) == 0;
+    const bool lostConnectionIsFatal = transportClosed &&
+        !tracker.refresh() && !tracker.valid() &&
+        tracker.failureReason() != nullptr &&
+        tracker.refreshConnectionError() != 0;
     xcb_disconnect(connection);
-    return refreshed && flushed && healthy ? 0 : 1;
+    if (!lostConnectionIsFatal)
+    {
+        std::fprintf(stderr,
+                     "cursor tracker did not fail closed after X connection "
+                     "loss\n");
+    }
+    return refreshed && flushed && healthy && lostConnectionIsFatal ? 0 : 1;
 }
 
 } // namespace

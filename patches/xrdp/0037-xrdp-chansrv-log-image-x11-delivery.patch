@@ -1,0 +1,114 @@
+diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -927,6 +927,18 @@ clipboard_provide_selection_c2s(XSelectionRequestEvent *req, Atom type)
+         xev.xselection.property = req->property;
+         xev.xselection.time = req->time;
+         XSendEvent(g_display, req->requestor, False, NoEventMask, &xev);
++        if (req->target == g_image_bmp_atom ||
++                req->target == g_image_png_atom)
++        {
++            LOG(LOG_LEVEL_INFO,
++                "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-delivery-issued "
++                "path=direct target=%s requestor=0x%lx property=0x%lx "
++                "bytes=%d generation=%llu cache_generation=%llu",
++                get_atom_text(req->target), req->requestor, req->property,
++                g_clip_c2s.total_bytes,
++                (unsigned long long)g_clipboard_format_generation,
++                (unsigned long long)g_image_cached_generation);
++        }
+     }
+     else
+     {
+@@ -956,6 +968,18 @@ clipboard_provide_selection_c2s(XSelectionRequestEvent *req, Atom type)
+         xev.xselection.property = req->property;
+         xev.xselection.time = req->time;
+         XSendEvent(g_display, req->requestor, False, NoEventMask, &xev);
++        if (req->target == g_image_bmp_atom ||
++                req->target == g_image_png_atom)
++        {
++            LOG(LOG_LEVEL_INFO,
++                "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-delivery-issued "
++                "path=incr target=%s requestor=0x%lx property=0x%lx "
++                "bytes=%d generation=%llu cache_generation=%llu",
++                get_atom_text(req->target), req->requestor, req->property,
++                g_clip_c2s.total_bytes,
++                (unsigned long long)g_clipboard_format_generation,
++                (unsigned long long)g_image_cached_generation);
++        }
+     }
+     return 0;
+ }
+@@ -1289,4 +1289,15 @@ clipboard_process_format_announce(struct stream *s, int clip_msg_status,
++    if (g_num_formatIds > 0 &&
++            (g_clip_c2s.incr_in_progress || g_clip_s2c.incr_in_progress))
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=selection-owner-deferred "
++            "generation=%llu current_owner=0x%lx chansrv_window=0x%lx "
++            "c2s_incr=%d s2c_incr=%d",
++            (unsigned long long)g_clipboard_format_generation,
++            XGetSelectionOwner(g_display, g_clipboard_atom), g_wnd,
++            g_clip_c2s.incr_in_progress, g_clip_s2c.incr_in_progress);
++    }
+     if ((g_num_formatIds > 0) &&
+             (g_clip_c2s.incr_in_progress == 0) && /* don't interrupt incr */
+             (g_clip_s2c.incr_in_progress == 0))
+     {
+@@ -2360,2 +2370,9 @@ clipboard_event_selection_owner_notify(XEvent *xevent)
+     lxevent = (XFixesSelectionNotifyEvent *)xevent;
++    LOG(LOG_LEVEL_INFO,
++        "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-owner-change "
++        "owner=0x%lx chansrv_window=0x%lx generation=%llu "
++        "c2s_incr=%d s2c_incr=%d",
++        lxevent->owner, g_wnd,
++        (unsigned long long)g_clipboard_format_generation,
++        g_clip_c2s.incr_in_progress, g_clip_s2c.incr_in_progress);
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_owner_notify: 0x%lx", lxevent->owner);
+@@ -3006,4 +3024,14 @@ clipboard_event_selection_request(XEvent *xevent)
+               get_atom_text(lxev->selection),
+               lxev->target, lxev->property);
++    if (lxev->property != None)
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-request "
++            "target=%s requestor=0x%lx owner=0x%lx selection=0x%lx property=0x%lx "
++            "time=%lu generation=%llu",
++            get_atom_text(lxev->target), lxev->requestor, lxev->owner,
++            lxev->selection, lxev->property, lxev->time,
++            (unsigned long long)g_clipboard_format_generation);
++    }
+ 
+     if (g_image_retry.retry_timeout_pending &&
+@@ -3484,4 +3514,15 @@ clipboard_event_property_notify(XEvent *xevent)
+         if (data_bytes < 1)
+         {
++            if (g_clip_c2s.xrdp_clip_type == XRDP_CB_BITMAP)
++            {
++                LOG(LOG_LEVEL_INFO,
++                    "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-incr-terminator-issued "
++                    "target=%s requestor=0x%lx property=0x%lx "
++                    "current_generation=%llu owner=0x%lx",
++                    get_atom_text(g_clip_c2s.type), xevent->xproperty.window,
++                    xevent->xproperty.atom,
++                    (unsigned long long)g_clipboard_format_generation,
++                    XGetSelectionOwner(g_display, g_clipboard_atom));
++            }
+             LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_property_notify: INCR done");
+             g_clip_c2s.incr_in_progress = 0;
+@@ -3508,8 +3548,15 @@ clipboard_event_property_notify(XEvent *xevent)
+     else if (g_image_incr_terminator_pending &&
+             xevent->xproperty.window == g_image_incr_terminator_window &&
+             xevent->xproperty.atom == g_image_incr_terminator_property &&
+             xevent->xproperty.state == PropertyDelete)
+     {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-incr-terminator-ack "
++            "requestor=0x%lx property=0x%lx terminator_generation=%llu "
++            "current_generation=%llu",
++            xevent->xproperty.window, xevent->xproperty.atom,
++            (unsigned long long)g_image_incr_terminator_generation,
++            (unsigned long long)g_clipboard_format_generation);
+         g_image_incr_terminator_pending = 0;
+         g_image_incr_terminator_window = 0;
+         g_image_incr_terminator_property = None;

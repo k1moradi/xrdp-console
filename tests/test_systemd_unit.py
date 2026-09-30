@@ -108,6 +108,10 @@ class DirectConsoleServiceTests(unittest.TestCase):
     def test_activation_rollback_backup_is_opt_in(self):
         text = ACTIVATION.read_text(encoding="utf-8")
         self.assertIn("backup_enabled=0", text)
+        self.assertIn(
+            'echo "Existing chansrv target will be replaced: $chansrv_target"', text
+        )
+        self.assertNotIn("target will be backed up before replacement", text)
         backup_guard = text.index('if [ "$backup_enabled" -eq 1 ]; then\n    stamp=')
         backup_creation = text.index('install -d -m 0700 "$backup_root"')
         self.assertLess(backup_guard, backup_creation)

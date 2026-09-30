@@ -1,0 +1,52 @@
+diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -3109,3 +3109,10 @@ clipboard_event_selection_request(XEvent *xevent)
+     char *xdata;
++    char target_names[256];
++    int target_names_length;
++    int target_names_remaining;
++    int target_names_written;
++    int target_index;
++    int target_names_truncated;
++    int targets_result;
+ 
+     lxev = (XSelectionRequestEvent *)xevent;
+@@ -3265,5 +3272,35 @@ clipboard_event_selection_request(XEvent *xevent)
+         atom_buf[atom_count] = 0;
+         LOG_DEVEL(LOG_LEVEL_DEBUG, "  reporting %d formats", atom_count);
+-        return clipboard_provide_selection(lxev, XA_ATOM, 32,
+-                                           (char *)atom_buf, atom_count);
++        target_names[0] = '\0';
++        target_names_length = 0;
++        target_names_truncated = 0;
++        for (target_index = 0; target_index < atom_count; ++target_index)
++        {
++            target_names_remaining =
++                (int)sizeof(target_names) - target_names_length;
++            target_names_written = g_snprintf(
++                target_names + target_names_length,
++                target_names_remaining, "%s%s",
++                target_index == 0 ? "" : ",",
++                get_atom_text(atom_buf[target_index]));
++            if (target_names_written < 0 ||
++                    target_names_written >= target_names_remaining)
++            {
++                target_names[sizeof(target_names) - 1] = '\0';
++                target_names_truncated = 1;
++                break;
++            }
++            target_names_length += target_names_written;
++        }
++
++        targets_result = clipboard_provide_selection(
++            lxev, XA_ATOM, 32, (char *)atom_buf, atom_count);
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=targets-response-issued "
++            "requestor=0x%lx generation=%llu target_count=%d "
++            "targets=%s truncated=%d result=%d",
++            lxev->requestor,
++            (unsigned long long)g_clipboard_format_generation,
++            atom_count, target_names, target_names_truncated, targets_result);
++        return targets_result;
+     }

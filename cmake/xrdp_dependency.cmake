@@ -21,6 +21,9 @@ set(XRDP_CONSOLE_XRDP_SOURCE_SHA256
 
 set(XRDP_CONSOLE_XRDP_DEPS_ROOT "${CMAKE_BINARY_DIR}/_deps" CACHE PATH
     "Build root for the generated xrdp dependency")
+set(XRDP_CONSOLE_XRDP_INSTALL_DIR
+    "${XRDP_CONSOLE_XRDP_DEPS_ROOT}/xrdp-install" CACHE PATH
+    "Private xrdp installation prefix")
 
 # ExternalProject stamps are generated state, not source. Make the patch
 # series and its inputs part of that state so a changed patch can never reuse
@@ -113,6 +116,7 @@ set(_xrdp_build_configuration_material
     "CPPFLAGS=${XRDP_CONSOLE_XRDP_CPPFLAGS}\n"
     "LDFLAGS=${XRDP_CONSOLE_XRDP_LDFLAGS}\n"
     "PKG_CONFIG_PATH=${XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH}\n"
+    "install-prefix=${XRDP_CONSOLE_XRDP_INSTALL_DIR}\n"
     "configure-args=${_xrdp_configure_arg_material}\n")
 string(JOIN "" _xrdp_build_configuration_material
     ${_xrdp_build_configuration_material})
@@ -140,10 +144,6 @@ set(XRDP_CONSOLE_XRDP_SOURCE_DIR
 set(XRDP_CONSOLE_XRDP_BUILD_DIR
     "${XRDP_CONSOLE_XRDP_DEPS_ROOT}/xrdp-build-${_xrdp_state_tag}" CACHE INTERNAL
     "Hash-keyed out-of-tree xrdp build directory" FORCE)
-set(XRDP_CONSOLE_XRDP_INSTALL_DIR
-    "${XRDP_CONSOLE_XRDP_DEPS_ROOT}/xrdp-install" CACHE PATH
-    "Private xrdp installation prefix")
-
 set(_xrdp_make_flags "CFLAGS=${XRDP_CONSOLE_XRDP_CFLAGS}")
 
 set(_xrdp_test_arguments)

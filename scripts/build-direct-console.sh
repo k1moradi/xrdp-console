@@ -6,6 +6,7 @@ set -eu
 
 workspace_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build_root=${XRDP_CONSOLE_BUILD_DIR:-$workspace_root/build-direct-console}
+xrdp_install_root=${XRDP_CONSOLE_XRDP_INSTALL_DIR:-$build_root/_deps/xrdp-install}
 freerdp_client=${XRDP_CONSOLE_FREERDP_EXECUTABLE:-}
 freerdp_build_root=${XRDP_CONSOLE_FREERDP_BUILD_DIR:-$workspace_root/build-test-freerdp}
 case "$freerdp_build_root" in
@@ -93,6 +94,7 @@ cmake -S "$workspace_root" -B "$build_root" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DXRDP_CONSOLE_NATIVE=ON \
     -DXRDP_CONSOLE_BUILD_XRDP=ON \
+    "-DXRDP_CONSOLE_XRDP_INSTALL_DIR=$xrdp_install_root" \
     "-DXRDP_CONSOLE_FREERDP_EXECUTABLE=$freerdp_client"
 
 # The pinned xrdp build is serialized to stay within the target laptop's

@@ -17,8 +17,12 @@ constexpr std::uint32_t kBytesPerPixel = 4;
 } // namespace
 
 X11CursorTracker::X11CursorTracker(xcb_connection_t &connection,
-                                   xcb_window_t rootWindow) noexcept
-    : connection_(&connection), rootWindow_(rootWindow)
+                                   xcb_window_t rootWindow,
+                                   CursorImageReplyFunction cursorImageReply,
+                                   void *cursorImageReplyContext) noexcept
+    : connection_(&connection), rootWindow_(rootWindow),
+      cursorImageReply_(cursorImageReply),
+      cursorImageReplyContext_(cursorImageReplyContext)
 {
     const xcb_query_extension_reply_t *extension =
         xcb_get_extension_data(connection_, &xcb_xfixes_id);
@@ -123,6 +127,16 @@ X11CursorTracker::pending() const noexcept
 bool
 X11CursorTracker::refresh() noexcept
 {
+    if (connection_ != nullptr)
+    {
+        const int connectionError = xcb_connection_has_error(connection_);
+        if (connectionError != 0)
+        {
+            refreshConnectionError_ = connectionError;
+            fail("XFixes cursor image query lost the X connection");
+            return false;
+        }
+    }
     if (!valid())
     {
         return false;
@@ -130,15 +144,32 @@ X11CursorTracker::refresh() noexcept
 
     const auto cursorCookie = xcb_xfixes_get_cursor_image(connection_);
     xcb_generic_error_t *cursorError = nullptr;
-    xcb_xfixes_get_cursor_image_reply_t *cursor =
-        xcb_xfixes_get_cursor_image_reply(connection_, cursorCookie,
-                                          &cursorError);
+    xcb_xfixes_get_cursor_image_reply_t *cursor = nullptr;
+    if (cursorImageReply_ != nullptr)
+    {
+        cursor = cursorImageReply_(connection_, cursorCookie, &cursorError,
+                                   cursorImageReplyContext_);
+    }
+    else
+    {
+        cursor = xcb_xfixes_get_cursor_image_reply(connection_, cursorCookie,
+                                                   &cursorError);
+    }
     if (cursorError != nullptr || cursor == nullptr)
     {
+        const std::uint8_t errorCode = cursorError != nullptr
+                                       ? cursorError->error_code : 0;
+        const int connectionError = xcb_connection_has_error(connection_);
         std::free(cursorError);
         std::free(cursor);
-        fail("XFixes cursor image query failed");
-        return false;
+        if (connectionError != 0)
+        {
+            refreshConnectionError_ = connectionError;
+            fail("XFixes cursor image query lost the X connection");
+            return false;
+        }
+        noteRefreshFailure("XFixes cursor image query failed", errorCode);
+        return true;
     }
 
     const std::uint64_t sourceArea =
@@ -170,8 +201,8 @@ X11CursorTracker::refresh() noexcept
     {
         std::free(cursorError);
         std::free(cursor);
-        fail("XFixes cursor image is invalid");
-        return false;
+        noteRefreshFailure("XFixes cursor image is invalid");
+        return true;
     }
 
     try
@@ -191,8 +222,8 @@ X11CursorTracker::refresh() noexcept
         {
             std::free(cursorError);
             std::free(cursor);
-            fail("XFixes cursor image conversion failed");
-            return false;
+            noteRefreshFailure("XFixes cursor image conversion failed");
+            return true;
         }
         pixels_.swap(pixels);
         mask_.swap(mask);
@@ -201,8 +232,8 @@ X11CursorTracker::refresh() noexcept
     {
         std::free(cursorError);
         std::free(cursor);
-        fail("XFixes cursor image allocation failed");
-        return false;
+        noteRefreshFailure("XFixes cursor image allocation failed");
+        return true;
     }
 
     widthPixels_ = xrdp_console::kCursorOutputDimension;
@@ -210,9 +241,40 @@ X11CursorTracker::refresh() noexcept
     hotspotX_ = static_cast<std::int32_t>(xhot);
     hotspotY_ = static_cast<std::int32_t>(yhot);
     unsupportedCursor_ = false;
+    refreshFailureWarningPending_ = false;
+    refreshFailureWarningLogged_ = false;
+    refreshFailureReason_ = nullptr;
+    refreshErrorCode_ = 0;
+    refreshConnectionError_ = 0;
     std::free(cursorError);
     std::free(cursor);
     return true;
+}
+
+bool
+X11CursorTracker::takeRefreshFailureWarning() noexcept
+{
+    const bool pending = refreshFailureWarningPending_;
+    refreshFailureWarningPending_ = false;
+    return pending;
+}
+
+const char *
+X11CursorTracker::refreshFailureReason() const noexcept
+{
+    return refreshFailureReason_;
+}
+
+std::uint8_t
+X11CursorTracker::refreshErrorCode() const noexcept
+{
+    return refreshErrorCode_;
+}
+
+int
+X11CursorTracker::refreshConnectionError() const noexcept
+{
+    return refreshConnectionError_;
 }
 
 bool
@@ -278,4 +340,19 @@ void
 X11CursorTracker::fail(const char *reason) noexcept
 {
     failureReason_ = reason;
+}
+
+void
+X11CursorTracker::noteRefreshFailure(const char *reason,
+                                     std::uint8_t errorCode,
+                                     int connectionError) noexcept
+{
+    refreshFailureReason_ = reason;
+    refreshErrorCode_ = errorCode;
+    refreshConnectionError_ = connectionError;
+    if (!refreshFailureWarningLogged_)
+    {
+        refreshFailureWarningPending_ = true;
+        refreshFailureWarningLogged_ = true;
+    }
 }

@@ -414,7 +414,7 @@ if [ "$preflight_only" -eq 1 ]; then
             ;;
     esac
     if [ -e "$chansrv_target" ] || [ -L "$chansrv_target" ]; then
-        echo "Existing chansrv target will be backed up before replacement: $chansrv_target"
+        echo "Existing chansrv target will be replaced: $chansrv_target"
     else
         echo "No previous chansrv target exists; activation will install: $chansrv_target"
     fi

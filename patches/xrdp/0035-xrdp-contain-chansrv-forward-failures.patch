@@ -1,0 +1,51 @@
+diff --git a/xrdp/xrdp_process.c b/xrdp/xrdp_process.c
+--- a/xrdp/xrdp_process.c
++++ b/xrdp/xrdp_process.c
+@@ -335,2 +335,5 @@
+             {
++                LOG(LOG_LEVEL_ERROR,
++                    "XRDP_CONSOLE_SESSION_EXIT event=main-loop-exit "
++                    "reason=console-transport-burst result=1");
+                 break;
+@@ -339,11 +342,17 @@
+             if (xrdp_wm_check_wait_objs(self->wm) != 0)
+             {
++                LOG(LOG_LEVEL_ERROR,
++                    "XRDP_CONSOLE_SESSION_EXIT event=main-loop-exit "
++                    "reason=window-manager-check");
+                 break;
+             }
+ 
+             /* Catch input or a disconnect which arrived during backend work
+              * before the next wait. */
+             if (trans_check_wait_objs(self->server_trans) != 0)
+             {
++                LOG(LOG_LEVEL_ERROR,
++                    "XRDP_CONSOLE_SESSION_EXIT event=main-loop-exit "
++                    "reason=client-transport-check");
+                 break;
+             }
+diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -3853,2 +3853,20 @@ xrdp_mm_process_channel_data
+             rv = trans_force_write(self->chan_trans);
++            if (rv != 0)
++            {
++                LOG(LOG_LEVEL_ERROR,
++                    "XRDP_CONSOLE_CHANNEL event=chansrv-write-failed "
++                    "channel_id=%d flags=0x%x chunk_bytes=%d total_bytes=%d "
++                    "result=%d action=drop-chansrv-keep-session",
++                    id, flags, length, total_length, rv);
++                /*
++                 * A chansrv transport failure must not terminate the desktop
++                 * session. The asynchronous wait-object path already drops
++                 * chan_trans and continues. This callback runs while reading
++                 * the RDP client transport, not from a chansrv callback, so
++                 * retiring the failed side-channel transport is safe here.
++                 */
++                trans_delete(self->chan_trans);
++                self->chan_trans = NULL;
++                rv = 0;
++            }
+         }

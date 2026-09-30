@@ -4,3 +4,4 @@
 *.c text eol=lf
 # Unified-diff patch files use a leading context marker on empty context lines.
 patches/xrdp/*.patch whitespace=-blank-at-eol
+patches/xrdp/0040-xrdp-log-window-manager-check-source.patch whitespace=-blank-at-eol,-blank-at-eof

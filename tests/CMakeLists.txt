@@ -31,7 +31,16 @@ if(TARGET xrdp-console)
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_input.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_pointer_position.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_padding.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_install_prefix_state.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py)
+
+    add_test(NAME xrdp-install-prefix-state-isolation
+        COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_install_prefix_state.py
+        "${CMAKE_SOURCE_DIR}" "${CMAKE_COMMAND}")
+    set_tests_properties(xrdp-install-prefix-state-isolation PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+        TIMEOUT 120)
 endif()
 
 if(TARGET xrdp-pixel-pipeline-bench)
@@ -748,6 +757,16 @@ if(TARGET xrdp-console)
        TARGET x11-pixel-probe AND TARGET x11-latency-stimulus)
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(TEST_X11 REQUIRED IMPORTED_TARGET x11)
+        pkg_check_modules(TEST_PNG REQUIRED IMPORTED_TARGET libpng)
+
+        get_filename_component(FREERDP_TEST_BIN_DIR
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}" DIRECTORY)
+        get_filename_component(FREERDP_TEST_PREFIX
+            "${FREERDP_TEST_BIN_DIR}/.." ABSOLUTE)
+        list(PREPEND CMAKE_PREFIX_PATH "${FREERDP_TEST_PREFIX}")
+        find_package(FreeRDP-Client CONFIG QUIET
+            PATHS "${FREERDP_TEST_PREFIX}/lib/cmake/FreeRDP-Client3"
+            NO_DEFAULT_PATH)
 
         add_executable(x11-scroll-coherence-stimulus
             helpers/x11_scroll_coherence_stimulus.c)
@@ -763,6 +782,33 @@ if(TARGET xrdp-console)
         target_compile_options(x11-frame-coherence-probe PRIVATE
             -Wall -Wextra -Wpedantic -Werror)
 
+        add_executable(clipboard-x11-session-peer
+            helpers/clipboard_x11_session_peer.c)
+        target_link_libraries(clipboard-x11-session-peer PRIVATE
+            PkgConfig::TEST_X11 PkgConfig::TEST_PNG)
+        target_compile_options(clipboard-x11-session-peer PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror)
+        add_test(NAME clipboard-png-validator-unit
+            COMMAND $<TARGET_FILE:clipboard-x11-session-peer>
+            png-validator-self-test)
+        set_tests_properties(clipboard-png-validator-unit PROPERTIES
+            LABELS "clipboard;unit")
+
+        if(TARGET freerdp-client)
+            add_executable(freerdp-cliprdr-overlap-peer
+                helpers/freerdp_cliprdr_overlap_peer.cpp)
+            target_link_libraries(freerdp-cliprdr-overlap-peer PRIVATE
+                freerdp-client)
+            target_compile_options(freerdp-cliprdr-overlap-peer PRIVATE
+                -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror)
+            set_target_properties(freerdp-cliprdr-overlap-peer PROPERTIES
+                BUILD_RPATH "${FREERDP_TEST_PREFIX}/lib")
+        else()
+            message(STATUS
+                "Skipping controlled CLIPRDR overlap CTests: "
+                "FreeRDP client development package was not found")
+        endif()
+
         add_test(NAME xrdp-loader-smoke
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
@@ -775,6 +821,83 @@ if(TARGET xrdp-console)
         set_tests_properties(xrdp-loader-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 30)
+        add_test(NAME xrdp-loader-clipboard-session
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11-latency-stimulus>
+            $<TARGET_FILE:clipboard-x11-session-peer>
+            --clipboard-stress)
+        set_tests_properties(xrdp-loader-clipboard-session PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 150
+            RESOURCE_LOCK xrdp_console_loader_display
+            RUN_SERIAL TRUE
+            LABELS "clipboard;integration")
+        if(TARGET freerdp-cliprdr-overlap-peer)
+            add_test(NAME xrdp-loader-clipboard-inflight-format-list-session
+                COMMAND ${Python3_EXECUTABLE} -B
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+                $<TARGET_FILE:xrdp-console>
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+                "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+                $<TARGET_FILE:x11-pixel-probe>
+                $<TARGET_FILE:x11-latency-stimulus>
+                $<TARGET_FILE:clipboard-x11-session-peer>
+                $<TARGET_FILE:freerdp-cliprdr-overlap-peer>
+                --gfx-h264
+                --clipboard-inflight-format-list)
+            set_tests_properties(xrdp-loader-clipboard-inflight-format-list-session
+                PROPERTIES
+                ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+                TIMEOUT 150
+                RESOURCE_LOCK xrdp_console_loader_display
+                RUN_SERIAL TRUE
+                LABELS "clipboard;integration")
+            add_test(NAME xrdp-loader-clipboard-inflight-png-format-list-session
+                COMMAND ${Python3_EXECUTABLE} -B
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+                $<TARGET_FILE:xrdp-console>
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+                "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+                $<TARGET_FILE:x11-pixel-probe>
+                $<TARGET_FILE:x11-latency-stimulus>
+                $<TARGET_FILE:clipboard-x11-session-peer>
+                $<TARGET_FILE:freerdp-cliprdr-overlap-peer>
+                --gfx-h264
+                --clipboard-inflight-png-format-list)
+            set_tests_properties(xrdp-loader-clipboard-inflight-png-format-list-session
+                PROPERTIES
+                ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+                TIMEOUT 150
+                RESOURCE_LOCK xrdp_console_loader_display
+                RUN_SERIAL TRUE
+                LABELS "clipboard;integration")
+        endif()
+        add_test(NAME xrdp-loader-retained-dual-image-reconnect-session
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11-latency-stimulus>
+            $<TARGET_FILE:clipboard-x11-session-peer>
+            --gfx-h264
+            --clipboard-named-png)
+        set_tests_properties(xrdp-loader-retained-dual-image-reconnect-session PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 150
+            RESOURCE_LOCK xrdp_console_loader_display
+            RUN_SERIAL TRUE
+            LABELS "clipboard;integration")
         add_test(NAME xrdp-loader-scaled-smoke
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
@@ -949,6 +1072,8 @@ if(TARGET xrdp-console)
             xrdp-loader-rfx-smoke
             xrdp-loader-rfx-scaled-smoke
             xrdp-loader-rfx-downscaled-smoke
+            xrdp-loader-clipboard-session
+            xrdp-loader-retained-dual-image-reconnect-session
             PROPERTIES RESOURCE_LOCK xrdp_console_loader_display)
     else()
         message(STATUS

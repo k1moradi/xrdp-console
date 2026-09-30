@@ -1,0 +1,71 @@
+diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -5332,6 +5332,12 @@ xrdp_mm_check_wait_objs
+             {
+                 /* if hide_log_window, this is fatal */
+                 rv = 1;
++                if (self->code == XRDP_CONSOLE_SESSION_CODE)
++                {
++                    LOG(LOG_LEVEL_ERROR,
++                        "XRDP_CONSOLE_SESSION_EXIT event=wait-object-failure "
++                        "source=sesman-transport");
++                }
+             }
+         }
+     }
+@@ -5358,6 +5364,12 @@ xrdp_mm_check_wait_objs
+         if (self->mod->mod_check_wait_objs != NULL)
+         {
+             rv = self->mod->mod_check_wait_objs(self->mod);
++            if (rv != 0 && self->code == XRDP_CONSOLE_SESSION_CODE)
++            {
++                LOG(LOG_LEVEL_ERROR,
++                    "XRDP_CONSOLE_SESSION_EXIT event=wait-object-failure "
++                    "source=module-check result=%d", rv);
++            }
+         }
+     }
+ 
+@@ -5368,6 +5380,9 @@ xrdp_mm_check_wait_objs
+         if (resize_rv != 0 &&
+                 self->code == XRDP_CONSOLE_SESSION_CODE && self->egfx_up)
+         {
++            LOG(LOG_LEVEL_ERROR,
++                "XRDP_CONSOLE_SESSION_EXIT event=wait-object-failure "
++                "source=console-resize result=%d", resize_rv);
+             /* A failed Console GFX resize cannot safely reuse the old
+              * surface IDs. Fail the session rather than emit stale frames. */
+             return resize_rv;
+@@ -5399,6 +5414,14 @@ xrdp_mm_check_wait_objs
+                 if (self->egfx_up)
+                 {
+                     rv = xrdp_mm_draw_dirty(self);
++                    if (rv != 0 &&
++                            self->code == XRDP_CONSOLE_SESSION_CODE)
++                    {
++                        LOG(LOG_LEVEL_ERROR,
++                            "XRDP_CONSOLE_SESSION_EXIT "
++                            "event=wait-object-failure "
++                            "source=gfx-dirty-draw result=%d", rv);
++                    }
+                     if (self->code != XRDP_CONSOLE_SESSION_CODE ||
+                             !xrdp_region_not_empty(
+                                 self->wm->screen_dirty_region))
+diff --git a/xrdp/xrdp_wm.c b/xrdp/xrdp_wm.c
+--- a/xrdp/xrdp_wm.c
++++ b/xrdp/xrdp_wm.c
+@@ -2441,6 +2441,13 @@ xrdp_wm_check_wait_objs
+         rv = xrdp_mm_check_wait_objs(self->mm);
+     }
+ 
++    if (rv != 0 && self->mm != NULL &&
++            self->mm->code == XRDP_CONSOLE_SESSION_CODE)
++    {
++        LOG(LOG_LEVEL_ERROR,
++            "XRDP_CONSOLE_SESSION_EXIT event=wait-object-failure "
++            "source=window-manager-check result=%d", rv);
++    }
+     return rv;
+ }
+ 

@@ -8,10 +8,22 @@ set(pacing_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0020-xrdp-console-adap
 set(image_retry_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0030-xrdp-chansrv-retry-image-clipboard-data.patch")
 set(image_waiters_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0031-xrdp-chansrv-coalesce-image-selection-requests.patch")
 set(image_incr_terminator_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0032-xrdp-chansrv-wait-for-image-incr-terminator-delete.patch")
+set(channel_containment_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0035-xrdp-contain-chansrv-forward-failures.patch")
+set(png_priority_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0036-xrdp-chansrv-prefer-png-target.patch")
+set(image_x11_diagnostics_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0037-xrdp-chansrv-log-image-x11-delivery.patch")
+set(image_deferred_owner_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0038-xrdp-chansrv-restore-deferred-selection-owner.patch")
+set(image_targets_response_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0039-xrdp-chansrv-log-targets-response.patch")
+set(wait_object_failure_source_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0040-xrdp-log-window-manager-check-source.patch")
 
 foreach(required IN ITEMS "${series_file}" "${h264_patch}" "${pacing_patch}"
         "${image_retry_patch}" "${image_waiters_patch}"
-        "${image_incr_terminator_patch}")
+        "${image_incr_terminator_patch}"
+        "${channel_containment_patch}"
+        "${png_priority_patch}"
+        "${image_x11_diagnostics_patch}"
+        "${image_deferred_owner_patch}"
+        "${image_targets_response_patch}"
+        "${wait_object_failure_source_patch}")
     if(NOT EXISTS "${required}")
         message(FATAL_ERROR "required optimization patch input is missing: ${required}")
     endif()
@@ -43,6 +55,115 @@ math(EXPR expected_image_incr_terminator_index "${image_waiters_index} + 1")
 if(NOT image_incr_terminator_index EQUAL expected_image_incr_terminator_index)
     message(FATAL_ERROR "INCR terminator ordering fix must immediately follow image waiter patch")
 endif()
+list(FIND series_lines "0034-xrdp-chansrv-retire-stale-image-incr-terminator.patch" image_retire_terminator_index)
+list(FIND series_lines "0035-xrdp-contain-chansrv-forward-failures.patch" channel_containment_index)
+list(FIND series_lines "0036-xrdp-chansrv-prefer-png-target.patch" png_priority_index)
+list(FIND series_lines "0037-xrdp-chansrv-log-image-x11-delivery.patch" image_x11_diagnostics_index)
+list(FIND series_lines "0038-xrdp-chansrv-restore-deferred-selection-owner.patch" image_deferred_owner_index)
+list(FIND series_lines "0039-xrdp-chansrv-log-targets-response.patch" image_targets_response_index)
+list(FIND series_lines "0040-xrdp-log-window-manager-check-source.patch" wait_object_failure_source_index)
+if(image_retire_terminator_index LESS 0 OR channel_containment_index LESS 0 OR
+        png_priority_index LESS 0 OR image_x11_diagnostics_index LESS 0 OR
+        image_deferred_owner_index LESS 0 OR image_targets_response_index LESS 0 OR
+        wait_object_failure_source_index LESS 0)
+    message(FATAL_ERROR "xrdp clipboard retirement, containment, and PNG-priority patches must be in series")
+endif()
+math(EXPR expected_channel_containment_index "${image_retire_terminator_index} + 1")
+math(EXPR expected_png_priority_index "${channel_containment_index} + 1")
+math(EXPR expected_image_x11_diagnostics_index "${png_priority_index} + 1")
+math(EXPR expected_image_deferred_owner_index "${image_x11_diagnostics_index} + 1")
+math(EXPR expected_image_targets_response_index "${image_deferred_owner_index} + 1")
+math(EXPR expected_wait_object_failure_source_index "${image_targets_response_index} + 1")
+if(NOT channel_containment_index EQUAL expected_channel_containment_index OR
+        NOT png_priority_index EQUAL expected_png_priority_index OR
+        NOT image_x11_diagnostics_index EQUAL expected_image_x11_diagnostics_index OR
+        NOT image_deferred_owner_index EQUAL expected_image_deferred_owner_index OR
+        NOT image_targets_response_index EQUAL expected_image_targets_response_index OR
+        NOT wait_object_failure_source_index EQUAL expected_wait_object_failure_source_index)
+    message(FATAL_ERROR "channel containment, PNG-priority, and X11 diagnostics patches must follow clipboard fixes in order")
+endif()
+
+file(READ "${channel_containment_patch}" channel_containment_text)
+foreach(marker IN ITEMS
+        "reason=console-transport-burst"
+        "reason=window-manager-check"
+        "reason=client-transport-check"
+        "event=chansrv-write-failed"
+        "action=drop-chansrv-keep-session"
+        "if (rv != 0)"
+        "trans_delete(self->chan_trans)"
+        "self->chan_trans = NULL;"
+        "rv = 0;")
+    string(FIND "${channel_containment_text}" "${marker}" marker_index)
+    if(marker_index LESS 0)
+        message(FATAL_ERROR "xrdp channel containment patch is missing diagnostic: ${marker}")
+    endif()
+endforeach()
+
+file(READ "${wait_object_failure_source_patch}" wait_object_failure_source_text)
+foreach(marker IN ITEMS
+        "source=window-manager-check result=%d"
+        "source=sesman-transport"
+        "source=module-check result=%d"
+        "source=console-resize result=%d"
+        "source=gfx-dirty-draw result=%d")
+    string(FIND "${wait_object_failure_source_text}" "${marker}" marker_index)
+    if(marker_index LESS 0)
+        message(FATAL_ERROR "xrdp wait-object failure-source patch is missing marker: ${marker}")
+    endif()
+endforeach()
+
+file(READ "${image_targets_response_patch}" image_targets_response_text)
+foreach(marker IN ITEMS
+        "event=targets-response-issued"
+        "target_count=%d"
+        "targets=%s"
+        "g_clipboard_format_generation"
+        "get_atom_text(atom_buf[target_index])")
+    string(FIND "${image_targets_response_text}" "${marker}" marker_index)
+    if(marker_index LESS 0)
+        message(FATAL_ERROR "TARGETS response diagnostic patch is missing marker: ${marker}")
+    endif()
+endforeach()
+
+file(READ "${png_priority_patch}" png_priority_text)
+string(FIND "${png_priority_text}"
+    "         if (g_png_format_id >= 0 &&" png_add_index)
+string(FIND "${png_priority_text}"
+    "+        if (g_dib_format_id >= 0 &&" bmp_add_index)
+if(png_add_index LESS 0 OR bmp_add_index LESS 0 OR
+        NOT png_add_index LESS bmp_add_index)
+    message(FATAL_ERROR "PNG-priority patch must add image/png before image/bmp")
+endif()
+
+file(READ "${image_x11_diagnostics_patch}" image_x11_diagnostics_text)
+foreach(marker IN ITEMS
+        "event=x11-request"
+        "event=x11-delivery-issued"
+        "event=selection-owner-deferred"
+        "event=x11-owner-change"
+        "current_owner=0x%lx"
+        "path=direct"
+        "path=incr"
+        "event=x11-incr-terminator-issued"
+        "event=x11-incr-terminator-ack")
+    string(FIND "${image_x11_diagnostics_text}" "${marker}" marker_index)
+    if(marker_index LESS 0)
+        message(FATAL_ERROR "X11 image-delivery diagnostics patch is missing marker: ${marker}")
+    endif()
+endforeach()
+
+file(READ "${image_deferred_owner_patch}" image_deferred_owner_text)
+foreach(marker IN ITEMS
+        "g_clipboard_owner_update_pending"
+        "clipboard_restore_deferred_selection_owner"
+        "event=selection-owner-restored"
+        "clipboard_event_selection_owner_notify")
+    string(FIND "${image_deferred_owner_text}" "${marker}" marker_index)
+    if(marker_index LESS 0)
+        message(FATAL_ERROR "deferred clipboard-owner patch is missing marker: ${marker}")
+    endif()
+endforeach()
 
 file(READ "${h264_patch}" h264_text)
 foreach(marker IN ITEMS

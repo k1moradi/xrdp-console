@@ -1,0 +1,25 @@
+diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -3099,14 +3099,14 @@
+-        if (g_dib_format_id >= 0 &&
+-                (g_cfg->restrict_inbound_clipboard & CLIP_RESTRICT_IMAGE) == 0)
+-        {
+-            LOG_DEVEL(LOG_LEVEL_DEBUG, "  reporting image/bmp");
+-            atom_buf[atom_count] = g_image_bmp_atom;
+-            atom_count++;
+-        }
+         if (g_png_format_id >= 0 &&
+                 (g_cfg->restrict_inbound_clipboard & CLIP_RESTRICT_IMAGE) == 0)
+         {
+             LOG_DEVEL(LOG_LEVEL_DEBUG, "  reporting image/png");
+             atom_buf[atom_count] = g_image_png_atom;
+             atom_count++;
+         }
++        if (g_dib_format_id >= 0 &&
++                (g_cfg->restrict_inbound_clipboard & CLIP_RESTRICT_IMAGE) == 0)
++        {
++            LOG_DEVEL(LOG_LEVEL_DEBUG, "  reporting image/bmp");
++            atom_buf[atom_count] = g_image_bmp_atom;
++            atom_count++;
++        }

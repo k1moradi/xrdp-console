@@ -11,6 +11,13 @@ class BuildDirectConsoleScriptTests(unittest.TestCase):
 
         self.assertIn('"Preflight (read-only):"', script)
         self.assertIn(
+            "xrdp_install_root=${XRDP_CONSOLE_XRDP_INSTALL_DIR:-$build_root/_deps/xrdp-install}",
+            script,
+        )
+        self.assertIn(
+            '"-DXRDP_CONSOLE_XRDP_INSTALL_DIR=$xrdp_install_root"', script
+        )
+        self.assertIn(
             'printf "sudo env XRDP_CONSOLE_BUILD_DIR=\'%s\' '
             "'%s/scripts/activate-direct-console.sh' --preflight\\n\"",
             script,

@@ -32,3 +32,9 @@
 0032-xrdp-chansrv-wait-for-image-incr-terminator-delete.patch
 0033-xrdp-chansrv-accept-peer-named-png.patch
 0034-xrdp-chansrv-retire-stale-image-incr-terminator.patch
+0035-xrdp-contain-chansrv-forward-failures.patch
+0036-xrdp-chansrv-prefer-png-target.patch
+0037-xrdp-chansrv-log-image-x11-delivery.patch
+0038-xrdp-chansrv-restore-deferred-selection-owner.patch
+0039-xrdp-chansrv-log-targets-response.patch
+0040-xrdp-log-window-manager-check-source.patch

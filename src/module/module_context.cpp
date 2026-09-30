@@ -4091,6 +4091,9 @@ ModuleContext::check_wait_objs() noexcept
 {
     if (!valid())
     {
+        log_message(LOG_LEVEL_ERROR,
+                    "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                    "source=module-invalid");
         return 1;
     }
     if (impl_->x11Connection == nullptr && impl_->damageTracker == nullptr &&
@@ -4105,6 +4108,9 @@ ModuleContext::check_wait_objs() noexcept
         !impl_->cursorTracker->valid() ||
         !impl_->sharedMemoryCapture->valid())
     {
+        log_message(LOG_LEVEL_ERROR,
+                    "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                    "source=backend-invalid");
         return 1;
     }
 
@@ -4119,10 +4125,15 @@ ModuleContext::check_wait_objs() noexcept
     ModuleEventSink eventSink(*impl_->damageTracker, *impl_->cursorTracker,
                               impl_->pointerPositionTracker.get(),
                               impl_->clipboard.get());
-    if (impl_->x11Connection->processEvents(
-            eventSink, kMaximumX11EventsPerService,
-            &impl_->x11EventBudgetPending) != ConnectionStatus::Ok)
+    const ConnectionStatus eventStatus = impl_->x11Connection->processEvents(
+        eventSink, kMaximumX11EventsPerService,
+        &impl_->x11EventBudgetPending);
+    if (eventStatus != ConnectionStatus::Ok)
     {
+        log_message(LOG_LEVEL_ERROR,
+                    "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                    "source=x11-event-poll result=%d",
+                    static_cast<int>(eventStatus));
         return 1;
     }
     if (impl_->clipboard != nullptr)
@@ -4170,6 +4181,10 @@ ModuleContext::check_wait_objs() noexcept
                     !impl_->rdpUpdateSink.setPointerPosition(
                         presentationPosition.x, presentationPosition.y))
                 {
+                    log_message(
+                        LOG_LEVEL_ERROR,
+                        "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                        "source=pointer-position-forward");
                     return 1;
                 }
                 forwarded = true;
@@ -4187,7 +4202,33 @@ ModuleContext::check_wait_objs() noexcept
     {
         if (!impl_->cursorTracker->refresh())
         {
+            log_message(LOG_LEVEL_ERROR,
+                        "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                        "source=cursor-refresh reason=%s x_error=%u "
+                        "x_connection_error=%d",
+                        impl_->cursorTracker->failureReason() != nullptr
+                            ? impl_->cursorTracker->failureReason()
+                            : "unknown",
+                        static_cast<unsigned>(
+                            impl_->cursorTracker->refreshErrorCode()),
+                        impl_->cursorTracker->refreshConnectionError());
             return 1;
+        }
+        const bool cursorRefreshDegraded =
+            impl_->cursorTracker->refreshFailureReason() != nullptr;
+        if (impl_->cursorTracker->takeRefreshFailureWarning())
+        {
+            log_message(
+                LOG_LEVEL_WARNING,
+                "XRDP_CONSOLE_CURSOR event=refresh-failed "
+                "action=keep-last-or-default reason=%s x_error=%u "
+                "x_connection_error=%d",
+                impl_->cursorTracker->refreshFailureReason() != nullptr
+                    ? impl_->cursorTracker->refreshFailureReason()
+                    : "unknown",
+                static_cast<unsigned>(
+                    impl_->cursorTracker->refreshErrorCode()),
+                impl_->cursorTracker->refreshConnectionError());
         }
         if (impl_->cursorTracker->takeUnsupportedCursorWarning())
         {
@@ -4196,7 +4237,7 @@ ModuleContext::check_wait_objs() noexcept
                 "xrdp-console: XFixes cursor exceeds the classic 32x32 "
                 "pointer limit; retaining the previous/default cursor");
         }
-        if (impl_->cursorTracker->hasImage() &&
+        if (!cursorRefreshDegraded && impl_->cursorTracker->hasImage() &&
             !impl_->rdpUpdateSink.setPointer(
                 impl_->cursorTracker->hotspotX(),
                 impl_->cursorTracker->hotspotY(),
@@ -4204,6 +4245,9 @@ ModuleContext::check_wait_objs() noexcept
                 impl_->cursorTracker->heightPixels(),
                 impl_->cursorTracker->pixels(), impl_->cursorTracker->mask()))
         {
+            log_message(LOG_LEVEL_ERROR,
+                        "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                        "source=cursor-forward");
             return 1;
         }
         impl_->cursorTracker->acknowledge();
@@ -4295,7 +4339,14 @@ ModuleContext::check_wait_objs() noexcept
     }
     if (impl_->graphicsTransport == GraphicsTransport::RemoteFx)
     {
-        return check_remote_fx();
+        const int remoteFxResult = check_remote_fx();
+        if (remoteFxResult != 0)
+        {
+            log_message(LOG_LEVEL_ERROR,
+                        "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                        "source=remote-fx result=%d", remoteFxResult);
+        }
+        return remoteFxResult;
     }
 
     // The standalone lifecycle test exercises the transport and Damage
@@ -4340,6 +4391,9 @@ ModuleContext::check_wait_objs() noexcept
             impl_->damageTracker->snapshotPixelCount();
         if (!impl_->damageTracker->snapshot(impl_->damageRegion))
         {
+            log_message(LOG_LEVEL_ERROR,
+                        "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                        "source=damage-snapshot");
             return 1;
         }
         impl_->profile.noteSnapshot(
@@ -4367,6 +4421,9 @@ ModuleContext::check_wait_objs() noexcept
                 sourceRectangle, presentationRectangle, samplingRectangle);
         if (mapping == RectangleMapResult::Invalid)
         {
+            log_message(LOG_LEVEL_ERROR,
+                        "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                        "source=priority-rectangle-map");
             return 1;
         }
         if (mapping == RectangleMapResult::Empty)
@@ -4379,6 +4436,9 @@ ModuleContext::check_wait_objs() noexcept
                 impl_->sharedMemoryCapture->capture(samplingRectangle);
             if (!pixels.valid())
             {
+                log_message(LOG_LEVEL_ERROR,
+                            "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                            "source=priority-capture");
                 return 1;
             }
             impl_->profile.noteCapture(samplingRectangle);
@@ -4404,6 +4464,9 @@ ModuleContext::check_wait_objs() noexcept
 
     if (!impl_->rdpUpdateSink.beginUpdate())
     {
+        log_message(LOG_LEVEL_ERROR,
+                    "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                    "source=begin-update");
         return 1;
     }
 
@@ -4664,6 +4727,12 @@ ModuleContext::check_wait_objs() noexcept
         impl_->profile.notePresentationBatch();
     }
     impl_->profile.maybeLog();
+    if (!success)
+    {
+        log_message(LOG_LEVEL_ERROR,
+                    "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                    "source=classic-presentation");
+    }
     return success ? 0 : 1;
 }
 
