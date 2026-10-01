@@ -1,7 +1,8 @@
-diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 --- a/sesman/chansrv/clipboard.c
 +++ b/sesman/chansrv/clipboard.c
-@@ -3109,3 +3109,10 @@ clipboard_event_selection_request(XEvent *xevent)
+@@ -3107,6 +3107,13 @@
+     int n_items;
+     int xdata_size;
      char *xdata;
 +    char target_names[256];
 +    int target_names_length;
@@ -12,7 +13,9 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +    int targets_result;
  
      lxev = (XSelectionRequestEvent *)xevent;
-@@ -3265,5 +3272,35 @@ clipboard_event_selection_request(XEvent *xevent)
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: 0x%lx", lxev->property);
+@@ -3264,8 +3271,38 @@
+         }
          atom_buf[atom_count] = 0;
          LOG_DEVEL(LOG_LEVEL_DEBUG, "  reporting %d formats", atom_count);
 -        return clipboard_provide_selection(lxev, XA_ATOM, 32,
@@ -50,3 +53,5 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +            atom_count, target_names, target_names_truncated, targets_result);
 +        return targets_result;
      }
+     else if (lxev->target == g_timestamp_atom)
+     {

@@ -553,6 +553,35 @@ if(TARGET xrdp-console)
         optimization-xrdp-patch-series
         PROPERTIES LABELS optimization)
 
+    if(XRDP_CONSOLE_BUILD_XRDP)
+        add_test(NAME xrdp-patch-series-zero-fuzz
+            COMMAND ${CMAKE_COMMAND}
+                "-DXRDP_ARCHIVE=${XRDP_CONSOLE_XRDP_DEPS_ROOT}/downloads/xrdp-${XRDP_CONSOLE_XRDP_VERSION}.tar.gz"
+                "-DXRDP_ARCHIVE_SHA256=${XRDP_CONSOLE_XRDP_SOURCE_SHA256}"
+                "-DXRDP_VERSION=${XRDP_CONSOLE_XRDP_VERSION}"
+                "-DXRDP_PATCH_DIRECTORY=${CMAKE_SOURCE_DIR}/patches/xrdp"
+                "-DXRDP_SERIES_FILE=${CMAKE_SOURCE_DIR}/patches/xrdp/series"
+                "-DXRDP_EXPECTED_SOURCE_DIRECTORY=${XRDP_CONSOLE_XRDP_SOURCE_DIR}"
+                "-DXRDP_TEST_BINARY_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}"
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/check_xrdp_patch_series_zero_fuzz.cmake)
+        set_tests_properties(xrdp-patch-series-zero-fuzz PROPERTIES
+            LABELS "optimization;contract"
+            RUN_SERIAL TRUE
+            TIMEOUT 120)
+
+        add_executable(xrdp-vc-diagnostics-unit
+            test_xrdp_vc_diagnostics.c)
+        target_include_directories(xrdp-vc-diagnostics-unit PRIVATE
+            "${XRDP_CONSOLE_XRDP_SOURCE_DIR}/common")
+        target_compile_options(xrdp-vc-diagnostics-unit PRIVATE
+            -Wall -Wextra -Wpedantic -Werror)
+        add_dependencies(xrdp-vc-diagnostics-unit xrdp_upstream)
+        add_test(NAME xrdp-vc-diagnostics-unit
+            COMMAND xrdp-vc-diagnostics-unit)
+        set_tests_properties(xrdp-vc-diagnostics-unit PROPERTIES
+            LABELS "optimization;unit")
+    endif()
+
     add_executable(interaction-priority-unit
         test_interaction_priority.cpp)
     set_target_properties(interaction-priority-unit PROPERTIES

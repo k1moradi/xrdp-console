@@ -247,7 +247,7 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +                "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-selection-notify-issued "
 +                "path=direct requestor=0x%lx owner=0x%lx selection=0x%lx "
 +                "target=image/png property=0x%lx request_time=%lu "
-+                "notify_time=%lu propagation=0 event_mask=0x0 "
++                "selection_notify_event_time=%lu propagation=0 event_mask=0x0 "
 +                "change_result=%d send_result=%d current_owner=0x%lx",
 +                req->requestor, req->owner, req->selection, req->property,
 +                req->time, xev.xselection.time, change_result, send_result,
@@ -317,7 +317,7 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +                "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-selection-notify-issued "
 +                "path=incr requestor=0x%lx owner=0x%lx selection=0x%lx "
 +                "target=image/png property=0x%lx request_time=%lu "
-+                "notify_time=%lu propagation=0 event_mask=0x0 "
++                "selection_notify_event_time=%lu propagation=0 event_mask=0x0 "
 +                "send_result=%d current_owner=0x%lx",
 +                req->requestor, req->owner, req->selection, req->property,
 +                req->time, xev.xselection.time, send_result,
@@ -627,4 +627,3 @@ diff --git a/sesman/chansrv/Makefile.in b/sesman/chansrv/Makefile.in
 +  $(CHANSRV_EXTRA_LIBS) $(OPENSSL_LIBS)
  
  all: all-am
-

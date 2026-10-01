@@ -1,7 +1,6 @@
 --- a/sesman/chansrv/clipboard.c
 +++ b/sesman/chansrv/clipboard.c
-@@ -638,15 +638,10 @@
-                 clipboard_out_utf8_as_utf16_le(s, "");
+@@ -639,14 +639,9 @@
                  break;
              case XRDP_CB_TEXT:
                  LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_send_format_announce: XRDP_CB_TEXT");
@@ -19,7 +18,8 @@
                  clipboard_out_utf8_as_utf16_le(s, "");
                  break;
              default:
-@@ -684,13 +679,7 @@
+@@ -683,14 +678,8 @@
+                 break;
              case XRDP_CB_TEXT:
                  LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_send_format_announce: XRDP_CB_TEXT");
 -                /* canned response for "bitmap" */
@@ -35,11 +35,11 @@
                  out_uint8p(s, windows_native_format, sizeof(windows_native_format));
                  break;
              default:
-@@ -1565,6 +1554,7 @@
-     {
+@@ -1567,6 +1556,7 @@
          /* window is closed */
          XConvertSelection(g_display, g_clipboard_atom, g_targets_atom,
                            g_clip_property_atom, g_wnd, lxevent->timestamp);
 +        XFlush(g_display);
      }
      return 0;
+ }

@@ -1,7 +1,7 @@
-diff --git a/xrdp/xrdp.h b/xrdp/xrdp.h
 --- a/xrdp/xrdp.h
 +++ b/xrdp/xrdp.h
-@@ -286,5 +286,8 @@ xrdp_mm_console_gfx_effective_flush_ms(
+@@ -292,6 +292,9 @@
+ xrdp_mm_console_gfx_effective_flush_ms(
      int session_code, int immediate_continuation,
      int backpressure_active, int interaction_priority_pending);
 +int
@@ -10,10 +10,9 @@ diff --git a/xrdp/xrdp.h b/xrdp/xrdp.h
  void
  xrdp_mm_console_set_interaction_anchor(
      struct xrdp_console_interaction_priority *priority, int x, int y);
-diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
 --- a/xrdp/xrdp_mm.c
 +++ b/xrdp/xrdp_mm.c
-@@ -1338,6 +1338,18 @@ xrdp_mm_console_gfx_effective_flush_ms(
+@@ -1284,6 +1284,18 @@
      return minimum_flush_ms;
  }
  
@@ -32,7 +31,8 @@ diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
  void
  xrdp_mm_console_record_gfx_acknowledgement(
      struct xrdp_console_gfx_ack_telemetry *telemetry,
-@@ -1746,6 +1758,8 @@ xrdp_mm_egfx_caps_advertise(void *user, int num_caps,
+@@ -2186,7 +2198,9 @@
+             error, self->wm->client_info->display_sizes.monitorCount);
          self->egfx_up = 1;
          xrdp_mm_egfx_create_surfaces(self);
 -        if (self->code != XRDP_CONSOLE_SESSION_CODE)
@@ -42,7 +42,8 @@ diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
          {
              self->encoder = xrdp_encoder_create(self);
          }
-@@ -1773,6 +1788,8 @@ xrdp_mm_egfx_caps_advertise(void *user, int num_caps,
+@@ -2210,7 +2224,9 @@
+         lrect.bottom = screen->height;
          self->wm->client_info->gfx = 0;
          xrdp_encoder_delete(self->encoder);
 -        if (self->code != XRDP_CONSOLE_SESSION_CODE)
@@ -52,9 +53,7 @@ diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
          {
              self->encoder = xrdp_encoder_create(self);
          }
-@@ -2753,9 +2771,11 @@ process_display_control_monitor_layout_data(struct xrdp_wm *wm)
-         case WMRZ_ENCODER_CREATE:
-             if (mm->egfx_up)
+@@ -2739,7 +2755,9 @@
              {
                  xrdp_mm_egfx_create_surfaces(mm);
              }
@@ -65,7 +64,9 @@ diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
              {
                  mm->encoder = xrdp_encoder_create(mm);
              }
-@@ -3591,10 +3612,16 @@ xrdp_mm_connect(struct xrdp_mm *self)
+@@ -3996,12 +4014,18 @@
+         self->code = XVNC_SESSION_CODE;
+     }
  
 -    /* The first-party console owns its synchronous RemoteFX encoder. The
 -     * generic xrdp encoder was created before the module code was parsed. */
@@ -86,10 +87,9 @@ diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
          xrdp_encoder_delete(self->encoder);
          self->encoder = NULL;
      }
-diff --git a/tests/xrdp/test_xrdp_region.c b/tests/xrdp/test_xrdp_region.c
 --- a/tests/xrdp/test_xrdp_region.c
 +++ b/tests/xrdp/test_xrdp_region.c
-@@ -518,6 +518,33 @@ test_console_interaction_priority_state(void **state)
+@@ -519,6 +519,33 @@
          &priority, 1366, 768, 982, 512, 384, 256));
  }
  
@@ -123,12 +123,10 @@ diff --git a/tests/xrdp/test_xrdp_region.c b/tests/xrdp/test_xrdp_region.c
  START_TEST(execute_suite)
  {
      const struct CMUnitTest tests[] =
-@@ -535,7 +560,8 @@ START_TEST(execute_suite)
-         cmocka_unit_test(
+@@ -536,6 +563,7 @@
              test_console_gfx_acknowledgement_telemetry_tracks_suspend_and_resume),
          cmocka_unit_test(test_console_gfx_backpressure_policy),
--        cmocka_unit_test(test_console_interaction_priority_state),
-+        cmocka_unit_test(test_console_interaction_priority_state),
+         cmocka_unit_test(test_console_interaction_priority_state),
 +        cmocka_unit_test(test_console_generic_encoder_policy),
      };
  

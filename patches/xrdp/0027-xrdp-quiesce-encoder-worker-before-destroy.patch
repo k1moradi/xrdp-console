@@ -1,24 +1,28 @@
-diff --git a/xrdp/xrdp_encoder.h b/xrdp/xrdp_encoder.h
 --- a/xrdp/xrdp_encoder.h
 +++ b/xrdp/xrdp_encoder.h
-@@ -41,4 +41,6 @@ struct xrdp_encoder
+@@ -39,6 +39,8 @@
+     struct fifo *fifo_to_proc;
+     struct fifo *fifo_processed;
      tbus mutex;
 +    /* Held by the worker until its final encoder-state access. */
 +    tbus worker_exit_mutex;
      int (*process_enc)(struct xrdp_encoder *self, struct xrdp_enc_data *enc);
      void *codec_handle_rfx;
      void *codec_handle_jpg;
-diff --git a/xrdp/xrdp_encoder.c b/xrdp/xrdp_encoder.c
 --- a/xrdp/xrdp_encoder.c
 +++ b/xrdp/xrdp_encoder.c
-@@ -302,5 +302,6 @@ xrdp_encoder_create(struct xrdp_mm *mm)
+@@ -302,6 +302,7 @@
      self->fifo_to_proc = fifo_create(xrdp_enc_data_destructor);
      self->fifo_processed = fifo_create(xrdp_enc_data_done_destructor);
      self->mutex = tc_mutex_create();
 +    self->worker_exit_mutex = tc_mutex_create();
  
      pid = g_getpid();
-@@ -400,2 +401,9 @@ xrdp_encoder_delete(struct xrdp_encoder *self)
+     /* setup wait objects for signalling */
+@@ -396,6 +397,13 @@
+         LOG(LOG_LEVEL_WARNING, "Encoder failed to shut down cleanly");
+     }
+ 
 +    /*
 +     * term_done is pipe-backed and does not join the detached worker. The
 +     * mutex handoff waits until the worker has completed its final access to
@@ -28,19 +32,28 @@ diff --git a/xrdp/xrdp_encoder.c b/xrdp/xrdp_encoder.c
 +    tc_mutex_unlock(self->worker_exit_mutex);
  #ifdef XRDP_RFXCODEC
      for (index = 0; index < 16; index++)
-@@ -436,3 +444,4 @@ xrdp_encoder_delete(struct xrdp_encoder *self)
+     {
+@@ -434,6 +442,7 @@
+     fifo_delete(self->fifo_to_proc, NULL);
      fifo_delete(self->fifo_processed, NULL);
      tc_mutex_delete(self->mutex);
 +    tc_mutex_delete(self->worker_exit_mutex);
      g_free(self);
-@@ -1625,3 +1633,6 @@ proc_enc_msg(void *arg)
+ }
+ 
+@@ -1620,6 +1629,9 @@
+         return 0;
+     }
+ 
 +    /* Paired with xrdp_encoder_delete() to quiesce detached-thread teardown. */
 +    tc_mutex_lock(self->worker_exit_mutex);
 +
      fifo_to_proc = self->fifo_to_proc;
      mutex = self->mutex;
      event_to_proc = self->xrdp_encoder_event_to_proc;
-@@ -1682,3 +1693,5 @@ proc_enc_msg(void *arg)
+@@ -1678,5 +1690,7 @@
+     } /* end while (cont) */
+     g_set_wait_obj(self->xrdp_encoder_term_done);
      LOG_DEVEL(LOG_LEVEL_DEBUG, "proc_enc_msg: thread exit");
 +    /* Do not access encoder or wait-object state after this handoff. */
 +    tc_mutex_unlock(self->worker_exit_mutex);

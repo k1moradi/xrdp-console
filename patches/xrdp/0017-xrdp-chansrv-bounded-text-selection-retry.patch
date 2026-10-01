@@ -1,7 +1,6 @@
 --- a/sesman/chansrv/clipboard.c
 +++ b/sesman/chansrv/clipboard.c
-@@ -175,8 +175,9 @@
- #include "chansrv_config.h"
+@@ -176,6 +176,7 @@
  #include "clipboard.h"
  #include "clipboard_file.h"
  #include "clipboard_common.h"
@@ -9,13 +8,10 @@
  #include "xcommon.h"
  #include "chansrv_fuse.h"
  #include "ms-rdpeclip.h"
- #include "xrdp_constants.h"
-@@ -243,8 +244,25 @@
- /* Format ID assigned to "FileGroupDescriptorW" by the client */
- static int g_file_group_descriptor_format_id = -1;
+@@ -245,6 +246,23 @@
  
  static char g_last_atom_name[256] = "";
-+
+ 
 +struct clipboard_selection_retry
 +{
 +    struct clipboard_retry_policy policy;
@@ -32,12 +28,11 @@
 +};
 +
 +static struct clipboard_selection_retry g_selection_retry;
- 
++
  /*
   * Values for the named formats we send to the client in
   * a Format List PDU
-@@ -483,8 +500,13 @@
- int
+@@ -485,6 +503,11 @@
  clipboard_deinit(void)
  {
      LOG_DEVEL(LOG_LEVEL_INFO, "clipboard_deinit:");
@@ -49,13 +44,10 @@
      if (g_wnd != 0)
      {
          XDestroyWindow(g_display, g_wnd);
-         g_wnd = 0;
-@@ -1023,8 +1045,203 @@
-     rv = send_channel_data(g_cliprdr_chan_id, s->data, size);
-     free_stream(s);
+@@ -1028,6 +1051,201 @@
      return rv;
  }
-+
+ 
 +static void
 +clipboard_finish_selection_conversion(Atom target)
 +{
@@ -250,12 +242,11 @@
 +        clipboard_fail_selection_conversion(target);
 +    }
 +}
- 
++
  /*****************************************************************************/
  /* sent from server to client
   * sent by recipient of CB_FORMAT_LIST; used to request data for one
-@@ -1085,10 +1302,10 @@
-             {
+@@ -1089,8 +1307,8 @@
                  LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_data_request: CF_UNICODETEXT, "
                            "calling XConvertSelection to g_utf8_atom");
                  g_clip_s2c.xrdp_clip_type = XRDP_CB_TEXT;
@@ -266,9 +257,7 @@
              }
              break;
          default:
-             LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_data_request: unknown type %d",
-@@ -1550,11 +1767,10 @@
-     g_got_selection = 0;
+@@ -1554,9 +1772,8 @@
      if (lxevent->owner != 0) /* nil owner comes when selection */
      {
          /* window is closed */
@@ -280,9 +269,7 @@
      }
      return 0;
  }
- 
-@@ -1701,14 +1917,45 @@
-     data = 0;
+@@ -1705,10 +1922,41 @@
      type = 0;
      lxevent = (XSelectionEvent *)xevent;
  
@@ -309,7 +296,6 @@
      {
 -        LOG_DEVEL(LOG_LEVEL_ERROR, "clipboard_event_selection_notify: clip could "
 -                  "not be converted");
--        rv = 1;
 +        if (clipboard_retry_policy_active(&g_selection_retry.policy) &&
 +                lxevent->target == g_selection_retry.target)
 +        {
@@ -324,16 +310,10 @@
 +        }
 +        LOG_DEVEL(LOG_LEVEL_ERROR,
 +                  "clipboard_event_selection_notify: clip could not be converted");
-+        rv = 1;
+         rv = 1;
      }
  
-     if (rv == 0)
-     {
-         LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_notify: wnd 0x%lx prop %s",
-@@ -1716,14 +1963,31 @@
-                   get_atom_text(lxevent->property));
-         rv = clipboard_get_window_property(lxevent->requestor, lxevent->property,
-                                            &type, &fmt,
+@@ -1722,10 +1970,27 @@
                                             &n_items, &data, &data_size);
          if (rv != 0)
          {
@@ -363,10 +343,9 @@
          //LOG_DEVEL_HEXDUMP(LOG_LEVEL_TRACE, "", data, data_size);
          XDeleteProperty(g_display, lxevent->requestor, lxevent->property);
          if (type == g_incr_atom)
-         {
 --- a/sesman/chansrv/Makefile.am
 +++ b/sesman/chansrv/Makefile.am
-@@ -58,8 +58,9 @@
+@@ -58,6 +58,7 @@
    clipboard.c \
    clipboard.h \
    clipboard_common.h \
@@ -374,16 +353,26 @@
    clipboard_file.c \
    clipboard_file.h \
    devredir.c \
-   devredir.h \
-   irp.c \
 --- a/sesman/chansrv/Makefile.in
 +++ b/sesman/chansrv/Makefile.in
-@@ -136,1 +136,1 @@
+@@ -133,7 +133,7 @@
+ am__xrdp_chansrv_SOURCES_DIST = chansrv.c chansrv.h chansrv_common.c \
+ 	chansrv_common.h chansrv_config.c chansrv_config.h \
+ 	chansrv_fuse.c chansrv_fuse.h chansrv_xfs.c chansrv_xfs.h \
 -	clipboard.c clipboard.h clipboard_common.h clipboard_file.c \
 +	clipboard.c clipboard.h clipboard_common.h clipboard_retry_policy.h clipboard_file.c \
-@@ -424,1 +424,1 @@
+ 	clipboard_file.h devredir.c devredir.h irp.c irp.h rail.c \
+ 	rail.h smartcard.h sound.c sound.h xcommon.c xcommon.h audin.c \
+ 	audin.h smartcard.c smartcard_internal.h smartcard_pcsc.c \
+@@ -421,7 +421,7 @@
+ xrdp_chansrv_SOURCES = chansrv.c chansrv.h chansrv_common.c \
+ 	chansrv_common.h chansrv_config.c chansrv_config.h \
+ 	chansrv_fuse.c chansrv_fuse.h chansrv_xfs.c chansrv_xfs.h \
 -	clipboard.c clipboard.h clipboard_common.h clipboard_file.c \
 +	clipboard.c clipboard.h clipboard_common.h clipboard_retry_policy.h clipboard_file.c \
+ 	clipboard_file.h devredir.c devredir.h irp.c irp.h rail.c \
+ 	rail.h smartcard.h sound.c sound.h xcommon.c xcommon.h audin.c \
+ 	audin.h $(am__append_11) $(am__append_12)
 --- /dev/null
 +++ b/sesman/chansrv/clipboard_retry_policy.h
 @@ -0,0 +1,100 @@

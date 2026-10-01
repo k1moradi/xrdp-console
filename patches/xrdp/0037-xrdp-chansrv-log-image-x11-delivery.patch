@@ -1,7 +1,6 @@
-diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 --- a/sesman/chansrv/clipboard.c
 +++ b/sesman/chansrv/clipboard.c
-@@ -927,6 +927,18 @@ clipboard_provide_selection_c2s(XSelectionRequestEvent *req, Atom type)
+@@ -934,6 +934,18 @@
          xev.xselection.property = req->property;
          xev.xselection.time = req->time;
          XSendEvent(g_display, req->requestor, False, NoEventMask, &xev);
@@ -20,7 +19,7 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
      }
      else
      {
-@@ -956,6 +968,18 @@ clipboard_provide_selection_c2s(XSelectionRequestEvent *req, Atom type)
+@@ -962,6 +974,18 @@
          xev.xselection.property = req->property;
          xev.xselection.time = req->time;
          XSendEvent(g_display, req->requestor, False, NoEventMask, &xev);
@@ -39,7 +38,10 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
      }
      return 0;
  }
-@@ -1289,4 +1289,15 @@ clipboard_process_format_announce(struct stream *s, int clip_msg_status,
+@@ -1264,6 +1288,17 @@
+         "dib_format_id=%d png_format_id=%d",
+         g_num_formatIds, g_dib_format_id, g_png_format_id);
+ 
 +    if (g_num_formatIds > 0 &&
 +            (g_clip_c2s.incr_in_progress || g_clip_s2c.incr_in_progress))
 +    {
@@ -54,8 +56,9 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
      if ((g_num_formatIds > 0) &&
              (g_clip_c2s.incr_in_progress == 0) && /* don't interrupt incr */
              (g_clip_s2c.incr_in_progress == 0))
-     {
-@@ -2360,2 +2370,9 @@ clipboard_event_selection_owner_notify(XEvent *xevent)
+@@ -2329,6 +2364,13 @@
+     XFixesSelectionNotifyEvent *lxevent;
+ 
      lxevent = (XFixesSelectionNotifyEvent *)xevent;
 +    LOG(LOG_LEVEL_INFO,
 +        "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-owner-change "
@@ -65,7 +68,10 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +        (unsigned long long)g_clipboard_format_generation,
 +        g_clip_c2s.incr_in_progress, g_clip_s2c.incr_in_progress);
      LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_owner_notify: 0x%lx", lxevent->owner);
-@@ -3006,4 +3024,14 @@ clipboard_event_selection_request(XEvent *xevent)
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_owner_notify: "
+               "window %ld subtype %d owner %ld g_wnd %ld",
+@@ -3006,6 +3048,16 @@
+               g_wnd, lxev->requestor, lxev->owner, lxev->selection,
                get_atom_text(lxev->selection),
                lxev->target, lxev->property);
 +    if (lxev->property != None)
@@ -80,7 +86,9 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +    }
  
      if (g_image_retry.retry_timeout_pending &&
-@@ -3484,4 +3514,15 @@ clipboard_event_property_notify(XEvent *xevent)
+             g_clip_c2s.xrdp_clip_type == XRDP_CB_BITMAP &&
+@@ -3486,6 +3538,17 @@
+                         PropModeReplace, data, data_bytes);
          if (data_bytes < 1)
          {
 +            if (g_clip_c2s.xrdp_clip_type == XRDP_CB_BITMAP)
@@ -96,9 +104,8 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +            }
              LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_property_notify: INCR done");
              g_clip_c2s.incr_in_progress = 0;
-@@ -3508,8 +3548,15 @@ clipboard_event_property_notify(XEvent *xevent)
-     else if (g_image_incr_terminator_pending &&
-             xevent->xproperty.window == g_image_incr_terminator_window &&
+             g_clip_c2s.converted = 1;
+@@ -3512,6 +3575,13 @@
              xevent->xproperty.atom == g_image_incr_terminator_property &&
              xevent->xproperty.state == PropertyDelete)
      {

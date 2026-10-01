@@ -1,8 +1,6 @@
-diff --git a/tests/xrdp/test_xrdp_egfx.c b/tests/xrdp/test_xrdp_egfx.c
-index b052f47..1fbf082 100644
 --- a/tests/xrdp/test_xrdp_egfx.c
 +++ b/tests/xrdp/test_xrdp_egfx.c
-@@ -4,10 +4,160 @@
+@@ -33,10 +33,160 @@
  
  #include "log.h"
  #include "os_calls.h"
@@ -163,9 +161,7 @@ index b052f47..1fbf082 100644
  START_TEST(test_xrdp_egfx_send_create_surface__happy_path)
  {
      struct xrdp_egfx_bulk *bulk = g_new0(struct xrdp_egfx_bulk, 1);
-@@ -124,8 +274,14 @@ make_suite_egfx_base_functions(void)
-     tc_process_monitors = tcase_create("xrdp_egfx_base_functions");
-     tcase_add_test(tc_process_monitors,
+@@ -126,6 +276,12 @@
                     test_xrdp_egfx_send_create_surface__happy_path);
      tcase_add_test(tc_process_monitors,
                     test_xrdp_egfx_map_surface_scaled__wire_layout);
@@ -178,11 +174,9 @@ index b052f47..1fbf082 100644
  
      suite_add_tcase(s, tc_process_monitors);
  
-diff --git a/xrdp/xrdp_egfx.c b/xrdp/xrdp_egfx.c
-index 4039993..9543eee 100644
 --- a/xrdp/xrdp_egfx.c
 +++ b/xrdp/xrdp_egfx.c
-@@ -19,6 +19,162 @@ xrdp_egfx_send_surface_to_surface(struct xrdp_egfx *egfx, int src_surface_id,
+@@ -408,6 +408,162 @@
      return error;
  }
  
@@ -345,11 +339,9 @@ index 4039993..9543eee 100644
  /******************************************************************************/
  struct stream *
  xrdp_egfx_frame_start(struct xrdp_egfx_bulk *bulk, int frame_id, int timestamp)
-diff --git a/xrdp/xrdp_egfx.h b/xrdp/xrdp_egfx.h
-index 40071f2..bb47393 100644
 --- a/xrdp/xrdp_egfx.h
 +++ b/xrdp/xrdp_egfx.h
-@@ -5,4 +5,25 @@ xrdp_egfx_send_surface_to_surface(struct xrdp_egfx *egfx, int src_surface_id,
+@@ -199,6 +199,27 @@
                                    int num_dst_points,
                                    const struct xrdp_egfx_point *dst_points);
  struct stream *
@@ -375,3 +367,5 @@ index 40071f2..bb47393 100644
 +    struct xrdp_egfx *egfx, int cache_slot);
 +struct stream *
  xrdp_egfx_frame_start(struct xrdp_egfx_bulk *bulk, int frame_id, int timestamp);
+ int
+ xrdp_egfx_send_frame_start(struct xrdp_egfx *egfx, int frame_id, int timestamp);

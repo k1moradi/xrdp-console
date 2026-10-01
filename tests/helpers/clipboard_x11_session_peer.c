@@ -401,7 +401,7 @@ send_selection_notify(Display *display,
     {
         printf("PNG_FILE_OWNER_SELECTION_NOTIFY requestor=0x%lx "
                "owner=0x%lx selection=0x%lx target=%s property=0x%lx "
-               "request_time=%lu notify_time=%lu propagation=0 "
+               "request_time=%lu selection_notify_event_time=%lu propagation=0 "
                "event_mask=0x0 send_result=%d\n",
                request->requestor, request->owner, request->selection,
                target_name, property, request->time,

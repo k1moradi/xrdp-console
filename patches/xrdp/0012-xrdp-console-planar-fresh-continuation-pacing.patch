@@ -1,6 +1,6 @@
 --- a/xrdp/xrdp_types.h
 +++ b/xrdp/xrdp_types.h
-@@ -448,6 +448,8 @@ struct xrdp_mm
+@@ -449,6 +449,8 @@
      int console_planar_frame_open;
      int console_planar_batch_log_count;
      int console_planar_frame_id;
@@ -11,7 +11,8 @@
      /* Whether a working h.264 library is loaded.
 --- a/xrdp/xrdp.h
 +++ b/xrdp/xrdp.h
-@@ -266,5 +266,12 @@ xrdp_mm_console_commit_dirty_region(
+@@ -266,6 +266,13 @@
+     const struct xrdp_rect *committed, int committed_count,
      const struct xrdp_rect *discarded, int discarded_count,
      int transaction_succeeded);
 +int
@@ -26,7 +27,7 @@
  struct xrdp_bitmap *
 --- a/xrdp/xrdp_mm.c
 +++ b/xrdp/xrdp_mm.c
-@@ -997,6 +997,7 @@
+@@ -997,7 +997,8 @@
  enum
  {
      XRDP_LEGACY_GFX_MINIMUM_FLUSH_MS = 40,
@@ -35,7 +36,9 @@
 +    XRDP_CONSOLE_GFX_CONTINUATION_MS = 0,
      XRDP_CONSOLE_GFX_MAXIMUM_PIXELS_PER_FLUSH = 128 * 1024
  };
-@@ -1022,9 +1023,30 @@ struct xrdp_console_planar_batch
+ 
+@@ -1021,12 +1022,33 @@
+     int tiles_sent;
  };
  
 +int
@@ -69,7 +72,9 @@
 +               self->code,
 +               self->console_planar_immediate_continuation);
  }
-@@ -4332,9 +4349,10 @@ xrdp_mm_draw_dirty_console(struct xrdp_mm *self)
+ 
+ static void
+@@ -4337,6 +4359,7 @@
          return 1;
      }
  
@@ -77,11 +82,7 @@
      if (self->wm->screen_dirty_region == NULL ||
              !xrdp_region_not_empty(self->wm->screen_dirty_region))
      {
-         return 0;
-     }
- 
-@@ -4441,7 +4460,14 @@ xrdp_mm_draw_dirty_console(struct xrdp_mm *self)
-     {
+@@ -4440,6 +4463,13 @@
          rv = 1;
      }
  
@@ -97,7 +98,7 @@
          LOG(LOG_LEVEL_INFO, "XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 enabled");
 --- a/tests/xrdp/test_xrdp_region.c
 +++ b/tests/xrdp/test_xrdp_region.c
-@@ -298,6 +298,46 @@ test_console_invalid_display_state_retains_dirty_region(void **state)
+@@ -294,6 +294,46 @@
      xrdp_region_delete(region);
  }
  
@@ -144,7 +145,8 @@
  START_TEST(execute_suite)
  {
      const struct CMUnitTest tests[] =
-@@ -311,6 +351,7 @@ START_TEST(execute_suite)
+@@ -303,7 +343,8 @@
+         cmocka_unit_test(test_xrdp_region_not_empty__happy_path),
          cmocka_unit_test(test_console_offscreen_predicate_is_fail_closed),
          cmocka_unit_test(test_console_stale_prefix_commits_transactionally),
 -        cmocka_unit_test(test_console_invalid_display_state_retains_dirty_region)

@@ -1,7 +1,6 @@
 --- a/xrdp/xrdp_types.h
 +++ b/xrdp/xrdp_types.h
-@@ -419,8 +419,26 @@
-     int latest_frames_decoded;
+@@ -420,6 +420,24 @@
      int acknowledgements_suspended;
  };
  
@@ -26,9 +25,7 @@
  struct xrdp_mm
  {
      struct xrdp_wm *wm; /* owner */
-     enum mm_connect_state connect_state; /* State of connection */
-@@ -465,8 +483,9 @@
-     int console_planar_frame_id;
+@@ -466,6 +484,7 @@
      /* Drain already-bounded Console damage without a fresh-batch delay. */
      int console_planar_immediate_continuation;
      struct xrdp_console_gfx_ack_telemetry console_gfx_ack_telemetry;
@@ -36,11 +33,9 @@
      int gfx_delay_autologin;
      int mod_uses_wm_screen_for_gfx;
      /* Whether a working h.264 library is loaded.
-      * We check this at run-time, so that we can fall-back to GFX if
 --- a/xrdp/xrdp.h
 +++ b/xrdp/xrdp.h
-@@ -265,8 +265,16 @@
-     struct xrdp_region *region,
+@@ -266,6 +266,14 @@
      const struct xrdp_rect *committed, int committed_count,
      const struct xrdp_rect *discarded, int discarded_count,
      int transaction_succeeded);
@@ -55,9 +50,7 @@
  int
  xrdp_mm_console_gfx_minimum_flush_ms(int session_code,
                                       int immediate_continuation);
- int
-@@ -276,8 +284,39 @@
- void
+@@ -277,6 +285,37 @@
  xrdp_mm_console_record_gfx_acknowledgement(
      struct xrdp_console_gfx_ack_telemetry *telemetry,
      uint32_t queue_depth, int frame_id, int frames_decoded);
@@ -95,11 +88,9 @@
  
  /* xrdp_bitmap_common.c */
  struct xrdp_bitmap *
- xrdp_bitmap_create(int width, int height, int bpp,
 --- a/xrdp/xrdp_mm.c
 +++ b/xrdp/xrdp_mm.c
-@@ -1045,8 +1045,246 @@
- {
+@@ -1046,6 +1046,244 @@
      return transaction_succeeded && progress_made && dirty_pending;
  }
  
@@ -344,9 +335,7 @@
  void
  xrdp_mm_console_record_gfx_acknowledgement(
      struct xrdp_console_gfx_ack_telemetry *telemetry,
-     uint32_t queue_depth, int frame_id, int frames_decoded)
-@@ -1078,11 +1316,13 @@
- 
+@@ -1079,9 +1317,11 @@
  static int
  xrdp_mm_gfx_minimum_flush_ms(const struct xrdp_mm *self)
  {
@@ -361,13 +350,10 @@
  }
  
  static void
- xrdp_mm_console_planar_scratch_delete(struct xrdp_mm *self)
-@@ -4377,21 +4617,82 @@
- 
- }
+@@ -4379,11 +4619,70 @@
  
  /*****************************************************************************/
-+static int
+ static int
 +xrdp_mm_console_send_priority_rect(
 +    struct xrdp_mm *self, struct xrdp_bitmap *bitmap,
 +    const struct xrdp_rect *priority_rect,
@@ -425,7 +411,7 @@
 +    return 0;
 +}
 +
- static int
++static int
  xrdp_mm_draw_dirty_console(struct xrdp_mm *self)
  {
      struct xrdp_console_planar_batch batch = {0};
@@ -435,7 +421,7 @@
      struct monitor_info *monitor;
      unsigned int monitor_count;
      unsigned int monitor_index;
-     int frame_id;
+@@ -4391,6 +4690,8 @@
      int rv = 0;
      int end_rv;
      int commit_rv = 0;
@@ -444,9 +430,7 @@
  
      if (self == NULL || self->wm == NULL || self->wm->screen == NULL ||
              self->wm->client_info == NULL || self->egfx == NULL)
-     {
-@@ -4404,8 +4705,14 @@
-     {
+@@ -4405,6 +4706,12 @@
          return 0;
      }
  
@@ -459,10 +443,8 @@
      if (xrdp_mm_console_planar_scratch(self) == NULL)
      {
          return 1;
-     }
-@@ -4434,25 +4741,60 @@
+@@ -4425,11 +4732,46 @@
      self->console_planar_batch = &batch;
-     self->console_planar_frame_open = 1;
  
      monitor_count = self->wm->client_info->display_sizes.monitorCount;
 -    if (monitor_count == 0 ||
@@ -471,15 +453,7 @@
 -                monitor_count,
 -                self->wm->client_info->display_sizes.minfo_wm))
 +    if (interaction_dirty_pending)
-     {
--        full_screen.left = 0;
--        full_screen.top = 0;
--        full_screen.right = self->wm->screen->width;
--        full_screen.bottom = self->wm->screen->height;
--        rv = xrdp_mm_egfx_send_planar_region(
--                 self, self->wm->screen, self->wm->screen_dirty_region,
--                 &full_screen, monitor_count == 0,
--                 self->egfx->surface_id, 0, 0);
++    {
 +        if (monitor_count == 0 ||
 +                !xrdp_mm_console_display_layout_is_valid(
 +                    self->wm->screen->width, self->wm->screen->height,
@@ -512,32 +486,19 @@
 +                         monitor->top);
 +            }
 +        }
-     }
--    else
++    }
 +    else if (monitor_count == 0 ||
 +             !xrdp_mm_console_display_layout_is_valid(
 +                 self->wm->screen->width, self->wm->screen->height,
 +                 monitor_count,
 +                 self->wm->client_info->display_sizes.minfo_wm))
      {
-+        full_screen.left = 0;
-+        full_screen.top = 0;
-+        full_screen.right = self->wm->screen->width;
-+        full_screen.bottom = self->wm->screen->height;
-+        rv = xrdp_mm_egfx_send_planar_region(
-+                 self, self->wm->screen, self->wm->screen_dirty_region,
-+                 &full_screen, monitor_count == 0,
-+                 self->egfx->surface_id, 0, 0);
-+    }
-+    else
-+    {
-         for (monitor_index = 0;
-              monitor_index < monitor_count &&
-                  batch.committed_count <
-                      XRDP_CONSOLE_GFX_MAXIMUM_RECTANGLES_PER_FLUSH &&
-@@ -4502,2 +4844,10 @@
-         rv = 1;
-     }
+         full_screen.left = 0;
+         full_screen.top = 0;
+@@ -4491,6 +4833,14 @@
+                     "xrdp_mm_draw_dirty_console: failed to restore full "
+                     "screen dirty state after region commit failure");
+             }
 +
 +    if (interaction_dirty_pending && rv == 0 && end_rv == 0 &&
 +            commit_rv == 0 && batch.committed_count > 0)
@@ -546,17 +507,32 @@
 +            &self->console_interaction_priority);
 +    }
 +
-@@ -4530,2 +4879,3 @@
+             LOG(LOG_LEVEL_ERROR,
+                 "xrdp_mm_draw_dirty_console: dirty region commit failed; "
+                 "forcing full-screen retry");
+@@ -4528,7 +4878,8 @@
+             "rects=%d tiles=%d pixels=%d pending=%d acknowledgements=%"
+             PRIu64 " queue_depth=%" PRIu32 " maximum_queue_depth=%"
              PRIu32 " acknowledged_frame=%d frames_decoded=%d "
 -            "acknowledgements_suspended=%d suspensions=%" PRIu64,
 +            "acknowledgements_suspended=%d suspensions=%" PRIu64 " "
 +            "backpressure=%d priority=%d",
-@@ -4540,2 +4890,3 @@
+             frame_id, end_rv == 0, batch.rectangles_sent,
+             batch.tiles_sent, batch.pixels_sent,
+             xrdp_region_not_empty(self->wm->screen_dirty_region),
+@@ -4538,7 +4889,8 @@
+             self->console_gfx_ack_telemetry.latest_frame_id,
+             self->console_gfx_ack_telemetry.latest_frames_decoded,
              self->console_gfx_ack_telemetry.acknowledgements_suspended,
 -            self->console_gfx_ack_telemetry.suspension_count);
 +            self->console_gfx_ack_telemetry.suspension_count,
 +            backpressure_active, interaction_dirty_pending);
-@@ -4917,2 +4917,16 @@
+     }
+     if (self->console_planar_batch_log_count != INT_MAX)
+     {
+@@ -4915,6 +5267,20 @@
+ }
+ 
  /*****************************************************************************/
 +static void
 +xrdp_mm_console_record_painted_interaction(
@@ -573,19 +549,27 @@
 +}
 +
  int
-@@ -4933,4 +4946,5 @@
+ server_paint_rect(struct xrdp_mod *mod, int x, int y, int cx, int cy,
+                   char *data, int width, int height, int srcx, int srcy)
+@@ -4933,6 +5299,7 @@
+     wm = (struct xrdp_wm *)(mod->wm);
      b = xrdp_bitmap_create_with_data(width, height, wm->screen->bpp, data, wm);
      xrdp_painter_copy(p, b, wm->target_surface, x, y, cx, cy, srcx, srcy);
 +    xrdp_mm_console_record_painted_interaction(wm, x, y, cx, cy);
      xrdp_bitmap_delete(b);
      return 0;
-@@ -4955,4 +4969,5 @@
+ }
+@@ -4955,6 +5322,7 @@
+     wm = (struct xrdp_wm *)(mod->wm);
      b = xrdp_bitmap_create_with_data(width, height, bpp, data, wm);
      xrdp_painter_copy(p, b, wm->target_surface, x, y, cx, cy, srcx, srcy);
 +    xrdp_mm_console_record_painted_interaction(wm, x, y, cx, cy);
      xrdp_bitmap_delete(b);
      return 0;
-@@ -5231,3 +5246,8 @@
+ }
+@@ -5229,6 +5597,11 @@
+     struct xrdp_wm *wm;
+ 
      wm = (struct xrdp_wm *)(mod->wm);
 +    if (wm->mm != NULL && wm->mm->code == XRDP_CONSOLE_SESSION_CODE)
 +    {
@@ -594,29 +578,26 @@
 +    }
      xrdp_wm_send_pointer_position(wm, x, y);
      return 0;
+ }
 --- a/xrdp/xrdp_wm.c
 +++ b/xrdp/xrdp_wm.c
-@@ -1201,8 +1201,14 @@
-     }
- 
+@@ -1203,6 +1203,12 @@
      self->mouse_x = x;
      self->mouse_y = y;
-+
+ 
 +    if (self->mm != NULL && self->mm->code == XRDP_CONSOLE_SESSION_CODE)
 +    {
 +        xrdp_mm_console_set_interaction_anchor(
 +            &self->mm->console_interaction_priority, x, y);
 +    }
- 
++
      if (self->dragging)
      {
          xrdp_painter_begin_update(self->painter);
-@@ -1303,8 +1309,16 @@
- int
- xrdp_wm_mouse_touch(struct xrdp_wm *self, int gesture, int param)
+@@ -1305,6 +1311,14 @@
  {
      LOG(LOG_LEVEL_DEBUG, "mouse touch event gesture %d param %d", gesture, param);
-+
+ 
 +    if (self != NULL && self->mm != NULL &&
 +            self->mm->code == XRDP_CONSOLE_SESSION_CODE)
 +    {
@@ -624,12 +605,11 @@
 +            &self->mm->console_interaction_priority,
 +            self->mouse_x, self->mouse_y);
 +    }
- 
++
      switch (gesture)
      {
          case TOUCH_TWO_FINGERS_UP:
-@@ -1358,8 +1372,24 @@
-     {
+@@ -1359,6 +1373,22 @@
          y = self->screen->height;
      }
  
@@ -652,26 +632,22 @@
      if (self->dragging && but == 1 && !down && self->dragging_window != 0)
      {
          /* if done dragging */
-         self->draggingx = x;
-@@ -1629,8 +1659,14 @@
-     else /* key down */
-     {
+@@ -1631,6 +1661,12 @@
          self->keys[scan_code] = 1 | device_flags;
          msg = WM_KEYDOWN;
-+
+ 
 +        if (self->mm != NULL && self->mm->code == XRDP_CONSOLE_SESSION_CODE)
 +        {
 +            xrdp_mm_console_request_focus_interaction(
 +                &self->mm->console_interaction_priority);
 +        }
- 
++
          switch (scan_code)
          {
              case 58:
 --- a/tests/xrdp/test_xrdp_region.c
 +++ b/tests/xrdp/test_xrdp_region.c
-@@ -414,8 +414,112 @@
-     assert_true(telemetry.acknowledgement_count == UINT64_MAX);
+@@ -415,6 +415,110 @@
      assert_true(telemetry.suspension_count == UINT64_MAX);
  }
  
@@ -782,9 +758,7 @@
  START_TEST(execute_suite)
  {
      const struct CMUnitTest tests[] =
-     {
-@@ -428,9 +532,11 @@
-         cmocka_unit_test(test_console_planar_fresh_and_continuation_pacing),
+@@ -429,7 +533,9 @@
          cmocka_unit_test(
              test_console_gfx_acknowledgement_telemetry_tracks_queue_depth),
          cmocka_unit_test(
@@ -795,4 +769,3 @@
      };
  
      ck_assert_int_eq(cmocka_run_group_tests(tests, NULL, NULL), 0);
- }

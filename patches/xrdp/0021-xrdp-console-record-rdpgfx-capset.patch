@@ -8,7 +8,7 @@ commands or alter graphics selection, rendering, or transport behavior.
 
 --- a/xrdp/xrdp_types.h
 +++ b/xrdp/xrdp_types.h
-@@ -491,6 +491,9 @@ struct xrdp_mm
+@@ -492,6 +492,9 @@
      struct xrdp_egfx *egfx;
      int egfx_up;
      enum xrdp_egfx_flags egfx_flags;
@@ -20,7 +20,7 @@ commands or alter graphics selection, rendering, or transport behavior.
      struct xrdp_console_planar_batch *console_planar_batch;
 --- a/xrdp/xrdp_mm.c
 +++ b/xrdp/xrdp_mm.c
-@@ -2238,6 +2238,8 @@ xrdp_mm_egfx_caps_advertise(void *user, int caps_count,
+@@ -2237,6 +2237,8 @@
  
      LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_caps_advertise:");
      self = (struct xrdp_mm *) user;
@@ -29,8 +29,7 @@ commands or alter graphics selection, rendering, or transport behavior.
      screen = self->wm->screen;
      if (screen->data == NULL)
      {
-@@ -2336,7 +2338,17 @@ xrdp_mm_egfx_caps_advertise(void *user, int caps_count,
-                                            ver_flags[best_index].version,
+@@ -2338,6 +2340,16 @@
                                             ver_flags[best_index].flags);
          LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_caps_advertise: xrdp_egfx_send_capsconfirm "
              "error %d best_index %d", error, best_index);

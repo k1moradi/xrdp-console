@@ -15,7 +15,6 @@ set(image_deferred_owner_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0038-xrd
 set(image_targets_response_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0039-xrdp-chansrv-log-targets-response.patch")
 set(wait_object_failure_source_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0040-xrdp-log-window-manager-check-source.patch")
 set(png_x11_transaction_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0041-xrdp-chansrv-log-png-x11-transaction.patch")
-set(png_prefetch_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0042-xrdp-chansrv-prefetch-named-png.patch")
 set(rdp_vc_diagnostics_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0043-xrdp-log-vc-negotiation-and-cliprdr-fragment-timing.patch")
 
 foreach(required IN ITEMS "${series_file}" "${h264_patch}" "${pacing_patch}"
@@ -28,7 +27,6 @@ foreach(required IN ITEMS "${series_file}" "${h264_patch}" "${pacing_patch}"
         "${image_targets_response_patch}"
         "${wait_object_failure_source_patch}"
         "${png_x11_transaction_patch}"
-        "${png_prefetch_patch}"
         "${rdp_vc_diagnostics_patch}")
     if(NOT EXISTS "${required}")
         message(FATAL_ERROR "required optimization patch input is missing: ${required}")
@@ -114,37 +112,26 @@ foreach(marker IN ITEMS
         "source_sha256=%s"
         "xchange_argument_sha256=%s"
         "hash_match=%d length_match=%d"
+        "selection_notify_event_time=%lu"
         "OPENSSL_LIBS")
     string(FIND "${png_x11_transaction_text}" "${marker}" marker_index)
     if(marker_index LESS 0)
         message(FATAL_ERROR "PNG/X11 transaction diagnostics patch is missing marker: ${marker}")
     endif()
 endforeach()
-
-file(READ "${png_prefetch_patch}" png_prefetch_text)
-foreach(marker IN ITEMS
-        "event=png-prefetch-start"
-        "event=png-prefetch-response"
-        "event=png-prefetch-complete"
-        "event=png-prefetch-failed"
-        "event=png-prefetch-invalidated"
-        "clipboard_begin_image_data_request(g_png_format_id)"
-        "clipboard_process_png_prefetch_response"
-        "deliberately does not touch g_saved_selection_req_event"
-        "event=request-deferred"
-        "clipboard_refuse_prefetch_bmp_waiters"
-        "g_image_prefetch_generation != g_clipboard_format_generation"
-        "cache_generation=%llu")
-    string(FIND "${png_prefetch_text}" "${marker}" marker_index)
-    if(marker_index LESS 0)
-        message(FATAL_ERROR "named-PNG prefetch patch is missing marker: ${marker}")
-    endif()
-endforeach()
+string(FIND "${png_x11_transaction_text}" "notify_time=%lu" obsolete_notify_time_index)
+if(NOT obsolete_notify_time_index LESS 0)
+    message(FATAL_ERROR
+        "PNG/X11 diagnostics must name the SelectionNotify protocol timestamp explicitly")
+endif()
 
 file(READ "${rdp_vc_diagnostics_patch}" rdp_vc_diagnostics_text)
 foreach(marker IN ITEMS
         "XRDP_CONSOLE_RDP_VC event=client-info-compression"
         "XRDP_CONSOLE_RDP_VC event=client-vc-caps"
+        "rdp_vc_diagnostics.h"
+        "xrdp_vc_diagnostic_decode_caps"
+        "xrdp_vc_diagnostic_decode_cliprdr_header"
         "XRDP_CONSOLE_RDP_VC event=server-vc-caps advertised=0"
         "XRDP_CONSOLE_RDP_VC event=channel-definition"
         "event=cliprdr-fragment"
@@ -235,7 +222,7 @@ foreach(marker IN ITEMS
         "g_clipboard_owner_update_pending"
         "clipboard_restore_deferred_selection_owner"
         "event=selection-owner-restored"
-        "clipboard_event_selection_owner_notify")
+        "selection-owner-changed")
     string(FIND "${image_deferred_owner_text}" "${marker}" marker_index)
     if(marker_index LESS 0)
         message(FATAL_ERROR "deferred clipboard-owner patch is missing marker: ${marker}")

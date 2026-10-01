@@ -26,7 +26,7 @@ fragment -> chansrv response processing without changing the protocol path.
 
 --- a/common/ms-rdpbcgr.h
 +++ b/common/ms-rdpbcgr.h
-@@ -216,6 +216,11 @@
+@@ -240,6 +240,11 @@
  #define CAPSTYPE_VIRTUALCHANNEL                 0x0014
  #define CAPSTYPE_VIRTUALCHANNEL_LEN             0x08
  
@@ -38,7 +38,7 @@ fragment -> chansrv response processing without changing the protocol path.
  #define CAPSTYPE_DRAWNINGRIDCACHE               0x0015
  #define CAPSTYPE_DRAWGDIPLUS                    0x0016
  #define CAPSTYPE_RAIL                           0x0017
-@@ -274,6 +274,10 @@
+@@ -302,6 +307,10 @@
  #define XR_CHANNEL_FLAG_FIRST          0x00000001
  #define XR_CHANNEL_FLAG_LAST           0x00000002
  #define XR_CHANNEL_FLAG_SHOW_PROTOCOL  0x00000010
@@ -51,7 +51,17 @@ fragment -> chansrv response processing without changing the protocol path.
  #define OSMAJORTYPE_UNSPECIFIED        0x0000
 --- a/libxrdp/xrdp_caps.c
 +++ b/libxrdp/xrdp_caps.c
-@@ -124,4 +124,46 @@
+@@ -29,6 +29,7 @@
+ #include "libxrdp.h"
+ #include "ms-rdpbcgr.h"
+ #include "ms-rdperp.h"
++#include "rdp_vc_diagnostics.h"
+ 
+ /**
+  * The largest supported size for a fastpath update
+@@ -122,6 +123,40 @@
+ 
+ 
  /*****************************************************************************/
 +/*
 + * Observe [MS-RDPBCGR] TS_VIRTUALCHANNEL_CAPABILITYSET without changing
@@ -62,13 +72,12 @@ fragment -> chansrv response processing without changing the protocol path.
 +xrdp_caps_process_virtualchannel(struct xrdp_rdp *self, struct stream *s,
 +                                 int len)
 +{
-+    int flags;
-+    unsigned int vc_chunk_size = 0;
-+    int vc_chunk_size_present = 0;
++    struct xrdp_vc_diagnostic_caps caps;
 +
 +    (void)self;
 +
-+    if (len < 4)
++    if (len < 0 || !xrdp_vc_diagnostic_decode_caps(
++                (const uint8_t *)s->p, (size_t)len, &caps))
 +    {
 +        LOG(LOG_LEVEL_WARNING,
 +            "XRDP_CONSOLE_RDP_VC event=client-vc-caps-malformed "
@@ -76,21 +85,14 @@ fragment -> chansrv response processing without changing the protocol path.
 +        return 0;
 +    }
 +
-+    in_uint32_le(s, flags);
-+    if (len >= 8)
-+    {
-+        in_uint32_le(s, vc_chunk_size);
-+        vc_chunk_size_present = 1;
-+    }
-+
 +    LOG(LOG_LEVEL_INFO,
 +        "XRDP_CONSOLE_RDP_VC event=client-vc-caps "
 +        "flags=0x%8.8x compr_sc=%d compr_cs_8k=%d "
 +        "vc_chunk_size_present=%d vc_chunk_size=%u",
-+        flags,
-+        (flags & XR_VCCAPS_COMPR_SC) != 0,
-+        (flags & XR_VCCAPS_COMPR_CS_8K) != 0,
-+        vc_chunk_size_present, vc_chunk_size);
++        caps.flags,
++        (caps.flags & XR_VCCAPS_COMPR_SC) != 0,
++        (caps.flags & XR_VCCAPS_COMPR_CS_8K) != 0,
++        caps.chunk_size_present, caps.chunk_size);
 +    return 0;
 +}
 +
@@ -98,7 +100,7 @@ fragment -> chansrv response processing without changing the protocol path.
  static int
  xrdp_caps_process_bitmap(struct xrdp_rdp *self, struct stream *s,
                           int len)
-@@ -890,7 +890,11 @@
+@@ -943,7 +978,11 @@
                  break;
              case CAPSTYPE_VIRTUALCHANNEL:
                  LOG_DEVEL(LOG_LEVEL_INFO, "Received [MS-RDPBCGR] TS_CONFIRM_ACTIVE_PDU - TS_CAPS_SET "
@@ -111,7 +113,7 @@ fragment -> chansrv response processing without changing the protocol path.
                  break;
              case CAPSTYPE_DRAWNINGRIDCACHE:
                  LOG_DEVEL(LOG_LEVEL_INFO, "Received [MS-RDPBCGR] TS_CONFIRM_ACTIVE_PDU - TS_CAPS_SET "
-@@ -1090,6 +1090,14 @@
+@@ -1151,6 +1190,14 @@
      out_uint8s(s, 4);
      caps_ptr = s->p;
  
@@ -128,7 +130,7 @@ fragment -> chansrv response processing without changing the protocol path.
      out_uint16_le(s, CAPSTYPE_SHARE);
 --- a/libxrdp/xrdp_sec.c
 +++ b/libxrdp/xrdp_sec.c
-@@ -634,6 +634,14 @@
+@@ -671,6 +671,14 @@
      in_uint32_le(s, flags);
      LOG_DEVEL(LOG_LEVEL_TRACE, "Parsing [MS-RDPBCGR] TS_INFO_PACKET");
  
@@ -143,7 +145,7 @@ fragment -> chansrv response processing without changing the protocol path.
      /* this is the first test that the decrypt is working */
      if ((flags & RDP_LOGON_NORMAL) != RDP_LOGON_NORMAL) /* 0x33 */
      {
-@@ -2307,7 +2315,18 @@
+@@ -2344,6 +2352,17 @@
          LOG(LOG_LEVEL_DEBUG,
              "Adding channel: name %s, channel id %d, flags 0x%8.8x",
              channel_item->name, channel_item->chanid, channel_item->flags);
@@ -161,10 +163,17 @@ fragment -> chansrv response processing without changing the protocol path.
      }
  
      /* Set the user channel as well */
-     self->mcs_layer->chanid = next_mcs_channel_id++;
 --- a/libxrdp/xrdp_channel.c
 +++ b/libxrdp/xrdp_channel.c
-@@ -56,6 +56,32 @@
+@@ -25,6 +25,7 @@
+ #include "libxrdp.h"
+ #include "string_calls.h"
+ #include "xrdp_channel.h"
++#include "rdp_vc_diagnostics.h"
+ 
+ #define CMD_DVC_OPEN_CHANNEL    0x10
+ #define CMD_DVC_DATA_FIRST      0x20
+@@ -56,6 +57,13 @@
  }
  
  /*****************************************************************************/
@@ -175,29 +184,10 @@ fragment -> chansrv response processing without changing the protocol path.
 +           g_strcasecmp(channel->name, CLIPRDR_SVC_CHANNEL_NAME) == 0;
 +}
 +
-+/*****************************************************************************/
-+static unsigned int
-+xrdp_channel_uint16_le(const unsigned char *p)
-+{
-+    return ((unsigned int)p[0]) |
-+           ((unsigned int)p[1] << 8);
-+}
-+
-+/*****************************************************************************/
-+static unsigned int
-+xrdp_channel_uint32_le(const unsigned char *p)
-+{
-+    return ((unsigned int)p[0]) |
-+           ((unsigned int)p[1] << 8) |
-+           ((unsigned int)p[2] << 16) |
-+           ((unsigned int)p[3] << 24);
-+}
-+
-+/*****************************************************************************/
  struct xrdp_channel *
  xrdp_channel_create(struct xrdp_sec *owner, struct xrdp_mcs *mcs_layer)
  {
-@@ -147,6 +173,22 @@
+@@ -147,6 +155,22 @@
      LOG_DEVEL(LOG_LEVEL_TRACE, "Adding header [MS-RDPBCGR] CHANNEL_PDU_HEADER "
                "length %d, flags 0x%8.8x", total_data_len, flags);
  
@@ -220,7 +210,7 @@ fragment -> chansrv response processing without changing the protocol path.
      if (xrdp_sec_send(self->sec_layer, s, channel->chanid) != 0)
      {
          LOG(LOG_LEVEL_ERROR, "xrdp_channel_send: xrdp_sec_send failed");
-@@ -297,6 +339,9 @@
+@@ -297,6 +321,9 @@
      in_uint16_le(s, cap_version); /* Version */
      LOG_DEVEL(LOG_LEVEL_TRACE, "Received [MS-RDPEDYC] DYNVC_CAPS_RSP "
                "version %d", cap_version);
@@ -230,19 +220,16 @@ fragment -> chansrv response processing without changing the protocol path.
  
      if ((cap_version != 2) && (cap_version != 3))
      {
-@@ -673,6 +718,11 @@
+@@ -673,6 +700,8 @@
      int flags;
      int rv;
      int channel_id;
 +    int fragment_bytes;
-+    unsigned int clip_msg_type;
-+    unsigned int clip_msg_flags;
-+    unsigned int clip_data_len;
-+    const unsigned char *clip_header;
++    struct xrdp_cliprdr_diagnostic_header clip_header;
      struct mcs_channel_item *channel;
  
      /* this assumes that the channels are in order of chanid(mcs channel id)
-@@ -704,6 +754,56 @@
+@@ -704,6 +733,55 @@
      in_uint32_le(s, flags);  /* flags */
      LOG_DEVEL(LOG_LEVEL_TRACE, "Received header [MS-RDPBCGR] CHANNEL_PDU_HEADER "
                "length %d, flags 0x%8.8x", length, flags);
@@ -253,12 +240,10 @@ fragment -> chansrv response processing without changing the protocol path.
 +        if ((flags & XR_CHANNEL_FLAG_FIRST) != 0)
 +        {
 +            if ((flags & XR_CHANNEL_PACKET_COMPRESSED) == 0 &&
-+                    fragment_bytes >= 8)
++                    xrdp_vc_diagnostic_decode_cliprdr_header(
++                        (const uint8_t *)s->p, (size_t)fragment_bytes,
++                        &clip_header))
 +            {
-+                clip_header = (const unsigned char *)s->p;
-+                clip_msg_type = xrdp_channel_uint16_le(clip_header);
-+                clip_msg_flags = xrdp_channel_uint16_le(clip_header + 2);
-+                clip_data_len = xrdp_channel_uint32_le(clip_header + 4);
 +                LOG(LOG_LEVEL_INFO,
 +                    "XRDP_CONSOLE_RDP_VC event=cliprdr-first-fragment "
 +                    "direction=client-to-server total_len=%d "
@@ -266,7 +251,8 @@ fragment -> chansrv response processing without changing the protocol path.
 +                    "msg_type=%u msg_flags=0x%4.4x data_len=%u "
 +                    "payload_bytes_in_fragment=%d",
 +                    length, fragment_bytes, flags,
-+                    clip_msg_type, clip_msg_flags, clip_data_len,
++                    clip_header.message_type, clip_header.message_flags,
++                    clip_header.data_length,
 +                    fragment_bytes - 8);
 +            }
 +            else
@@ -299,7 +285,7 @@ fragment -> chansrv response processing without changing the protocol path.
      rv = xrdp_channel_call_callback(self, s, channel_id, length, flags);
      return rv;
  }
-@@ -746,6 +846,10 @@
+@@ -746,6 +824,10 @@
      LOG_DEVEL(LOG_LEVEL_TRACE, "Sending [MS-RDPEDYC] DYNVC_CAPS_VERSION2 "
                "cbId 0, Sp 0, Cmd 0x05, Version 2, PriorityCharge0 0, "
                "PriorityCharge1 0, PriorityCharge2 0, PriorityCharge3 0");
@@ -310,3 +296,77 @@ fragment -> chansrv response processing without changing the protocol path.
      if (xrdp_channel_send(self, s, channel_id, total_data_len, flags) != 0)
      {
          LOG(LOG_LEVEL_ERROR,
+--- /dev/null
++++ b/common/rdp_vc_diagnostics.h
+@@ -0,0 +1,71 @@
++/* SPDX-License-Identifier: Apache-2.0 */
++
++#ifndef XRDP_RDP_VC_DIAGNOSTICS_H
++#define XRDP_RDP_VC_DIAGNOSTICS_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++struct xrdp_vc_diagnostic_caps
++{
++    uint32_t flags;
++    uint32_t chunk_size;
++    int chunk_size_present;
++};
++
++struct xrdp_cliprdr_diagnostic_header
++{
++    uint16_t message_type;
++    uint16_t message_flags;
++    uint32_t data_length;
++};
++
++/* The VC capability payload is either flags-only (4 bytes), or includes
++ * VCChunkSize (8 bytes). Lengths 5-7 are truncated optional fields. */
++static inline int
++xrdp_vc_diagnostic_decode_caps(const uint8_t *data, size_t bytes,
++                               struct xrdp_vc_diagnostic_caps *caps)
++{
++    if (data == NULL || caps == NULL ||
++            (bytes < 4) || (bytes > 4 && bytes < 8))
++    {
++        return 0;
++    }
++
++    caps->flags = ((uint32_t)data[0]) |
++                  ((uint32_t)data[1] << 8) |
++                  ((uint32_t)data[2] << 16) |
++                  ((uint32_t)data[3] << 24);
++    caps->chunk_size_present = bytes >= 8;
++    caps->chunk_size = caps->chunk_size_present ?
++        (((uint32_t)data[4]) |
++         ((uint32_t)data[5] << 8) |
++         ((uint32_t)data[6] << 16) |
++         ((uint32_t)data[7] << 24)) : 0;
++    return 1;
++}
++
++/* A CLIPRDR common header is exactly 8 bytes; bytes after it may be only the
++ * first fragment of the PDU, so data_length is not checked against bytes. */
++static inline int
++xrdp_vc_diagnostic_decode_cliprdr_header(
++    const uint8_t *data, size_t bytes,
++    struct xrdp_cliprdr_diagnostic_header *header)
++{
++    if (data == NULL || header == NULL || bytes < 8)
++    {
++        return 0;
++    }
++
++    header->message_type = (uint16_t)(((uint16_t)data[0]) |
++                                      ((uint16_t)data[1] << 8));
++    header->message_flags = (uint16_t)(((uint16_t)data[2]) |
++                                       ((uint16_t)data[3] << 8));
++    header->data_length = ((uint32_t)data[4]) |
++                          ((uint32_t)data[5] << 8) |
++                          ((uint32_t)data[6] << 16) |
++                          ((uint32_t)data[7] << 24);
++    return 1;
++}
++
++#endif /* XRDP_RDP_VC_DIAGNOSTICS_H */
