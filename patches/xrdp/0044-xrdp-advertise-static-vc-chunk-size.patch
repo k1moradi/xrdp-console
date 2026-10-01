@@ -1,0 +1,46 @@
+From: xrdp-console contributors
+Subject: [PATCH] xrdp: advertise the standard maximum static VC chunk size
+
+Advertise a 16,256-byte static virtual-channel chunk limit in the server
+Virtual Channel Capability Set while leaving all compression flags clear.
+The Microsoft macOS client advertises the optional client VCChunkSize field,
+so it can use this server limit for client-to-server chunks instead of the
+1,600-byte default. This reduces static-channel PDU overhead without changing
+CLIPRDR delayed rendering, reassembly, compression, or payload semantics.
+
+--- a/common/ms-rdpbcgr.h
++++ b/common/ms-rdpbcgr.h
+@@ -244,6 +244,7 @@
+ #define XR_VCCAPS_NO_COMPR                      0x00000000
+ #define XR_VCCAPS_COMPR_SC                      0x00000001
+ #define XR_VCCAPS_COMPR_CS_8K                   0x00000002
++#define XR_VC_CHUNK_SIZE_MAX                    16256
+ 
+ #define CAPSTYPE_DRAWNINGRIDCACHE               0x0015
+ #define CAPSTYPE_DRAWGDIPLUS                    0x0016
+--- a/libxrdp/xrdp_caps.c
++++ b/libxrdp/xrdp_caps.c
+@@ -1193,9 +1193,16 @@
+-    /*
+-     * Phase-A audit marker. xrdp 0.10.6.1 currently emits no
+-     * TS_VIRTUALCHANNEL_CAPABILITYSET here. Do not change that until the
+-     * receive-side decompressor and negotiation state are implemented.
+-     */
+-    LOG(LOG_LEVEL_INFO,
+-        "XRDP_CONSOLE_RDP_VC event=server-vc-caps advertised=0");
++    /*
++     * Advertise the maximum standard VC chunk size. The client-to-server
++     * compression flag remains clear because no VC decompressor is enabled.
++     */
++    caps_count++;
++    out_uint16_le(s, CAPSTYPE_VIRTUALCHANNEL);
++    out_uint16_le(s, CAPSTYPE_VIRTUALCHANNEL_LEN + 4);
++    out_uint32_le(s, XR_VCCAPS_NO_COMPR);
++    out_uint32_le(s, XR_VC_CHUNK_SIZE_MAX);
++    LOG(LOG_LEVEL_INFO,
++        "XRDP_CONSOLE_RDP_VC event=server-vc-caps advertised=1 "
++        "flags=0x%8.8x compr_sc=0 compr_cs_8k=0 "
++        "vc_chunk_size_present=1 vc_chunk_size=%u",
++        XR_VCCAPS_NO_COMPR, XR_VC_CHUNK_SIZE_MAX);
+ 
+     /* Output share capability set */

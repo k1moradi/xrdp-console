@@ -16,6 +16,8 @@ set(image_targets_response_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0039-x
 set(wait_object_failure_source_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0040-xrdp-log-window-manager-check-source.patch")
 set(png_x11_transaction_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0041-xrdp-chansrv-log-png-x11-transaction.patch")
 set(rdp_vc_diagnostics_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0043-xrdp-log-vc-negotiation-and-cliprdr-fragment-timing.patch")
+set(vc_chunk_size_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0044-xrdp-advertise-static-vc-chunk-size.patch")
+set(chansrv_vc_buffer_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0045-xrdp-size-chansrv-channel-ipc-for-negotiated-chunks.patch")
 
 foreach(required IN ITEMS "${series_file}" "${h264_patch}" "${pacing_patch}"
         "${image_retry_patch}" "${image_waiters_patch}"
@@ -27,7 +29,9 @@ foreach(required IN ITEMS "${series_file}" "${h264_patch}" "${pacing_patch}"
         "${image_targets_response_patch}"
         "${wait_object_failure_source_patch}"
         "${png_x11_transaction_patch}"
-        "${rdp_vc_diagnostics_patch}")
+        "${rdp_vc_diagnostics_patch}"
+        "${vc_chunk_size_patch}"
+        "${chansrv_vc_buffer_patch}")
     if(NOT EXISTS "${required}")
         message(FATAL_ERROR "required optimization patch input is missing: ${required}")
     endif()
@@ -69,11 +73,15 @@ list(FIND series_lines "0040-xrdp-log-window-manager-check-source.patch" wait_ob
 list(FIND series_lines "0041-xrdp-chansrv-log-png-x11-transaction.patch" png_x11_transaction_index)
 list(FIND series_lines "0042-xrdp-chansrv-prefetch-named-png.patch" png_prefetch_index)
 list(FIND series_lines "0043-xrdp-log-vc-negotiation-and-cliprdr-fragment-timing.patch" rdp_vc_diagnostics_index)
+list(FIND series_lines "0044-xrdp-advertise-static-vc-chunk-size.patch" vc_chunk_size_index)
+list(FIND series_lines "0045-xrdp-size-chansrv-channel-ipc-for-negotiated-chunks.patch" chansrv_vc_buffer_index)
 if(image_retire_terminator_index LESS 0 OR channel_containment_index LESS 0 OR
         png_priority_index LESS 0 OR image_x11_diagnostics_index LESS 0 OR
         image_deferred_owner_index LESS 0 OR image_targets_response_index LESS 0 OR
         wait_object_failure_source_index LESS 0 OR png_x11_transaction_index LESS 0 OR
-        rdp_vc_diagnostics_index LESS 0 OR png_prefetch_index GREATER -1)
+        rdp_vc_diagnostics_index LESS 0 OR vc_chunk_size_index LESS 0 OR
+        chansrv_vc_buffer_index LESS 0 OR
+        png_prefetch_index GREATER -1)
     message(FATAL_ERROR "xrdp clipboard diagnostics must be in series and experimental PNG prefetch must remain inactive")
 endif()
 math(EXPR expected_channel_containment_index "${image_retire_terminator_index} + 1")
@@ -84,6 +92,8 @@ math(EXPR expected_image_targets_response_index "${image_deferred_owner_index} +
 math(EXPR expected_wait_object_failure_source_index "${image_targets_response_index} + 1")
 math(EXPR expected_png_x11_transaction_index "${wait_object_failure_source_index} + 1")
 math(EXPR expected_rdp_vc_diagnostics_index "${png_x11_transaction_index} + 1")
+math(EXPR expected_vc_chunk_size_index "${rdp_vc_diagnostics_index} + 1")
+math(EXPR expected_chansrv_vc_buffer_index "${vc_chunk_size_index} + 1")
 if(NOT channel_containment_index EQUAL expected_channel_containment_index OR
         NOT png_priority_index EQUAL expected_png_priority_index OR
         NOT image_x11_diagnostics_index EQUAL expected_image_x11_diagnostics_index OR
@@ -91,7 +101,9 @@ if(NOT channel_containment_index EQUAL expected_channel_containment_index OR
         NOT image_targets_response_index EQUAL expected_image_targets_response_index OR
         NOT wait_object_failure_source_index EQUAL expected_wait_object_failure_source_index OR
         NOT png_x11_transaction_index EQUAL expected_png_x11_transaction_index OR
-        NOT rdp_vc_diagnostics_index EQUAL expected_rdp_vc_diagnostics_index)
+        NOT rdp_vc_diagnostics_index EQUAL expected_rdp_vc_diagnostics_index OR
+        NOT vc_chunk_size_index EQUAL expected_vc_chunk_size_index OR
+        NOT chansrv_vc_buffer_index EQUAL expected_chansrv_vc_buffer_index)
     message(FATAL_ERROR "channel containment, PNG-priority, and xrdp diagnostics patches must follow clipboard fixes in order")
 endif()
 
@@ -117,6 +129,31 @@ foreach(marker IN ITEMS
     string(FIND "${png_x11_transaction_text}" "${marker}" marker_index)
     if(marker_index LESS 0)
         message(FATAL_ERROR "PNG/X11 transaction diagnostics patch is missing marker: ${marker}")
+    endif()
+endforeach()
+
+file(READ "${vc_chunk_size_patch}" vc_chunk_size_text)
+foreach(marker IN ITEMS
+        "XR_VC_CHUNK_SIZE_MAX"
+        "16256"
+        "CAPSTYPE_VIRTUALCHANNEL_LEN + 4"
+        "out_uint32_le(s, XR_VCCAPS_NO_COMPR)"
+        "out_uint32_le(s, XR_VC_CHUNK_SIZE_MAX)"
+        "event=server-vc-caps advertised=1"
+        "vc_chunk_size_present=1 vc_chunk_size=%u")
+    string(FIND "${vc_chunk_size_text}" "${marker}" marker_index)
+    if(marker_index LESS 0)
+        message(FATAL_ERROR "static VC chunk-size patch is missing marker: ${marker}")
+    endif()
+endforeach()
+file(READ "${chansrv_vc_buffer_patch}" chansrv_vc_buffer_text)
+foreach(marker IN ITEMS
+        "CHANSRV_CHANNEL_IPC_HEADER_BYTES 26"
+        "XR_VC_CHUNK_SIZE_MAX + CHANSRV_CHANNEL_IPC_HEADER_BYTES"
+        "CHANSRV_CHANNEL_IPC_BUFFER_SIZE")
+    string(FIND "${chansrv_vc_buffer_text}" "${marker}" marker_index)
+    if(marker_index LESS 0)
+        message(FATAL_ERROR "chansrv VC chunk IPC buffer patch is missing marker: ${marker}")
     endif()
 endforeach()
 string(FIND "${png_x11_transaction_text}" "notify_time=%lu" obsolete_notify_time_index)

@@ -534,6 +534,21 @@ def assert_clipboard_image_session(
     wait_for_chansrv_marker(
         chansrv_logs, "event=response status=0x1", 1, 10.0,
         chansrv_process, chansrv_stdout)
+    vc_log = read_text(log_path)
+    if re.search(
+            r"event=server-vc-caps advertised=1 flags=0x00000000 "
+            r"compr_sc=0 compr_cs_8k=0 vc_chunk_size_present=1 "
+            r"vc_chunk_size=16256", vc_log) is None:
+        raise AssertionError(
+            "server did not advertise the negotiated static VC chunk limit:\n"
+            f"{xrdp_log_excerpt(log_path)}")
+    if re.search(
+            r"event=cliprdr-first-fragment "
+            r"direction=client-to-server total_len=\d+ "
+            r"fragment_bytes=16256 [^\n]*msg_type=5", vc_log) is None:
+        raise AssertionError(
+            "large CF_DIB response did not exercise the negotiated VC chunk "
+            f"size:\n{xrdp_log_excerpt(log_path)}")
     x11_log = chansrv_log_text(chansrv_logs)
     request_match = re.search(
         r"event=x11-request target=image/bmp requestor=(0x[0-9a-fA-F]+) "

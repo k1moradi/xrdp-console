@@ -1,0 +1,30 @@
+From: xrdp-console contributors
+Subject: [PATCH] chansrv: size IPC buffers for negotiated VC chunks
+
+The xrdp-to-chansrv channel-data IPC message wraps a static virtual-channel
+chunk in 26 bytes of internal framing. A negotiated 16,256-byte VC chunk
+therefore needs a receive buffer larger than the historical 8 KiB default.
+Size the listener and its accepted connections to hold the largest legal
+chunk plus that framing.
+
+--- a/sesman/chansrv/chansrv.c
++++ b/sesman/chansrv/chansrv.c
+@@ -80,6 +80,11 @@
+ /* max total channel bytes size */
+ #define MAX_CHANNEL_BYTES (1 * 1024 * 1024 * 1024) /* 1 GB */
+ #define MAX_CHANNEL_FRAG_BYTES 1600
++/* The xrdp->chansrv channel-data IPC frame adds 26 bytes around the
++ * virtual-channel chunk. Keep this buffer tied to the negotiated maximum. */
++#define CHANSRV_CHANNEL_IPC_HEADER_BYTES 26
++#define CHANSRV_CHANNEL_IPC_BUFFER_SIZE \
++    (XR_VC_CHUNK_SIZE_MAX + CHANSRV_CHANNEL_IPC_HEADER_BYTES)
+ 
+ #define CHANSRV_DRDYNVC_STATUS_CLOSED       0
+ #define CHANSRV_DRDYNVC_STATUS_OPEN_SENT    1
+@@ -1328,3 +1333,5 @@
+-    g_lis_trans = trans_create(TRANS_MODE_UNIX, 8192, 8192);
++    g_lis_trans = trans_create(TRANS_MODE_UNIX,
++                               CHANSRV_CHANNEL_IPC_BUFFER_SIZE,
++                               CHANSRV_CHANNEL_IPC_BUFFER_SIZE);
+     g_lis_trans->is_term = g_is_term;
+     g_snprintf(port, sizeof(port), XRDP_CHANSRV_STR, g_getuid(), g_display_num);
