@@ -8,6 +8,7 @@
 #include <png.h>
 
 #include <errno.h>
+#include <limits.h>
 #include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -380,6 +381,8 @@ send_selection_notify(Display *display,
                       Atom property)
 {
     XEvent response;
+    char *target_name;
+    int send_result;
 
     memset(&response, 0, sizeof(response));
     response.xselection.type = SelectionNotify;
@@ -389,7 +392,26 @@ send_selection_notify(Display *display,
     response.xselection.target = request->target;
     response.xselection.property = property;
     response.xselection.time = request->time;
-    XSendEvent(display, request->requestor, False, 0, &response);
+    send_result = XSendEvent(display, request->requestor, False, 0, &response);
+    target_name = XGetAtomName(display, request->target);
+    if (target_name != NULL &&
+            (strcmp(target_name, "image/png") == 0 ||
+             strcmp(target_name, "TARGETS") == 0 ||
+             strcmp(target_name, "TIMESTAMP") == 0))
+    {
+        printf("PNG_FILE_OWNER_SELECTION_NOTIFY requestor=0x%lx "
+               "owner=0x%lx selection=0x%lx target=%s property=0x%lx "
+               "request_time=%lu notify_time=%lu propagation=0 "
+               "event_mask=0x0 send_result=%d\n",
+               request->requestor, request->owner, request->selection,
+               target_name, property, request->time,
+               response.xselection.time, send_result);
+        fflush(stdout);
+    }
+    if (target_name != NULL)
+    {
+        XFree(target_name);
+    }
     XFlush(display);
 }
 
@@ -402,10 +424,14 @@ start_incr_transfer(Display *display,
                     const unsigned char *data,
                     size_t data_length,
                     struct image_transfer *transfer,
+                    int xrdp_event_order,
                     const char *first_chunk_marker,
                     const char *done_marker)
 {
     unsigned long announced_length;
+    int change_result;
+    int select_result = 0;
+    char *type_name;
 
     if (request->property == None || data == NULL || data_length == 0 ||
             data_length > UINT32_MAX || transfer->active)
@@ -427,10 +453,34 @@ start_incr_transfer(Display *display,
     transfer->first_chunk_marker = first_chunk_marker;
     transfer->done_marker = done_marker;
 
-    XSelectInput(display, request->requestor, PropertyChangeMask);
-    XChangeProperty(display, request->requestor, property, incr, 32,
-                    PropModeReplace,
-                    (unsigned char *)&announced_length, 1);
+    if (!xrdp_event_order)
+    {
+        select_result = XSelectInput(display, request->requestor,
+                                     PropertyChangeMask);
+    }
+    change_result = XChangeProperty(display, request->requestor, property,
+                                    incr, 32, PropModeReplace,
+                                    (unsigned char *)&announced_length, 1);
+    if (xrdp_event_order)
+    {
+        select_result = XSelectInput(display, request->requestor,
+                                     PropertyChangeMask);
+    }
+    type_name = XGetAtomName(display, type);
+    printf("X11_OWNER_INCR_ANNOUNCEMENT requestor=0x%lx owner=0x%lx "
+           "selection=0x%lx target=%s property=0x%lx "
+           "type=INCR format=32 items=1 announced_bytes=%lu "
+           "request_time=%lu change_result=%d select_result=%d "
+           "event_order=%s\n",
+           request->requestor, request->owner, request->selection,
+           type_name != NULL ? type_name : "<unknown>", property,
+           announced_length, request->time, change_result, select_result,
+           xrdp_event_order ? "xrdp" : "select-first");
+    if (type_name != NULL)
+    {
+        XFree(type_name);
+    }
+    fflush(stdout);
     send_selection_notify(display, request, property);
     return 0;
 }
@@ -490,6 +540,7 @@ handle_named_png_raw_request(Display *display,
 
     if (start_incr_transfer(display, request, property, raw_target, incr,
                             png_data, png_length, transfer,
+                            0,
                             "NAMED_PNG_RAW_FIRST_CHUNK",
                             "NAMED_PNG_RAW_INCR_DONE") != 0)
     {
@@ -572,6 +623,7 @@ handle_selection_request(Display *display,
     {
         if (start_incr_transfer(display, request, property, image_bmp, incr,
                                 bitmap, bitmap_length, transfer,
+                                0,
                                 "IMAGE_FIRST_CHUNK", "IMAGE_INCR_DONE") == 0)
         {
             puts("IMAGE_REQUEST");
@@ -1516,6 +1568,373 @@ done:
     return status;
 }
 
+static int
+run_png_file_owner(const char *png_path, int force_incr, int xrdp_chunks,
+                   int xrdp_targets)
+{
+    Display *display = XOpenDisplay(NULL);
+    Window owner;
+    Atom clipboard;
+    Atom targets;
+    Atom timestamp;
+    Atom multiple;
+    Atom image_bmp;
+    Atom image_png;
+    Atom timestamp_probe;
+    Atom incr;
+    unsigned char *png_data = NULL;
+    size_t png_length = 0;
+    png_uint_32 width = 0;
+    png_uint_32 height = 0;
+    size_t decoded_bytes = 0;
+    unsigned long selection_time = 0;
+    unsigned long max_request_units;
+    size_t max_request_bytes;
+    size_t chunk_limit = IMAGE_CHUNK_BYTES;
+    size_t chunk_count = 0;
+    int direct_property;
+    int x_fd;
+    struct image_transfer transfer = {0};
+
+    if (display == NULL)
+    {
+        fputs("cannot open PNG owner display\n", stderr);
+        return 1;
+    }
+    png_data = read_named_png(png_path, &png_length);
+    if (png_data == NULL ||
+            decode_png_in_memory(png_data, png_length, &width, &height,
+                                 &decoded_bytes) != 0)
+    {
+        fputs("PNG owner input failed bounded full decode\n", stderr);
+        free(png_data);
+        XCloseDisplay(display);
+        return 1;
+    }
+
+    clipboard = XInternAtom(display, "CLIPBOARD", False);
+    targets = XInternAtom(display, "TARGETS", False);
+    timestamp = XInternAtom(display, "TIMESTAMP", False);
+    multiple = XInternAtom(display, "MULTIPLE", False);
+    image_bmp = XInternAtom(display, "image/bmp", False);
+    image_png = XInternAtom(display, "image/png", False);
+    incr = XInternAtom(display, "INCR", False);
+    timestamp_probe = XInternAtom(
+        display, "_XRDP_CONSOLE_PNG_OWNER_TIMESTAMP_PROBE", False);
+    owner = XCreateSimpleWindow(display, DefaultRootWindow(display),
+                                0, 0, 1, 1, 0, 0, 0);
+    XStoreName(display, owner, "xrdp-console diagnostic PNG owner");
+    XSelectInput(display, owner, PropertyChangeMask);
+    {
+        const unsigned char probe_value = 1;
+        XEvent event;
+        XChangeProperty(display, owner, timestamp_probe, XA_INTEGER, 8,
+                        PropModeReplace, &probe_value, 1);
+        XFlush(display);
+        do
+        {
+            XWindowEvent(display, owner, PropertyChangeMask, &event);
+        }
+        while (event.type != PropertyNotify ||
+               event.xproperty.atom != timestamp_probe);
+        selection_time = (unsigned long)event.xproperty.time;
+    }
+    XSetSelectionOwner(display, clipboard, owner, (Time)selection_time);
+    XSync(display, False);
+    if (XGetSelectionOwner(display, clipboard) != owner)
+    {
+        fputs("PNG owner could not acquire CLIPBOARD selection\n", stderr);
+        free(png_data);
+        XDestroyWindow(display, owner);
+        XCloseDisplay(display);
+        return 1;
+    }
+
+    max_request_units = (unsigned long)XExtendedMaxRequestSize(display);
+    if (max_request_units == 0)
+    {
+        max_request_units = (unsigned long)XMaxRequestSize(display);
+    }
+    max_request_bytes = max_request_units > (size_t)-1 / 4U ?
+                        (size_t)-1 : (size_t)max_request_units * 4U;
+    if (xrdp_chunks)
+    {
+        const long core_request_units = XMaxRequestSize(display);
+        if (core_request_units <= 6)
+        {
+            fputs("X server core request limit is too small for INCR\n",
+                  stderr);
+            free(png_data);
+            XDestroyWindow(display, owner);
+            XCloseDisplay(display);
+            return 1;
+        }
+        chunk_limit = (size_t)core_request_units * 4U - 24U;
+        if (chunk_limit > (size_t)INT_MAX)
+        {
+            chunk_limit = (size_t)INT_MAX;
+        }
+    }
+    direct_property = !force_incr && max_request_bytes > 128U &&
+                      png_length <= max_request_bytes - 128U &&
+                      png_length <= (size_t)INT_MAX;
+    x_fd = ConnectionNumber(display);
+    printf("PNG_FILE_OWNER_READY owner=0x%lx current_owner=0x%lx "
+           "bytes=%zu width=%u height=%u selection_time=%lu "
+           "delivery=%s chunk_limit=%zu\n",
+           owner, XGetSelectionOwner(display, clipboard), png_length,
+           (unsigned)width, (unsigned)height, selection_time,
+           direct_property ? "direct" : "incr", chunk_limit);
+    fflush(stdout);
+
+    for (;;)
+    {
+        struct pollfd descriptor;
+        int poll_result;
+
+        descriptor.fd = x_fd;
+        descriptor.events = POLLIN;
+        descriptor.revents = 0;
+        poll_result = poll(&descriptor, 1, -1);
+        if (poll_result < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            perror("PNG owner poll failed");
+            break;
+        }
+
+        while (XPending(display) > 0)
+        {
+            XEvent event;
+            XNextEvent(display, &event);
+            if (event.type == SelectionRequest)
+            {
+                const XSelectionRequestEvent *request =
+                    &event.xselectionrequest;
+                const Atom property = request->property == None ?
+                                      request->target : request->property;
+
+                if (xrdp_targets)
+                {
+                    char *target_name = XGetAtomName(display, request->target);
+                    printf("PNG_FILE_OWNER_REQUEST target=%s "
+                           "requestor=0x%lx owner=0x%lx selection=0x%lx "
+                           "property=0x%lx time=%lu\n",
+                           target_name != NULL ? target_name : "<unknown>",
+                           request->requestor, request->owner,
+                           request->selection, request->property,
+                           request->time);
+                    if (target_name != NULL)
+                    {
+                        XFree(target_name);
+                    }
+                    fflush(stdout);
+                }
+
+                if (request->selection != clipboard)
+                {
+                    send_selection_notify(display, request, None);
+                }
+                else if (request->target == targets)
+                {
+                    if (xrdp_targets)
+                    {
+                        Atom supported[] = {
+                            targets, timestamp, multiple, image_png, image_bmp
+                        };
+                        const int target_count = (int)(sizeof(supported) /
+                                                       sizeof(supported[0]));
+                        const int property_result = XChangeProperty(
+                            display, request->requestor, property,
+                            XA_ATOM, 32, PropModeReplace,
+                            (unsigned char *)supported, target_count);
+                        printf("PNG_FILE_OWNER_TARGETS_PROPERTY requestor=0x%lx "
+                               "property=0x%lx type=ATOM format=32 items=%d "
+                               "targets=TARGETS,TIMESTAMP,MULTIPLE,image/png,image/bmp "
+                               "change_result=%d\n",
+                               request->requestor, property, target_count,
+                               property_result);
+                    }
+                    else
+                    {
+                        Atom supported[] = {targets, timestamp, image_png};
+                        const int target_count = (int)(sizeof(supported) /
+                                                       sizeof(supported[0]));
+                        const int property_result = XChangeProperty(
+                            display, request->requestor, property,
+                            XA_ATOM, 32, PropModeReplace,
+                            (unsigned char *)supported, target_count);
+                        printf("PNG_FILE_OWNER_TARGETS_PROPERTY requestor=0x%lx "
+                               "property=0x%lx type=ATOM format=32 items=%d "
+                               "targets=TARGETS,TIMESTAMP,image/png "
+                               "change_result=%d\n",
+                               request->requestor, property, target_count,
+                               property_result);
+                    }
+                    send_selection_notify(display, request, property);
+                    puts("PNG_FILE_OWNER_TARGETS_SENT");
+                    fflush(stdout);
+                }
+                else if (request->target == timestamp)
+                {
+                    const int property_result = XChangeProperty(
+                        display, request->requestor, property,
+                        XA_INTEGER, 32, PropModeReplace,
+                        (unsigned char *)&selection_time, 1);
+                    printf("PNG_FILE_OWNER_TIMESTAMP_PROPERTY requestor=0x%lx "
+                           "property=0x%lx type=INTEGER format=32 items=1 "
+                           "value=%lu selection_time=%lu change_result=%d\n",
+                           request->requestor, property, selection_time,
+                           selection_time, property_result);
+                    send_selection_notify(display, request, property);
+                }
+                else if (request->target == image_png && !transfer.active)
+                {
+                    if (request->property == None)
+                    {
+                        send_selection_notify(display, request, None);
+                    }
+                    else if (direct_property)
+                    {
+                        const int property_result = XChangeProperty(
+                            display, request->requestor, property,
+                            image_png, 8, PropModeReplace,
+                            png_data, (int)png_length);
+                        send_selection_notify(display, request, property);
+                        printf("PNG_FILE_OWNER_DIRECT_SENT requestor=0x%lx "
+                               "property=0x%lx type=image/png format=8 "
+                               "bytes=%zu change_result=%d\n",
+                               request->requestor, property, png_length,
+                               property_result);
+                        fflush(stdout);
+                    }
+                    else if (start_incr_transfer(
+                                 display, request, property, image_png, incr,
+                                 png_data, png_length, &transfer,
+                                 xrdp_chunks,
+                                 "PNG_FILE_OWNER_INCR_FIRST_CHUNK",
+                                 "PNG_FILE_OWNER_INCR_DONE") == 0)
+                    {
+                        printf("PNG_FILE_OWNER_INCR_STARTED bytes=%zu\n",
+                               png_length);
+                        fflush(stdout);
+                    }
+                }
+                else
+                {
+                    send_selection_notify(display, request, None);
+                }
+            }
+            else if (event.type == PropertyNotify && transfer.active &&
+                     event.xproperty.window == transfer.requestor &&
+                     event.xproperty.atom == transfer.property &&
+                     event.xproperty.state == PropertyDelete)
+            {
+                if (xrdp_chunks)
+                {
+                    printf("PNG_FILE_OWNER_INCR_PROPERTY_DELETE_ACK "
+                           "requestor=0x%lx property=0x%lx time=%lu "
+                           "acknowledged_bytes=%zu terminator_waiting=%d\n",
+                           event.xproperty.window, event.xproperty.atom,
+                           event.xproperty.time, transfer.offset,
+                           transfer.terminator_waiting);
+                    fflush(stdout);
+                }
+                if (transfer.terminator_waiting)
+                {
+                    const int select_result = XSelectInput(
+                        display, transfer.requestor, NoEventMask);
+                    if (xrdp_chunks)
+                    {
+                        printf("PNG_FILE_OWNER_INCR_TERMINATOR_ACK requestor=0x%lx "
+                               "property=0x%lx type=image/png format=8 items=0 "
+                               "time=%lu select_result=%d\n",
+                               event.xproperty.window, event.xproperty.atom,
+                               event.xproperty.time, select_result);
+                        fflush(stdout);
+                    }
+                    memset(&transfer, 0, sizeof(transfer));
+                    puts("PNG_FILE_OWNER_INCR_DONE");
+                    fflush(stdout);
+                }
+                else if (transfer.offset < transfer.data_length)
+                {
+                    const size_t chunk_offset = transfer.offset;
+                    size_t chunk_bytes = transfer.data_length - transfer.offset;
+                    int property_result;
+                    if (chunk_bytes > chunk_limit)
+                    {
+                        chunk_bytes = chunk_limit;
+                    }
+                    property_result = XChangeProperty(
+                        display, transfer.requestor, transfer.property,
+                        transfer.type, 8, PropModeReplace,
+                        transfer.data + transfer.offset, (int)chunk_bytes);
+                    transfer.offset += chunk_bytes;
+                    ++chunk_count;
+                    XFlush(display);
+                    if (xrdp_chunks)
+                    {
+                        printf("PNG_FILE_OWNER_INCR_CHUNK index=%zu "
+                               "requestor=0x%lx property=0x%lx "
+                               "type=image/png format=8 offset=%zu "
+                               "bytes=%zu end_offset=%zu change_result=%d "
+                               "trigger_delete_time=%lu\n", chunk_count,
+                               transfer.requestor, transfer.property,
+                               chunk_offset, chunk_bytes, transfer.offset,
+                               property_result, event.xproperty.time);
+                        fflush(stdout);
+                    }
+                    if (!transfer.first_chunk_reported)
+                    {
+                        transfer.first_chunk_reported = 1;
+                        puts("PNG_FILE_OWNER_INCR_FIRST_CHUNK");
+                        fflush(stdout);
+                    }
+                }
+                else
+                {
+                    transfer.terminator_waiting = 1;
+                    {
+                        const int property_result = XChangeProperty(
+                            display, transfer.requestor, transfer.property,
+                            transfer.type, 8, PropModeReplace, NULL, 0);
+                        if (xrdp_chunks)
+                        {
+                            printf("PNG_FILE_OWNER_INCR_TERMINATOR_ISSUED "
+                                   "requestor=0x%lx property=0x%lx "
+                                   "type=image/png format=8 items=0 "
+                                   "offset=%zu change_result=%d "
+                                   "trigger_delete_time=%lu\n",
+                                   transfer.requestor, transfer.property,
+                                   transfer.offset, property_result,
+                                   event.xproperty.time);
+                            fflush(stdout);
+                        }
+                    }
+                    XFlush(display);
+                }
+            }
+            else if (event.type == SelectionClear &&
+                     event.xselectionclear.selection == clipboard)
+            {
+                puts("PNG_FILE_OWNER_SELECTION_CLEARED");
+                fflush(stdout);
+                goto done;
+            }
+        }
+    }
+
+done:
+    free(png_data);
+    XDestroyWindow(display, owner);
+    XCloseDisplay(display);
+    return 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1531,6 +1950,23 @@ main(int argc, char **argv)
     {
         return run_owner(argv[2]);
     }
+    if (argc == 3 && strcmp(argv[1], "owner-png-file") == 0)
+    {
+        return run_png_file_owner(argv[2], 0, 0, 0);
+    }
+    if (argc == 3 && strcmp(argv[1], "owner-png-file-incr") == 0)
+    {
+        return run_png_file_owner(argv[2], 1, 0, 0);
+    }
+    if (argc == 3 && strcmp(argv[1], "owner-png-file-incr-xrdp") == 0)
+    {
+        return run_png_file_owner(argv[2], 1, 1, 0);
+    }
+    if (argc == 3 &&
+            strcmp(argv[1], "owner-png-file-incr-xrdp-targets") == 0)
+    {
+        return run_png_file_owner(argv[2], 1, 1, 1);
+    }
     if (argc == 2 && strcmp(argv[1], "stealer") == 0)
     {
         return run_selection_stealer();
@@ -1544,6 +1980,9 @@ main(int argc, char **argv)
         return run_requestor(argc, argv);
     }
     fputs("usage: clipboard_x11_session_peer owner | owner-named-png PNG_FILE | "
+          "owner-png-file PNG_FILE | owner-png-file-incr PNG_FILE | "
+          "owner-png-file-incr-xrdp PNG_FILE | "
+          "owner-png-file-incr-xrdp-targets PNG_FILE | "
           "stealer | selection-owner | "
           "requestor TARGET [delay_ms]\n",
           stderr);

@@ -1,0 +1,630 @@
+diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -167,6 +167,7 @@
+ #include <X11/Xatom.h>
+ #include <X11/extensions/Xfixes.h>
+ #include <limits.h>
++#include <openssl/evp.h>
+ #include "arch.h"
+ #include "parse.h"
+ #include "os_calls.h"
+@@ -235,6 +236,20 @@
+ /* client to server, pasting from mstsc to linux app */
+ struct clip_c2s g_clip_c2s;
+ 
++/* Diagnostic state for one client-to-server PNG selection transfer. */
++static EVP_MD_CTX *g_png_x11_digest_context = NULL;
++static char g_png_source_sha256[65];
++static size_t g_png_source_bytes;
++static size_t g_png_x11_bytes;
++static size_t g_png_x11_announced_bytes;
++static unsigned int g_png_x11_chunk_count;
++static int g_png_x11_digest_status;
++static Time g_png_x11_request_time;
++static uint64_t g_png_x11_start_generation;
++static Window g_png_x11_requestor;
++static Atom g_png_x11_property;
++static int g_png_x11_transaction_active;
++
+ /* default version and flags */
+ static int g_cliprdr_version = CB_CAPS_VERSION_2;
+ static int g_cliprdr_flags = CB_USE_LONG_FORMAT_NAMES |
+@@ -255,6 +270,106 @@
+ 
+ static char g_last_atom_name[256] = "";
+ 
++static void
++clipboard_png_digest_reset(void)
++{
++    EVP_MD_CTX_free(g_png_x11_digest_context);
++    g_png_x11_digest_context = NULL;
++    g_png_source_sha256[0] = '\0';
++    g_png_source_bytes = 0;
++    g_png_x11_bytes = 0;
++    g_png_x11_announced_bytes = 0;
++    g_png_x11_chunk_count = 0;
++    g_png_x11_digest_status = 0;
++    g_png_x11_request_time = CurrentTime;
++    g_png_x11_start_generation = 0;
++    g_png_x11_requestor = 0;
++    g_png_x11_property = None;
++    g_png_x11_transaction_active = 0;
++}
++
++static int
++clipboard_png_digest_hex(const unsigned char *data, size_t data_bytes,
++                         char output[65])
++{
++    static const char digits[] = "0123456789abcdef";
++    unsigned char digest[EVP_MAX_MD_SIZE];
++    unsigned int digest_bytes = 0;
++    unsigned int index;
++
++    if ((data == NULL && data_bytes != 0) ||
++            EVP_Digest(data, data_bytes, digest, &digest_bytes,
++                       EVP_sha256(), NULL) != 1 || digest_bytes != 32)
++    {
++        output[0] = '\0';
++        return 0;
++    }
++
++    for (index = 0; index < digest_bytes; ++index)
++    {
++        output[index * 2] = digits[digest[index] >> 4];
++        output[index * 2 + 1] = digits[digest[index] & 0x0f];
++    }
++    output[64] = '\0';
++    return 1;
++}
++
++static int
++clipboard_png_digest_to_hex(const unsigned char *digest,
++                            unsigned int digest_bytes, char output[65])
++{
++    static const char digits[] = "0123456789abcdef";
++    unsigned int index;
++
++    if (digest_bytes != 32)
++    {
++        output[0] = '\0';
++        return 0;
++    }
++    for (index = 0; index < digest_bytes; ++index)
++    {
++        output[index * 2] = digits[digest[index] >> 4];
++        output[index * 2 + 1] = digits[digest[index] & 0x0f];
++    }
++    output[64] = '\0';
++    return 1;
++}
++
++static void
++clipboard_png_digest_log_complete(const char *path, const char *x11_sha256,
++                                  unsigned long requestor, Atom property,
++                                  Time request_time, Time delete_time)
++{
++    int hash_match;
++    int length_match;
++
++    hash_match = g_png_source_sha256[0] != '\0' &&
++                 x11_sha256 != NULL && x11_sha256[0] != '\0' &&
++                 g_strcmp(g_png_source_sha256, x11_sha256) == 0;
++    length_match = g_png_source_bytes == g_png_x11_bytes &&
++                   g_png_source_bytes == g_png_x11_announced_bytes;
++    LOG(LOG_LEVEL_INFO,
++        "XRDP_CONSOLE_CLIPBOARD_IMAGE event=png-xchange-arguments-issued "
++        "path=%s requestor=0x%lx property=0x%lx target=image/png "
++        "type=image/png format=8 source_bytes=%llu announced_bytes=%llu "
++        "xchange_argument_bytes=%llu chunks=%u source_sha256=%s "
++        "xchange_argument_sha256=%s "
++        "hash_match=%d length_match=%d request_time=%lu "
++        "last_property_delete_time=%lu start_generation=%llu "
++        "current_generation=%llu",
++        path, requestor, property,
++        (unsigned long long)g_png_source_bytes,
++        (unsigned long long)g_png_x11_announced_bytes,
++        (unsigned long long)g_png_x11_bytes,
++        g_png_x11_chunk_count,
++        g_png_source_sha256[0] != '\0' ? g_png_source_sha256 : "unavailable",
++        x11_sha256 != NULL && x11_sha256[0] != '\0' ?
++            x11_sha256 : "unavailable",
++        hash_match, length_match, request_time, delete_time,
++        (unsigned long long)g_png_x11_start_generation,
++        (unsigned long long)g_clipboard_format_generation);
++}
++
+ struct clipboard_selection_retry
+ {
+     struct clipboard_retry_policy policy;
+@@ -408,6 +523,7 @@
+     g_incr_max_req_size = XMaxRequestSize(g_display) * 4 - 24;
+     g_memset(&g_clip_c2s, 0, sizeof(g_clip_c2s));
+     g_memset(&g_clip_s2c, 0, sizeof(g_clip_s2c));
++    clipboard_png_digest_reset();
+     clipboard_image_waiters_clear(&g_image_waiters);
+     g_image_cached_generation = 0;
+     g_image_request_invalidated = 0;
+@@ -565,6 +681,7 @@
+     g_image_retry.format_generation = 0;
+     g_image_retry.retry_timeout_pending = 0;
+     clipboard_image_waiters_clear(&g_image_waiters);
++    clipboard_png_digest_reset();
+     g_image_cached_generation = 0;
+     g_image_request_invalidated = 0;
+     g_image_original_refused = 0;
+@@ -972,14 +1089,65 @@
+ {
+     XEvent xev;
+     long val1[2];
++    int change_result;
++    int select_result;
++    int send_result;
++    char x11_sha256[65];
++    int x11_hash_valid;
+ 
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_provide_selection_c2s: bytes %d",
+               g_clip_c2s.total_bytes);
++    if (type == g_image_png_atom)
++    {
++        clipboard_png_digest_reset();
++        g_png_source_bytes = g_clip_c2s.total_bytes > 0 ?
++                             (size_t)g_clip_c2s.total_bytes : 0;
++        g_png_x11_announced_bytes = g_png_source_bytes;
++        g_png_x11_request_time = req->time;
++        g_png_x11_start_generation = g_clipboard_format_generation;
++        g_png_x11_requestor = req->requestor;
++        g_png_x11_property = req->property;
++        g_png_x11_transaction_active = 1;
++        if (g_clip_c2s.data != NULL && g_clip_c2s.total_bytes > 0 &&
++                clipboard_png_digest_hex(
++                                     (const unsigned char *)g_clip_c2s.data,
++                                     g_png_source_bytes,
++                                     g_png_source_sha256))
++        {
++            LOG(LOG_LEVEL_INFO,
++                "XRDP_CONSOLE_CLIPBOARD_IMAGE event=png-x11-source "
++                "target=image/png bytes=%llu sha256=%s requestor=0x%lx "
++                "selection=0x%lx property=0x%lx request_time=%lu "
++                "selection_time=%lu generation=%llu cache_generation=%llu",
++                (unsigned long long)g_png_source_bytes,
++                g_png_source_sha256, req->requestor, req->selection,
++                req->property, req->time, g_selection_time,
++                (unsigned long long)g_clipboard_format_generation,
++                (unsigned long long)g_image_cached_generation);
++        }
++        else
++        {
++            LOG(LOG_LEVEL_WARNING,
++                "XRDP_CONSOLE_CLIPBOARD_IMAGE event=png-x11-source "
++                "target=image/png bytes=%llu sha256=unavailable "
++                "requestor=0x%lx generation=%llu",
++                (unsigned long long)g_png_source_bytes, req->requestor,
++                (unsigned long long)g_clipboard_format_generation);
++        }
++    }
+     if (g_clip_c2s.total_bytes < g_incr_max_req_size)
+     {
+-        XChangeProperty(g_display, req->requestor, req->property,
+-                        type, 8, PropModeReplace,
+-                        (tui8 *)g_clip_c2s.data, g_clip_c2s.total_bytes);
++        x11_hash_valid = type == g_image_png_atom &&
++                         g_clip_c2s.data != NULL &&
++                         g_clip_c2s.total_bytes > 0 &&
++                         clipboard_png_digest_hex(
++                             (const unsigned char *)g_clip_c2s.data,
++                             (size_t)g_clip_c2s.total_bytes, x11_sha256);
++        change_result = XChangeProperty(g_display, req->requestor,
++                                        req->property, type, 8,
++                                        PropModeReplace,
++                                        (tui8 *)g_clip_c2s.data,
++                                        g_clip_c2s.total_bytes);
+         g_memset(&xev, 0, sizeof(xev));
+         xev.xselection.type = SelectionNotify;
+         xev.xselection.send_event = True;
+@@ -989,7 +1157,8 @@
+         xev.xselection.target = req->target;
+         xev.xselection.property = req->property;
+         xev.xselection.time = req->time;
+-        XSendEvent(g_display, req->requestor, False, NoEventMask, &xev);
++        send_result = XSendEvent(g_display, req->requestor, False,
++                                 NoEventMask, &xev);
+         if (req->target == g_image_bmp_atom ||
+                 req->target == g_image_png_atom)
+         {
+@@ -1002,6 +1171,24 @@
+                 (unsigned long long)g_clipboard_format_generation,
+                 (unsigned long long)g_image_cached_generation);
+         }
++        if (type == g_image_png_atom)
++        {
++            g_png_x11_bytes = (size_t)g_clip_c2s.total_bytes;
++            g_png_x11_chunk_count = 1;
++            clipboard_png_digest_log_complete(
++                "direct", x11_hash_valid ? x11_sha256 : NULL,
++                req->requestor, req->property, req->time, CurrentTime);
++            LOG(LOG_LEVEL_INFO,
++                "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-selection-notify-issued "
++                "path=direct requestor=0x%lx owner=0x%lx selection=0x%lx "
++                "target=image/png property=0x%lx request_time=%lu "
++                "notify_time=%lu propagation=0 event_mask=0x0 "
++                "change_result=%d send_result=%d current_owner=0x%lx",
++                req->requestor, req->owner, req->selection, req->property,
++                req->time, xev.xselection.time, change_result, send_result,
++                XGetSelectionOwner(g_display, req->selection));
++            clipboard_png_digest_reset();
++        }
+     }
+     else
+     {
+@@ -1016,10 +1203,12 @@
+                   get_atom_text(type));
+         val1[0] = g_clip_c2s.total_bytes;
+         val1[1] = 0;
+-        XChangeProperty(g_display, req->requestor, req->property,
+-                        g_incr_atom, 32, PropModeReplace, (tui8 *)val1, 1);
++        change_result = XChangeProperty(g_display, req->requestor,
++                                        req->property, g_incr_atom, 32,
++                                        PropModeReplace, (tui8 *)val1, 1);
+         /* we need events from that other window */
+-        XSelectInput(g_display, req->requestor, PropertyChangeMask);
++        select_result = XSelectInput(g_display, req->requestor,
++                                     PropertyChangeMask);
+         g_memset(&xev, 0, sizeof(xev));
+         xev.xselection.type = SelectionNotify;
+         xev.xselection.send_event = True;
+@@ -1029,7 +1218,8 @@
+         xev.xselection.target = req->target;
+         xev.xselection.property = req->property;
+         xev.xselection.time = req->time;
+-        XSendEvent(g_display, req->requestor, False, NoEventMask, &xev);
++        send_result = XSendEvent(g_display, req->requestor, False,
++                                 NoEventMask, &xev);
+         if (req->target == g_image_bmp_atom ||
+                 req->target == g_image_png_atom)
+         {
+@@ -1042,6 +1232,42 @@
+                 (unsigned long long)g_clipboard_format_generation,
+                 (unsigned long long)g_image_cached_generation);
+         }
++        if (type == g_image_png_atom)
++        {
++            g_png_x11_digest_context = EVP_MD_CTX_new();
++            if (g_png_x11_digest_context != NULL &&
++                    EVP_DigestInit_ex(g_png_x11_digest_context,
++                                      EVP_sha256(), NULL) == 1)
++            {
++                g_png_x11_digest_status = 1;
++            }
++            else
++            {
++                EVP_MD_CTX_free(g_png_x11_digest_context);
++                g_png_x11_digest_context = NULL;
++                g_png_x11_digest_status = -1;
++            }
++            LOG(LOG_LEVEL_INFO,
++                "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-incr-announcement "
++                "requestor=0x%lx owner=0x%lx selection=0x%lx "
++                "target=image/png property=0x%lx type=INCR format=32 "
++                "items=1 announced_bytes=%d request_time=%lu "
++                "selection_time=%lu change_result=%d select_result=%d "
++                "generation=%llu",
++                req->requestor, req->owner, req->selection, req->property,
++                g_clip_c2s.total_bytes, req->time, g_selection_time,
++                change_result, select_result,
++                (unsigned long long)g_clipboard_format_generation);
++            LOG(LOG_LEVEL_INFO,
++                "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-selection-notify-issued "
++                "path=incr requestor=0x%lx owner=0x%lx selection=0x%lx "
++                "target=image/png property=0x%lx request_time=%lu "
++                "notify_time=%lu propagation=0 event_mask=0x0 "
++                "send_result=%d current_owner=0x%lx",
++                req->requestor, req->owner, req->selection, req->property,
++                req->time, xev.xselection.time, send_result,
++                XGetSelectionOwner(g_display, req->selection));
++        }
+     }
+     return 0;
+ }
+@@ -1895,6 +2121,7 @@
+     struct stream *bmp_hs;
+     size_t bmp_pixel_offset;
+     const unsigned char *image_data;
++    char image_sha256[65];
+ 
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_data_response_for_image: "
+               "CLIPRDR_DATA_RESPONSE_FOR_IMAGE");
+@@ -1915,6 +2142,28 @@
+             clipboard_refuse_selection(lxev);
+             return 0;
+         }
++        if (clipboard_png_digest_hex(image_data, (size_t)len,
++                                     image_sha256))
++        {
++            LOG(LOG_LEVEL_INFO,
++                "XRDP_CONSOLE_CLIPBOARD_IMAGE event=png-cliprdr-response "
++                "format_id=%d bytes=%d sha256=%s requestor=0x%lx "
++                "selection=0x%lx target=image/png property=0x%lx "
++                "request_time=%lu generation=%llu",
++                g_png_format_id, len, image_sha256,
++                lxev->requestor, lxev->selection, lxev->property,
++                lxev->time,
++                (unsigned long long)g_clipboard_format_generation);
++        }
++        else
++        {
++            LOG(LOG_LEVEL_WARNING,
++                "XRDP_CONSOLE_CLIPBOARD_IMAGE event=png-cliprdr-response "
++                "format_id=%d bytes=%d sha256=unavailable "
++                "generation=%llu",
++                g_png_format_id, len,
++                (unsigned long long)g_clipboard_format_generation);
++        }
+         g_free(g_clip_c2s.data);
+         g_clip_c2s.data = (char *)g_malloc((size_t)len, 0);
+         if (g_clip_c2s.data == NULL)
+@@ -2429,9 +2678,12 @@
+     lxevent = (XFixesSelectionNotifyEvent *)xevent;
+     LOG(LOG_LEVEL_INFO,
+         "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-owner-change "
+-        "owner=0x%lx chansrv_window=0x%lx generation=%llu "
+-        "c2s_incr=%d s2c_incr=%d",
+-        lxevent->owner, g_wnd,
++        "owner=0x%lx current_owner=0x%lx chansrv_window=0x%lx "
++        "event_time=%lu selection_time=%lu stored_selection_time=%lu "
++        "generation=%llu c2s_incr=%d s2c_incr=%d",
++        lxevent->owner, XGetSelectionOwner(g_display, g_clipboard_atom),
++        g_wnd,
++        lxevent->timestamp, lxevent->selection_timestamp, g_selection_time,
+         (unsigned long long)g_clipboard_format_generation,
+         g_clip_c2s.incr_in_progress, g_clip_s2c.incr_in_progress);
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_owner_notify: 0x%lx", lxevent->owner);
+@@ -3114,6 +3366,7 @@
+     int target_index;
+     int target_names_truncated;
+     int targets_result;
++    int result;
+ 
+     lxev = (XSelectionRequestEvent *)xevent;
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: 0x%lx", lxev->property);
+@@ -3311,8 +3564,16 @@
+                   "g_timestamp_atom");
+         atom_buf[0] = g_selection_time;
+         atom_buf[1] = 0;
+-        return clipboard_provide_selection(lxev, XA_INTEGER, 32,
+-                                           (char *)atom_buf, 1);
++        result = clipboard_provide_selection(lxev, XA_INTEGER, 32,
++                                             (char *)atom_buf, 1);
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=timestamp-response-issued "
++            "requestor=0x%lx selection=0x%lx target=TIMESTAMP "
++            "property=0x%lx request_time=%lu value=%lu "
++            "selection_time=%lu result=%d",
++            lxev->requestor, lxev->selection, lxev->property, lxev->time,
++            g_selection_time, g_selection_time, result);
++        return result;
+     }
+     else if (lxev->target == g_multiple_atom)
+     {
+@@ -3592,6 +3853,13 @@
+     int new_data_len;
+     int data_bytes;
+     char *cptr;
++    size_t chunk_offset;
++    int change_result;
++    unsigned char final_digest[EVP_MAX_MD_SIZE];
++    unsigned int final_digest_bytes;
++    char x11_sha256[65];
++    int final_hash_valid;
++    int diagnostic_state_match = 0;
+ 
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_property_notify: PropertyNotify .window %ld "
+               ".state %d .atom %ld %s", xevent->xproperty.window,
+@@ -3604,6 +3872,39 @@
+             (xevent->xproperty.state == PropertyDelete))
+     {
+         LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_property_notify: INCR PropertyDelete");
++        if (g_clip_c2s.type == g_image_png_atom)
++        {
++            diagnostic_state_match =
++                g_png_x11_transaction_active &&
++                g_png_x11_requestor == g_clip_c2s.window &&
++                g_png_x11_property == g_clip_c2s.property &&
++                g_png_x11_start_generation ==
++                    g_clipboard_format_generation;
++            LOG(LOG_LEVEL_INFO,
++                "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-incr-property-delete-ack "
++                "requestor=0x%lx property=0x%lx state=PropertyDelete "
++                "time=%lu acknowledged_bytes=%llu state_match=%d "
++                "start_generation=%llu current_generation=%llu",
++                xevent->xproperty.window, xevent->xproperty.atom,
++                xevent->xproperty.time,
++                (unsigned long long)g_clip_c2s.incr_bytes_done,
++                diagnostic_state_match,
++                (unsigned long long)g_png_x11_start_generation,
++                (unsigned long long)g_clipboard_format_generation);
++            if (!diagnostic_state_match)
++            {
++                LOG(LOG_LEVEL_WARNING,
++                    "XRDP_CONSOLE_CLIPBOARD_IMAGE event=png-x11-diagnostic-state-mismatch "
++                    "stage=property-delete event_window=0x%lx "
++                    "event_property=0x%lx expected_requestor=0x%lx "
++                    "expected_property=0x%lx start_generation=%llu "
++                    "current_generation=%llu",
++                    xevent->xproperty.window, xevent->xproperty.atom,
++                    g_png_x11_requestor, g_png_x11_property,
++                    (unsigned long long)g_png_x11_start_generation,
++                    (unsigned long long)g_clipboard_format_generation);
++            }
++        }
+         /* this is used for when copying a large clipboard to the other app,
+            it will delete the property so we know to send the next one */
+ 
+@@ -3637,11 +3938,77 @@
+         {
+             data_bytes = g_incr_max_req_size;
+         }
++        chunk_offset = (size_t)g_clip_c2s.incr_bytes_done;
++        if (g_clip_c2s.type == g_image_png_atom && data_bytes > 0)
++        {
++            g_png_x11_bytes += (size_t)data_bytes;
++            ++g_png_x11_chunk_count;
++            if (g_png_x11_digest_status == 1 &&
++                    g_png_x11_digest_context != NULL &&
++                    EVP_DigestUpdate(g_png_x11_digest_context, data,
++                                     (size_t)data_bytes) != 1)
++            {
++                g_png_x11_digest_status = -1;
++            }
++        }
+         g_clip_c2s.incr_bytes_done += data_bytes;
+         LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_property_notify: data_bytes %d", data_bytes);
+-        XChangeProperty(xevent->xproperty.display, xevent->xproperty.window,
+-                        xevent->xproperty.atom, g_clip_c2s.type, 8,
+-                        PropModeReplace, data, data_bytes);
++        change_result = XChangeProperty(
++            xevent->xproperty.display, xevent->xproperty.window,
++            xevent->xproperty.atom, g_clip_c2s.type, 8,
++            PropModeReplace, data, data_bytes);
++        if (g_clip_c2s.type == g_image_png_atom)
++        {
++            if (data_bytes > 0)
++            {
++                LOG(LOG_LEVEL_INFO,
++                    "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-incr-chunk-issued "
++                    "requestor=0x%lx property=0x%lx target=image/png "
++                    "type=image/png format=8 chunk=%u offset=%llu bytes=%d "
++                    "end_offset=%llu change_result=%d "
++                    "trigger_delete_time=%lu state_match=%d "
++                    "start_generation=%llu current_generation=%llu",
++                    xevent->xproperty.window, xevent->xproperty.atom,
++                    g_png_x11_chunk_count,
++                    (unsigned long long)chunk_offset, data_bytes,
++                    (unsigned long long)g_clip_c2s.incr_bytes_done,
++                    change_result, xevent->xproperty.time,
++                    diagnostic_state_match,
++                    (unsigned long long)g_png_x11_start_generation,
++                    (unsigned long long)g_clipboard_format_generation);
++            }
++            else
++            {
++                final_hash_valid = g_png_x11_digest_status == 1 &&
++                                   g_png_x11_digest_context != NULL &&
++                                   EVP_DigestFinal_ex(
++                                       g_png_x11_digest_context,
++                                       final_digest,
++                                       &final_digest_bytes) == 1 &&
++                                   clipboard_png_digest_to_hex(
++                                       final_digest, final_digest_bytes,
++                                       x11_sha256);
++                LOG(LOG_LEVEL_INFO,
++                    "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-incr-terminator-issued "
++                    "requestor=0x%lx property=0x%lx target=image/png "
++                    "type=image/png format=8 items=0 offset=%llu "
++                    "change_result=%d trigger_delete_time=%lu "
++                    "state_match=%d start_generation=%llu "
++                    "current_generation=%llu",
++                    xevent->xproperty.window, xevent->xproperty.atom,
++                    (unsigned long long)chunk_offset, change_result,
++                    xevent->xproperty.time, diagnostic_state_match,
++                    (unsigned long long)g_png_x11_start_generation,
++                    (unsigned long long)g_clipboard_format_generation);
++                clipboard_png_digest_log_complete(
++                    "incr", final_hash_valid ? x11_sha256 : NULL,
++                    xevent->xproperty.window, xevent->xproperty.atom,
++                    g_png_x11_request_time, xevent->xproperty.time);
++                EVP_MD_CTX_free(g_png_x11_digest_context);
++                g_png_x11_digest_context = NULL;
++                g_png_x11_digest_status = 2;
++            }
++        }
+         if (data_bytes < 1)
+         {
+             if (g_clip_c2s.xrdp_clip_type == XRDP_CB_BITMAP)
+@@ -3682,13 +4049,43 @@
+             xevent->xproperty.atom == g_image_incr_terminator_property &&
+             xevent->xproperty.state == PropertyDelete)
+     {
++        diagnostic_state_match =
++            g_png_x11_transaction_active &&
++            g_png_x11_requestor == xevent->xproperty.window &&
++            g_png_x11_property == xevent->xproperty.atom &&
++            g_png_x11_start_generation ==
++                g_clipboard_format_generation &&
++            g_png_x11_requestor == g_image_incr_terminator_window &&
++            g_png_x11_property == g_image_incr_terminator_property;
+         LOG(LOG_LEVEL_INFO,
+             "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-incr-terminator-ack "
+             "requestor=0x%lx property=0x%lx terminator_generation=%llu "
+-            "current_generation=%llu",
++            "current_generation=%llu target=%s time=%lu "
++            "current_owner=0x%lx state_match=%d start_generation=%llu",
+             xevent->xproperty.window, xevent->xproperty.atom,
+             (unsigned long long)g_image_incr_terminator_generation,
+-            (unsigned long long)g_clipboard_format_generation);
++            (unsigned long long)g_clipboard_format_generation,
++            get_atom_text(g_clip_c2s.type), xevent->xproperty.time,
++            XGetSelectionOwner(g_display, g_clipboard_atom),
++            diagnostic_state_match,
++            (unsigned long long)g_png_x11_start_generation);
++        if (g_png_x11_transaction_active && !diagnostic_state_match)
++        {
++            LOG(LOG_LEVEL_WARNING,
++                "XRDP_CONSOLE_CLIPBOARD_IMAGE event=png-x11-diagnostic-state-mismatch "
++                "stage=terminator-ack event_window=0x%lx "
++                "event_property=0x%lx expected_requestor=0x%lx "
++                "expected_property=0x%lx start_generation=%llu "
++                "current_generation=%llu",
++                xevent->xproperty.window, xevent->xproperty.atom,
++                g_png_x11_requestor, g_png_x11_property,
++                (unsigned long long)g_png_x11_start_generation,
++                (unsigned long long)g_clipboard_format_generation);
++        }
++        if (g_png_x11_transaction_active)
++        {
++            clipboard_png_digest_reset();
++        }
+         g_image_incr_terminator_pending = 0;
+         g_image_incr_terminator_window = 0;
+         g_image_incr_terminator_property = None;
+
+diff --git a/sesman/chansrv/Makefile.am b/sesman/chansrv/Makefile.am
+--- a/sesman/chansrv/Makefile.am
++++ b/sesman/chansrv/Makefile.am
+@@ -39,7 +39,7 @@
+ AM_CPPFLAGS += -DXRDP_RDPSNDAUDIN
+ endif
+ 
+-AM_CFLAGS = $(X_CFLAGS)
++AM_CFLAGS = $(X_CFLAGS) $(OPENSSL_CFLAGS)
+ 
+ sbin_PROGRAMS = \
+   xrdp-chansrv
+@@ -95,4 +95,4 @@
+   $(top_builddir)/sesman/libsesman/libsesman.la \
+   $(top_builddir)/libipm/libipm.la \
+   $(X_PRE_LIBS) -lXfixes -lXrandr -lX11 $(X_EXTRA_LIBS) \
+-  $(CHANSRV_EXTRA_LIBS)
++  $(CHANSRV_EXTRA_LIBS) $(OPENSSL_LIBS)
+
+diff --git a/sesman/chansrv/Makefile.in b/sesman/chansrv/Makefile.in
+--- a/sesman/chansrv/Makefile.in
++++ b/sesman/chansrv/Makefile.in
+@@ -417,7 +417,7 @@
+ 	$(am__append_10)
+ CHANSRV_EXTRA_LIBS = $(am__append_2) $(am__append_4) $(am__append_6) \
+ 	$(am__append_8)
+-AM_CFLAGS = $(X_CFLAGS)
++AM_CFLAGS = $(X_CFLAGS) $(OPENSSL_CFLAGS)
+ xrdp_chansrv_SOURCES = chansrv.c chansrv.h chansrv_common.c \
+ 	chansrv_common.h chansrv_config.c chansrv_config.h \
+ 	chansrv_fuse.c chansrv_fuse.h chansrv_xfs.c chansrv_xfs.h \
+@@ -433,7 +433,7 @@
+   $(top_builddir)/sesman/libsesman/libsesman.la \
+   $(top_builddir)/libipm/libipm.la \
+   $(X_PRE_LIBS) -lXfixes -lXrandr -lX11 $(X_EXTRA_LIBS) \
+-  $(CHANSRV_EXTRA_LIBS)
++  $(CHANSRV_EXTRA_LIBS) $(OPENSSL_LIBS)
+ 
+ all: all-am
+

@@ -38,3 +38,5 @@
 0038-xrdp-chansrv-restore-deferred-selection-owner.patch
 0039-xrdp-chansrv-log-targets-response.patch
 0040-xrdp-log-window-manager-check-source.patch
+0041-xrdp-chansrv-log-png-x11-transaction.patch
+0043-xrdp-log-vc-negotiation-and-cliprdr-fragment-timing.patch

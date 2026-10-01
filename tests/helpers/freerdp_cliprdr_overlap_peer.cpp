@@ -51,11 +51,16 @@ struct PeerContext
     CliprdrClientContext* cliprdr;
     BYTE* dib;
     std::size_t dibSize;
+    BYTE* png;
+    std::size_t pngSize;
     UINT32 frameCount;
     bool initialFormatsSent;
     bool overlapFormatsSent;
     bool imageResponseSent;
     bool pngOverlap;
+    bool pngPrefetchDelay;
+    bool pngPrefetchFail;
+    bool pngAllowed;
     bool pendingPngResponse;
     bool failed;
     char controlBuffer[256];
@@ -104,6 +109,59 @@ bool make_dib(PeerContext* peer)
     return true;
 }
 
+bool load_png(PeerContext* peer, const char* path)
+{
+    if (peer == nullptr || path == nullptr)
+    {
+        return false;
+    }
+    std::FILE* file = std::fopen(path, "rb");
+    if (file == nullptr)
+    {
+        return false;
+    }
+    if (std::fseek(file, 0, SEEK_END) != 0)
+    {
+        std::fclose(file);
+        return false;
+    }
+    const long size = std::ftell(file);
+    if (size <= 0 || static_cast<unsigned long>(size) > UINT32_MAX ||
+        std::fseek(file, 0, SEEK_SET) != 0)
+    {
+        std::fclose(file);
+        return false;
+    }
+    BYTE* data = static_cast<BYTE*>(std::malloc(static_cast<std::size_t>(size)));
+    if (data == nullptr)
+    {
+        std::fclose(file);
+        return false;
+    }
+    const std::size_t bytesRead = std::fread(
+        data, 1U, static_cast<std::size_t>(size), file);
+    std::fclose(file);
+    if (bytesRead != static_cast<std::size_t>(size))
+    {
+        std::free(data);
+        return false;
+    }
+    peer->png = data;
+    peer->pngSize = bytesRead;
+    return true;
+}
+
+const BYTE* peer_png_data(const PeerContext* peer)
+{
+    return peer != nullptr && peer->png != nullptr ? peer->png : kPngFixture;
+}
+
+std::size_t peer_png_size(const PeerContext* peer)
+{
+    return peer != nullptr && peer->png != nullptr ?
+           peer->pngSize : sizeof(kPngFixture);
+}
+
 UINT send_format_list(CliprdrClientContext* cliprdr,
                       const CLIPRDR_FORMAT* formats, UINT32 count)
 {
@@ -145,13 +203,20 @@ UINT on_monitor_ready(CliprdrClientContext* cliprdr,
 
     CLIPRDR_FORMAT formats[2]{};
     formats[0].formatId = kCfDib;
-    formats[1].formatId = kPngFormatId;
-    formats[1].formatName = const_cast<char*>("PNG");
-    const UINT status = send_format_list(cliprdr, formats, 2U);
+    const bool advertisePng = peer->pngOverlap || peer->pngPrefetchDelay;
+    if (advertisePng)
+    {
+        formats[1].formatId = kPngFormatId;
+        formats[1].formatName = const_cast<char*>("PNG");
+    }
+    const UINT status = send_format_list(cliprdr, formats,
+                                         advertisePng ? 2U : 1U);
     if (status == CHANNEL_RC_OK)
     {
         peer->initialFormatsSent = true;
-        std::puts("PEER_INITIAL_FORMAT_LIST_SENT dib=8 png=40005");
+        std::puts(advertisePng ?
+                  "PEER_INITIAL_FORMAT_LIST_SENT dib=8 png=40005" :
+                  "PEER_INITIAL_FORMAT_LIST_SENT dib=8");
         std::fflush(stdout);
     }
     else
@@ -175,19 +240,22 @@ UINT on_server_format_data_request(
 
     if (request->requestedFormatId == kCfDib && !peer->overlapFormatsSent)
     {
-        CLIPRDR_FORMAT textFormat{};
-        textFormat.formatId = kCfUnicodeText;
-        const UINT listStatus = send_format_list(cliprdr, &textFormat, 1U);
-        if (listStatus != CHANNEL_RC_OK)
+        if (!peer->pngPrefetchDelay)
         {
-            peer->failed = true;
-            std::fprintf(stderr, "overlap text format-list send failed: %u\n",
-                         listStatus);
-            return listStatus;
+            CLIPRDR_FORMAT textFormat{};
+            textFormat.formatId = kCfUnicodeText;
+            const UINT listStatus = send_format_list(cliprdr, &textFormat, 1U);
+            if (listStatus != CHANNEL_RC_OK)
+            {
+                peer->failed = true;
+                std::fprintf(stderr, "overlap text format-list send failed: %u\n",
+                             listStatus);
+                return listStatus;
+            }
+            peer->overlapFormatsSent = true;
+            std::puts("PEER_OVERLAP_FORMAT_LIST_SENT while_image_request_outstanding=1");
+            std::fflush(stdout);
         }
-        peer->overlapFormatsSent = true;
-        std::puts("PEER_OVERLAP_FORMAT_LIST_SENT while_image_request_outstanding=1");
-        std::fflush(stdout);
 
         if (!make_dib(peer))
         {
@@ -205,9 +273,85 @@ UINT on_server_format_data_request(
             return responseStatus;
         }
         peer->imageResponseSent = true;
-        std::printf("PEER_OLD_DIB_RESPONSE_SENT bytes=%zu\n", peer->dibSize);
+        std::printf("%s bytes=%zu\n",
+                    peer->pngPrefetchDelay ?
+                        "PEER_EXPLICIT_DIB_RESPONSE_SENT" :
+                        "PEER_OLD_DIB_RESPONSE_SENT",
+                    peer->dibSize);
         std::fflush(stdout);
         return CHANNEL_RC_OK;
+    }
+
+    if (request->requestedFormatId == kPngFormatId &&
+        peer->pngPrefetchFail && !peer->pngAllowed)
+    {
+        const UINT responseStatus = send_data_response(
+            cliprdr, CB_RESPONSE_FAIL, nullptr, 0U);
+        if (responseStatus == CHANNEL_RC_OK)
+        {
+            std::puts("PEER_PNG_PREFETCH_RESPONSE_FAILED format_id=40005");
+            std::fflush(stdout);
+        }
+        else
+        {
+            peer->failed = true;
+            std::fprintf(stderr, "PNG failure response send failed: %u\n",
+                         responseStatus);
+        }
+        return responseStatus;
+    }
+
+    if (request->requestedFormatId == kPngFormatId &&
+        peer->pngPrefetchDelay && !peer->pendingPngResponse &&
+        !peer->imageResponseSent && !peer->pngPrefetchFail)
+    {
+        peer->pendingPngResponse = true;
+        std::puts("PEER_PNG_PREFETCH_RESPONSE_HELD format_id=40005");
+        std::fflush(stdout);
+        return CHANNEL_RC_OK;
+    }
+
+    if (request->requestedFormatId == kPngFormatId &&
+        peer->pngPrefetchDelay && peer->imageResponseSent &&
+        !peer->pngPrefetchFail)
+    {
+        const UINT responseStatus = send_data_response(
+            cliprdr, CB_RESPONSE_OK, peer_png_data(peer),
+            peer_png_size(peer));
+        if (responseStatus == CHANNEL_RC_OK)
+        {
+            std::puts("PEER_NEXT_GENERATION_PNG_RESPONSE_SENT");
+            std::fflush(stdout);
+        }
+        else
+        {
+            peer->failed = true;
+            std::fprintf(stderr, "next-generation PNG response failed: %u\n",
+                         responseStatus);
+        }
+        return responseStatus;
+    }
+
+    if (request->requestedFormatId == kPngFormatId &&
+        (peer->pngPrefetchDelay || peer->pngPrefetchFail) && peer->pngAllowed)
+    {
+        const UINT responseStatus = send_data_response(
+            cliprdr, CB_RESPONSE_OK, peer_png_data(peer),
+            peer_png_size(peer));
+        if (responseStatus == CHANNEL_RC_OK)
+        {
+            peer->imageResponseSent = true;
+            std::printf("PEER_EXPLICIT_PNG_RESPONSE_SENT bytes=%zu\n",
+                        peer_png_size(peer));
+            std::fflush(stdout);
+        }
+        else
+        {
+            peer->failed = true;
+            std::fprintf(stderr, "explicit PNG response send failed: %u\n",
+                         responseStatus);
+        }
+        return responseStatus;
     }
 
     if (request->requestedFormatId == kPngFormatId && peer->pngOverlap &&
@@ -273,17 +417,47 @@ void process_control_command(PeerContext* peer, const char* command)
         return;
     }
 
+    if (std::strcmp(command, "CHANGE_FORMATS_IMAGE") == 0)
+    {
+        if (!peer->pngPrefetchDelay || peer->pngPrefetchFail ||
+            !peer->pendingPngResponse || peer->overlapFormatsSent)
+        {
+            peer->failed = true;
+            std::fprintf(stderr, "invalid CHANGE_FORMATS_IMAGE test command\n");
+            return;
+        }
+        CLIPRDR_FORMAT formats[2]{};
+        formats[0].formatId = kCfDib;
+        formats[1].formatId = kPngFormatId;
+        formats[1].formatName = const_cast<char*>("PNG");
+        const UINT status = send_format_list(peer->cliprdr, formats, 2U);
+        if (status != CHANNEL_RC_OK)
+        {
+            peer->failed = true;
+            std::fprintf(stderr, "replacement image format-list send failed: %u\n",
+                         status);
+            return;
+        }
+        peer->overlapFormatsSent = true;
+        std::puts("PEER_NEXT_IMAGE_FORMAT_LIST_SENT while_old_png_pending=1");
+        std::fflush(stdout);
+        return;
+    }
+
     if (std::strcmp(command, "RESPOND_PNG") == 0)
     {
-        if (!peer->pngOverlap || !peer->pendingPngResponse ||
-            !peer->overlapFormatsSent)
+        if ((!peer->pngOverlap &&
+             (!peer->pngPrefetchDelay || peer->pngPrefetchFail)) ||
+            !peer->pendingPngResponse ||
+            (peer->pngOverlap && !peer->overlapFormatsSent))
         {
             peer->failed = true;
             std::fprintf(stderr, "invalid RESPOND_PNG test command\n");
             return;
         }
         const UINT status = send_data_response(
-            peer->cliprdr, CB_RESPONSE_OK, kPngFixture, sizeof(kPngFixture));
+            peer->cliprdr, CB_RESPONSE_OK, peer_png_data(peer),
+            peer_png_size(peer));
         if (status != CHANNEL_RC_OK)
         {
             peer->failed = true;
@@ -292,8 +466,25 @@ void process_control_command(PeerContext* peer, const char* command)
         }
         peer->pendingPngResponse = false;
         peer->imageResponseSent = true;
-        std::printf("PEER_OLD_PNG_RESPONSE_SENT bytes=%zu\n",
-                    sizeof(kPngFixture));
+        std::printf("%s bytes=%zu\n",
+                    peer->pngPrefetchDelay ?
+                        "PEER_PNG_PREFETCH_RESPONSE_SENT" :
+                        "PEER_OLD_PNG_RESPONSE_SENT",
+                    peer_png_size(peer));
+        std::fflush(stdout);
+        return;
+    }
+
+    if (std::strcmp(command, "ALLOW_PNG") == 0)
+    {
+        if (!peer->pngPrefetchFail || peer->pngAllowed)
+        {
+            peer->failed = true;
+            std::fprintf(stderr, "invalid ALLOW_PNG test command\n");
+            return;
+        }
+        peer->pngAllowed = true;
+        std::puts("PEER_PNG_EXPLICIT_REQUESTS_ALLOWED");
         std::fflush(stdout);
         return;
     }
@@ -580,11 +771,16 @@ int main(int argc, char** argv)
     peer->cliprdr = nullptr;
     peer->dib = nullptr;
     peer->dibSize = 0U;
+    peer->png = nullptr;
+    peer->pngSize = 0U;
     peer->frameCount = 0U;
     peer->initialFormatsSent = false;
     peer->overlapFormatsSent = false;
     peer->imageResponseSent = false;
     peer->pngOverlap = false;
+    peer->pngPrefetchDelay = false;
+    peer->pngPrefetchFail = false;
+    peer->pngAllowed = false;
     peer->pendingPngResponse = false;
     peer->failed = false;
     peer->controlBuffer[0] = '\0';
@@ -592,9 +788,31 @@ int main(int argc, char** argv)
     const char* pngOverlap = std::getenv("XRDP_CONSOLE_TEST_PNG_OVERLAP");
     peer->pngOverlap = pngOverlap != nullptr &&
                        std::strcmp(pngOverlap, "1") == 0;
+    const char* pngPrefetchDelay =
+        std::getenv("XRDP_CONSOLE_TEST_PNG_PREFETCH_DELAY");
+    peer->pngPrefetchDelay = pngPrefetchDelay != nullptr &&
+                             std::strcmp(pngPrefetchDelay, "1") == 0;
+    const char* pngPrefetchFail =
+        std::getenv("XRDP_CONSOLE_TEST_PNG_PREFETCH_FAIL");
+    peer->pngPrefetchFail = pngPrefetchFail != nullptr &&
+                            std::strcmp(pngPrefetchFail, "1") == 0;
+    if (peer->pngPrefetchDelay)
+    {
+        const char* pngPath = std::getenv("XRDP_CONSOLE_TEST_PNG_FILE");
+        if (!load_png(peer, pngPath))
+        {
+            std::fputs("could not load PNG fixture for prefetch test\n", stderr);
+            freerdp_disconnect(context->instance);
+            freerdp_client_stop(context);
+            freerdp_client_context_free(context);
+            return 1;
+        }
+    }
     const DWORD result = run_client(context->instance, peer);
     freerdp_disconnect(context->instance);
     const int stopStatus = freerdp_client_stop(context);
+    std::free(peer->png);
+    std::free(peer->dib);
     freerdp_client_context_free(context);
     return result == 0U && stopStatus == 0 ? 0 : 1;
 }

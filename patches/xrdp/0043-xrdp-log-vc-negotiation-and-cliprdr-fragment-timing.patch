@@ -1,0 +1,312 @@
+From: xrdp-console contributors
+Subject: [PATCH] xrdp: log virtual-channel negotiation and cliprdr fragment timing
+
+Add diagnostics needed to audit the pinned xrdp static-virtual-channel
+implementation against MS-RDPBCGR before enabling compression or changing
+clipboard behavior.
+
+This patch is intentionally observational:
+- it does not advertise a Virtual Channel Capability Set;
+- it does not compress or decompress channel data;
+- it does not change MCS priority;
+- it does not change virtual-channel chunking;
+- it does not change clipboard ownership or delayed-rendering behavior.
+
+The new XRDP_CONSOLE_RDP_VC markers record:
+- client TS_VIRTUALCHANNEL_CAPABILITYSET flags / optional VCChunkSize;
+- the server's current lack of a VC capability advertisement;
+- Client Info bulk-compression request/type;
+- static CHANNEL_DEF options;
+- CLIPRDR first/last virtual-channel fragment timing and, where the first
+  fragment is uncompressed and contains the CLIPRDR common header, its
+  msgType/msgFlags/dataLen and payload bytes already present.
+
+The intent is to measure request -> first CLIPRDR payload fragment -> final
+fragment -> chansrv response processing without changing the protocol path.
+
+--- a/common/ms-rdpbcgr.h
++++ b/common/ms-rdpbcgr.h
+@@ -216,6 +216,11 @@
+ #define CAPSTYPE_VIRTUALCHANNEL                 0x0014
+ #define CAPSTYPE_VIRTUALCHANNEL_LEN             0x08
+ 
++/* Virtual Channel Capability Set: flags (2.2.7.1.10) */
++#define XR_VCCAPS_NO_COMPR                      0x00000000
++#define XR_VCCAPS_COMPR_SC                      0x00000001
++#define XR_VCCAPS_COMPR_CS_8K                   0x00000002
++
+ #define CAPSTYPE_DRAWNINGRIDCACHE               0x0015
+ #define CAPSTYPE_DRAWGDIPLUS                    0x0016
+ #define CAPSTYPE_RAIL                           0x0017
+@@ -274,6 +274,10 @@
+ #define XR_CHANNEL_FLAG_FIRST          0x00000001
+ #define XR_CHANNEL_FLAG_LAST           0x00000002
+ #define XR_CHANNEL_FLAG_SHOW_PROTOCOL  0x00000010
++#define XR_CHANNEL_PACKET_COMPRESSED   0x00200000
++#define XR_CHANNEL_PACKET_AT_FRONT     0x00400000
++#define XR_CHANNEL_PACKET_FLUSHED      0x00800000
++#define XR_CHANNEL_PACKET_COMPR_TYPE_MASK 0x000F0000
+ 
+ /* General Capability Set: osMajorType (2.2.7.1.1) */
+ #define OSMAJORTYPE_UNSPECIFIED        0x0000
+--- a/libxrdp/xrdp_caps.c
++++ b/libxrdp/xrdp_caps.c
+@@ -124,4 +124,46 @@
+ /*****************************************************************************/
++/*
++ * Observe [MS-RDPBCGR] TS_VIRTUALCHANNEL_CAPABILITYSET without changing
++ * negotiated behavior. The outer capability parser advances past any fields
++ * we do not consume.
++ */
++static int
++xrdp_caps_process_virtualchannel(struct xrdp_rdp *self, struct stream *s,
++                                 int len)
++{
++    int flags;
++    unsigned int vc_chunk_size = 0;
++    int vc_chunk_size_present = 0;
++
++    (void)self;
++
++    if (len < 4)
++    {
++        LOG(LOG_LEVEL_WARNING,
++            "XRDP_CONSOLE_RDP_VC event=client-vc-caps-malformed "
++            "payload_bytes=%d", len);
++        return 0;
++    }
++
++    in_uint32_le(s, flags);
++    if (len >= 8)
++    {
++        in_uint32_le(s, vc_chunk_size);
++        vc_chunk_size_present = 1;
++    }
++
++    LOG(LOG_LEVEL_INFO,
++        "XRDP_CONSOLE_RDP_VC event=client-vc-caps "
++        "flags=0x%8.8x compr_sc=%d compr_cs_8k=%d "
++        "vc_chunk_size_present=%d vc_chunk_size=%u",
++        flags,
++        (flags & XR_VCCAPS_COMPR_SC) != 0,
++        (flags & XR_VCCAPS_COMPR_CS_8K) != 0,
++        vc_chunk_size_present, vc_chunk_size);
++    return 0;
++}
++
++/*****************************************************************************/
+ static int
+ xrdp_caps_process_bitmap(struct xrdp_rdp *self, struct stream *s,
+                          int len)
+@@ -890,7 +890,11 @@
+                 break;
+             case CAPSTYPE_VIRTUALCHANNEL:
+                 LOG_DEVEL(LOG_LEVEL_INFO, "Received [MS-RDPBCGR] TS_CONFIRM_ACTIVE_PDU - TS_CAPS_SET "
+-                          "capabilitySetType = CAPSTYPE_VIRTUALCHANNEL - Ignored");
++                          "capabilitySetType = CAPSTYPE_VIRTUALCHANNEL");
++                if (xrdp_caps_process_virtualchannel(self, s, len) != 0)
++                {
++                    return 1;
++                }
+                 break;
+             case CAPSTYPE_DRAWNINGRIDCACHE:
+                 LOG_DEVEL(LOG_LEVEL_INFO, "Received [MS-RDPBCGR] TS_CONFIRM_ACTIVE_PDU - TS_CAPS_SET "
+@@ -1090,6 +1090,14 @@
+     out_uint8s(s, 4);
+     caps_ptr = s->p;
+ 
++    /*
++     * Phase-A audit marker. xrdp 0.10.6.1 currently emits no
++     * TS_VIRTUALCHANNEL_CAPABILITYSET here. Do not change that until the
++     * receive-side decompressor and negotiation state are implemented.
++     */
++    LOG(LOG_LEVEL_INFO,
++        "XRDP_CONSOLE_RDP_VC event=server-vc-caps advertised=0");
++
+     /* Output share capability set */
+     caps_count++;
+     out_uint16_le(s, CAPSTYPE_SHARE);
+--- a/libxrdp/xrdp_sec.c
++++ b/libxrdp/xrdp_sec.c
+@@ -634,6 +634,14 @@
+     in_uint32_le(s, flags);
+     LOG_DEVEL(LOG_LEVEL_TRACE, "Parsing [MS-RDPBCGR] TS_INFO_PACKET");
+ 
++    LOG(LOG_LEVEL_INFO,
++        "XRDP_CONSOLE_RDP_VC event=client-info-compression "
++        "requested=%d type=%d server_bulk_enabled=%d",
++        (flags & RDP_COMPRESSION) != 0,
++        (flags & RDP_COMPRESSION) != 0 ?
++            ((flags & 0x00001E00) >> 9) : -1,
++        self->rdp_layer->client_info.use_bulk_comp != 0);
++
+     /* this is the first test that the decrypt is working */
+     if ((flags & RDP_LOGON_NORMAL) != RDP_LOGON_NORMAL) /* 0x33 */
+     {
+@@ -2307,7 +2315,18 @@
+         LOG(LOG_LEVEL_DEBUG,
+             "Adding channel: name %s, channel id %d, flags 0x%8.8x",
+             channel_item->name, channel_item->chanid, channel_item->flags);
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_RDP_VC event=channel-definition "
++            "name=%s mcs_id=%d options=0x%8.8x "
++            "pri_high=%d pri_med=%d pri_low=%d "
++            "compress_rdp=%d compress=%d",
++            channel_item->name, channel_item->chanid, channel_item->flags,
++            (channel_item->flags & XR_CHANNEL_OPTION_PRI_HIGH) != 0,
++            (channel_item->flags & XR_CHANNEL_OPTION_PRI_MED) != 0,
++            (channel_item->flags & XR_CHANNEL_OPTION_PRI_LOW) != 0,
++            (channel_item->flags & XR_CHANNEL_OPTION_COMPRESS_RDP) != 0,
++            (channel_item->flags & XR_CHANNEL_OPTION_COMPRESS) != 0);
+     }
+ 
+     /* Set the user channel as well */
+     self->mcs_layer->chanid = next_mcs_channel_id++;
+--- a/libxrdp/xrdp_channel.c
++++ b/libxrdp/xrdp_channel.c
+@@ -56,6 +56,32 @@
+ }
+ 
+ /*****************************************************************************/
++static int
++xrdp_channel_is_cliprdr(const struct mcs_channel_item *channel)
++{
++    return channel != NULL &&
++           g_strcasecmp(channel->name, CLIPRDR_SVC_CHANNEL_NAME) == 0;
++}
++
++/*****************************************************************************/
++static unsigned int
++xrdp_channel_uint16_le(const unsigned char *p)
++{
++    return ((unsigned int)p[0]) |
++           ((unsigned int)p[1] << 8);
++}
++
++/*****************************************************************************/
++static unsigned int
++xrdp_channel_uint32_le(const unsigned char *p)
++{
++    return ((unsigned int)p[0]) |
++           ((unsigned int)p[1] << 8) |
++           ((unsigned int)p[2] << 16) |
++           ((unsigned int)p[3] << 24);
++}
++
++/*****************************************************************************/
+ struct xrdp_channel *
+ xrdp_channel_create(struct xrdp_sec *owner, struct xrdp_mcs *mcs_layer)
+ {
+@@ -147,6 +173,22 @@
+     LOG_DEVEL(LOG_LEVEL_TRACE, "Adding header [MS-RDPBCGR] CHANNEL_PDU_HEADER "
+               "length %d, flags 0x%8.8x", total_data_len, flags);
+ 
++    if (xrdp_channel_is_cliprdr(channel) &&
++            (flags & (XR_CHANNEL_FLAG_FIRST | XR_CHANNEL_FLAG_LAST)) != 0)
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_RDP_VC event=cliprdr-fragment "
++            "direction=server-to-client total_len=%d fragment_bytes=%d "
++            "flags=0x%8.8x first=%d last=%d compressed=%d "
++            "compression_type=%u channel_options=0x%8.8x",
++            total_data_len, (int)(s->end - s->p), flags,
++            (flags & XR_CHANNEL_FLAG_FIRST) != 0,
++            (flags & XR_CHANNEL_FLAG_LAST) != 0,
++            (flags & XR_CHANNEL_PACKET_COMPRESSED) != 0,
++            ((unsigned int)flags & XR_CHANNEL_PACKET_COMPR_TYPE_MASK) >> 16,
++            channel->flags);
++    }
++
+     if (xrdp_sec_send(self->sec_layer, s, channel->chanid) != 0)
+     {
+         LOG(LOG_LEVEL_ERROR, "xrdp_channel_send: xrdp_sec_send failed");
+@@ -297,6 +339,9 @@
+     in_uint16_le(s, cap_version); /* Version */
+     LOG_DEVEL(LOG_LEVEL_TRACE, "Received [MS-RDPEDYC] DYNVC_CAPS_RSP "
+               "version %d", cap_version);
++    LOG(LOG_LEVEL_INFO,
++        "XRDP_CONSOLE_RDP_VC event=drdynvc-capability-response version=%d",
++        cap_version);
+ 
+     if ((cap_version != 2) && (cap_version != 3))
+     {
+@@ -673,6 +718,11 @@
+     int flags;
+     int rv;
+     int channel_id;
++    int fragment_bytes;
++    unsigned int clip_msg_type;
++    unsigned int clip_msg_flags;
++    unsigned int clip_data_len;
++    const unsigned char *clip_header;
+     struct mcs_channel_item *channel;
+ 
+     /* this assumes that the channels are in order of chanid(mcs channel id)
+@@ -704,6 +754,56 @@
+     in_uint32_le(s, flags);  /* flags */
+     LOG_DEVEL(LOG_LEVEL_TRACE, "Received header [MS-RDPBCGR] CHANNEL_PDU_HEADER "
+               "length %d, flags 0x%8.8x", length, flags);
++
++    if (xrdp_channel_is_cliprdr(channel))
++    {
++        fragment_bytes = (int)(s->end - s->p);
++        if ((flags & XR_CHANNEL_FLAG_FIRST) != 0)
++        {
++            if ((flags & XR_CHANNEL_PACKET_COMPRESSED) == 0 &&
++                    fragment_bytes >= 8)
++            {
++                clip_header = (const unsigned char *)s->p;
++                clip_msg_type = xrdp_channel_uint16_le(clip_header);
++                clip_msg_flags = xrdp_channel_uint16_le(clip_header + 2);
++                clip_data_len = xrdp_channel_uint32_le(clip_header + 4);
++                LOG(LOG_LEVEL_INFO,
++                    "XRDP_CONSOLE_RDP_VC event=cliprdr-first-fragment "
++                    "direction=client-to-server total_len=%d "
++                    "fragment_bytes=%d flags=0x%8.8x compressed=0 "
++                    "msg_type=%u msg_flags=0x%4.4x data_len=%u "
++                    "payload_bytes_in_fragment=%d",
++                    length, fragment_bytes, flags,
++                    clip_msg_type, clip_msg_flags, clip_data_len,
++                    fragment_bytes - 8);
++            }
++            else
++            {
++                LOG(LOG_LEVEL_INFO,
++                    "XRDP_CONSOLE_RDP_VC event=cliprdr-first-fragment "
++                    "direction=client-to-server total_len=%d "
++                    "fragment_bytes=%d flags=0x%8.8x compressed=%d "
++                    "compression_type=%u cliprdr_header_available=0",
++                    length, fragment_bytes, flags,
++                    (flags & XR_CHANNEL_PACKET_COMPRESSED) != 0,
++                    ((unsigned int)flags &
++                     XR_CHANNEL_PACKET_COMPR_TYPE_MASK) >> 16);
++            }
++        }
++        if ((flags & XR_CHANNEL_FLAG_LAST) != 0)
++        {
++            LOG(LOG_LEVEL_INFO,
++                "XRDP_CONSOLE_RDP_VC event=cliprdr-last-fragment "
++                "direction=client-to-server total_len=%d "
++                "fragment_bytes=%d flags=0x%8.8x compressed=%d "
++                "compression_type=%u",
++                length, fragment_bytes, flags,
++                (flags & XR_CHANNEL_PACKET_COMPRESSED) != 0,
++                ((unsigned int)flags &
++                 XR_CHANNEL_PACKET_COMPR_TYPE_MASK) >> 16);
++        }
++    }
++
+     rv = xrdp_channel_call_callback(self, s, channel_id, length, flags);
+     return rv;
+ }
+@@ -746,6 +846,10 @@
+     LOG_DEVEL(LOG_LEVEL_TRACE, "Sending [MS-RDPEDYC] DYNVC_CAPS_VERSION2 "
+               "cbId 0, Sp 0, Cmd 0x05, Version 2, PriorityCharge0 0, "
+               "PriorityCharge1 0, PriorityCharge2 0, PriorityCharge3 0");
++    LOG(LOG_LEVEL_INFO,
++        "XRDP_CONSOLE_RDP_VC event=drdynvc-capability-request "
++        "version=2 priority_charge0=0 priority_charge1=0 "
++        "priority_charge2=0 priority_charge3=0");
+     if (xrdp_channel_send(self, s, channel_id, total_data_len, flags) != 0)
+     {
+         LOG(LOG_LEVEL_ERROR,

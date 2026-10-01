@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import zlib
+from datetime import datetime
 from pathlib import Path
 
 from h264_frame_coherence import coherence_problem, parse_frame_sample
@@ -866,11 +867,11 @@ def assert_clipboard_image_session(
     # large fragmented image shape as the Mac report. Stop chansrv only after
     # FreeRDP has consumed the complete local X11 INCR selection, leaving its
     # Unix socket open but unread while the CLIPRDR response is forwarded.
+    formats_before_failure_image = clipboard_format_list_count(chansrv_logs)
     owner.stdin.write(b"switch-image\n")
     owner.stdin.flush()
     wait_for_owner_marker(owner, "IMAGE_OWNER_CHANGED", 5.0,
                           owner_log_path)
-    formats_before_failure_image = clipboard_format_list_count(chansrv_logs)
     wait_for_chansrv_marker(
         chansrv_logs, "event=format-list", formats_before_failure_image + 1,
         10.0, chansrv_process, chansrv_stdout)
@@ -921,8 +922,8 @@ def assert_clipboard_inflight_format_list_session(
     """Overlap a replacement format list with an outstanding large DIB fetch."""
     initial_list = wait_for_chansrv_pattern(
         chansrv_logs,
-        r"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
-        r"png_format_id=40005",
+        r"event=format-list[^\n]*stored_formats=1 dib_format_id=8 "
+        r"png_format_id=-1",
         15.0, chansrv_process, chansrv_stdout)
     wait_for_peer_marker(client, client_log_path,
                          "PEER_INITIAL_FORMAT_LIST_SENT", 10.0)
@@ -978,9 +979,9 @@ def assert_clipboard_inflight_format_list_session(
             raise AssertionError(
                 "FreeRDP peer did not emit its overlap marker:\n"
                 f"{read_text(client_log_path)}")
-        if "stored_formats=2 dib_format_id=8 png_format_id=40005" not in initial_list:
+        if "stored_formats=1 dib_format_id=8 png_format_id=-1" not in initial_list:
             raise AssertionError(
-                "initial client clipboard was not the Mac-style DIB+PNG list:\n"
+                "initial DIB-overlap fixture unexpectedly advertised PNG:\n"
                 f"{initial_list}")
         if "stored_formats=1 dib_format_id=-1 png_format_id=-1" not in changed_list:
             raise AssertionError(
@@ -1253,6 +1254,657 @@ def assert_clipboard_inflight_png_format_list_session(
             "RDP peer did not render graphics after PNG-generation overlap")
 
 
+def assert_clipboard_png_prefetch_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, log_path: Path, stdout_path: Path,
+        chansrv_process: subprocess.Popen[object], chansrv_logs: Path,
+        chansrv_stdout: Path, source_display: str,
+        stimulus: subprocess.Popen[bytes], expected_png_bytes: int,
+        expected_png_sha256: str) -> None:
+    """Hide a slow remote fetch, then require a prompt warm X11 INCR paste."""
+    modeled_selection_idle_budget_seconds = 1.0
+    initial_list = wait_for_chansrv_pattern(
+        chansrv_logs,
+        r"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        r"png_format_id=40005 generation=\d+",
+        15.0, chansrv_process, chansrv_stdout)
+    if "PEER_INITIAL_FORMAT_LIST_SENT dib=8 png=40005" not in read_text(
+            client_log_path):
+        wait_for_peer_marker(client, client_log_path,
+                             "PEER_INITIAL_FORMAT_LIST_SENT dib=8 png=40005",
+                             10.0)
+
+    prefetch_pattern = (
+        r"event=png-prefetch-start format_id=40005 generation=(\d+)")
+    prefetch_log = wait_for_chansrv_pattern(
+        chansrv_logs, prefetch_pattern, 10.0,
+        chansrv_process, chansrv_stdout)
+    prefetch_match = re.search(prefetch_pattern, prefetch_log)
+    if prefetch_match is None:
+        raise AssertionError(
+            "PNG was not prefetched as soon as the image-only generation "
+            f"arrived:\n{prefetch_log}")
+    generation = int(prefetch_match.group(1))
+    initial_generation_match = re.search(
+        r"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        r"png_format_id=40005 generation=(\d+)", initial_list)
+    if (initial_generation_match is None or
+            int(initial_generation_match.group(1)) != generation):
+        raise AssertionError(
+            "format-list and PNG prefetch generations did not match:\n"
+            f"{initial_list}\n{prefetch_log}")
+    wait_for_chansrv_pattern(
+        chansrv_logs,
+        r"event=request format_id=40005 target=image/png attempt=1",
+        10.0, chansrv_process, chansrv_stdout)
+    wait_for_peer_marker(
+        client, client_log_path,
+        "PEER_PNG_PREFETCH_RESPONSE_HELD format_id=40005", 10.0)
+
+    # This 1-second value is a modeled consumer idle budget, not a claim that
+    # every Firefox build has the same deadline. Hold the CLIPRDR response
+    # beyond it before any X11 image request exists; the eventual paste should
+    # see only the warm-cache SelectionNotify latency.
+    delayed_at = time.monotonic()
+    time.sleep(modeled_selection_idle_budget_seconds + 0.25)
+    held_log = chansrv_log_text(chansrv_logs)
+    if time.monotonic() - delayed_at <= modeled_selection_idle_budget_seconds:
+        raise AssertionError("prefetch delay did not exceed modeled idle budget")
+    if (f"generation={generation} cache_generation={generation}" in held_log or
+            "event=x11-request target=image/png" in held_log):
+        raise AssertionError(
+            "PNG was delivered to X11 before the delayed CLIPRDR prefetch "
+            f"completed:\n{held_log}")
+    if client.stdin is None:
+        raise AssertionError("delayed PNG peer control pipe is unavailable")
+    client.stdin.write(b"RESPOND_PNG\n")
+    client.stdin.flush()
+    wait_for_peer_marker(
+        client, client_log_path,
+        "PEER_PNG_PREFETCH_RESPONSE_SENT", 10.0)
+    completed_log = wait_for_chansrv_pattern(
+        chansrv_logs,
+        rf"event=png-prefetch-complete bytes={expected_png_bytes} "
+        rf"generation={generation} "
+        rf"cache_generation={generation}",
+        10.0, chansrv_process, chansrv_stdout)
+
+    requestor = start_clipboard_requestor(
+        helper, source_display, "image/png", validate_png=True,
+        raw_png_output=True)
+    png_payload, validation_log = finish_raw_png_requestor(
+        requestor, 10.0, chansrv_logs)
+    if (len(png_payload) != expected_png_bytes or
+            hashlib.sha256(png_payload).hexdigest() != expected_png_sha256 or
+            f"decode=valid width={NAMED_PNG_WIDTH} "
+            f"height={NAMED_PNG_HEIGHT} "
+            f"decoded_bytes={NAMED_PNG_WIDTH * NAMED_PNG_HEIGHT * 4}"
+            not in validation_log):
+        raise AssertionError(
+            "prefetched PNG did not match and fully decode the large fixture: "
+            f"bytes={len(png_payload)} sha256="
+            f"{hashlib.sha256(png_payload).hexdigest()} expected="
+            f"{expected_png_bytes}/{expected_png_sha256}\n{validation_log!r}")
+
+    full_log = chansrv_log_text(chansrv_logs)
+    if len(re.findall(
+            r"event=request format_id=40005 target=image/png attempt=1",
+            full_log)) != 1:
+        raise AssertionError(
+            "the warm X11 PNG request caused a duplicate CLIPRDR fetch:\n"
+            f"{full_log}")
+    if re.search(r"event=request format_id=8 target=image/bmp", full_log):
+        raise AssertionError(f"PNG prefetch fell back to DIB/BMP:\n{full_log}")
+    if not re.search(
+            rf"event=png-x11-source target=image/png bytes={len(png_payload)} "
+            rf"sha256=[0-9a-f]+ requestor=0x[0-9a-f]+ selection=0x[0-9a-f]+ "
+            rf"property=0x[0-9a-f]+ request_time=\d+ selection_time=\d+ "
+            rf"generation={generation} cache_generation={generation}",
+            full_log):
+        raise AssertionError(
+            "Firefox-like request was not served from the matching warm PNG "
+            f"generation:\n{full_log}")
+    request_line = next((line for line in full_log.splitlines()
+                         if "event=x11-request target=image/png " in line and
+                         f"generation={generation}" in line), None)
+    if request_line is None:
+        raise AssertionError(
+            "the warm PNG request was not logged:\n"
+            f"{full_log}")
+    request_ids = re.search(
+        r"requestor=(0x[0-9a-fA-F]+).*property=(0x[0-9a-fA-F]+)",
+        request_line)
+    if request_ids is None:
+        raise AssertionError(f"could not parse request identity: {request_line}")
+    notify_line = next((line for line in full_log.splitlines()
+                        if "event=x11-selection-notify-issued path=incr " in line and
+                        "target=image/png" in line and
+                        f"requestor={request_ids.group(1)}" in line and
+                        f"property={request_ids.group(2)}" in line), None)
+    if notify_line is None:
+        raise AssertionError(
+            "the cached PNG did not start with an INCR SelectionNotify:\n"
+            f"{full_log}")
+
+    def log_timestamp(line: str) -> datetime:
+        timestamp_match = re.match(r"^\[([^\]]+)\]", line)
+        if timestamp_match is None:
+            raise AssertionError(f"missing timestamp in chansrv event: {line}")
+        try:
+            return datetime.fromisoformat(timestamp_match.group(1))
+        except ValueError as error:
+            raise AssertionError(
+                f"invalid chansrv event timestamp: {line}") from error
+
+    selection_notify_latency = (
+        log_timestamp(notify_line) - log_timestamp(request_line)).total_seconds()
+    if not 0 <= selection_notify_latency <= modeled_selection_idle_budget_seconds:
+        raise AssertionError(
+            "warm-cache SelectionRequest-to-SelectionNotify exceeded the "
+            f"modeled {modeled_selection_idle_budget_seconds:.1f}s budget: "
+            f"{selection_notify_latency:.3f}s\n{request_line}\n{notify_line}")
+
+    announcement = re.search(
+        rf"event=x11-incr-announcement[^\n]*target=image/png "
+        rf"property={request_ids.group(2)} type=INCR format=32 items=1 "
+        rf"announced_bytes={expected_png_bytes}", full_log)
+    if announcement is None:
+        raise AssertionError(
+            "the INCR announcement did not match the cached PNG size:\n"
+            f"{full_log}")
+    chunk_matches = list(re.finditer(
+        rf"event=x11-incr-chunk-issued[^\n]*property={request_ids.group(2)} "
+        rf"target=image/png type=image/png format=8 chunk=(\d+) "
+        rf"offset=(\d+) bytes=(\d+) end_offset=(\d+)", full_log))
+    chunk_offset = 0
+    for expected_chunk_number, chunk_match in enumerate(chunk_matches, 1):
+        chunk_number, offset, chunk_bytes, end_offset = map(
+            int, chunk_match.groups())
+        if (chunk_number != expected_chunk_number or offset != chunk_offset or
+                end_offset != offset + chunk_bytes):
+            raise AssertionError(
+                f"non-contiguous PNG INCR chunk sequence: {chunk_match.group(0)}")
+        chunk_offset = end_offset
+    if chunk_offset != expected_png_bytes or not chunk_matches:
+        raise AssertionError(
+            f"INCR chunk bytes {chunk_offset} did not equal PNG size "
+            f"{expected_png_bytes}:\n{full_log}")
+    if not re.search(
+            rf"event=png-xchange-arguments-issued[^\n]*path=incr "
+            rf"requestor={request_ids.group(1)} property={request_ids.group(2)} "
+            rf"target=image/png type=image/png format=8 "
+            rf"source_bytes={expected_png_bytes} "
+            rf"announced_bytes={expected_png_bytes} "
+            rf"xchange_argument_bytes={expected_png_bytes} "
+            rf"chunks={len(chunk_matches)} source_sha256={expected_png_sha256} "
+            rf"xchange_argument_sha256={expected_png_sha256} "
+            rf"hash_match=1 length_match=1", full_log):
+        raise AssertionError(
+            "PNG INCR source and XChangeProperty arguments did not match:\n"
+            f"{full_log}")
+    if not re.search(
+            rf"event=x11-incr-terminator-ack[^\n]*requestor="
+            rf"{request_ids.group(1)} property={request_ids.group(2)} "
+            rf".*state_match=1", full_log):
+        raise AssertionError(f"PNG INCR terminator was not acknowledged:\n{full_log}")
+    if "event=png-prefetch-complete" not in completed_log:
+        raise AssertionError("PNG prefetch completion was not recorded")
+    if client.poll() is not None or chansrv_process.poll() is not None:
+        raise AssertionError(
+            "RDP peer or chansrv exited after PNG prefetch:\n"
+            f"[peer]\n{read_text(client_log_path)}\n[chansrv]\n{full_log}")
+    if "XRDP_CONSOLE_SESSION_EXIT event=" in read_text(log_path):
+        raise AssertionError(
+            "xrdp terminated the session after PNG prefetch:\n"
+            f"{xrdp_log_excerpt(log_path)}")
+
+    peer_count_before = peer_frame_count(client_log_path)
+    if stimulus.stdin is None or stimulus.stdout is None:
+        raise AssertionError("post-prefetch graphics stimulus pipes are unavailable")
+    stimulus.stdin.write(b"frame\n")
+    stimulus.stdin.flush()
+    stimulus_result = read_line(stimulus.stdout, 5.0)
+    if len(stimulus_result.split()) < 3:
+        raise AssertionError(
+            f"post-prefetch graphics stimulus failed: {stimulus_result!r}")
+    peer_count_after = wait_for_peer_frame_after(
+        client, client_log_path, peer_count_before, 10.0)
+    if peer_count_after <= peer_count_before:
+        raise AssertionError("RDP peer did not render after PNG prefetch")
+
+
+def assert_clipboard_png_prefetch_bmp_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, log_path: Path,
+        chansrv_process: subprocess.Popen[object], chansrv_logs: Path,
+        chansrv_stdout: Path, source_display: str,
+        stimulus: subprocess.Popen[bytes]) -> None:
+    """Keep an explicit BMP consumer usable while speculative PNG is in flight."""
+    if client.stdin is None:
+        raise AssertionError("delayed PNG peer control pipe is unavailable")
+    wait_for_chansrv_pattern(
+        chansrv_logs,
+        r"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        r"png_format_id=40005 generation=\d+",
+        15.0, chansrv_process, chansrv_stdout)
+    wait_for_peer_marker(client, client_log_path,
+                         "PEER_INITIAL_FORMAT_LIST_SENT dib=8 png=40005", 10.0)
+    wait_for_peer_marker(client, client_log_path,
+                         "PEER_PNG_PREFETCH_RESPONSE_HELD format_id=40005", 10.0)
+
+    bmp_requestor = start_clipboard_requestor(
+        helper, source_display, "image/bmp", allow_refusal=True)
+    try:
+        wait_for_chansrv_pattern(
+            chansrv_logs,
+            r"event=request-deferred reason=png-prefetch-in-flight "
+            r"target=image/bmp waiters=1",
+            5.0, chansrv_process, chansrv_stdout)
+        client.stdin.write(b"RESPOND_PNG\n")
+        client.stdin.flush()
+        wait_for_peer_marker(client, client_log_path,
+                             "PEER_PNG_PREFETCH_RESPONSE_SENT", 10.0)
+        wait_for_peer_marker(client, client_log_path,
+                             "PEER_EXPLICIT_DIB_RESPONSE_SENT", 15.0)
+        bmp_result = finish_clipboard_requestor(bmp_requestor, 25.0, chansrv_logs)
+        if "RESULT target=image/bmp refused" in bmp_result or not re.search(
+                r"RESULT target=image/bmp bytes=[1-9]\d*", bmp_result):
+            raise AssertionError(
+                "explicit BMP selection did not complete after speculative "
+                f"PNG released the CLIPRDR slot: {bmp_result!r}\n[chansrv]\n"
+                f"{chansrv_log_text(chansrv_logs)}")
+    finally:
+        stop_process(bmp_requestor)
+
+    full_log = chansrv_log_text(chansrv_logs)
+    if not re.search(
+            r"event=deferred-request-start target=image/bmp format_id=8 "
+            r"waiters=0 generation=\d+", full_log):
+        raise AssertionError(
+            "deferred explicit BMP request did not start after PNG prefetch:\n"
+            f"{full_log}")
+    if (len(re.findall(r"event=request format_id=40005 target=image/png", full_log)) != 1 or
+            len(re.findall(r"event=request format_id=8 target=image/bmp", full_log)) != 1):
+        raise AssertionError(
+            "prefetch/BMP serialization issued unexpected remote requests:\n"
+            f"{full_log}")
+    if re.search(r"event=request-refused[^\n]*target=image/bmp", full_log):
+        raise AssertionError(f"an explicit BMP request was refused:\n{full_log}")
+    if client.poll() is not None or chansrv_process.poll() is not None:
+        raise AssertionError(
+            "RDP peer or chansrv exited after deferred BMP service:\n"
+            f"[peer]\n{read_text(client_log_path)}\n[chansrv]\n{full_log}")
+    if "XRDP_CONSOLE_SESSION_EXIT event=" in read_text(log_path):
+        raise AssertionError(
+            "xrdp terminated the session after deferred BMP service:\n"
+            f"{xrdp_log_excerpt(log_path)}")
+    peer_count_before = peer_frame_count(client_log_path)
+    if stimulus.stdin is None or stimulus.stdout is None:
+        raise AssertionError("post-prefetch graphics stimulus pipes are unavailable")
+    stimulus.stdin.write(b"frame\n")
+    stimulus.stdin.flush()
+    if len(read_line(stimulus.stdout, 5.0).split()) < 3:
+        raise AssertionError("post-prefetch graphics stimulus failed")
+    if wait_for_peer_frame_after(client, client_log_path,
+                                 peer_count_before, 10.0) <= peer_count_before:
+        raise AssertionError("RDP graphics did not continue after deferred BMP")
+
+
+def assert_clipboard_png_prefetch_failure_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, log_path: Path,
+        chansrv_process: subprocess.Popen[object], chansrv_logs: Path,
+        chansrv_stdout: Path, source_display: str,
+        stimulus: subprocess.Popen[bytes], expected_png_bytes: int,
+        expected_png_sha256: str) -> None:
+    """A failed optimization must not disable a later explicit PNG request."""
+    if client.stdin is None:
+        raise AssertionError("failing PNG peer control pipe is unavailable")
+    initial_list = wait_for_chansrv_pattern(
+        chansrv_logs,
+        r"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        r"png_format_id=40005 generation=(\d+)",
+        15.0, chansrv_process, chansrv_stdout)
+    wait_for_peer_marker(client, client_log_path,
+                         "PEER_INITIAL_FORMAT_LIST_SENT dib=8 png=40005", 10.0)
+    generation_match = re.search(
+        r"event=format-list[^\n]*generation=(\d+)", initial_list)
+    if generation_match is None:
+        raise AssertionError(f"generation missing from initial list: {initial_list}")
+    generation = int(generation_match.group(1))
+    wait_for_chansrv_pattern(
+        chansrv_logs,
+        rf"event=png-prefetch-failed reason=explicit-failure-exhausted "
+        rf"generation={generation}",
+        10.0, chansrv_process, chansrv_stdout)
+    peer_log = read_text(client_log_path)
+    if peer_log.count("PEER_PNG_PREFETCH_RESPONSE_FAILED format_id=40005") < 2:
+        raise AssertionError(
+            "test peer did not fail the speculative request and retry:\n"
+            f"{peer_log}")
+    failed_log = chansrv_log_text(chansrv_logs)
+    if "event=png-prefetch-complete" in failed_log:
+        raise AssertionError(f"failed speculative PNG populated cache:\n{failed_log}")
+
+    client.stdin.write(b"ALLOW_PNG\n")
+    client.stdin.flush()
+    wait_for_peer_marker(client, client_log_path,
+                         "PEER_PNG_EXPLICIT_REQUESTS_ALLOWED", 5.0)
+    requestor = start_clipboard_requestor(
+        helper, source_display, "image/png", validate_png=True,
+        raw_png_output=True)
+    try:
+        png_payload, validation_log = finish_raw_png_requestor(
+            requestor, 15.0, chansrv_logs)
+    finally:
+        stop_process(requestor)
+    if (len(png_payload) != expected_png_bytes or
+            hashlib.sha256(png_payload).hexdigest() != expected_png_sha256 or
+            f"decode=valid width={NAMED_PNG_WIDTH} "
+            f"height={NAMED_PNG_HEIGHT} "
+            f"decoded_bytes={NAMED_PNG_WIDTH * NAMED_PNG_HEIGHT * 4}"
+            not in validation_log):
+        raise AssertionError(
+            "explicit PNG request failed after prefetch failure: "
+            f"bytes={len(png_payload)} expected={expected_png_bytes}\n"
+            f"{validation_log}")
+    full_log = chansrv_log_text(chansrv_logs)
+    explicit_request_order = re.search(
+        r"event=png-prefetch-failed[^\n]*generation=\d+.*\n"
+        r"(?:[^\n]*\n)*[^\n]*event=x11-request target=image/png[^\n]*\n"
+        r"[^\n]*event=selection target=image/png[^\n]*\n"
+        r"[^\n]*event=request format_id=40005 target=image/png",
+        full_log)
+    if (len(re.findall(
+            r"event=request format_id=40005 target=image/png", full_log)) != 2 or
+            not re.search(r"event=retry format_id=40005 attempt=2", full_log) or
+            explicit_request_order is None):
+        raise AssertionError(
+            "explicit PNG did not retry the ordinary on-demand path after "
+            f"prefetch failure:\n{full_log}")
+    if "PEER_EXPLICIT_PNG_RESPONSE_SENT" not in read_text(client_log_path):
+        raise AssertionError(
+            "test peer did not provide the later explicit PNG response:\n"
+            f"{read_text(client_log_path)}")
+    if client.poll() is not None or chansrv_process.poll() is not None:
+        raise AssertionError(
+            "RDP peer or chansrv exited after failed PNG prefetch:\n"
+            f"[peer]\n{read_text(client_log_path)}\n[chansrv]\n{full_log}")
+    if "XRDP_CONSOLE_SESSION_EXIT event=" in read_text(log_path):
+        raise AssertionError(
+            "xrdp terminated the session after failed PNG prefetch:\n"
+            f"{xrdp_log_excerpt(log_path)}")
+    peer_count_before = peer_frame_count(client_log_path)
+    if stimulus.stdin is None or stimulus.stdout is None:
+        raise AssertionError("post-prefetch graphics stimulus pipes are unavailable")
+    stimulus.stdin.write(b"frame\n")
+    stimulus.stdin.flush()
+    if len(read_line(stimulus.stdout, 5.0).split()) < 3:
+        raise AssertionError("post-prefetch graphics stimulus failed")
+    if wait_for_peer_frame_after(client, client_log_path,
+                                 peer_count_before, 10.0) <= peer_count_before:
+        raise AssertionError("RDP graphics did not continue after failed prefetch")
+
+
+def assert_clipboard_png_prefetch_pending_consumer_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, log_path: Path,
+        chansrv_process: subprocess.Popen[object], chansrv_logs: Path,
+        chansrv_stdout: Path, source_display: str,
+        stimulus: subprocess.Popen[bytes], expected_png_bytes: int,
+        expected_png_sha256: str) -> None:
+    """A paste arriving during a slow prefetch waits, then completes safely."""
+    modeled_idle_budget_seconds = 1.0
+    if client.stdin is None:
+        raise AssertionError("delayed PNG peer control pipe is unavailable")
+    initial_list = wait_for_chansrv_pattern(
+        chansrv_logs,
+        r"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        r"png_format_id=40005 generation=(\d+)",
+        15.0, chansrv_process, chansrv_stdout)
+    wait_for_peer_marker(client, client_log_path,
+                         "PEER_INITIAL_FORMAT_LIST_SENT dib=8 png=40005", 10.0)
+    generation_match = re.search(
+        r"event=format-list[^\n]*generation=(\d+)", initial_list)
+    if generation_match is None:
+        raise AssertionError(f"format generation missing: {initial_list}")
+    generation = int(generation_match.group(1))
+    wait_for_peer_marker(client, client_log_path,
+                         "PEER_PNG_PREFETCH_RESPONSE_HELD format_id=40005", 10.0)
+
+    requestor = start_clipboard_requestor(
+        helper, source_display, "image/png", validate_png=True,
+        raw_png_output=True)
+    try:
+        wait_for_chansrv_pattern(
+            chansrv_logs,
+            r"event=request-coalesced target=image/png waiters=1",
+            5.0, chansrv_process, chansrv_stdout)
+        request_pattern = (
+            rf"event=x11-request target=image/png[^\n]*generation={generation}")
+        wait_for_chansrv_pattern(
+            chansrv_logs, request_pattern, 5.0,
+            chansrv_process, chansrv_stdout)
+        full_log = chansrv_log_text(chansrv_logs)
+        request_line = next(line for line in full_log.splitlines()
+                            if re.search(request_pattern, line))
+        request_ids = re.search(
+            r"requestor=(0x[0-9a-fA-F]+).*property=(0x[0-9a-fA-F]+)",
+            request_line)
+        if request_ids is None:
+            raise AssertionError(f"could not parse queued PNG request: {request_line}")
+        time.sleep(modeled_idle_budget_seconds + 0.25)
+        held_log = chansrv_log_text(chansrv_logs)
+        if re.search(
+                rf"event=x11-selection-notify-issued[^\n]*"
+                rf"requestor={request_ids.group(1)} "
+                rf".*property={request_ids.group(2)}", held_log):
+            raise AssertionError(
+                "queued PNG received SelectionNotify before its CLIPRDR data "
+                f"arrived:\n{held_log}")
+        client.stdin.write(b"RESPOND_PNG\n")
+        client.stdin.flush()
+        wait_for_peer_marker(client, client_log_path,
+                             "PEER_PNG_PREFETCH_RESPONSE_SENT", 10.0)
+        png_payload, validation_log = finish_raw_png_requestor(
+            requestor, 15.0, chansrv_logs)
+    finally:
+        stop_process(requestor)
+
+    if (len(png_payload) != expected_png_bytes or
+            hashlib.sha256(png_payload).hexdigest() != expected_png_sha256 or
+            f"decode=valid width={NAMED_PNG_WIDTH} "
+            f"height={NAMED_PNG_HEIGHT} "
+            f"decoded_bytes={NAMED_PNG_WIDTH * NAMED_PNG_HEIGHT * 4}"
+            not in validation_log):
+        raise AssertionError(
+            "pending-consumer PNG did not fully match/decode: "
+            f"bytes={len(png_payload)} expected={expected_png_bytes}\n"
+            f"{validation_log}")
+    full_log = chansrv_log_text(chansrv_logs)
+    notify_line = next((line for line in full_log.splitlines()
+                        if "event=x11-selection-notify-issued path=incr " in line and
+                        f"requestor={request_ids.group(1)}" in line and
+                        f"property={request_ids.group(2)}" in line), None)
+    if notify_line is None:
+        raise AssertionError(
+            f"queued PNG did not eventually start INCR:\n{full_log}")
+    request_time = datetime.fromisoformat(
+        re.match(r"^\[([^\]]+)\]", request_line).group(1))
+    notify_time = datetime.fromisoformat(
+        re.match(r"^\[([^\]]+)\]", notify_line).group(1))
+    request_to_notify = (notify_time - request_time).total_seconds()
+    print(
+        "PNG request during held prefetch: "
+        f"SelectionRequest-to-INCR-SelectionNotify={request_to_notify:.3f}s "
+        f"(modeled idle budget={modeled_idle_budget_seconds:.1f}s)")
+    if request_to_notify <= modeled_idle_budget_seconds:
+        raise AssertionError(
+            "controlled pending-prefetch test did not exceed its modeled "
+            f"consumer budget: {request_to_notify:.3f}s")
+    if len(re.findall(r"event=request format_id=40005 target=image/png", full_log)) != 1:
+        raise AssertionError(
+            "queued PNG request caused another CLIPRDR fetch instead of "
+            f"coalescing with prefetch:\n{full_log}")
+    if "event=response-discarded reason=stale-generation" in full_log:
+        raise AssertionError(f"same-generation prefetch was misclassified stale:\n{full_log}")
+    if not re.search(
+            rf"event=png-xchange-arguments-issued[^\n]*path=incr "
+            rf"requestor={request_ids.group(1)} property={request_ids.group(2)} "
+            rf".*hash_match=1 length_match=1", full_log):
+        raise AssertionError(f"pending PNG INCR was not byte-complete:\n{full_log}")
+    if client.poll() is not None or chansrv_process.poll() is not None:
+        raise AssertionError(
+            "RDP peer or chansrv exited after pending PNG paste:\n"
+            f"[peer]\n{read_text(client_log_path)}\n[chansrv]\n{full_log}")
+    if "XRDP_CONSOLE_SESSION_EXIT event=" in read_text(log_path):
+        raise AssertionError(
+            "xrdp terminated the session after pending PNG paste:\n"
+            f"{xrdp_log_excerpt(log_path)}")
+    peer_count_before = peer_frame_count(client_log_path)
+    if stimulus.stdin is None or stimulus.stdout is None:
+        raise AssertionError("post-prefetch graphics stimulus pipes are unavailable")
+    stimulus.stdin.write(b"frame\n")
+    stimulus.stdin.flush()
+    if len(read_line(stimulus.stdout, 5.0).split()) < 3:
+        raise AssertionError("post-prefetch graphics stimulus failed")
+    if wait_for_peer_frame_after(client, client_log_path,
+                                 peer_count_before, 10.0) <= peer_count_before:
+        raise AssertionError("RDP graphics did not continue after pending PNG paste")
+
+
+def assert_clipboard_png_prefetch_stale_image_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, log_path: Path,
+        chansrv_process: subprocess.Popen[object], chansrv_logs: Path,
+        chansrv_stdout: Path, source_display: str,
+        stimulus: subprocess.Popen[bytes], expected_png_bytes: int,
+        expected_png_sha256: str) -> None:
+    """Keep a new-generation PNG consumer isolated from an old held response."""
+    if client.stdin is None:
+        raise AssertionError("stale-generation PNG peer control pipe is unavailable")
+    first_list = wait_for_chansrv_pattern(
+        chansrv_logs,
+        r"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        r"png_format_id=40005 generation=(\d+)",
+        15.0, chansrv_process, chansrv_stdout)
+    wait_for_peer_marker(client, client_log_path,
+                         "PEER_INITIAL_FORMAT_LIST_SENT dib=8 png=40005", 10.0)
+    first_generation_matches = list(re.finditer(
+        r"event=format-list[^\n]*generation=(\d+)", first_list))
+    if not first_generation_matches:
+        raise AssertionError(f"initial generation missing: {first_list}")
+    first_generation = int(first_generation_matches[0].group(1))
+    wait_for_peer_marker(client, client_log_path,
+                         "PEER_PNG_PREFETCH_RESPONSE_HELD format_id=40005", 10.0)
+
+    format_lists_before = clipboard_format_list_count(chansrv_logs)
+    client.stdin.write(b"CHANGE_FORMATS_IMAGE\n")
+    client.stdin.flush()
+    wait_for_peer_marker(
+        client, client_log_path,
+        "PEER_NEXT_IMAGE_FORMAT_LIST_SENT while_old_png_pending=1", 10.0)
+    wait_for_chansrv_marker(
+        chansrv_logs, "event=format-list", format_lists_before + 1,
+        10.0, chansrv_process, chansrv_stdout)
+    second_list = chansrv_log_text(chansrv_logs)
+    second_generation_matches = list(re.finditer(
+        r"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        r"png_format_id=40005 generation=(\d+)", second_list))
+    if len(second_generation_matches) < 2:
+        raise AssertionError(f"replacement generation missing: {second_list}")
+    second_generation = int(second_generation_matches[-1].group(1))
+    if second_generation != first_generation + 1:
+        raise AssertionError(
+            f"replacement image generation did not advance: "
+            f"{first_generation} -> {second_generation}")
+
+    requestor = start_clipboard_requestor(
+        helper, source_display, "image/png", validate_png=True,
+        raw_png_output=True)
+    try:
+        wait_for_chansrv_pattern(
+            chansrv_logs,
+            rf"event=request-deferred reason=stale-png-prefetch "
+            rf"target=image/png prefetch_generation={first_generation} "
+            rf"generation={second_generation}",
+            5.0, chansrv_process, chansrv_stdout)
+        client.stdin.write(b"RESPOND_PNG\n")
+        client.stdin.flush()
+        wait_for_peer_marker(client, client_log_path,
+                             "PEER_PNG_PREFETCH_RESPONSE_SENT", 10.0)
+        stale_log = wait_for_chansrv_pattern(
+            chansrv_logs,
+            rf"event=response-discarded reason=stale-generation "
+            rf"format_id=40005 request_generation={first_generation} "
+            rf"current_generation={second_generation} "
+            rf"prefetch_generation={first_generation}",
+            10.0, chansrv_process, chansrv_stdout)
+        wait_for_peer_marker(client, client_log_path,
+                             "PEER_NEXT_GENERATION_PNG_RESPONSE_SENT", 10.0)
+        wait_for_chansrv_pattern(
+            chansrv_logs,
+            rf"event=png-prefetch-complete bytes={expected_png_bytes} "
+            rf"generation={second_generation} "
+            rf"cache_generation={second_generation}",
+            10.0, chansrv_process, chansrv_stdout)
+        png_payload, validation_log = finish_raw_png_requestor(
+            requestor, 15.0, chansrv_logs)
+    finally:
+        stop_process(requestor)
+
+    if (len(png_payload) != expected_png_bytes or
+            hashlib.sha256(png_payload).hexdigest() != expected_png_sha256 or
+            f"decode=valid width={NAMED_PNG_WIDTH} "
+            f"height={NAMED_PNG_HEIGHT} "
+            f"decoded_bytes={NAMED_PNG_WIDTH * NAMED_PNG_HEIGHT * 4}"
+            not in validation_log):
+        raise AssertionError(
+            "new-generation waiter received invalid PNG after stale response "
+            f"discard: bytes={len(png_payload)}\n{validation_log}")
+    full_log = chansrv_log_text(chansrv_logs)
+    if len(re.findall(r"event=request format_id=40005 target=image/png", full_log)) != 2:
+        raise AssertionError(
+            "expected one discarded old PNG response and one new-generation "
+            f"PNG fetch:\n{full_log}")
+    if re.search(
+            rf"event=png-prefetch-complete[^\n]*generation={first_generation} "
+            rf"cache_generation={second_generation}", full_log):
+        raise AssertionError(
+            "old PNG response populated the new generation cache:\n{full_log}")
+    if re.search(
+            rf"event=x11-delivery-issued[^\n]*target=image/png[^\n]*"
+            rf"generation={first_generation}", full_log):
+        raise AssertionError(
+            f"old PNG response was delivered to an X11 waiter:\n{full_log}")
+    if not re.search(
+            rf"event=png-x11-source target=image/png bytes={expected_png_bytes} "
+            rf"sha256={expected_png_sha256} .*generation={second_generation} "
+            rf"cache_generation={second_generation}", full_log):
+        raise AssertionError(
+            f"new waiter was not served from its own generation cache:\n{full_log}")
+    if "event=response-discarded reason=stale-generation" not in stale_log:
+        raise AssertionError(f"old response was not discarded:\n{stale_log}")
+    if client.poll() is not None or chansrv_process.poll() is not None:
+        raise AssertionError(
+            "RDP peer or chansrv exited after stale PNG overlap:\n"
+            f"[peer]\n{read_text(client_log_path)}\n[chansrv]\n{full_log}")
+    if "XRDP_CONSOLE_SESSION_EXIT event=" in read_text(log_path):
+        raise AssertionError(
+            "xrdp terminated the session after stale PNG overlap:\n"
+            f"{xrdp_log_excerpt(log_path)}")
+    peer_count_before = peer_frame_count(client_log_path)
+    if stimulus.stdin is None or stimulus.stdout is None:
+        raise AssertionError("post-prefetch graphics stimulus pipes are unavailable")
+    stimulus.stdin.write(b"frame\n")
+    stimulus.stdin.flush()
+    if len(read_line(stimulus.stdout, 5.0).split()) < 3:
+        raise AssertionError("post-prefetch graphics stimulus failed")
+    if wait_for_peer_frame_after(client, client_log_path,
+                                 peer_count_before, 10.0) <= peer_count_before:
+        raise AssertionError("RDP graphics did not continue after stale PNG overlap")
+
+
 def assert_clipboard_named_png_session(
         helper: Path, owner: subprocess.Popen[bytes],
         owner_log_path: Path, client: subprocess.Popen[object],
@@ -1370,16 +2022,13 @@ def assert_clipboard_named_png_session(
     requestor = start_clipboard_requestor(
         helper, source_display, "image/png", validate_png=True,
         raw_png_output=True)
-    request_pattern = (
-        rf"event=request format_id={NAMED_PNG_FORMAT_ID} "
-        r"target=image/png attempt=1")
-    request_log = wait_for_chansrv_pattern(
-        chansrv_logs, request_pattern, 12.0,
+    x11_request_pattern = (
+        r"event=x11-request target=image/png requestor=0x[0-9a-fA-F]+ "
+        r"owner=0x[0-9a-fA-F]+ selection=0x[0-9a-fA-F]+ "
+        r"property=0x[0-9a-fA-F]+ time=\d+ generation=\d+")
+    x11_request_log = wait_for_chansrv_pattern(
+        chansrv_logs, x11_request_pattern, 12.0,
         chansrv_process, chansrv_stdout)
-    wait_for_owner_marker(owner, "NAMED_PNG_RAW_REQUEST", 15.0,
-                          owner_log_path)
-    wait_for_owner_marker(owner, "NAMED_PNG_RAW_INCR_DONE", 30.0,
-                          owner_log_path)
 
     png_payload, validation_log = finish_raw_png_requestor(
         requestor, 30.0, chansrv_logs)
@@ -1406,7 +2055,7 @@ def assert_clipboard_named_png_session(
         r"event=x11-request target=image/png requestor=(0x[0-9a-fA-F]+) "
         r"owner=(0x[0-9a-fA-F]+) selection=(0x[0-9a-fA-F]+) "
         r"property=(0x[0-9a-fA-F]+) time=\d+ generation=(\d+)",
-        request_log)
+        x11_request_log)
     if x11_request_match is None:
         raise AssertionError("chansrv omitted the named PNG X11 request details")
     x11_requestor = x11_request_match.group(1).lower()
@@ -1437,6 +2086,14 @@ def assert_clipboard_named_png_session(
             "named PNG did not traverse and complete the chansrv X11 INCR path:\n"
             f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
     full_chansrv_log = chansrv_log_text(chansrv_logs)
+    png_fetches = re.findall(
+        rf"event=request format_id={NAMED_PNG_FORMAT_ID} "
+        r"target=image/png attempt=1", full_chansrv_log)
+    if len(png_fetches) != 1:
+        raise AssertionError(
+            "the explicit post-reconnect PNG request should cause exactly one "
+            "on-demand CLIPRDR fetch:\n"
+            f"PNG fetch count={len(png_fetches)}\n{full_chansrv_log}")
     if re.search(r"event=request format_id=8 target=image/bmp", full_chansrv_log):
         raise AssertionError(
             "consumer selected the BMP fallback after the PNG request:\n"
@@ -2101,12 +2758,20 @@ def main() -> int:
     clipboard_named_png_mode = False
     clipboard_inflight_format_list_mode = False
     clipboard_inflight_png_format_list_mode = False
+    clipboard_png_prefetch_mode = False
+    clipboard_png_prefetch_bmp_mode = False
+    clipboard_png_prefetch_fail_mode = False
+    clipboard_png_prefetch_pending_mode = False
+    clipboard_png_prefetch_stale_image_mode = False
     clipboard_helper: Path | None = None
     overlap_client: Path | None = None
     clipboard_options = [option for option in (
         "--clipboard-stress", "--clipboard-named-png",
         "--clipboard-inflight-format-list",
-        "--clipboard-inflight-png-format-list") if option in arguments]
+        "--clipboard-inflight-png-format-list",
+        "--clipboard-png-prefetch", "--clipboard-png-prefetch-bmp",
+        "--clipboard-png-prefetch-fail", "--clipboard-png-prefetch-pending",
+        "--clipboard-png-prefetch-stale-image") if option in arguments]
     if clipboard_options:
         selected_clipboard_mode = clipboard_options[0]
         if (len(clipboard_options) != 1 or arguments[-1] != selected_clipboard_mode or
@@ -2120,12 +2785,26 @@ def main() -> int:
             selected_clipboard_mode == "--clipboard-inflight-format-list")
         clipboard_inflight_png_format_list_mode = (
             selected_clipboard_mode == "--clipboard-inflight-png-format-list")
+        clipboard_png_prefetch_mode = selected_clipboard_mode in (
+            "--clipboard-png-prefetch", "--clipboard-png-prefetch-bmp",
+            "--clipboard-png-prefetch-fail",
+            "--clipboard-png-prefetch-pending",
+            "--clipboard-png-prefetch-stale-image")
+        clipboard_png_prefetch_bmp_mode = (
+            selected_clipboard_mode == "--clipboard-png-prefetch-bmp")
+        clipboard_png_prefetch_fail_mode = (
+            selected_clipboard_mode == "--clipboard-png-prefetch-fail")
+        clipboard_png_prefetch_pending_mode = (
+            selected_clipboard_mode == "--clipboard-png-prefetch-pending")
+        clipboard_png_prefetch_stale_image_mode = (
+            selected_clipboard_mode == "--clipboard-png-prefetch-stale-image")
     clipboard_inflight_mode = (
         clipboard_inflight_format_list_mode or
         clipboard_inflight_png_format_list_mode)
+    clipboard_peer_mode = clipboard_inflight_mode or clipboard_png_prefetch_mode
     clipboard_enabled = (
         clipboard_stress_mode or clipboard_named_png_mode or
-        clipboard_inflight_mode)
+        clipboard_inflight_mode or clipboard_png_prefetch_mode)
     mode_options = [option for option in (
         "--rfx", "--gfx-planar", "--gfx-h264",
         "--gfx-h264-coherence", "--gfx-h264-fullhd")
@@ -2153,13 +2832,13 @@ def main() -> int:
         raise SystemExit("--cpu-contention requires --gfx-h264-coherence")
 
     if clipboard_enabled:
-        expected_argument_count = 8 if clipboard_inflight_mode else 7
+        expected_argument_count = 8 if clipboard_peer_mode else 7
         if len(arguments) != expected_argument_count:
             raise SystemExit(
                 "clipboard mode requires the clipboard X11 helper path and, "
-                "for an in-flight format-list case, its FreeRDP peer path")
+                "for a controlled CLIPRDR case, its FreeRDP peer path")
         clipboard_helper = Path(arguments[6]).resolve()
-        if clipboard_inflight_mode:
+        if clipboard_peer_mode:
             overlap_client = Path(arguments[7]).resolve()
         arguments = arguments[:6]
     elif len(arguments) not in (6, 8):
@@ -2173,7 +2852,8 @@ def main() -> int:
             "[clipboard helper [overlap peer] "
             "--clipboard-stress|--clipboard-named-png|"
             "--clipboard-inflight-format-list|"
-            "--clipboard-inflight-png-format-list]"
+            "--clipboard-inflight-png-format-list|"
+            "--clipboard-png-prefetch]"
         )
 
     presentation_width = (
@@ -2251,7 +2931,7 @@ def main() -> int:
         named_png_fixture_path = root / "peer-named.png"
         named_png_fixture_info = (
             write_named_png_fixture(named_png_fixture_path)
-            if clipboard_named_png_mode else None)
+            if clipboard_named_png_mode or clipboard_png_prefetch_mode else None)
         log_path = root / "xrdp.log"
         stdout_path = root / "xrdp-stdout.log"
         client_log_path = root / "freerdp.log"
@@ -2368,7 +3048,7 @@ password=smoke
 
                 if clipboard_helper is None:
                     raise AssertionError("clipboard helper path was not configured")
-                if not clipboard_inflight_mode:
+                if not clipboard_peer_mode:
                     owner_command = (
                         [str(clipboard_helper), "owner-named-png",
                          str(named_png_fixture_path)]
@@ -2400,7 +3080,7 @@ password=smoke
                 wait_for_listener(server, port, 8.0, stdout_path)
 
                 client_executable = (
-                    overlap_client if clipboard_inflight_mode else
+                    overlap_client if clipboard_peer_mode else
                     freerdp_path)
                 if client_executable is None:
                     raise AssertionError("clipboard overlap client was not configured")
@@ -2433,14 +3113,23 @@ password=smoke
                     client_environment = os.environ.copy()
                     if clipboard_inflight_png_format_list_mode:
                         client_environment["XRDP_CONSOLE_TEST_PNG_OVERLAP"] = "1"
+                    if clipboard_png_prefetch_mode:
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_PNG_PREFETCH_DELAY"] = "1"
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_PNG_FILE"] = str(
+                                named_png_fixture_path)
+                    if clipboard_png_prefetch_fail_mode:
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_PNG_PREFETCH_FAIL"] = "1"
                     client = subprocess.Popen(
                         client_command,
                         cwd=root,
-                        stdin=subprocess.PIPE if clipboard_inflight_mode else None,
+                        stdin=subprocess.PIPE if clipboard_peer_mode else None,
                         stdout=client_log,
                         stderr=subprocess.STDOUT,
                         env=client_environment,
-                        bufsize=0 if clipboard_inflight_mode else -1,
+                        bufsize=0 if clipboard_peer_mode else -1,
                         start_new_session=True,
                     )
                     marker = f"loaded module '{module_name}' ok"
@@ -2528,7 +3217,7 @@ password=smoke
                                 server, log_path,
                                 "source=1920x1080 presentation=1512x949",
                                 4.0, stdout_path, client_log_path)
-                    if clipboard_inflight_mode:
+                    if clipboard_peer_mode:
                         wait_for_peer_marker(
                             client, client_log_path, "PEER_CONNECTED", 10.0)
                         wait_for_peer_marker(
@@ -2558,7 +3247,7 @@ password=smoke
                     if clipboard_enabled:
                         if (clipboard_helper is None or chansrv_process is None or
                                 (clipboard_owner is None and
-                                 not clipboard_inflight_mode)):
+                                 not clipboard_peer_mode)):
                             raise AssertionError(
                                 "clipboard integration processes were not started")
                         if clipboard_inflight_format_list_mode:
@@ -2573,6 +3262,40 @@ password=smoke
                                 log_path, stdout_path, chansrv_process,
                                 chansrv_logs_path, chansrv_stdout_path,
                                 source_display, stimulus)
+                        elif clipboard_png_prefetch_mode:
+                            if named_png_fixture_info is None:
+                                raise AssertionError(
+                                    "prefetch PNG fixture metadata was not prepared")
+                            if clipboard_png_prefetch_bmp_mode:
+                                assert_clipboard_png_prefetch_bmp_session(
+                                    clipboard_helper, client, client_log_path,
+                                    log_path, chansrv_process, chansrv_logs_path,
+                                    chansrv_stdout_path, source_display, stimulus)
+                            elif clipboard_png_prefetch_fail_mode:
+                                assert_clipboard_png_prefetch_failure_session(
+                                    clipboard_helper, client, client_log_path,
+                                    log_path, chansrv_process, chansrv_logs_path,
+                                    chansrv_stdout_path, source_display, stimulus,
+                                    *named_png_fixture_info)
+                            elif clipboard_png_prefetch_pending_mode:
+                                assert_clipboard_png_prefetch_pending_consumer_session(
+                                    clipboard_helper, client, client_log_path,
+                                    log_path, chansrv_process, chansrv_logs_path,
+                                    chansrv_stdout_path, source_display, stimulus,
+                                    *named_png_fixture_info)
+                            elif clipboard_png_prefetch_stale_image_mode:
+                                assert_clipboard_png_prefetch_stale_image_session(
+                                    clipboard_helper, client, client_log_path,
+                                    log_path, chansrv_process, chansrv_logs_path,
+                                    chansrv_stdout_path, source_display, stimulus,
+                                    *named_png_fixture_info)
+                            else:
+                                assert_clipboard_png_prefetch_session(
+                                    clipboard_helper, client, client_log_path,
+                                    log_path, stdout_path, chansrv_process,
+                                    chansrv_logs_path, chansrv_stdout_path,
+                                    source_display, stimulus,
+                                    *named_png_fixture_info)
                         elif clipboard_stress_mode:
                             if clipboard_owner is None:
                                 raise AssertionError(

@@ -1,12 +1,15 @@
 diff --git a/xrdp/xrdp_types.h b/xrdp/xrdp_types.h
 --- a/xrdp/xrdp_types.h
 +++ b/xrdp/xrdp_types.h
-@@ -570,3 +570,5 @@ struct xrdp_wm
+@@ -580,6 +580,8 @@
+ 
      struct xrdp_region *screen_dirty_region;
      int last_screen_draw_time;
 +    /* Monotonic frame IDs for the Console-owned GFX Planar fallback. */
 +    int console_gfx_frame_id;
  };
+ 
+ /* rdp process */
 diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
 --- a/xrdp/xrdp_mm.c
 +++ b/xrdp/xrdp_mm.c
@@ -37,7 +40,7 @@ diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
      {
          LOG(LOG_LEVEL_INFO, "xrdp_mm_egfx_send_planar_bitmap: "
              "xrdp_egfx_send_frame_end error");
-@@ -1534,6 +1542,9 @@ xrdp_mm_egfx_frame_ack(void *user, uint32_t queue_depth, int frame_id,
+@@ -1541,7 +1548,10 @@
      encoder = self->encoder;
      if (encoder == NULL)
      {
@@ -48,3 +51,4 @@ diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
 +        }
          return 0;
      }
+     if (queue_depth == XR_SUSPEND_FRAME_ACKNOWLEDGEMENT)
