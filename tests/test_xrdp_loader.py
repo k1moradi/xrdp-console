@@ -2166,6 +2166,97 @@ def assert_clipboard_named_png_session(
         raise AssertionError(
             "consumer selected the BMP fallback after the PNG request:\n"
             f"{full_chansrv_log}")
+
+    # The first real image request has now materialized this generation in
+    # chansrv. A second request must be served from that same-generation
+    # cache, with no new CLIPRDR request and prompt X11 INCR startup.
+    modeled_selection_idle_budget_seconds = 1.0
+    second_requestor = start_clipboard_requestor(
+        helper, source_display, "image/png", validate_png=True,
+        raw_png_output=True)
+    second_started = time.monotonic()
+    second_png, second_validation_log = finish_raw_png_requestor(
+        second_requestor, 15.0, chansrv_logs)
+    second_elapsed = time.monotonic() - second_started
+    if (len(second_png) != expected_png_bytes or
+            hashlib.sha256(second_png).hexdigest() != expected_png_sha256 or
+            f"PNG_VALIDATION bytes={expected_png_bytes} signature=valid "
+            f"decode=valid width={NAMED_PNG_WIDTH} "
+            f"height={NAMED_PNG_HEIGHT} " not in second_validation_log):
+        raise AssertionError(
+            "warm same-generation PNG did not preserve and decode the exact "
+            f"payload: bytes={len(second_png)} expected={expected_png_bytes}\n"
+            f"{second_validation_log}")
+    warm_log = chansrv_log_text(chansrv_logs)
+    second_request_match = re.search(
+        r"event=x11-request target=image/png requestor=(0x[0-9a-fA-F]+) "
+        r"owner=0x[0-9a-fA-F]+ selection=0x[0-9a-fA-F]+ "
+        r"property=(0x[0-9a-fA-F]+) time=\d+ generation=(\d+)",
+        warm_log[x11_request_match.end():])
+    if second_request_match is None:
+        raise AssertionError(
+            "warm PNG request was not independently identified in chansrv "
+            f"logs:\n{warm_log}")
+    warm_requestor = second_request_match.group(1).lower()
+    warm_property = second_request_match.group(2).lower()
+    warm_generation = int(second_request_match.group(3))
+    if warm_generation != x11_generation:
+        raise AssertionError(
+            "warm image request changed clipboard generation: "
+            f"cold={x11_generation} warm={warm_generation}")
+    warm_request_line = next(
+        line for line in warm_log.splitlines()
+        if "event=x11-request target=image/png " in line and
+        f"requestor={warm_requestor} " in line and
+        f"property={warm_property} " in line)
+    warm_notify_line = next((
+        line for line in warm_log.splitlines()
+        if "event=x11-selection-notify-issued path=incr " in line and
+        f"requestor={warm_requestor} " in line and
+        f"property={warm_property} " in line), None)
+    if warm_notify_line is None:
+        raise AssertionError(
+            "warm cached request did not issue SelectionNotify:\n"
+            f"{warm_log}")
+    warm_request_time = datetime.fromisoformat(
+        re.match(r"^\[([^\]]+)\]", warm_request_line).group(1))
+    warm_notify_time = datetime.fromisoformat(
+        re.match(r"^\[([^\]]+)\]", warm_notify_line).group(1))
+    request_to_notify = (warm_notify_time - warm_request_time).total_seconds()
+    if request_to_notify >= modeled_selection_idle_budget_seconds:
+        raise AssertionError(
+            "warm cached SelectionNotify exceeded the modeled local idle "
+            f"budget: {request_to_notify:.3f}s")
+    warm_delivery = re.search(
+        rf"event=x11-delivery-issued path=incr target=image/png "
+        rf"requestor={re.escape(warm_requestor)} "
+        rf"property={re.escape(warm_property)} bytes={expected_png_bytes} "
+        rf"generation={warm_generation} cache_generation={warm_generation}",
+        warm_log)
+    warm_terminator_ack = re.search(
+        rf"event=x11-incr-terminator-ack requestor={re.escape(warm_requestor)} "
+        rf"property={re.escape(warm_property)} "
+        rf"terminator_generation={warm_generation} "
+        rf"current_generation={warm_generation}",
+        warm_log)
+    if warm_delivery is None or warm_terminator_ack is None:
+        raise AssertionError(
+            "warm PNG did not complete a same-generation cached INCR transfer:\n"
+            f"{warm_log}")
+    if len(re.findall(
+            rf"event=request format_id={NAMED_PNG_FORMAT_ID} "
+            r"target=image/png attempt=1", warm_log)) != 1:
+        raise AssertionError(
+            "warm PNG paste caused another remote CLIPRDR fetch:\n"
+            f"{warm_log}")
+    print(
+        "PNG same-generation cold/warm regression: "
+        f"cold fetch count=1, warm fetch count=0, "
+        f"warm SelectionNotify={request_to_notify:.3f}s, "
+        f"full INCR={second_elapsed:.3f}s "
+        f"(modeled local selection budget="
+        f"{modeled_selection_idle_budget_seconds:.1f}s)")
+
     if "UNEXPECTED_NAMED_PNG_FORMAT_REQUEST format_id=8" in read_text(owner_log_path):
         raise AssertionError(
             "peer received a DIB request instead of staying on named PNG:\n"
