@@ -30,10 +30,19 @@ Raw diagnostic archives are intentionally not included in this commit.
   success was generation 16 at about 12:36. No corresponding new chansrv image
   generation is present in the earlier 12:31–12:34 window. This establishes
   only that chansrv did not log a new usable image generation in that window.
-- No `XRDP_CONSOLE_RDP_VC` CLIPRDR-fragment markers were found in the checked
-  `/var/log/xrdp.log` for correlating the earlier failed event. The active
-  0043 patch is intended to provide this evidence; the logging destination
-  and deployment/configuration of those markers need verification.
+- Follow-up inspection confirmed that 0043's `XRDP_CONSOLE_RDP_VC` markers are
+  written to the systemd journal. For the earlier 12:31:30–12:34:15 window,
+  `journalctl -u xrdp` has no CLIPRDR fragment entries, and the chansrv log
+  has no new clipboard generation. Thus Linux did not observe a CLIPRDR PDU
+  in that window; the evidence still cannot distinguish client non-emission
+  from a client-to-server delivery/receive gap.
+- The journal later records an image Format List at 12:36:02 and a 1,670,999
+  byte PNG response at 12:36:11–12:36:13. Generation 17 and its successful
+  Firefox paste follow at 12:37. At 12:46:53 and 12:47:33 the journal records
+  two more client-to-server Format List PDUs (`msg_type=2`, `data_len=6`);
+  chansrv stores one text format for each. Those later text-only generations
+  are not correlated to a specific user action and must not be called
+  screenshot supersession without further evidence.
 - Raw TCP over the actual Mac/Linux WLAN measured about 6.85 Mbit/s Mac-to-Linux
   and 5.66 Mbit/s Linux-to-Mac in the reported 20-second tests. This is a
   performance constraint, but it has not been shown to cause either missing
@@ -85,9 +94,12 @@ Raw diagnostic archives are intentionally not included in this commit.
    `nanosleep()`.** Replace that test-only delay with a monotonic deadline so
    SelectionClear, PropertyNotify, and other requests continue to be served
    during the delay; add responsiveness tests.
-10. **The VC trace is not yet available for the failed screenshot window.**
-    Verify that 0043 is active in the deployed server and identify where its
-    records are written. Correlate direction, CLIPRDR message type, generation,
+10. **The client-side clipboard observation/emission step remains hidden.**
+    Linux-side 0043 logging is confirmed in the systemd journal, but the Mac
+    log does not expose explicit clipboard events and the failed capture window
+    has no received CLIPRDR PDU. Obtain client-side pasteboard/format evidence
+    or another reliable client trace to distinguish non-emission from a
+    delivery/receive gap. Correlate direction, CLIPRDR message type, generation,
     and timestamps; report all times in Los Angeles local time.
 11. **The WLAN contribution to a Class-A transfer is not isolated.** Bracket
     one known cold PNG transaction with immediate station/TCP counter snapshots
