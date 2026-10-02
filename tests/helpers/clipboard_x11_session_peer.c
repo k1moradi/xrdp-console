@@ -51,6 +51,7 @@ struct image_transfer
     const unsigned char *data;
     size_t data_length;
     size_t offset;
+    unsigned int first_chunk_delay_ms;
     int first_chunk_reported;
     const char *first_chunk_marker;
     const char *done_marker;
@@ -425,6 +426,7 @@ start_incr_transfer(Display *display,
                     size_t data_length,
                     struct image_transfer *transfer,
                     int xrdp_event_order,
+                    unsigned int first_chunk_delay_ms,
                     const char *first_chunk_marker,
                     const char *done_marker)
 {
@@ -449,6 +451,7 @@ start_incr_transfer(Display *display,
     transfer->data = data;
     transfer->data_length = data_length;
     transfer->offset = 0;
+    transfer->first_chunk_delay_ms = first_chunk_delay_ms;
     transfer->first_chunk_reported = 0;
     transfer->first_chunk_marker = first_chunk_marker;
     transfer->done_marker = done_marker;
@@ -541,6 +544,7 @@ handle_named_png_raw_request(Display *display,
     if (start_incr_transfer(display, request, property, raw_target, incr,
                             png_data, png_length, transfer,
                             0,
+                            0,
                             "NAMED_PNG_RAW_FIRST_CHUNK",
                             "NAMED_PNG_RAW_INCR_DONE") != 0)
     {
@@ -623,6 +627,7 @@ handle_selection_request(Display *display,
     {
         if (start_incr_transfer(display, request, property, image_bmp, incr,
                                 bitmap, bitmap_length, transfer,
+                                0,
                                 0,
                                 "IMAGE_FIRST_CHUNK", "IMAGE_INCR_DONE") == 0)
         {
@@ -1570,7 +1575,7 @@ done:
 
 static int
 run_png_file_owner(const char *png_path, int force_incr, int xrdp_chunks,
-                   int xrdp_targets)
+                   int xrdp_targets, unsigned int first_chunk_delay_ms)
 {
     Display *display = XOpenDisplay(NULL);
     Window owner;
@@ -1681,10 +1686,11 @@ run_png_file_owner(const char *png_path, int force_incr, int xrdp_chunks,
     x_fd = ConnectionNumber(display);
     printf("PNG_FILE_OWNER_READY owner=0x%lx current_owner=0x%lx "
            "bytes=%zu width=%u height=%u selection_time=%lu "
-           "delivery=%s chunk_limit=%zu\n",
+           "delivery=%s chunk_limit=%zu first_chunk_delay_ms=%u\n",
            owner, XGetSelectionOwner(display, clipboard), png_length,
            (unsigned)width, (unsigned)height, selection_time,
-           direct_property ? "direct" : "incr", chunk_limit);
+           direct_property ? "direct" : "incr", chunk_limit,
+           first_chunk_delay_ms);
     fflush(stdout);
 
     for (;;)
@@ -1815,6 +1821,7 @@ run_png_file_owner(const char *png_path, int force_incr, int xrdp_chunks,
                                  display, request, property, image_png, incr,
                                  png_data, png_length, &transfer,
                                  xrdp_chunks,
+                                 first_chunk_delay_ms,
                                  "PNG_FILE_OWNER_INCR_FIRST_CHUNK",
                                  "PNG_FILE_OWNER_INCR_DONE") == 0)
                     {
@@ -1865,6 +1872,31 @@ run_png_file_owner(const char *png_path, int force_incr, int xrdp_chunks,
                     const size_t chunk_offset = transfer.offset;
                     size_t chunk_bytes = transfer.data_length - transfer.offset;
                     int property_result;
+                    if (chunk_offset == 0 &&
+                            transfer.first_chunk_delay_ms != 0)
+                    {
+                        struct timespec delay;
+                        delay.tv_sec =
+                            (time_t)(transfer.first_chunk_delay_ms / 1000U);
+                        delay.tv_nsec =
+                            (long)(transfer.first_chunk_delay_ms % 1000U) *
+                            1000000L;
+                        printf("PNG_FILE_OWNER_INCR_FIRST_CHUNK_DELAY_STARTED "
+                               "delay_ms=%u requestor=0x%lx property=0x%lx\n",
+                               transfer.first_chunk_delay_ms,
+                               transfer.requestor, transfer.property);
+                        fflush(stdout);
+                        while (nanosleep(&delay, &delay) != 0 && errno == EINTR)
+                        {
+                            /* Resume the requested delay after a signal. */
+                        }
+                        printf("PNG_FILE_OWNER_INCR_FIRST_CHUNK_DELAY_DONE "
+                               "delay_ms=%u requestor=0x%lx property=0x%lx\n",
+                               transfer.first_chunk_delay_ms,
+                               transfer.requestor, transfer.property);
+                        fflush(stdout);
+                        transfer.first_chunk_delay_ms = 0;
+                    }
                     if (chunk_bytes > chunk_limit)
                     {
                         chunk_bytes = chunk_limit;
@@ -1952,20 +1984,37 @@ main(int argc, char **argv)
     }
     if (argc == 3 && strcmp(argv[1], "owner-png-file") == 0)
     {
-        return run_png_file_owner(argv[2], 0, 0, 0);
+        return run_png_file_owner(argv[2], 0, 0, 0, 0);
     }
     if (argc == 3 && strcmp(argv[1], "owner-png-file-incr") == 0)
     {
-        return run_png_file_owner(argv[2], 1, 0, 0);
+        return run_png_file_owner(argv[2], 1, 0, 0, 0);
     }
     if (argc == 3 && strcmp(argv[1], "owner-png-file-incr-xrdp") == 0)
     {
-        return run_png_file_owner(argv[2], 1, 1, 0);
+        return run_png_file_owner(argv[2], 1, 1, 0, 0);
     }
     if (argc == 3 &&
             strcmp(argv[1], "owner-png-file-incr-xrdp-targets") == 0)
     {
-        return run_png_file_owner(argv[2], 1, 1, 1);
+        return run_png_file_owner(argv[2], 1, 1, 1, 0);
+    }
+    if (argc == 4 && strcmp(argv[1],
+                            "owner-png-file-incr-xrdp-targets-delay") == 0)
+    {
+        char *end = NULL;
+        unsigned long delay_ms;
+        errno = 0;
+        delay_ms = strtoul(argv[3], &end, 10);
+        if (errno != 0 || end == argv[3] || *end != '\0' ||
+                delay_ms > 60000UL)
+        {
+            fputs("invalid first-chunk delay (expected 0..60000 ms)\n",
+                  stderr);
+            return 2;
+        }
+        return run_png_file_owner(argv[2], 1, 1, 1,
+                                  (unsigned int)delay_ms);
     }
     if (argc == 2 && strcmp(argv[1], "stealer") == 0)
     {
@@ -1983,6 +2032,7 @@ main(int argc, char **argv)
           "owner-png-file PNG_FILE | owner-png-file-incr PNG_FILE | "
           "owner-png-file-incr-xrdp PNG_FILE | "
           "owner-png-file-incr-xrdp-targets PNG_FILE | "
+          "owner-png-file-incr-xrdp-targets-delay PNG_FILE DELAY_MS | "
           "stealer | selection-owner | "
           "requestor TARGET [delay_ms]\n",
           stderr);
