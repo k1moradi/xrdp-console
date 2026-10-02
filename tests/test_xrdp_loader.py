@@ -2128,6 +2128,124 @@ def assert_clipboard_named_png_session(
     return reconnect_client, reconnect_log_path
 
 
+def assert_clipboard_no_server_copy_on_reconnect(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, log_path: Path, stdout_path: Path,
+        source_display: str, server: subprocess.Popen[object],
+        chansrv_logs: Path, chansrv_stdout: Path, root: Path,
+        client_command: list[str]) -> tuple[subprocess.Popen[object], Path]:
+    """A reconnect must not republish Linux clipboard data to the client."""
+    owner_log_path = root / "linux-clipboard-owner.log"
+    owner_environment = os.environ.copy()
+    owner_environment["DISPLAY"] = source_display
+    owner_environment.pop("XAUTHORITY", None)
+    owner: subprocess.Popen[bytes] | None = None
+    reconnect_client: subprocess.Popen[object] | None = None
+    test_passed = False
+    reconnect_log_path = root / "freerdp-no-server-copy-reconnect.log"
+
+    try:
+        if "PEER_MONITOR_READY_NO_CLIENT_FORMAT_LIST" not in read_text(
+                client_log_path):
+            wait_for_peer_marker(
+                client, client_log_path,
+                "PEER_MONITOR_READY_NO_CLIENT_FORMAT_LIST", 10.0)
+        if "PEER_SERVER_FORMAT_LIST_RECEIVED" in read_text(client_log_path):
+            raise AssertionError(
+                "server offered clipboard data before a Linux clipboard copy:\n"
+                f"{read_text(client_log_path)}")
+
+        with owner_log_path.open("w", encoding="utf-8") as owner_log:
+            owner = subprocess.Popen(
+                [str(helper), "owner"], cwd=root,
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=owner_log, env=owner_environment, bufsize=0,
+                start_new_session=True)
+        wait_for_owner_marker(owner, "OWNER_READY", 8.0, owner_log_path)
+
+        # Establish the positive control: an actual Linux clipboard-owner
+        # change should announce the Linux formats to the connected peer.
+        wait_for_peer_marker(
+            client, client_log_path,
+            "PEER_SERVER_FORMAT_LIST_RECEIVED count=1", 12.0)
+        time.sleep(0.35)
+        first_log = read_text(client_log_path)
+        if len(re.findall(r"^PEER_SERVER_FORMAT_LIST_RECEIVED ", first_log,
+                          re.MULTILINE)) != 1:
+            raise AssertionError(
+                "one Linux clipboard-owner change should produce exactly one "
+                "server format-list offer:\n" + first_log)
+        if "PEER_SERVER_FORMAT_DATA_RESPONSE_RECEIVED" in first_log:
+            raise AssertionError(
+                "server sent clipboard bytes without a client data request:\n"
+                + first_log)
+        if owner.poll() is not None:
+            raise AssertionError(
+                "Linux clipboard owner exited before the reconnect check:\n"
+                f"{read_text(owner_log_path)}")
+
+        # Reconnect the RDP client while preserving the exact Linux X11
+        # clipboard owner. The new peer deliberately advertises no clipboard
+        # formats, so any incoming server format-list is a server-side replay.
+        stop_process(client)
+        time.sleep(0.25)
+        reconnect_environment = os.environ.copy()
+        reconnect_environment["XRDP_CONSOLE_TEST_NO_CLIENT_FORMAT_LIST"] = "1"
+        with reconnect_log_path.open("w", encoding="utf-8") as reconnect_log:
+            reconnect_client = subprocess.Popen(
+                client_command, cwd=root, stdin=subprocess.PIPE,
+                stdout=reconnect_log, stderr=subprocess.STDOUT,
+                env=reconnect_environment, bufsize=0, start_new_session=True)
+
+        wait_for_log_occurrence(
+            server, log_path, "xrdp-console: build revision=", 2, 15.0,
+            stdout_path, reconnect_log_path)
+        wait_for_peer_marker(
+            reconnect_client, reconnect_log_path, "PEER_CONNECTED", 12.0)
+        wait_for_peer_marker(
+            reconnect_client, reconnect_log_path,
+            "PEER_MONITOR_READY_NO_CLIENT_FORMAT_LIST", 12.0)
+        wait_for_peer_frame_after(reconnect_client, reconnect_log_path, 0, 12.0)
+
+        # Let the post-MonitorReady channel event queue drain. A server format
+        # list here would replace the client's clipboard offer on reconnect.
+        time.sleep(1.5)
+        reconnect_log = read_text(reconnect_log_path)
+        forbidden = (
+            "PEER_SERVER_FORMAT_LIST_RECEIVED",
+            "PEER_SERVER_FORMAT_DATA_RESPONSE_RECEIVED",
+            "PEER_SERVER_FORMAT_DATA_REQUEST_RECEIVED",
+        )
+        observed = [marker for marker in forbidden if marker in reconnect_log]
+        if observed:
+            raise AssertionError(
+                "RDP reconnect replayed or transferred server clipboard state "
+                f"without a new Linux clipboard copy ({observed}):\n"
+                f"[reconnected peer]\n{reconnect_log}\n"
+                f"[chansrv]\n{chansrv_log_text(chansrv_logs)}\n"
+                f"[chansrv stdout]\n{read_text(chansrv_stdout)}\n"
+                f"[xrdp]\n{xrdp_log_excerpt(log_path)}")
+        if reconnect_client.poll() is not None:
+            raise AssertionError(
+                "RDP client disconnected during clipboard reconnect check:\n"
+                f"{reconnect_log}\n{xrdp_log_excerpt(log_path)}")
+        if owner.poll() is not None:
+            raise AssertionError(
+                "Linux clipboard owner did not survive the RDP reconnect:\n"
+                f"{read_text(owner_log_path)}")
+        if peer_frame_count(reconnect_log_path) == 0:
+            raise AssertionError(
+                "graphics did not continue while checking clipboard reconnect:\n"
+                f"{reconnect_log}")
+
+        test_passed = True
+        return reconnect_client, reconnect_log_path
+    finally:
+        stop_process(owner)
+        if not test_passed:
+            stop_process(reconnect_client)
+
+
 def start_source_xvfb(
         log_path: Path, width: int = 1024, height: int = 768
 ) -> tuple[subprocess.Popen[bytes], str]:
@@ -2771,6 +2889,7 @@ def main() -> int:
     cpu_contention = False
     clipboard_stress_mode = False
     clipboard_named_png_mode = False
+    clipboard_no_server_copy_reconnect_mode = False
     clipboard_inflight_format_list_mode = False
     clipboard_inflight_png_format_list_mode = False
     clipboard_png_prefetch_mode = False
@@ -2782,6 +2901,7 @@ def main() -> int:
     overlap_client: Path | None = None
     clipboard_options = [option for option in (
         "--clipboard-stress", "--clipboard-named-png",
+        "--clipboard-no-server-copy-reconnect",
         "--clipboard-inflight-format-list",
         "--clipboard-inflight-png-format-list",
         "--clipboard-png-prefetch", "--clipboard-png-prefetch-bmp",
@@ -2796,6 +2916,8 @@ def main() -> int:
         arguments.pop()
         clipboard_stress_mode = selected_clipboard_mode == "--clipboard-stress"
         clipboard_named_png_mode = selected_clipboard_mode == "--clipboard-named-png"
+        clipboard_no_server_copy_reconnect_mode = (
+            selected_clipboard_mode == "--clipboard-no-server-copy-reconnect")
         clipboard_inflight_format_list_mode = (
             selected_clipboard_mode == "--clipboard-inflight-format-list")
         clipboard_inflight_png_format_list_mode = (
@@ -2816,10 +2938,13 @@ def main() -> int:
     clipboard_inflight_mode = (
         clipboard_inflight_format_list_mode or
         clipboard_inflight_png_format_list_mode)
-    clipboard_peer_mode = clipboard_inflight_mode or clipboard_png_prefetch_mode
+    clipboard_peer_mode = (
+        clipboard_inflight_mode or clipboard_png_prefetch_mode or
+        clipboard_no_server_copy_reconnect_mode)
     clipboard_enabled = (
         clipboard_stress_mode or clipboard_named_png_mode or
-        clipboard_inflight_mode or clipboard_png_prefetch_mode)
+        clipboard_inflight_mode or clipboard_png_prefetch_mode or
+        clipboard_no_server_copy_reconnect_mode)
     mode_options = [option for option in (
         "--rfx", "--gfx-planar", "--gfx-h264",
         "--gfx-h264-coherence", "--gfx-h264-fullhd")
@@ -3126,6 +3251,9 @@ password=smoke
                     client_command.append("-gfx")
                 with client_log_path.open("w", encoding="utf-8") as client_log:
                     client_environment = os.environ.copy()
+                    if clipboard_no_server_copy_reconnect_mode:
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_NO_CLIENT_FORMAT_LIST"] = "1"
                     if clipboard_inflight_png_format_list_mode:
                         client_environment["XRDP_CONSOLE_TEST_PNG_OVERLAP"] = "1"
                     if clipboard_png_prefetch_mode:
@@ -3237,7 +3365,9 @@ password=smoke
                             client, client_log_path, "PEER_CONNECTED", 10.0)
                         wait_for_peer_marker(
                             client, client_log_path,
-                            "PEER_INITIAL_FORMAT_LIST_SENT", 10.0)
+                            ("PEER_MONITOR_READY_NO_CLIENT_FORMAT_LIST"
+                             if clipboard_no_server_copy_reconnect_mode else
+                             "PEER_INITIAL_FORMAT_LIST_SENT"), 10.0)
                     elif coherence_mode:
                         assert_client_frame_coherence(
                             os.environ["DISPLAY"], stimulus, window_title,
@@ -3265,7 +3395,17 @@ password=smoke
                                  not clipboard_peer_mode)):
                             raise AssertionError(
                                 "clipboard integration processes were not started")
-                        if clipboard_inflight_format_list_mode:
+                        if clipboard_no_server_copy_reconnect_mode:
+                            if overlap_client is None:
+                                raise AssertionError(
+                                    "controlled clipboard peer was not configured")
+                            client, client_log_path = (
+                                assert_clipboard_no_server_copy_on_reconnect(
+                                    clipboard_helper, client, client_log_path,
+                                    log_path, stdout_path, source_display,
+                                    server, chansrv_logs_path,
+                                    chansrv_stdout_path, root, client_command))
+                        elif clipboard_inflight_format_list_mode:
                             assert_clipboard_inflight_format_list_session(
                                 clipboard_helper, client, client_log_path,
                                 log_path, stdout_path, chansrv_process,

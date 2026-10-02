@@ -62,6 +62,9 @@ struct PeerContext
     bool pngPrefetchFail;
     bool pngAllowed;
     bool pendingPngResponse;
+    bool noClientFormatList;
+    UINT32 serverFormatListCount;
+    UINT32 serverFormatDataResponseCount;
     bool failed;
     char controlBuffer[256];
     std::size_t controlBufferSize;
@@ -201,6 +204,15 @@ UINT on_monitor_ready(CliprdrClientContext* cliprdr,
         return CHANNEL_RC_OK;
     }
 
+    if (peer->noClientFormatList)
+    {
+        peer->initialFormatsSent = true;
+        std::puts("PEER_MONITOR_READY_NO_CLIENT_FORMAT_LIST");
+        std::fflush(stdout);
+        (void)monitorReady;
+        return CHANNEL_RC_OK;
+    }
+
     CLIPRDR_FORMAT formats[2]{};
     formats[0].formatId = kCfDib;
     const bool advertisePng = peer->pngOverlap || peer->pngPrefetchDelay;
@@ -228,6 +240,59 @@ UINT on_monitor_ready(CliprdrClientContext* cliprdr,
     return status;
 }
 
+UINT on_server_format_list(CliprdrClientContext* cliprdr,
+                           const CLIPRDR_FORMAT_LIST* formatList)
+{
+    auto* peer = static_cast<PeerContext*>(cliprdr->custom);
+    if (peer == nullptr || formatList == nullptr ||
+        (formatList->numFormats > 0U && formatList->formats == nullptr))
+    {
+        return CHANNEL_RC_BAD_CHANNEL_HANDLE;
+    }
+
+    ++peer->serverFormatListCount;
+    std::printf("PEER_SERVER_FORMAT_LIST_RECEIVED count=%u format_count=%u ids=",
+                peer->serverFormatListCount, formatList->numFormats);
+    for (UINT32 index = 0U; index < formatList->numFormats; ++index)
+    {
+        std::printf("%s%u", index == 0U ? "" : ",",
+                    formatList->formats[index].formatId);
+    }
+    std::putchar('\n');
+    std::fflush(stdout);
+
+    CLIPRDR_FORMAT_LIST_RESPONSE response{};
+    response.common.msgType = CB_FORMAT_LIST_RESPONSE;
+    response.common.msgFlags = CB_RESPONSE_OK;
+    const UINT status = cliprdr->ClientFormatListResponse(cliprdr, &response);
+    if (status != CHANNEL_RC_OK)
+    {
+        peer->failed = true;
+        std::fprintf(stderr, "server format-list acknowledgement failed: %u\n",
+                     status);
+    }
+    return status;
+}
+
+UINT on_server_format_data_response(
+    CliprdrClientContext* cliprdr,
+    const CLIPRDR_FORMAT_DATA_RESPONSE* response)
+{
+    auto* peer = static_cast<PeerContext*>(cliprdr->custom);
+    if (peer == nullptr || response == nullptr)
+    {
+        return CHANNEL_RC_BAD_CHANNEL_HANDLE;
+    }
+
+    ++peer->serverFormatDataResponseCount;
+    std::printf("PEER_SERVER_FORMAT_DATA_RESPONSE_RECEIVED count=%u "
+                "flags=%u bytes=%u\n",
+                peer->serverFormatDataResponseCount,
+                response->common.msgFlags, response->common.dataLen);
+    std::fflush(stdout);
+    return CHANNEL_RC_OK;
+}
+
 UINT on_server_format_data_request(
     CliprdrClientContext* cliprdr,
     const CLIPRDR_FORMAT_DATA_REQUEST* request)
@@ -236,6 +301,13 @@ UINT on_server_format_data_request(
     if (peer == nullptr || request == nullptr)
     {
         return CHANNEL_RC_BAD_CHANNEL_HANDLE;
+    }
+
+    if (peer->noClientFormatList)
+    {
+        std::printf("PEER_SERVER_FORMAT_DATA_REQUEST_RECEIVED format_id=%u\n",
+                    request->requestedFormatId);
+        std::fflush(stdout);
     }
 
     if (request->requestedFormatId == kCfDib && !peer->overlapFormatsSent)
@@ -567,7 +639,9 @@ void on_channel_connected(void* context, const ChannelConnectedEventArgs* event)
         peer->cliprdr = cliprdr;
         cliprdr->custom = peer;
         cliprdr->MonitorReady = on_monitor_ready;
+        cliprdr->ServerFormatList = on_server_format_list;
         cliprdr->ServerFormatDataRequest = on_server_format_data_request;
+        cliprdr->ServerFormatDataResponse = on_server_format_data_response;
     }
     else
     {
@@ -782,6 +856,9 @@ int main(int argc, char** argv)
     peer->pngPrefetchFail = false;
     peer->pngAllowed = false;
     peer->pendingPngResponse = false;
+    peer->noClientFormatList = false;
+    peer->serverFormatListCount = 0U;
+    peer->serverFormatDataResponseCount = 0U;
     peer->failed = false;
     peer->controlBuffer[0] = '\0';
     peer->controlBufferSize = 0U;
@@ -796,6 +873,10 @@ int main(int argc, char** argv)
         std::getenv("XRDP_CONSOLE_TEST_PNG_PREFETCH_FAIL");
     peer->pngPrefetchFail = pngPrefetchFail != nullptr &&
                             std::strcmp(pngPrefetchFail, "1") == 0;
+    const char* noClientFormatList =
+        std::getenv("XRDP_CONSOLE_TEST_NO_CLIENT_FORMAT_LIST");
+    peer->noClientFormatList = noClientFormatList != nullptr &&
+                               std::strcmp(noClientFormatList, "1") == 0;
     if (peer->pngPrefetchDelay)
     {
         const char* pngPath = std::getenv("XRDP_CONSOLE_TEST_PNG_FILE");
