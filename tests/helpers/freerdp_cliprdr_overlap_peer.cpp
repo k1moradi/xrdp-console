@@ -30,6 +30,10 @@ namespace
 constexpr UINT32 kCfDib = 8U;
 constexpr UINT32 kCfUnicodeText = 13U;
 constexpr UINT32 kPngFormatId = 40005U;
+constexpr UINT32 kSpecPeerCapabilityVersion = CB_CAPS_VERSION_1;
+constexpr UINT32 kSpecPeerGeneralFlags = 0U;
+constexpr char kSpecPeerTemporaryDirectory[] = "/tmp";
+constexpr UINT32 kMaximumTrackedServerFormats = 256U;
 constexpr UINT32 kDibWidth = 3072U;
 constexpr UINT32 kDibHeight = 1932U;
 constexpr std::size_t kBitmapInfoHeaderBytes = 40U;
@@ -43,6 +47,15 @@ constexpr BYTE kPngFixture[] = {
     0x0f, 0x00, 0x01, 0x04, 0x01, 0x00, 0x5f, 0xe5,
     0xc3, 0x4b, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
     0x4e, 0x44, 0xae, 0x42, 0x60, 0x82
+};
+
+enum class CliprdrInitState : UINT8
+{
+    WaitingForMonitorReady,
+    SendingInitialClipboardState,
+    WaitingForInitialFormatListResponse,
+    Ready,
+    Failed
 };
 
 struct PeerContext
@@ -65,6 +78,13 @@ struct PeerContext
     bool auditServerClipboard;
     UINT32 serverFormatListCount;
     UINT32 serverFormatDataResponseCount;
+    UINT32 serverGeneralCapabilityVersion;
+    UINT32 serverGeneralCapabilityFlags;
+    UINT32 serverFormatListResponseCount;
+    UINT32 serverFormatCount;
+    UINT32 serverFormatIds[kMaximumTrackedServerFormats];
+    CliprdrInitState cliprdrInitState;
+    bool serverCapabilitiesReceived;
     bool failed;
     char controlBuffer[256];
     std::size_t controlBufferSize;
@@ -199,10 +219,82 @@ UINT on_monitor_ready(CliprdrClientContext* cliprdr,
                      const CLIPRDR_MONITOR_READY* monitorReady)
 {
     auto* peer = static_cast<PeerContext*>(cliprdr->custom);
-    if (peer == nullptr || peer->initialFormatsSent)
+    if (peer == nullptr || monitorReady == nullptr ||
+        peer->cliprdrInitState != CliprdrInitState::WaitingForMonitorReady ||
+        peer->initialFormatsSent)
     {
-        return CHANNEL_RC_OK;
+        if (peer != nullptr)
+        {
+            peer->failed = true;
+            peer->cliprdrInitState = CliprdrInitState::Failed;
+        }
+        return CHANNEL_RC_BAD_PROC;
     }
+
+    peer->cliprdrInitState = CliprdrInitState::SendingInitialClipboardState;
+    std::printf("PEER_RX_MONITOR_READY server_caps_seen=%u\n",
+                peer->serverCapabilitiesReceived ? 1U : 0U);
+    std::fflush(stdout);
+
+    // This is the explicitly configured minimal test-peer profile, not a
+    // claim about any Microsoft client's advertised capabilities. It
+    // implements no optional clipboard features, so file transfer, locking,
+    // and huge-file support are never negotiated accidentally.
+    CLIPRDR_GENERAL_CAPABILITY_SET generalCapabilities{};
+    generalCapabilities.capabilitySetType = CB_CAPSTYPE_GENERAL;
+    generalCapabilities.capabilitySetLength = CB_CAPSTYPE_GENERAL_LEN;
+    generalCapabilities.version = kSpecPeerCapabilityVersion;
+    generalCapabilities.generalFlags = kSpecPeerGeneralFlags &
+                                       peer->serverGeneralCapabilityFlags;
+
+    CLIPRDR_CAPABILITIES capabilities{};
+    capabilities.cCapabilitiesSets = 1U;
+    capabilities.capabilitySets = reinterpret_cast<CLIPRDR_CAPABILITY_SET*>(
+        &generalCapabilities);
+    if (cliprdr->ClientCapabilities == nullptr)
+    {
+        peer->failed = true;
+        peer->cliprdrInitState = CliprdrInitState::Failed;
+        return CHANNEL_RC_BAD_CHANNEL_HANDLE;
+    }
+    UINT status = cliprdr->ClientCapabilities(cliprdr, &capabilities);
+    if (status != CHANNEL_RC_OK)
+    {
+        peer->failed = true;
+        peer->cliprdrInitState = CliprdrInitState::Failed;
+        std::fprintf(stderr, "client clipboard capabilities send failed: %u\n",
+                     status);
+        return status;
+    }
+    std::printf("PEER_TX_CLIENT_CLIP_CAPS version=%u general_flags=0x%08x\n",
+                generalCapabilities.version,
+                generalCapabilities.generalFlags);
+    std::fflush(stdout);
+
+    CLIPRDR_TEMP_DIRECTORY tempDirectory{};
+    const int pathStatus = std::snprintf(tempDirectory.szTempDir,
+                                         sizeof(tempDirectory.szTempDir), "%s",
+                                         kSpecPeerTemporaryDirectory);
+    if (pathStatus < 0 ||
+        static_cast<std::size_t>(pathStatus) >= sizeof(tempDirectory.szTempDir) ||
+        cliprdr->TempDirectory == nullptr)
+    {
+        peer->failed = true;
+        peer->cliprdrInitState = CliprdrInitState::Failed;
+        return CHANNEL_RC_BAD_CHANNEL_HANDLE;
+    }
+    status = cliprdr->TempDirectory(cliprdr, &tempDirectory);
+    if (status != CHANNEL_RC_OK)
+    {
+        peer->failed = true;
+        peer->cliprdrInitState = CliprdrInitState::Failed;
+        std::fprintf(stderr, "client temporary-directory send failed: %u\n",
+                     status);
+        return status;
+    }
+    std::printf("PEER_TX_TEMP_DIRECTORY path=%s\n",
+                kSpecPeerTemporaryDirectory);
+    std::fflush(stdout);
 
     CLIPRDR_FORMAT formats[2]{};
     formats[0].formatId = kCfDib;
@@ -212,11 +304,13 @@ UINT on_monitor_ready(CliprdrClientContext* cliprdr,
         formats[1].formatId = kPngFormatId;
         formats[1].formatName = const_cast<char*>("PNG");
     }
-    const UINT status = send_format_list(cliprdr, formats,
-                                         advertisePng ? 2U : 1U);
+    status = send_format_list(cliprdr, formats, advertisePng ? 2U : 1U);
     if (status == CHANNEL_RC_OK)
     {
         peer->initialFormatsSent = true;
+        peer->cliprdrInitState =
+            CliprdrInitState::WaitingForInitialFormatListResponse;
+        std::puts("PEER_TX_INITIAL_FORMAT_LIST profile=spec-minimal");
         std::puts(advertisePng ?
                   "PEER_INITIAL_FORMAT_LIST_SENT dib=8 png=40005" :
                   "PEER_INITIAL_FORMAT_LIST_SENT dib=8");
@@ -225,10 +319,92 @@ UINT on_monitor_ready(CliprdrClientContext* cliprdr,
     else
     {
         peer->failed = true;
+        peer->cliprdrInitState = CliprdrInitState::Failed;
         std::fprintf(stderr, "initial clipboard format-list send failed: %u\n", status);
     }
     (void)monitorReady;
     return status;
+}
+
+UINT on_server_capabilities(CliprdrClientContext* cliprdr,
+                            const CLIPRDR_CAPABILITIES* capabilities)
+{
+    auto* peer = static_cast<PeerContext*>(cliprdr->custom);
+    if (peer == nullptr || capabilities == nullptr ||
+        peer->cliprdrInitState != CliprdrInitState::WaitingForMonitorReady ||
+        peer->serverCapabilitiesReceived ||
+        capabilities->cCapabilitiesSets == 0U ||
+        capabilities->capabilitySets == nullptr)
+    {
+        return CHANNEL_RC_BAD_CHANNEL_HANDLE;
+    }
+
+    bool foundGeneral = false;
+    for (UINT32 index = 0U; index < capabilities->cCapabilitiesSets; ++index)
+    {
+        const auto* capability = capabilities->capabilitySets + index;
+        if (capability->capabilitySetType != CB_CAPSTYPE_GENERAL)
+        {
+            continue;
+        }
+        if (capability->capabilitySetLength < CB_CAPSTYPE_GENERAL_LEN)
+        {
+            peer->failed = true;
+            peer->cliprdrInitState = CliprdrInitState::Failed;
+            return CHANNEL_RC_BAD_PROC;
+        }
+
+        const auto* general = reinterpret_cast<
+            const CLIPRDR_GENERAL_CAPABILITY_SET*>(capability);
+        peer->serverGeneralCapabilityVersion = general->version;
+        peer->serverGeneralCapabilityFlags = general->generalFlags;
+        foundGeneral = true;
+        break;
+    }
+
+    if (!foundGeneral)
+    {
+        peer->failed = true;
+        peer->cliprdrInitState = CliprdrInitState::Failed;
+        return CHANNEL_RC_BAD_PROC;
+    }
+
+    peer->serverCapabilitiesReceived = true;
+    std::printf("PEER_RX_SERVER_CLIP_CAPS version=%u general_flags=0x%08x\n",
+                peer->serverGeneralCapabilityVersion,
+                peer->serverGeneralCapabilityFlags);
+    std::fflush(stdout);
+    return CHANNEL_RC_OK;
+}
+
+UINT on_server_format_list_response(
+    CliprdrClientContext* cliprdr,
+    const CLIPRDR_FORMAT_LIST_RESPONSE* response)
+{
+    auto* peer = static_cast<PeerContext*>(cliprdr->custom);
+    if (peer == nullptr || response == nullptr)
+    {
+        return CHANNEL_RC_BAD_CHANNEL_HANDLE;
+    }
+
+    ++peer->serverFormatListResponseCount;
+    const UINT16 flags = response->common.msgFlags;
+    std::printf("PEER_RX_SERVER_FORMAT_LIST_RESPONSE count=%u flags=0x%04x\n",
+                peer->serverFormatListResponseCount, flags);
+    std::fflush(stdout);
+
+    if (peer->cliprdrInitState ==
+        CliprdrInitState::WaitingForInitialFormatListResponse)
+    {
+        if ((flags & CB_RESPONSE_OK) == 0U)
+        {
+            peer->failed = true;
+            peer->cliprdrInitState = CliprdrInitState::Failed;
+            return CHANNEL_RC_BAD_PROC;
+        }
+        peer->cliprdrInitState = CliprdrInitState::Ready;
+    }
+    return CHANNEL_RC_OK;
 }
 
 UINT on_server_format_list(CliprdrClientContext* cliprdr,
@@ -242,10 +418,20 @@ UINT on_server_format_list(CliprdrClientContext* cliprdr,
     }
 
     ++peer->serverFormatListCount;
-    std::printf("PEER_SERVER_FORMAT_LIST_RECEIVED count=%u format_count=%u ids=",
+    if (formatList->numFormats > kMaximumTrackedServerFormats)
+    {
+        peer->failed = true;
+        std::fprintf(stderr,
+                     "server format list exceeds test-peer capacity: %u\n",
+                     formatList->numFormats);
+        return CHANNEL_RC_BAD_PROC;
+    }
+    peer->serverFormatCount = formatList->numFormats;
+    std::printf("PEER_RX_SERVER_FORMAT_LIST_OFFER count=%u format_count=%u ids=",
                 peer->serverFormatListCount, formatList->numFormats);
     for (UINT32 index = 0U; index < formatList->numFormats; ++index)
     {
+        peer->serverFormatIds[index] = formatList->formats[index].formatId;
         std::printf("%s%u", index == 0U ? "" : ",",
                     formatList->formats[index].formatId);
     }
@@ -262,6 +448,12 @@ UINT on_server_format_list(CliprdrClientContext* cliprdr,
         std::fprintf(stderr, "server format-list acknowledgement failed: %u\n",
                      status);
     }
+    else
+    {
+        std::printf("PEER_TX_SERVER_FORMAT_LIST_RESPONSE status=0x%04x\n",
+                    CB_RESPONSE_OK);
+        std::fflush(stdout);
+    }
     return status;
 }
 
@@ -276,7 +468,7 @@ UINT on_server_format_data_response(
     }
 
     ++peer->serverFormatDataResponseCount;
-    std::printf("PEER_SERVER_FORMAT_DATA_RESPONSE_RECEIVED count=%u "
+    std::printf("PEER_RX_SERVER_FORMAT_DATA_RESPONSE count=%u "
                 "flags=%u bytes=%u\n",
                 peer->serverFormatDataResponseCount,
                 response->common.msgFlags, response->common.dataLen);
@@ -296,7 +488,7 @@ UINT on_server_format_data_request(
 
     if (peer->auditServerClipboard)
     {
-        std::printf("PEER_SERVER_FORMAT_DATA_REQUEST_RECEIVED format_id=%u\n",
+        std::printf("PEER_RX_SERVER_FORMAT_DATA_REQUEST format_id=%u\n",
                     request->requestedFormatId);
         std::fflush(stdout);
     }
@@ -456,6 +648,65 @@ UINT on_server_format_data_request(
 
 void process_control_command(PeerContext* peer, const char* command)
 {
+    constexpr char kPasteServerFormatPrefix[] = "PASTE_SERVER_FORMAT ";
+    if (std::strncmp(command, kPasteServerFormatPrefix,
+                     sizeof(kPasteServerFormatPrefix) - 1U) == 0)
+    {
+        const char* formatText =
+            command + sizeof(kPasteServerFormatPrefix) - 1U;
+        char* end = nullptr;
+        errno = 0;
+        const unsigned long parsedFormat = std::strtoul(formatText, &end, 10);
+        if (!peer->auditServerClipboard || peer->cliprdr == nullptr ||
+            peer->cliprdrInitState != CliprdrInitState::Ready ||
+            errno != 0 || end == formatText || *end != '\0' ||
+            parsedFormat > UINT32_MAX)
+        {
+            peer->failed = true;
+            std::fprintf(stderr, "invalid PASTE_SERVER_FORMAT command\n");
+            return;
+        }
+
+        const UINT32 formatId = static_cast<UINT32>(parsedFormat);
+        bool formatWasAdvertised = false;
+        for (UINT32 index = 0U; index < peer->serverFormatCount; ++index)
+        {
+            if (peer->serverFormatIds[index] == formatId)
+            {
+                formatWasAdvertised = true;
+                break;
+            }
+        }
+        if (!formatWasAdvertised ||
+            peer->cliprdr->ClientFormatDataRequest == nullptr)
+        {
+            peer->failed = true;
+            std::fprintf(stderr,
+                         "paste requested unadvertised server format: %u\n",
+                         formatId);
+            return;
+        }
+
+        CLIPRDR_FORMAT_DATA_REQUEST request{};
+        request.common.msgType = CB_FORMAT_DATA_REQUEST;
+        request.common.dataLen = sizeof(request.requestedFormatId);
+        request.requestedFormatId = formatId;
+        const UINT status = peer->cliprdr->ClientFormatDataRequest(
+            peer->cliprdr, &request);
+        if (status != CHANNEL_RC_OK)
+        {
+            peer->failed = true;
+            std::fprintf(stderr,
+                         "server format-data request send failed: %u\n",
+                         status);
+            return;
+        }
+        std::printf("PEER_TX_SERVER_FORMAT_DATA_REQUEST format_id=%u\n",
+                    formatId);
+        std::fflush(stdout);
+        return;
+    }
+
     if (std::strcmp(command, "CHANGE_FORMATS") == 0)
     {
         if (!peer->pngOverlap || !peer->pendingPngResponse ||
@@ -629,7 +880,9 @@ void on_channel_connected(void* context, const ChannelConnectedEventArgs* event)
         }
         peer->cliprdr = cliprdr;
         cliprdr->custom = peer;
+        cliprdr->ServerCapabilities = on_server_capabilities;
         cliprdr->MonitorReady = on_monitor_ready;
+        cliprdr->ServerFormatListResponse = on_server_format_list_response;
         cliprdr->ServerFormatDataRequest = on_server_format_data_request;
         if (peer->auditServerClipboard)
         {
@@ -854,6 +1107,13 @@ int main(int argc, char** argv)
     peer->auditServerClipboard = false;
     peer->serverFormatListCount = 0U;
     peer->serverFormatDataResponseCount = 0U;
+    peer->serverGeneralCapabilityVersion = 0U;
+    peer->serverGeneralCapabilityFlags = 0U;
+    peer->serverFormatListResponseCount = 0U;
+    peer->serverFormatCount = 0U;
+    std::memset(peer->serverFormatIds, 0, sizeof(peer->serverFormatIds));
+    peer->cliprdrInitState = CliprdrInitState::WaitingForMonitorReady;
+    peer->serverCapabilitiesReceived = false;
     peer->failed = false;
     peer->controlBuffer[0] = '\0';
     peer->controlBufferSize = 0U;

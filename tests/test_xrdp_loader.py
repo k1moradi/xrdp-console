@@ -373,6 +373,37 @@ def wait_for_peer_marker(peer: subprocess.Popen[object], log_path: Path,
         f"returncode={peer.poll()}\n{read_text(log_path)}")
 
 
+def assert_peer_initialization_sequence(
+        peer: subprocess.Popen[object], log_path: Path,
+        timeout: float = 10.0) -> str:
+    """Require the test peer's explicit MS-RDPECLIP initialization trace."""
+    log = wait_for_peer_marker(
+        peer, log_path,
+        "PEER_RX_SERVER_FORMAT_LIST_RESPONSE count=1 flags=0x0001",
+        timeout)
+    sequence = (
+        "PEER_RX_SERVER_CLIP_CAPS ",
+        "PEER_RX_MONITOR_READY",
+        "PEER_TX_CLIENT_CLIP_CAPS ",
+        "PEER_TX_TEMP_DIRECTORY path=/tmp",
+        "PEER_TX_INITIAL_FORMAT_LIST profile=spec-minimal",
+        "PEER_INITIAL_FORMAT_LIST_SENT",
+        "PEER_RX_SERVER_FORMAT_LIST_RESPONSE count=1 flags=0x0001",
+    )
+    positions = [log.find(marker) for marker in sequence]
+    if any(position < 0 for position in positions) or positions != sorted(positions):
+        raise AssertionError(
+            "clipboard peer did not follow the explicit MS-RDPECLIP initial "
+            "exchange in order:\n"
+            f"expected={sequence!r}\npositions={positions!r}\n{log}")
+    if "PEER_TX_CLIENT_CLIP_CAPS version=1 general_flags=0x00000000" not in log:
+        raise AssertionError(
+            "minimal spec peer capability profile unexpectedly enabled an "
+            "optional feature:\n"
+            f"{log}")
+    return log
+
+
 def assert_peer_markers_absent_for(
         peer: subprocess.Popen[object], log_path: Path,
         markers: tuple[str, ...], duration: float, context: str) -> None:
@@ -2167,12 +2198,12 @@ def assert_clipboard_no_server_copy_on_reconnect(
     reconnect_log_path = root / "freerdp-no-server-copy-reconnect.log"
 
     try:
-        wait_for_peer_marker(
-            client, client_log_path, "PEER_INITIAL_FORMAT_LIST_SENT", 10.0)
+        assert_peer_initialization_sequence(client, client_log_path, 10.0)
         server_clipboard_markers = (
-            "PEER_SERVER_FORMAT_LIST_RECEIVED",
-            "PEER_SERVER_FORMAT_DATA_RESPONSE_RECEIVED",
-            "PEER_SERVER_FORMAT_DATA_REQUEST_RECEIVED",
+            "PEER_RX_SERVER_FORMAT_LIST_OFFER",
+            "PEER_TX_SERVER_FORMAT_DATA_REQUEST",
+            "PEER_RX_SERVER_FORMAT_DATA_RESPONSE",
+            "PEER_RX_SERVER_FORMAT_DATA_REQUEST",
         )
         assert_peer_markers_absent_for(
             client, client_log_path, server_clipboard_markers, 0.35,
@@ -2190,17 +2221,48 @@ def assert_clipboard_no_server_copy_on_reconnect(
         # change should announce the Linux formats to the connected peer.
         wait_for_peer_marker(
             client, client_log_path,
-            "PEER_SERVER_FORMAT_LIST_RECEIVED count=1", 12.0)
+            "PEER_RX_SERVER_FORMAT_LIST_OFFER count=1", 12.0)
+        wait_for_peer_marker(
+            client, client_log_path,
+            "PEER_TX_SERVER_FORMAT_LIST_RESPONSE status=0x0001", 8.0)
         assert_peer_markers_absent_for(
             client, client_log_path,
-            ("PEER_SERVER_FORMAT_LIST_RECEIVED count=2",
-             "PEER_SERVER_FORMAT_DATA_RESPONSE_RECEIVED",
-             "PEER_SERVER_FORMAT_DATA_REQUEST_RECEIVED"),
-            0.35, "duplicate server clipboard activity after one Linux copy")
+            ("PEER_RX_SERVER_FORMAT_LIST_OFFER count=2",
+             "PEER_TX_SERVER_FORMAT_DATA_REQUEST",
+             "PEER_RX_SERVER_FORMAT_DATA_RESPONSE",
+             "PEER_RX_SERVER_FORMAT_DATA_REQUEST"),
+            0.35, "eager data request or duplicate activity after Linux copy")
         if owner.poll() is not None:
             raise AssertionError(
                 "Linux clipboard owner exited before the reconnect check:\n"
                 f"{read_text(owner_log_path)}")
+
+        # Receiving and acknowledging a server Format List must not fetch its
+        # payload. Simulate a local application paste as a separate event and
+        # verify it requests only a format that the server just advertised.
+        server_format_match = re.search(
+            r"PEER_RX_SERVER_FORMAT_LIST_OFFER count=1 format_count=(\d+) "
+            r"ids=([0-9,]+)", read_text(client_log_path))
+        if server_format_match is None:
+            raise AssertionError(
+                "the local Linux clipboard offer had no usable format IDs:\n"
+                f"{read_text(client_log_path)}")
+        advertised_format_ids = [
+            int(value) for value in server_format_match.group(2).split(",")]
+        if not advertised_format_ids:
+            raise AssertionError("the Linux Format List was empty")
+        requested_format_id = advertised_format_ids[0]
+        if client.stdin is None:
+            raise AssertionError("clipboard peer control pipe is unavailable")
+        client.stdin.write(f"PASTE_SERVER_FORMAT {requested_format_id}\n".encode())
+        client.stdin.flush()
+        wait_for_peer_marker(
+            client, client_log_path,
+            f"PEER_TX_SERVER_FORMAT_DATA_REQUEST format_id={requested_format_id}",
+            8.0)
+        wait_for_peer_marker(
+            client, client_log_path,
+            "PEER_RX_SERVER_FORMAT_DATA_RESPONSE count=1 flags=1", 12.0)
 
         # Reconnect the RDP client while preserving the exact Linux X11
         # clipboard owner. The replacement peer performs the normal client
@@ -2222,9 +2284,8 @@ def assert_clipboard_no_server_copy_on_reconnect(
             stdout_path, reconnect_log_path)
         wait_for_peer_marker(
             reconnect_client, reconnect_log_path, "PEER_CONNECTED", 12.0)
-        wait_for_peer_marker(
-            reconnect_client, reconnect_log_path,
-            "PEER_INITIAL_FORMAT_LIST_SENT", 12.0)
+        assert_peer_initialization_sequence(
+            reconnect_client, reconnect_log_path, 12.0)
         wait_for_peer_frame_after(reconnect_client, reconnect_log_path, 0, 12.0)
 
         # Poll a bounded post-initialization quiet interval. A server Format
@@ -3371,9 +3432,8 @@ password=smoke
                     if clipboard_peer_mode:
                         wait_for_peer_marker(
                             client, client_log_path, "PEER_CONNECTED", 10.0)
-                        wait_for_peer_marker(
-                            client, client_log_path,
-                            "PEER_INITIAL_FORMAT_LIST_SENT", 10.0)
+                        assert_peer_initialization_sequence(
+                            client, client_log_path, 10.0)
                     elif coherence_mode:
                         assert_client_frame_coherence(
                             os.environ["DISPLAY"], stimulus, window_title,
