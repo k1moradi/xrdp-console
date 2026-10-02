@@ -108,9 +108,11 @@ Raw diagnostic archives are intentionally not included in this commit.
     includes lazy `FileGroupDescriptorW` / `FILECONTENTS_SIZE` /
     `FILECONTENTS_RANGE` behavior, negotiated lock/large-file semantics, and a
     Linux adapter (FUSE remains a candidate, not a protocol dependency).
-15. **The experimental 0042 PNG-prefetch patch remains inactive by design.**
-    Delayed rendering remains the production policy; do not reactivate prefetch
-    without a standards justification and explicit design review.
+15. **Captured Microsoft-client profiles are incomplete.** Maintain versioned
+    evidence profiles for exact client/platform versions, observed capability
+    flags and channel options, initialization sequence, and screenshot format
+    offers. Keep unobserved fields explicitly unknown rather than filling
+    them from FreeRDP defaults or another Microsoft client version.
 
 ## Advice requested from reviewers
 
@@ -136,8 +138,11 @@ Raw diagnostic archives are intentionally not included in this commit.
 - Keep screenshot failures where no image generation is observed separate
   from failures after a valid PNG request begins.
 - Do not infer client non-emission from Linux-only logs.
-- Do not enable 0042/prefetch, alter X11 ownership semantics, expose partial
-  CLIPRDR data, or modify H.264 as part of this review.
+- Keep experimental patch 0042 inactive; delayed rendering remains the
+  production policy unless a standards-based design review concludes
+  otherwise.
+- Do not alter X11 ownership semantics, expose partial CLIPRDR data, or modify
+  H.264 as part of this review.
 - The latest successful paste does not close the end-to-end reliability goal;
   repeatable direct screenshot-to-Firefox/ChatGPT success remains the
   acceptance criterion.
