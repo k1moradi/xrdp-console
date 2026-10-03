@@ -11,6 +11,21 @@
 #include "../src/core/presentation_scaler.h"
 #include "../src/core/presentation_transform.h"
 
+struct PresentationScalerTestPeer final
+{
+    static std::span<const PresentationAxisSpan>
+    horizontalSpans(const PresentationScaler &scaler) noexcept
+    {
+        return scaler.horizontalSpans_;
+    }
+
+    static std::span<const std::uint32_t>
+    horizontalFastSourcePixels(const PresentationScaler &scaler) noexcept
+    {
+        return scaler.horizontalFastSourcePixels_;
+    }
+};
+
 namespace
 {
 
@@ -1282,6 +1297,38 @@ fullhd_area_downscale_and_partial_update_tests()
 }
 
 bool
+fullhd_fast_horizontal_map_matches_axis_spans()
+{
+    PresentationScaler scaler;
+    if (!check(scaler.configure({1920, 1080}, {1512, 949},
+                                {0, 50, 1512, 850}),
+               "Full HD compact-map configuration failed"))
+    {
+        return false;
+    }
+
+    const auto spans =
+        PresentationScalerTestPeer::horizontalSpans(scaler);
+    const auto sourcePixels =
+        PresentationScalerTestPeer::horizontalFastSourcePixels(scaler);
+    if (!check(spans.size() == 1512U && sourcePixels.size() == spans.size(),
+               "Full HD fast horizontal map is missing or has wrong size"))
+    {
+        return false;
+    }
+
+    for (std::size_t index = 0; index < spans.size(); ++index)
+    {
+        if (!check(sourcePixels[index] == spans[index].firstSourcePixel,
+                   "compact fast map diverged from filter source mapping"))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool
 global_reconstruction_case(PixelSize sourceSize,
                            PixelSize presentationSize,
                            const std::vector<std::uint32_t> &boundaries)
@@ -1414,6 +1461,10 @@ main()
         success = false;
     }
     if (!fullhd_area_downscale_and_partial_update_tests())
+    {
+        success = false;
+    }
+    if (!fullhd_fast_horizontal_map_matches_axis_spans())
     {
         success = false;
     }

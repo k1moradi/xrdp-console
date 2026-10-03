@@ -3245,8 +3245,10 @@ def presentation_probe_point(width: int, height: int,
                              source_width: int = 1024,
                              source_height: int = 768) -> tuple[int, int]:
     """Map an interior stimulus pixel through the aspect-fit transform."""
-    source_x = 60
-    source_y = 60
+    # Keep the probe inside sparse window A (25..44, 25..44) so the Planar
+    # sparse-update assertion observes a pixel that the stimulus changes.
+    source_x = 30
+    source_y = 30
     if width * source_height <= height * source_width:
         viewport_width = width
         viewport_height = max(1, width * source_height // source_width)

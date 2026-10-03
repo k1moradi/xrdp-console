@@ -52,6 +52,8 @@ public:
         std::uint32_t presentationRowCount) noexcept;
 
 private:
+    friend struct PresentationScalerTestPeer;
+
     [[nodiscard]] bool sourceCoverageForPresentationRectangle(
         Rectangle presentationRectangle,
         Rectangle &sourceRectangle) const noexcept;
@@ -71,4 +73,5 @@ private:
     std::vector<std::uint32_t> pixels_{};
     std::vector<PresentationAxisSpan> horizontalSpans_{};
     std::vector<PresentationAxisSpan> verticalSpans_{};
+    std::vector<std::uint32_t> horizontalFastSourcePixels_{};
 };

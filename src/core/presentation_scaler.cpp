@@ -301,6 +301,7 @@ PresentationScaler::configure(PixelSize source, PixelSize presentation,
     std::vector<std::uint32_t> replacementPixels;
     std::vector<PresentationAxisSpan> replacementHorizontalSpans;
     std::vector<PresentationAxisSpan> replacementVerticalSpans;
+    std::vector<std::uint32_t> replacementHorizontalFastSourcePixels;
     if (!replacementIdentity)
     {
         try
@@ -320,11 +321,31 @@ PresentationScaler::configure(PixelSize source, PixelSize presentation,
         {
             return false;
         }
+        if (replacementFastDiagonalFilter)
+        {
+            try
+            {
+                replacementHorizontalFastSourcePixels.resize(
+                    replacementHorizontalSpans.size());
+            }
+            catch (...)
+            {
+                return false;
+            }
+            for (std::size_t index = 0;
+                 index < replacementHorizontalSpans.size(); ++index)
+            {
+                replacementHorizontalFastSourcePixels[index] =
+                    replacementHorizontalSpans[index].firstSourcePixel;
+            }
+        }
     }
 
     pixels_.swap(replacementPixels);
     horizontalSpans_.swap(replacementHorizontalSpans);
     verticalSpans_.swap(replacementVerticalSpans);
+    horizontalFastSourcePixels_.swap(
+        replacementHorizontalFastSourcePixels);
     sourceGeometry_ = source;
     presentationGeometry_ = presentation;
     viewport_ = viewport;
@@ -350,7 +371,11 @@ PresentationScaler::valid() const noexcept
            (identity_ ||
             (pixels_.size() == kScratchPixelCapacity &&
              horizontalSpans_.size() == viewport_.widthPixels &&
-             verticalSpans_.size() == viewport_.heightPixels));
+             verticalSpans_.size() == viewport_.heightPixels &&
+             (fastDiagonalFilter_
+                  ? horizontalFastSourcePixels_.size() ==
+                        viewport_.widthPixels
+                  : horizontalFastSourcePixels_.empty())));
 }
 
 RectangleMapResult
@@ -777,7 +802,7 @@ PresentationScaler::scaleRows(FramebufferView source,
             for (std::uint32_t x = 0; x < outputWidth; ++x)
             {
                 const std::uint32_t sourceX =
-                    horizontalSpans_[viewportLocalLeft + x].firstSourcePixel;
+                    horizontalFastSourcePixels_[viewportLocalLeft + x];
                 const std::uint32_t sourceX2 =
                     sourceX + static_cast<std::uint32_t>(areaFilterX_);
                 destinationRow[x] = averagePixel(
