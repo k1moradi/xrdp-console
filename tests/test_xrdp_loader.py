@@ -35,6 +35,10 @@ NAMED_PNG_HEIGHT = 512
 NAMED_PNG_FORMAT_ID = 40005
 
 
+class TestSkipped(Exception):
+    """Raised when the host cannot provide an integration-test prerequisite."""
+
+
 def write_named_png_fixture(path: Path) -> tuple[int, str]:
     """Write a deterministic valid PNG large enough to exercise X11 INCR."""
     random_bytes = random.Random(NAMED_PNG_FORMAT_ID)
@@ -2493,9 +2497,13 @@ def assert_clipboard_no_server_copy_on_reconnect(
             stop_process(reconnect_client)
 
 
-def start_source_xvfb(
-        log_path: Path, width: int = 1024, height: int = 768
+def start_source_display(
+        log_path: Path, width: int = 1024, height: int = 768,
+        randr_resize: bool = False
 ) -> tuple[subprocess.Popen[bytes], str]:
+    if randr_resize:
+        return start_source_xephyr(log_path, width, height)
+
     executable = shutil.which("Xvfb")
     if executable is None:
         raise AssertionError("xrdp loader smoke test needs Xvfb")
@@ -2539,6 +2547,50 @@ def start_source_xvfb(
     raise AssertionError(f"source Xvfb display {display} did not become ready:\n{details}")
 
 
+def start_source_xephyr(
+        log_path: Path, width: int, height: int
+) -> tuple[subprocess.Popen[bytes], str]:
+    """Start Xephyr, whose RandR screen modes can change during the test."""
+    executable = (os.environ.get("XRDP_CONSOLE_TEST_XEPHYR") or
+                  shutil.which("Xephyr"))
+    if executable is None:
+        raise TestSkipped("live RandR resize coverage requires Xephyr")
+
+    with log_path.open("w", encoding="utf-8") as log_file:
+        try:
+            process = subprocess.Popen(
+                [executable, "-displayfd", "1", "-screen",
+                 f"{width}x{height}x24", "-resizeable", "-nolisten", "tcp",
+                 "-noreset"],
+                stdout=subprocess.PIPE, stderr=log_file, start_new_session=True)
+        except OSError as error:
+            raise TestSkipped(f"could not start Xephyr: {error}") from error
+    if process.stdout is None:
+        stop_process(process)
+        raise AssertionError("source Xephyr display-number pipe was not created")
+    display_number = read_line(process.stdout, 8.0).strip()
+    if not display_number.isdigit():
+        details = read_text(log_path)
+        stop_process(process)
+        raise TestSkipped(f"Xephyr did not allocate a display:\n{details}")
+    display = ":" + display_number.decode("ascii")
+
+    deadline = time.monotonic() + 8.0
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            break
+        result = subprocess.run(
+            ["xdpyinfo", "-display", display],
+            capture_output=True, check=False, timeout=1.0)
+        if result.returncode == 0:
+            return process, display
+        time.sleep(0.05)
+
+    details = read_text(log_path)
+    stop_process(process)
+    raise TestSkipped(f"Xephyr could not start a resizable X display:\n{details}")
+
+
 def find_window(display: str, title: str, timeout: float) -> str:
     pattern = re.compile(
         r"^\s*(0x[0-9a-fA-F]+) \"" + re.escape(title) + r"\"",
@@ -2559,6 +2611,78 @@ def find_window(display: str, title: str, timeout: float) -> str:
     raise AssertionError(
         f"FreeRDP window {title!r} did not appear:\n{last_tree}"
     )
+
+
+def wait_for_window_size(display: str, title: str, width: int, height: int,
+                         timeout: float) -> None:
+    """Require a server-requested resize to reach the FreeRDP X11 window."""
+    deadline = time.monotonic() + timeout
+    last_geometry = "window not found"
+    while time.monotonic() < deadline:
+        try:
+            window = find_window(display, title, 0.5)
+            result = subprocess.run(
+                ["xwininfo", "-display", display, "-id", window],
+                capture_output=True, text=True, check=False, timeout=2.0)
+            width_match = re.search(r"^\s*Width:\s+(\d+)", result.stdout,
+                                    re.MULTILINE)
+            height_match = re.search(r"^\s*Height:\s+(\d+)", result.stdout,
+                                     re.MULTILINE)
+            if result.returncode == 0 and width_match and height_match:
+                observed = (int(width_match.group(1)),
+                            int(height_match.group(1)))
+                last_geometry = f"{observed[0]}x{observed[1]}"
+                if observed == (width, height):
+                    return
+            else:
+                last_geometry = result.stdout + result.stderr
+        except (AssertionError, subprocess.TimeoutExpired) as error:
+            last_geometry = str(error)
+        time.sleep(0.05)
+    raise AssertionError(
+        f"FreeRDP window did not resize to {width}x{height}; "
+        f"last geometry={last_geometry}")
+
+
+def resize_source_x11_display(display: str, width: int, height: int) -> None:
+    """Switch the private RandR display to its largest practical test mode."""
+    xrandr = shutil.which("xrandr")
+    if xrandr is None:
+        raise TestSkipped("RandR resize smoke test requires xrandr")
+    if (width, height) != (1600, 1200):
+        raise AssertionError("the RandR smoke test currently covers 1600x1200")
+
+    query = subprocess.run(
+        [xrandr, "--display", display, "--query"],
+        capture_output=True, text=True, check=False, timeout=5.0)
+    output_match = re.search(r"^(\S+) connected\b", query.stdout, re.MULTILINE)
+    if query.returncode != 0 or output_match is None:
+        raise AssertionError(
+            "RandR source display has no connected output:\n"
+            f"stdout={query.stdout}\nstderr={query.stderr}")
+
+    output = output_match.group(1)
+    mode_change = subprocess.run(
+        [xrandr, "--display", display, "--output", output,
+         "--mode", f"{width}x{height}"],
+        capture_output=True, text=True, check=False, timeout=5.0)
+    result = subprocess.run(
+        [xrandr, "--display", display, "--query"],
+        capture_output=True, text=True, check=False, timeout=5.0)
+    if result.returncode == 0 and re.search(
+            rf"^Screen 0:.*current {width} x {height}",
+            result.stdout, re.MULTILINE):
+        return
+    if result.returncode != 0:
+        raise TestSkipped(
+            "the source display does not support a live RandR mode change:\n"
+            f"stdout={result.stdout}\nstderr={result.stderr}")
+    raise TestSkipped(
+        "the source display did not apply the requested RandR mode; "
+        f"expected {width}x{height}:\n"
+        f"mode change stdout={mode_change.stdout}\n"
+        f"mode change stderr={mode_change.stderr}\n"
+        f"current RandR state:\n{result.stdout}")
 
 
 def start_stimulus(stimulus_path: Path, display: str,
@@ -3133,6 +3257,7 @@ def main() -> int:
     gfx_h264_mode = False
     coherence_mode = False
     fullhd_source_mode = False
+    randr_resize_mode = False
     cpu_contention = False
     clipboard_stress_mode = False
     clipboard_named_png_mode = False
@@ -3194,7 +3319,8 @@ def main() -> int:
         clipboard_no_server_copy_reconnect_mode)
     mode_options = [option for option in (
         "--rfx", "--gfx-planar", "--gfx-h264",
-        "--gfx-h264-coherence", "--gfx-h264-fullhd")
+        "--gfx-h264-coherence", "--gfx-h264-fullhd",
+        "--gfx-h264-randr-resize")
                     if option in arguments]
     if mode_options:
         if (len(mode_options) != 1 or arguments[-1] != mode_options[0] or
@@ -3206,9 +3332,11 @@ def main() -> int:
         rfx_mode = selected_mode == "--rfx"
         gfx_planar_mode = selected_mode == "--gfx-planar"
         gfx_h264_mode = selected_mode in (
-            "--gfx-h264", "--gfx-h264-coherence", "--gfx-h264-fullhd")
+            "--gfx-h264", "--gfx-h264-coherence", "--gfx-h264-fullhd",
+            "--gfx-h264-randr-resize")
         coherence_mode = selected_mode == "--gfx-h264-coherence"
         fullhd_source_mode = selected_mode == "--gfx-h264-fullhd"
+        randr_resize_mode = selected_mode == "--gfx-h264-randr-resize"
 
     if "--cpu-contention" in arguments:
         if arguments.count("--cpu-contention") != 1:
@@ -3234,7 +3362,7 @@ def main() -> int:
             "PIXEL_OR_FRAME_PROBE STIMULUS "
             "[PRESENTATION_WIDTH PRESENTATION_HEIGHT] "
             "[--rfx|--gfx-planar|--gfx-h264|--gfx-h264-coherence|"
-            "--gfx-h264-fullhd] "
+            "--gfx-h264-fullhd|--gfx-h264-randr-resize] "
             "[--cpu-contention before the graphics-mode option] "
             "[clipboard helper [overlap peer] "
             "--clipboard-stress|--clipboard-named-png|"
@@ -3267,7 +3395,11 @@ def main() -> int:
     if cpu_contention:
         set_single_cpu_affinity()
 
-    ensure_test_display(presentation_width, presentation_height)
+    ensure_test_display(
+        max(presentation_width, 1600) if randr_resize_mode else
+        presentation_width,
+        max(presentation_height, 1200) if randr_resize_mode else
+        presentation_height)
 
     module_path = Path(arguments[0]).resolve()
     xrdp_path = Path(arguments[1]).resolve()
@@ -3322,16 +3454,16 @@ def main() -> int:
         log_path = root / "xrdp.log"
         stdout_path = root / "xrdp-stdout.log"
         client_log_path = root / "freerdp.log"
-        source_xvfb_log_path = root / "source-xvfb.log"
+        source_display_log_path = root / "source-display.log"
         chansrv_logs_path = root / "chansrv-logs"
         chansrv_stdout_path = root / "chansrv-stdout.log"
         clipboard_owner_log_path = root / "clipboard-owner.log"
         chansrv_logs_path.mkdir()
         config_path = root / "xrdp.ini"
         port = free_tcp_port()
-        source_xvfb, source_display = start_source_xvfb(
-            source_xvfb_log_path,
-            source_width, source_height)
+        source_display_process, source_display = start_source_display(
+            source_display_log_path, source_width, source_height,
+            randr_resize=randr_resize_mode)
 
         module_dir = install_root / "lib" / "xrdp"
         module_dir.mkdir(parents=True, exist_ok=True)
@@ -3384,6 +3516,7 @@ code=21
 display={source_display}
 username=smoke
 password=smoke
+{"enable_dynamic_resizing=true" if randr_resize_mode else ""}
 {chansrv_port_option}
 """,
             encoding="utf-8",
@@ -3494,6 +3627,8 @@ password=smoke
                     client_command.append("/gfx")
                 elif gfx_h264_mode:
                     client_command.append("/gfx:AVC420:on")
+                    if randr_resize_mode:
+                        client_command.append("+dynamic-resolution")
                 else:
                     client_command.append("-gfx")
                 with client_log_path.open("w", encoding="utf-8") as client_log:
@@ -3633,6 +3768,40 @@ password=smoke
                             assert_client_stays_connected(
                                 client, os.environ["DISPLAY"], window_title,
                                 client_log_path, log_path, stdout_path)
+                        if randr_resize_mode:
+                            resize_source_x11_display(
+                                source_display, 1600, 1200)
+                            wait_for_log(
+                                server, log_path,
+                                "XRDP_CONSOLE_GEOMETRY event=source-resize "
+                                "old_source=1024x768 new_source=1600x1200 "
+                                "result=updated",
+                                8.0, stdout_path, client_log_path)
+                            wait_for_log(
+                                server, log_path,
+                                "XRDP_CONSOLE_GEOMETRY event=remote-resize-request "
+                                "target=1600x1200 result=queued",
+                                8.0, stdout_path, client_log_path)
+                            wait_for_log(
+                                server, log_path,
+                                "XRDP_CONSOLE_GEOMETRY event=resize "
+                                "source=1600x1200 requested_presentation=1600x1200",
+                                8.0, stdout_path, client_log_path)
+                            wait_for_window_size(
+                                os.environ["DISPLAY"], window_title,
+                                1600, 1200, 8.0)
+                            resized_probe = presentation_probe_point(
+                                1600, 1200, 1600, 1200)
+                            assert_client_pixel(
+                                os.environ["DISPLAY"], stimulus, window_title,
+                                pixel_probe, log_path, stdout_path,
+                                resized_probe[0], resized_probe[1],
+                                presentation_width=1600,
+                                presentation_height=1200,
+                                client_log_path=client_log_path)
+                            assert_client_stays_connected(
+                                client, os.environ["DISPLAY"], window_title,
+                                client_log_path, log_path, stdout_path)
                     if clipboard_enabled:
                         if (clipboard_helper is None or chansrv_process is None or
                                 (clipboard_owner is None and
@@ -3735,7 +3904,7 @@ password=smoke
             stop_process(clipboard_owner)
             stop_process(chansrv_process)
             stop_process(stimulus)
-            stop_process(source_xvfb)
+            stop_process(source_display_process)
             if clipboard_enabled:
                 try:
                     unmount_test_fuse_mount(root / "thinclient_drives")
@@ -3772,4 +3941,8 @@ password=smoke
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except TestSkipped as error:
+        print(f"SKIP: {error}", file=sys.stderr)
+        raise SystemExit(77) from error
