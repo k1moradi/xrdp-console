@@ -1146,6 +1146,24 @@ if(TARGET xrdp-console)
             RESOURCE_LOCK xrdp_console_loader_display
             RUN_SERIAL TRUE
             SKIP_RETURN_CODE 77)
+        add_test(NAME xrdp-loader-gfx-h264-randr-resize-already-matching
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11-latency-stimulus>
+            1920 1080 --gfx-h264-randr-resize)
+        set_tests_properties(
+            xrdp-loader-gfx-h264-randr-resize-already-matching PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 60
+            LABELS "h264;integration"
+            RESOURCE_LOCK xrdp_console_loader_display
+            RUN_SERIAL TRUE
+            SKIP_RETURN_CODE 77)
         add_test(NAME xrdp-loader-rfx-smoke
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py

@@ -37,6 +37,11 @@ public:
                                  PixelSize presentationGeometry,
                                  PixelSize frameGeometry,
                                  Rectangle viewport) noexcept;
+    [[nodiscard]] bool configure(PixelSize sourceGeometry,
+                                 PixelSize presentationGeometry,
+                                 PixelSize frameGeometry,
+                                 Rectangle viewport,
+                                 std::uint32_t nextFrameId) noexcept;
     void reset() noexcept;
 
     [[nodiscard]] bool valid() const noexcept;
@@ -67,6 +72,7 @@ public:
     [[nodiscard]] bool frameInFlight() const noexcept;
     [[nodiscard]] bool baselineReady() const noexcept;
     [[nodiscard]] bool baselineSubmissionPending() const noexcept;
+    [[nodiscard]] std::uint32_t nextFrameIdForReconfiguration() const noexcept;
 
     [[nodiscard]] std::size_t collectCaptureSelections(
         std::span<GenerationTileMap::Selection> output) const noexcept;

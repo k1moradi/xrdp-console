@@ -2087,6 +2087,10 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     }
 
     xrdp_console::rdp::H264LatestFrameState h264Frame;
+    // A source-only resize can replace this state while the client's GFX
+    // surface remains live. Continue its frame-ID sequence in that case.
+    const std::uint32_t nextH264FrameId =
+        impl_->h264Frame.nextFrameIdForReconfiguration();
     struct xrdp_console_graphics_capabilities negotiatedGraphics{};
     const bool h264Negotiated =
         num_monitors >= 0 && num_monitors <= 1 &&
@@ -2111,7 +2115,8 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
             xrdp_console_module_h264_surface_id(impl_->module) >= 0 &&
             h264Frame.configure(
                 impl_->state.sourceGeometry, presentationGeometry,
-                h264Plan.frameGeometry, h264Plan.viewport) &&
+                h264Plan.frameGeometry, h264Plan.viewport,
+                nextH264FrameId) &&
             h264Transform.configure(impl_->state.sourceGeometry,
                                     presentationGeometry, h264Plan.viewport) &&
             h264Scaler.configure(impl_->state.sourceGeometry,
@@ -4360,7 +4365,16 @@ ModuleContext::check_wait_objs() noexcept
         }
         else if (impl_->state.presentationGeometry == requestedGeometry)
         {
-            impl_->requestedClientResize = {};
+            if (impl_->requestedClientResize != requestedGeometry)
+            {
+                impl_->requestedClientResize = requestedGeometry;
+                log_message(
+                    LOG_LEVEL_INFO,
+                    "XRDP_CONSOLE_GEOMETRY event=remote-resize-request "
+                    "target=%ux%u result=already-matching",
+                    requestedGeometry.widthPixels,
+                    requestedGeometry.heightPixels);
+            }
         }
 
         if (!impl_->x11EventBudgetPending &&

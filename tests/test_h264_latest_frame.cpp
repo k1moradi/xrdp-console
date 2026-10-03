@@ -1021,6 +1021,53 @@ bool reconfigure_preserves_monotonic_frame_ids()
     return success;
 }
 
+bool replacement_state_continues_rdp_frame_ids()
+{
+    H264LatestFrameState previous;
+    H264LatestFrameState replacement;
+    std::array<GenerationTileMap::Selection, 4> selections{};
+    bool success = true;
+
+    success &= check(previous.configure({64, 64}),
+                     "initial frame state configuration failed");
+    success &= check(previous.collectCaptureSelections(selections) == 1 &&
+                         previous.commitCaptured(selections[0]),
+                     "initial frame baseline capture failed");
+    const GenerationTileMap::Selection initialBaseline{
+        {0, 0, 64, 64}, UINT64_MAX};
+    success &= check(previous.noteSubmitted(
+                         1, std::span(&initialBaseline, 1)),
+                     "initial frame baseline submission failed");
+    const std::uint32_t nextFrameId =
+        previous.nextFrameIdForReconfiguration();
+    success &= check(nextFrameId == 2,
+                     "initial submission did not advance the RDP frame id");
+
+    success &= check(replacement.configure(
+                         {128, 64}, {128, 64}, {128, 64}, {0, 0, 128, 64},
+                         nextFrameId),
+                     "replacement frame state configuration failed");
+    while (replacement.capturePending())
+    {
+        const std::size_t count =
+            replacement.collectCaptureSelections(selections);
+        success &= check(count != 0 && replacement.commitCaptured(selections[0]),
+                         "replacement baseline capture failed");
+        if (count == 0)
+        {
+            break;
+        }
+    }
+    success &= check(replacement.nextFrameId() == 2,
+                     "replacement state restarted the RDP frame id sequence");
+    const GenerationTileMap::Selection replacementBaseline{
+        {0, 0, 128, 64}, UINT64_MAX};
+    success &= check(replacement.noteSubmitted(
+                         2, std::span(&replacementBaseline, 1)),
+                     "replacement baseline did not accept the next RDP frame id");
+    return success;
+}
+
 bool full_invalidation_supersedes_incremental_transmission()
 {
     H264LatestFrameState state;
@@ -1448,6 +1495,7 @@ int main()
     success &= priority_transmission_can_bypass_background_runs();
     success &= scroll_priority_creates_and_then_avoids_mouse_local_mixed_age_update();
     success &= reconfigure_preserves_monotonic_frame_ids();
+    success &= replacement_state_continues_rdp_frame_ids();
     success &= full_invalidation_supersedes_incremental_transmission();
     success &= fingerprint_unchanged_capture_suppresses_transport();
     success &= changed_fingerprint_commits_only_after_submission();

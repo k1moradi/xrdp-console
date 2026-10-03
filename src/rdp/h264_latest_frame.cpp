@@ -113,6 +113,19 @@ H264LatestFrameState::configure(PixelSize sourceGeometry,
                                 PixelSize frameGeometry,
                                 Rectangle viewport) noexcept
 {
+    const std::uint32_t nextFrameId =
+        nextFrameId_ == 0 ? 1U : nextFrameId_;
+    return configure(sourceGeometry, presentationGeometry, frameGeometry,
+                     viewport, nextFrameId);
+}
+
+bool
+H264LatestFrameState::configure(PixelSize sourceGeometry,
+                                PixelSize presentationGeometry,
+                                PixelSize frameGeometry,
+                                Rectangle viewport,
+                                std::uint32_t nextFrameId) noexcept
+{
     if (sourceGeometry.widthPixels == 0 || sourceGeometry.heightPixels == 0 ||
         sourceGeometry.widthPixels > UINT16_MAX ||
         sourceGeometry.heightPixels > UINT16_MAX ||
@@ -131,7 +144,8 @@ H264LatestFrameState::configure(PixelSize sourceGeometry,
         frameGeometry.widthPixels > presentationGeometry.widthPixels ||
         frameGeometry.heightPixels > presentationGeometry.heightPixels ||
         (frameGeometry.widthPixels & 1U) != 0 ||
-        (frameGeometry.heightPixels & 1U) != 0)
+        (frameGeometry.heightPixels & 1U) != 0 ||
+        nextFrameId == 0 || nextFrameId > static_cast<std::uint32_t>(INT_MAX))
     {
         return false;
     }
@@ -172,8 +186,6 @@ H264LatestFrameState::configure(PixelSize sourceGeometry,
         return false;
     }
 
-    const std::uint32_t preservedNextFrameId =
-        nextFrameId_ == 0 ? 1U : nextFrameId_;
     sourceGeometry_ = sourceGeometry;
     presentationGeometry_ = presentationGeometry;
     viewport_ = viewport;
@@ -187,7 +199,7 @@ H264LatestFrameState::configure(PixelSize sourceGeometry,
     transmissionDamage_ = std::move(transmissionDamage);
     committedFingerprints_ = std::move(committedFingerprints);
     pendingFingerprints_ = std::move(pendingFingerprints);
-    nextFrameId_ = preservedNextFrameId;
+    nextFrameId_ = nextFrameId;
     submittedFrameId_ = 0;
     frameInFlight_ = false;
     baselineSubmitted_ = false;
@@ -466,6 +478,12 @@ bool
 H264LatestFrameState::baselineSubmissionPending() const noexcept
 {
     return baselineReady() && !baselineSubmitted_;
+}
+
+std::uint32_t
+H264LatestFrameState::nextFrameIdForReconfiguration() const noexcept
+{
+    return valid() ? nextFrameId_ : 1U;
 }
 
 std::size_t

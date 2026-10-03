@@ -2550,18 +2550,21 @@ def start_source_display(
 def start_source_xephyr(
         log_path: Path, width: int, height: int
 ) -> tuple[subprocess.Popen[bytes], str]:
-    """Start Xephyr, whose RandR screen modes can change during the test."""
+    """Start Xephyr with enough RandR headroom for the Full HD transition."""
     executable = (os.environ.get("XRDP_CONSOLE_TEST_XEPHYR") or
                   shutil.which("Xephyr"))
     if executable is None:
         raise TestSkipped("live RandR resize coverage requires Xephyr")
 
+    maximum_width = max(width, 1920)
+    maximum_height = max(height, 1080)
+
     with log_path.open("w", encoding="utf-8") as log_file:
         try:
             process = subprocess.Popen(
                 [executable, "-displayfd", "1", "-screen",
-                 f"{width}x{height}x24", "-resizeable", "-nolisten", "tcp",
-                 "-noreset"],
+                 f"{maximum_width}x{maximum_height}x24", "-resizeable",
+                 "-nolisten", "tcp", "-noreset"],
                 stdout=subprocess.PIPE, stderr=log_file, start_new_session=True)
         except OSError as error:
             raise TestSkipped(f"could not start Xephyr: {error}") from error
@@ -2583,6 +2586,36 @@ def start_source_xephyr(
             ["xdpyinfo", "-display", display],
             capture_output=True, check=False, timeout=1.0)
         if result.returncode == 0:
+            if (width, height) != (maximum_width, maximum_height):
+                xrandr = shutil.which("xrandr")
+                if xrandr is None:
+                    stop_process(process)
+                    raise TestSkipped(
+                        "live RandR resize coverage requires xrandr")
+                query = subprocess.run(
+                    [xrandr, "--display", display, "--query"],
+                    capture_output=True, text=True, check=False, timeout=5.0)
+                output_match = re.search(
+                    r"^(\S+) connected\b", query.stdout, re.MULTILINE)
+                if query.returncode != 0 or output_match is None:
+                    details = read_text(log_path)
+                    stop_process(process)
+                    raise TestSkipped(
+                        "Xephyr did not expose a connected RandR output:\n"
+                        f"stdout={query.stdout}\nstderr={query.stderr}\n"
+                        f"Xephyr log={details}")
+                initial_mode = subprocess.run(
+                    [xrandr, "--display", display, "--output",
+                     output_match.group(1), "--mode", f"{width}x{height}"],
+                    capture_output=True, text=True, check=False, timeout=5.0)
+                if initial_mode.returncode != 0:
+                    details = read_text(log_path)
+                    stop_process(process)
+                    raise TestSkipped(
+                        "Xephyr could not select the initial RandR mode:\n"
+                        f"stdout={initial_mode.stdout}\n"
+                        f"stderr={initial_mode.stderr}\n"
+                        f"Xephyr log={details}")
             return process, display
         time.sleep(0.05)
 
@@ -2649,8 +2682,8 @@ def resize_source_x11_display(display: str, width: int, height: int) -> None:
     xrandr = shutil.which("xrandr")
     if xrandr is None:
         raise TestSkipped("RandR resize smoke test requires xrandr")
-    if (width, height) != (1600, 1200):
-        raise AssertionError("the RandR smoke test currently covers 1600x1200")
+    if (width, height) != (1920, 1080):
+        raise AssertionError("the RandR smoke test currently covers 1920x1080")
 
     query = subprocess.run(
         [xrandr, "--display", display, "--query"],
@@ -2930,7 +2963,8 @@ def assert_client_pixel(client_display: str,
                         scaled_presentation: bool = False,
                         presentation_width: int = 1024,
                         presentation_height: int = 768,
-                        client_log_path: Path | None = None) -> None:
+                        client_log_path: Path | None = None,
+                        source_display: str | None = None) -> None:
     """Draw a known source color and require it in the FreeRDP framebuffer."""
     try:
         window = find_window(client_display, window_title, 8.0)
@@ -2975,6 +3009,36 @@ def assert_client_pixel(client_display: str,
             raise AssertionError(f"source stimulus did not draw a frame: {source_line!r}")
         state = int(fields[2])
         expected_red = state == 0
+        source_pixel_sample = None
+        if source_display is not None:
+            source_sample = subprocess.run(
+                [str(pixel_probe), source_display, "root", "60", "60"],
+                input=b"sample\n", capture_output=True, check=False,
+                timeout=3.0)
+            source_lines = source_sample.stdout.splitlines()
+            if source_sample.returncode != 0 or len(source_lines) < 2:
+                raise AssertionError(
+                    "could not sample the known source pixel after resize:\n"
+                    f"stdout={source_sample.stdout!r}\n"
+                    f"stderr={source_sample.stderr!r}")
+            source_pixel_sample = source_lines[-1]
+            source_channels = source_pixel_sample.split()
+            if len(source_channels) < 4:
+                raise AssertionError(
+                    "source pixel probe returned an invalid sample: "
+                    f"{source_pixel_sample!r}")
+            source_red, source_green, source_blue = (
+                int(value) for value in source_channels[1:4])
+            source_matches = (
+                source_red > 200 and source_green < 80 and source_blue < 80
+                if expected_red else
+                source_blue > 200 and source_red < 80 and source_green < 80
+            )
+            if not source_matches:
+                raise AssertionError(
+                    "the local source did not retain the expected stimulus "
+                    f"pixel after resize: sample={source_pixel_sample!r} "
+                    f"expected_red={expected_red}")
 
         def wait_for_pixel(expected_red: bool) -> bytes:
             deadline = time.monotonic() + 8.0
@@ -3017,7 +3081,14 @@ def assert_client_pixel(client_display: str,
                 f"{read_text(client_log_path) if client_log_path else ''}"
             )
 
-        wait_for_pixel(expected_red)
+        try:
+            wait_for_pixel(expected_red)
+        except AssertionError as error:
+            if source_pixel_sample is None:
+                raise
+            raise AssertionError(
+                f"{error}\n[source display pixel sample] "
+                f"{source_pixel_sample!r}") from error
         if assert_sparse_planar_batch:
             # A client-visible pixel may precede the next xrdp GFX dirty
             # flush. Wait for the baseline draw's own completed Planar batch,
@@ -3173,9 +3244,9 @@ def assert_client_stays_connected(client: subprocess.Popen[object],
 def presentation_probe_point(width: int, height: int,
                              source_width: int = 1024,
                              source_height: int = 768) -> tuple[int, int]:
-    """Map the stimulus pixel through the loader's aspect-fit transform."""
-    source_x = 30
-    source_y = 30
+    """Map an interior stimulus pixel through the aspect-fit transform."""
+    source_x = 60
+    source_y = 60
     if width * source_height <= height * source_width:
         viewport_width = width
         viewport_height = max(1, width * source_height // source_width)
@@ -3396,9 +3467,9 @@ def main() -> int:
         set_single_cpu_affinity()
 
     ensure_test_display(
-        max(presentation_width, 1600) if randr_resize_mode else
+        max(presentation_width, 1920) if randr_resize_mode else
         presentation_width,
-        max(presentation_height, 1200) if randr_resize_mode else
+        max(presentation_height, 1080) if randr_resize_mode else
         presentation_height)
 
     module_path = Path(arguments[0]).resolve()
@@ -3770,35 +3841,39 @@ password=smoke
                                 client_log_path, log_path, stdout_path)
                         if randr_resize_mode:
                             resize_source_x11_display(
-                                source_display, 1600, 1200)
+                                source_display, 1920, 1080)
                             wait_for_log(
                                 server, log_path,
                                 "XRDP_CONSOLE_GEOMETRY event=source-resize "
-                                "old_source=1024x768 new_source=1600x1200 "
+                                "old_source=1024x768 new_source=1920x1080 "
                                 "result=updated",
                                 8.0, stdout_path, client_log_path)
                             wait_for_log(
                                 server, log_path,
                                 "XRDP_CONSOLE_GEOMETRY event=remote-resize-request "
-                                "target=1600x1200 result=queued",
+                                "target=1920x1080 result=" +
+                                ("already-matching"
+                                 if (presentation_width, presentation_height) ==
+                                 (1920, 1080) else "queued"),
                                 8.0, stdout_path, client_log_path)
                             wait_for_log(
                                 server, log_path,
                                 "XRDP_CONSOLE_GEOMETRY event=resize "
-                                "source=1600x1200 requested_presentation=1600x1200",
+                                "source=1920x1080 requested_presentation=1920x1080",
                                 8.0, stdout_path, client_log_path)
                             wait_for_window_size(
                                 os.environ["DISPLAY"], window_title,
-                                1600, 1200, 8.0)
+                                1920, 1080, 8.0)
                             resized_probe = presentation_probe_point(
-                                1600, 1200, 1600, 1200)
+                                1920, 1080, 1920, 1080)
                             assert_client_pixel(
                                 os.environ["DISPLAY"], stimulus, window_title,
                                 pixel_probe, log_path, stdout_path,
                                 resized_probe[0], resized_probe[1],
-                                presentation_width=1600,
-                                presentation_height=1200,
-                                client_log_path=client_log_path)
+                                presentation_width=1920,
+                                presentation_height=1080,
+                                client_log_path=client_log_path,
+                                source_display=source_display)
                             assert_client_stays_connected(
                                 client, os.environ["DISPLAY"], window_title,
                                 client_log_path, log_path, stdout_path)
