@@ -3331,6 +3331,7 @@ def main() -> int:
     coherence_mode = False
     fullhd_source_mode = False
     randr_resize_mode = False
+    randr_resize_dynamic_resolution = False
     cpu_contention = False
     clipboard_stress_mode = False
     clipboard_named_png_mode = False
@@ -3393,7 +3394,8 @@ def main() -> int:
     mode_options = [option for option in (
         "--rfx", "--gfx-planar", "--gfx-h264",
         "--gfx-h264-coherence", "--gfx-h264-fullhd",
-        "--gfx-h264-randr-resize")
+        "--gfx-h264-randr-resize",
+        "--gfx-h264-randr-resize-no-dynamic-resolution")
                     if option in arguments]
     if mode_options:
         if (len(mode_options) != 1 or arguments[-1] != mode_options[0] or
@@ -3406,10 +3408,15 @@ def main() -> int:
         gfx_planar_mode = selected_mode == "--gfx-planar"
         gfx_h264_mode = selected_mode in (
             "--gfx-h264", "--gfx-h264-coherence", "--gfx-h264-fullhd",
-            "--gfx-h264-randr-resize")
+            "--gfx-h264-randr-resize",
+            "--gfx-h264-randr-resize-no-dynamic-resolution")
         coherence_mode = selected_mode == "--gfx-h264-coherence"
         fullhd_source_mode = selected_mode == "--gfx-h264-fullhd"
-        randr_resize_mode = selected_mode == "--gfx-h264-randr-resize"
+        randr_resize_mode = selected_mode in (
+            "--gfx-h264-randr-resize",
+            "--gfx-h264-randr-resize-no-dynamic-resolution")
+        randr_resize_dynamic_resolution = (
+            selected_mode == "--gfx-h264-randr-resize")
 
     if "--cpu-contention" in arguments:
         if arguments.count("--cpu-contention") != 1:
@@ -3435,7 +3442,8 @@ def main() -> int:
             "PIXEL_OR_FRAME_PROBE STIMULUS "
             "[PRESENTATION_WIDTH PRESENTATION_HEIGHT] "
             "[--rfx|--gfx-planar|--gfx-h264|--gfx-h264-coherence|"
-            "--gfx-h264-fullhd|--gfx-h264-randr-resize] "
+            "--gfx-h264-fullhd|--gfx-h264-randr-resize|"
+            "--gfx-h264-randr-resize-no-dynamic-resolution] "
             "[--cpu-contention before the graphics-mode option] "
             "[clipboard helper [overlap peer] "
             "--clipboard-stress|--clipboard-named-png|"
@@ -3700,7 +3708,7 @@ password=smoke
                     client_command.append("/gfx")
                 elif gfx_h264_mode:
                     client_command.append("/gfx:AVC420:on")
-                    if randr_resize_mode:
+                    if randr_resize_dynamic_resolution:
                         client_command.append("+dynamic-resolution")
                 else:
                     client_command.append("-gfx")
