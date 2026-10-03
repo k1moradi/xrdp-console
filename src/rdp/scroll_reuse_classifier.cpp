@@ -38,9 +38,7 @@ rectanglesEqual(FramebufferView previousFrame, Rectangle previousRectangle,
                 Rectangle currentRectangle) noexcept
 {
     if (previousRectangle.widthPixels != currentRectangle.widthPixels ||
-        previousRectangle.heightPixels != currentRectangle.heightPixels ||
-        previousRectangle.widthPixels >
-            std::numeric_limits<std::size_t>::max() / kBytesPerPixel)
+        previousRectangle.heightPixels != currentRectangle.heightPixels)
     {
         return false;
     }
@@ -91,6 +89,9 @@ classifyExactVerticalScrollReuse(
     if (output.empty() || !previousFrame.valid() || !currentFrame.valid() ||
         previousFrame.widthPixels != currentFrame.widthPixels ||
         previousFrame.heightPixels != currentFrame.heightPixels ||
+        static_cast<std::uint64_t>(previousFrame.widthPixels) *
+                previousFrame.heightPixels >
+            std::numeric_limits<std::size_t>::max() / kBytesPerPixel ||
         previousFrame.strideBytes <
             static_cast<std::size_t>(previousFrame.widthPixels) *
                 kBytesPerPixel ||
@@ -133,6 +134,20 @@ classifyExactVerticalScrollReuse(
           GenerationTileMap::kTileWidthPixels - 1U) /
          GenerationTileMap::kTileWidthPixels) *
         GenerationTileMap::kTileWidthPixels);
+    std::uint32_t pastTileX = firstTileX;
+    for (std::uint32_t x = firstTileX; x < currentFrame.widthPixels;
+         x += GenerationTileMap::kTileWidthPixels)
+    {
+        const std::uint32_t width = std::min(
+            GenerationTileMap::kTileWidthPixels,
+            currentFrame.widthPixels - x);
+        if (static_cast<std::uint64_t>(x) + width > reusableRight)
+        {
+            break;
+        }
+        pastTileX = x + width;
+    }
+    const std::uint32_t reusableWidth = pastTileX - firstTileX;
 
     const std::uint32_t tileRows =
         (currentFrame.heightPixels +
@@ -150,6 +165,79 @@ classifyExactVerticalScrollReuse(
             : static_cast<std::uint32_t>(
                   reusableBottom / GenerationTileMap::kTileHeightPixels);
 
+    // Full-width, tightly packed frames make the reusable tile rows one
+    // contiguous byte range. Verify that range with one memcmp, but keep the
+    // emitted copy commands split into tile rows to preserve same-surface
+    // scroll ordering.
+    const std::size_t fullRowBytes =
+        static_cast<std::size_t>(currentFrame.widthPixels) * kBytesPerPixel;
+    if (firstTileX == 0 && reusableWidth == currentFrame.widthPixels &&
+        previousFrame.strideBytes == fullRowBytes &&
+        currentFrame.strideBytes == fullRowBytes &&
+        firstTileRow < endTileRow)
+    {
+        const std::uint32_t firstY =
+            firstTileRow * GenerationTileMap::kTileHeightPixels;
+        const std::uint32_t endY = std::min(
+            endTileRow * GenerationTileMap::kTileHeightPixels,
+            currentFrame.heightPixels);
+        const std::uint32_t runHeight = endY - firstY;
+        const std::int64_t sourceY =
+            static_cast<std::int64_t>(firstY) - displacementY;
+        const std::size_t byteCount =
+            static_cast<std::size_t>(runHeight) * fullRowBytes;
+        const auto *previous =
+            previousFrame.pixels.data() +
+            static_cast<std::size_t>(sourceY) * fullRowBytes;
+        const auto *current =
+            currentFrame.pixels.data() +
+            static_cast<std::size_t>(firstY) * fullRowBytes;
+
+        if (std::memcmp(previous, current, byteCount) == 0)
+        {
+            const std::size_t requiredRuns = endTileRow - firstTileRow;
+            if (requiredRuns > output.size())
+            {
+                return {0, 0, true};
+            }
+
+            const auto appendTileRun = [&](std::uint32_t tileRow) noexcept {
+                const std::uint32_t y =
+                    tileRow * GenerationTileMap::kTileHeightPixels;
+                const std::uint32_t height = std::min(
+                    GenerationTileMap::kTileHeightPixels,
+                    currentFrame.heightPixels - y);
+                const std::int64_t tileSourceY =
+                    static_cast<std::int64_t>(y) - displacementY;
+                output[result.runCount++] = {
+                    {0, static_cast<std::int32_t>(tileSourceY),
+                     currentFrame.widthPixels, height},
+                    {0, static_cast<std::int32_t>(y)}};
+                result.reusablePixels +=
+                    static_cast<std::uint64_t>(currentFrame.widthPixels) *
+                    height;
+            };
+
+            if (displacementY < 0)
+            {
+                for (std::uint32_t row = firstTileRow; row < endTileRow;
+                     ++row)
+                {
+                    appendTileRun(row);
+                }
+            }
+            else
+            {
+                for (std::uint32_t row = endTileRow; row > firstTileRow;
+                     --row)
+                {
+                    appendTileRun(row - 1U);
+                }
+            }
+            return result;
+        }
+    }
+
     const auto appendRow = [&](std::uint32_t tileRow) noexcept {
         const std::uint32_t y =
             tileRow * GenerationTileMap::kTileHeightPixels;
@@ -158,6 +246,52 @@ classifyExactVerticalScrollReuse(
             currentFrame.heightPixels - y);
         const std::int64_t sourceY =
             static_cast<std::int64_t>(y) - displacementY;
+
+        if (reusableWidth != 0)
+        {
+            const std::size_t rowBytes =
+                static_cast<std::size_t>(reusableWidth) * kBytesPerPixel;
+            const std::size_t xBytes =
+                static_cast<std::size_t>(firstTileX) * kBytesPerPixel;
+            bool wholeRowReusable = true;
+            for (std::uint32_t row = 0; row < height; ++row)
+            {
+                const auto *previous =
+                    previousFrame.pixels.data() +
+                    static_cast<std::size_t>(sourceY + row) *
+                        previousFrame.strideBytes +
+                    xBytes;
+                const auto *current =
+                    currentFrame.pixels.data() +
+                    static_cast<std::size_t>(y + row) *
+                        currentFrame.strideBytes +
+                    xBytes;
+                if (std::memcmp(previous, current, rowBytes) != 0)
+                {
+                    wholeRowReusable = false;
+                    break;
+                }
+            }
+
+            if (wholeRowReusable)
+            {
+                if (result.runCount == output.size())
+                {
+                    result = {0, 0, true};
+                    return false;
+                }
+                output[result.runCount++] = {
+                    {static_cast<std::int32_t>(firstTileX),
+                     static_cast<std::int32_t>(sourceY), reusableWidth,
+                     height},
+                    {static_cast<std::int32_t>(firstTileX),
+                     static_cast<std::int32_t>(y)},
+                };
+                result.reusablePixels +=
+                    static_cast<std::uint64_t>(reusableWidth) * height;
+                return true;
+            }
+        }
 
         ExactScrollCopyRun pending{};
         bool pendingActive = false;
@@ -182,16 +316,12 @@ classifyExactVerticalScrollReuse(
             return true;
         };
 
-        for (std::uint32_t x = firstTileX; x < currentFrame.widthPixels;
+        for (std::uint32_t x = firstTileX; x < pastTileX;
              x += GenerationTileMap::kTileWidthPixels)
         {
             const std::uint32_t width = std::min(
                 GenerationTileMap::kTileWidthPixels,
                 currentFrame.widthPixels - x);
-            if (static_cast<std::uint64_t>(x) + width > reusableRight)
-            {
-                break;
-            }
             const Rectangle destination{
                 static_cast<std::int32_t>(x),
                 static_cast<std::int32_t>(y), width, height};

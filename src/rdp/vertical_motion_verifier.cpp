@@ -155,9 +155,8 @@ verifyVerticalMotion(FramebufferView previousFrame,
     if (!previousFrame.valid() || !currentFrame.valid() ||
         previousFrame.widthPixels != currentFrame.widthPixels ||
         previousFrame.heightPixels != currentFrame.heightPixels ||
-        previousFrame.widthPixels >
-            std::numeric_limits<std::size_t>::max() / kBytesPerPixel ||
-        currentFrame.widthPixels >
+        static_cast<std::uint64_t>(previousFrame.widthPixels) *
+                previousFrame.heightPixels >
             std::numeric_limits<std::size_t>::max() / kBytesPerPixel ||
         previousFrame.strideBytes <
             static_cast<std::size_t>(previousFrame.widthPixels) *

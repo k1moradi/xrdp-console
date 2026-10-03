@@ -12,6 +12,7 @@
 #include "rdp/gfx_surface_copy.h"
 #include "rdp/h264_latest_frame.h"
 #include "rdp/scroll_motion_observer.h"
+#include "rdp/scroll_reuse_classifier.h"
 #include "x11/x11_shared_memory_capture.h"
 
 #include <algorithm>
@@ -43,8 +44,10 @@ using xrdp_console::benchmark::DurationSummary;
 using xrdp_console::benchmark::summarizeDurations;
 using xrdp_console::rdp::GfxAvc420Command;
 using xrdp_console::rdp::H264PresentationPlan;
+using xrdp_console::rdp::ExactScrollCopyRun;
 using xrdp_console::rdp::ScrollMotionObserver;
 using xrdp_console::rdp::buildGfxAvc420Command;
+using xrdp_console::rdp::classifyExactVerticalScrollReuse;
 using xrdp_console::rdp::convertBgraToNv12_709FullRange;
 using xrdp_console::rdp::gfxAvc420CommandBytes;
 using xrdp_console::rdp::makeH264PresentationPlan;
@@ -323,7 +326,7 @@ copyCapturedFrame(FramebufferView capture, std::vector<std::byte> &storage,
                   FramebufferView &view)
 {
     if (!capture.valid() ||
-        capture.widthPixels >
+        framePixels({capture.widthPixels, capture.heightPixels}) >
             std::numeric_limits<std::size_t>::max() / kBytesPerBgraPixel)
     {
         return false;
@@ -713,6 +716,53 @@ runBenchmark(const Options &options)
     }
     reportStage("tile_fingerprint_full_grid", samples, sourcePixels,
                 sourceBgraBytes, 0U);
+
+    constexpr std::int32_t scrollDisplacement = -64;
+    const std::size_t sourceStride =
+        static_cast<std::size_t>(sourceGeometry.widthPixels) *
+        kBytesPerBgraPixel;
+    const std::uint32_t scrollOffset =
+        static_cast<std::uint32_t>(-scrollDisplacement);
+    std::vector<std::byte> scrolledStorage(source.pixels.size());
+    for (std::uint32_t row = 0;
+         row + scrollOffset < sourceGeometry.heightPixels; ++row)
+    {
+        std::memcpy(
+            scrolledStorage.data() + static_cast<std::size_t>(row) *
+                                         sourceStride,
+            source.pixels.data() + static_cast<std::size_t>(row + scrollOffset) *
+                                      sourceStride,
+            sourceStride);
+    }
+    const std::uint32_t exposedTop =
+        sourceGeometry.heightPixels - scrollOffset;
+    std::fill(scrolledStorage.begin() +
+                  static_cast<std::ptrdiff_t>(exposedTop * sourceStride),
+              scrolledStorage.end(), std::byte{0x5a});
+    const FramebufferView scrolled{
+        scrolledStorage, sourceGeometry.widthPixels,
+        sourceGeometry.heightPixels, sourceStride};
+    std::array<ExactScrollCopyRun,
+               xrdp_console::rdp::kMaximumExactScrollCopyRuns>
+        exactScrollRuns{};
+    if (!scrolled.valid() ||
+        !measure(samples, options.samples, noPreparation,
+                 [&](std::size_t, std::uint64_t &outputBytes) {
+                     const auto result = classifyExactVerticalScrollReuse(
+                         source, scrolled, fullSource, scrollDisplacement,
+                         exactScrollRuns);
+                     outputBytes = result.runCount * sizeof(ExactScrollCopyRun);
+                     checksum += result.reusablePixels + result.runCount;
+                     return !result.overflow && result.runCount != 0 &&
+                            result.reusablePixels != 0;
+                 }))
+    {
+        std::fputs("exact scroll-reuse classification measurement failed\n",
+                   stderr);
+        return false;
+    }
+    reportStage("scroll_exact_reuse_classify", samples, sourcePixels,
+                sourceBgraBytes * 2U, 0U);
 
     PresentationScaler scaler{};
     if (!scaler.configure(sourceGeometry, frameGeometry, outputRectangle))

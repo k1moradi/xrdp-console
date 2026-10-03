@@ -298,7 +298,9 @@ convertBgraToNv12_709FullRange(
     const PixelSize geometry{source.widthPixels, source.heightPixels};
     const std::size_t requiredBytes = nv12FrameBytes(geometry);
     if (!source.valid() || requiredBytes == 0 ||
-        source.widthPixels > std::numeric_limits<std::size_t>::max() / 4U ||
+        static_cast<std::uint64_t>(source.widthPixels) *
+                source.heightPixels >
+            std::numeric_limits<std::size_t>::max() / 4U ||
         source.strideBytes < static_cast<std::size_t>(source.widthPixels) * 4U ||
         destination.size() < requiredBytes)
     {
@@ -401,7 +403,9 @@ updateNv12RectangleFromBgraRegion_709FullRange(
         (destinationRectangle.y & 1) != 0 ||
         (destinationRectangle.widthPixels & 1U) != 0 ||
         (destinationRectangle.heightPixels & 1U) != 0 ||
-        source.widthPixels > std::numeric_limits<std::size_t>::max() / 4U ||
+        static_cast<std::uint64_t>(source.widthPixels) *
+                source.heightPixels >
+            std::numeric_limits<std::size_t>::max() / 4U ||
         source.strideBytes < static_cast<std::size_t>(source.widthPixels) * 4U)
     {
         return false;

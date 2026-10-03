@@ -104,6 +104,7 @@ if(XRDP_CONSOLE_ENABLE_PIXEL_PIPELINE_BENCH)
         ${CMAKE_SOURCE_DIR}/src/rdp/gfx_surface_copy.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/h264_latest_frame.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/scroll_copy_plan.cpp
+        ${CMAKE_SOURCE_DIR}/src/rdp/scroll_reuse_classifier.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/scroll_motion_observer.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/vertical_motion_discovery.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/vertical_motion_verifier.cpp

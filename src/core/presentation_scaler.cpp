@@ -561,7 +561,10 @@ PresentationScaler::scaleRows(FramebufferView source,
         return {};
     }
 
-    if (source.widthPixels >
+    const std::uint64_t sourcePixels =
+        static_cast<std::uint64_t>(source.widthPixels) *
+        source.heightPixels;
+    if (sourcePixels >
             std::numeric_limits<std::size_t>::max() / kBytesPerPixel ||
         source.strideBytes <
             static_cast<std::size_t>(source.widthPixels) * kBytesPerPixel)

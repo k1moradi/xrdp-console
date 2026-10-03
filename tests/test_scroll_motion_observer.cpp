@@ -174,6 +174,117 @@ bool exact_reuse_fails_closed_on_run_overflow()
                  "exact reuse returned a partial plan on overflow");
 }
 
+bool exact_reuse_emits_one_run_per_identical_tile_row()
+{
+    constexpr std::uint32_t width = 320;
+    constexpr std::uint32_t height = 240;
+    constexpr std::int32_t displacement = -37;
+    const auto previous = makeTextured(width, height);
+    const auto current = scroll(previous, width, height, displacement);
+    std::array<ExactScrollCopyRun, kMaximumExactScrollCopyRuns> runs{};
+    const auto result = classifyExactVerticalScrollReuse(
+        view(previous, width, height), view(current, width, height),
+        {0, 0, width, height}, displacement, runs);
+
+    bool success = check(!result.overflow && result.runCount == 3 &&
+                             result.reusablePixels ==
+                                 static_cast<std::uint64_t>(width) * 64U * 3U,
+                         "identical scroll rows did not form complete runs");
+    for (std::size_t index = 0; index < result.runCount; ++index)
+    {
+        const auto &run = runs[index];
+        success &= check(run.sourceRectangle.x == 0 &&
+                             run.sourceRectangle.y ==
+                                 run.destinationPoint.y - displacement &&
+                             run.sourceRectangle.widthPixels == width &&
+                             run.sourceRectangle.heightPixels == 64U &&
+                             run.destinationPoint.y ==
+                                 static_cast<std::int32_t>(index * 64U),
+                         "full-row scroll run geometry was incorrect");
+    }
+    return success;
+}
+
+bool exact_reuse_preserves_full_hd_downward_scroll_rows()
+{
+    constexpr std::uint32_t width = 1920;
+    constexpr std::uint32_t height = 1080;
+    constexpr std::int32_t displacement = 64;
+    constexpr std::uint32_t expectedRunCount = 16;
+    const auto previous = makeTextured(width, height);
+    const auto current = scroll(previous, width, height, displacement);
+    std::array<ExactScrollCopyRun, kMaximumExactScrollCopyRuns> runs{};
+    const auto result = classifyExactVerticalScrollReuse(
+        view(previous, width, height), view(current, width, height),
+        {0, 0, width, height}, displacement, runs);
+
+    bool success = check(!result.overflow &&
+                             result.runCount == expectedRunCount &&
+                             result.reusablePixels ==
+                                 static_cast<std::uint64_t>(width) *
+                                     (height - displacement),
+                         "Full HD exact reuse returned the wrong coverage");
+    for (std::uint32_t index = 0; index < result.runCount; ++index)
+    {
+        const auto &run = runs[index];
+        const std::uint32_t destinationY =
+            (expectedRunCount - index) * 64U;
+        const std::uint32_t expectedHeight =
+            std::min(64U, height - destinationY);
+        success &= check(run.destinationPoint.x == 0 &&
+                             run.destinationPoint.y ==
+                                 static_cast<std::int32_t>(destinationY) &&
+                             run.sourceRectangle.x == 0 &&
+                             run.sourceRectangle.y ==
+                                 static_cast<std::int32_t>(destinationY -
+                                                           displacement) &&
+                             run.sourceRectangle.widthPixels == width &&
+                             run.sourceRectangle.heightPixels == expectedHeight,
+                         "Full HD exact reuse changed safe row ordering");
+    }
+    return success;
+}
+
+bool exact_reuse_splits_rows_around_changed_tiles()
+{
+    constexpr std::uint32_t width = 320;
+    constexpr std::uint32_t height = 240;
+    constexpr std::int32_t displacement = -64;
+    const auto previous = makeTextured(width, height);
+    auto current = scroll(previous, width, height, displacement);
+    setPixel(current, width, 70, 70, 0x00abcdefU);
+    std::array<ExactScrollCopyRun, kMaximumExactScrollCopyRuns> runs{};
+    const auto result = classifyExactVerticalScrollReuse(
+        view(previous, width, height), view(current, width, height),
+        {0, 0, width, height}, displacement, runs);
+
+    bool success = check(!result.overflow && result.runCount == 3 &&
+                             result.reusablePixels ==
+                                 static_cast<std::uint64_t>(width * 2U - 64U) *
+                                     64U,
+                         "changed tile was not excluded from exact reuse");
+    for (std::size_t index = 0; index < result.runCount; ++index)
+    {
+        const Rectangle destination = runs[index].destinationRectangle();
+        const bool overlapsChangedTile =
+            destination.y < 128 &&
+            static_cast<std::int64_t>(destination.x) +
+                    destination.widthPixels >
+                64 &&
+            static_cast<std::int64_t>(destination.y) +
+                    destination.heightPixels >
+                64;
+        success &= check(!overlapsChangedTile ||
+                             destination.x +
+                                     static_cast<std::int32_t>(
+                                         destination.widthPixels) <=
+                                 64 ||
+                             destination.x >= 128,
+                         "exact reuse included a modified tile");
+    }
+    return success;
+}
+
 bool exact_reuse_rejects_invalid_framebuffers()
 {
     constexpr std::uint32_t width = 320;
@@ -305,6 +416,9 @@ int main()
     success &= snapshot_memory_is_bounded();
     success &= invalid_capture_does_not_start_an_episode();
     success &= exact_reuse_fails_closed_on_run_overflow();
+    success &= exact_reuse_emits_one_run_per_identical_tile_row();
+    success &= exact_reuse_preserves_full_hd_downward_scroll_rows();
+    success &= exact_reuse_splits_rows_around_changed_tiles();
     success &= exact_reuse_rejects_invalid_framebuffers();
     success &= check(clientScrollCopyRequested(nullptr) &&
                          clientScrollCopyRequested("1") &&

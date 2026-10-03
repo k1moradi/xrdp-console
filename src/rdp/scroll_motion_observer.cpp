@@ -50,7 +50,8 @@ ScrollMotionObserver::configure(PixelSize geometry,
 {
     if (geometry.widthPixels == 0 || geometry.heightPixels == 0 ||
         config.minimumEpisodePercent > 100U ||
-        geometry.widthPixels >
+        static_cast<std::uint64_t>(geometry.widthPixels) *
+                geometry.heightPixels >
             std::numeric_limits<std::size_t>::max() / kBytesPerPixel)
     {
         return false;
@@ -120,7 +121,8 @@ bool
 ScrollMotionObserver::valid() const noexcept
 {
     if (geometry_.widthPixels == 0 || geometry_.heightPixels == 0 ||
-        geometry_.widthPixels >
+        static_cast<std::uint64_t>(geometry_.widthPixels) *
+                geometry_.heightPixels >
             std::numeric_limits<std::size_t>::max() / kBytesPerPixel)
     {
         return false;
@@ -202,7 +204,8 @@ ScrollMotionObserver::stageCapture(FramebufferView capture,
     if (!capture.valid() || !rectangleFits(destination, geometry_) ||
         capture.widthPixels != destination.widthPixels ||
         capture.heightPixels != destination.heightPixels ||
-        capture.widthPixels >
+        static_cast<std::uint64_t>(capture.widthPixels) *
+                capture.heightPixels >
             std::numeric_limits<std::size_t>::max() / kBytesPerPixel ||
         capture.strideBytes <
             static_cast<std::size_t>(capture.widthPixels) * kBytesPerPixel)
