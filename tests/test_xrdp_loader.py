@@ -275,13 +275,20 @@ def start_clipboard_requestor(helper: Path, display: str, target: str,
                               allow_refusal: bool = False,
                               delay_ms: int = 0,
                               validate_png: bool = False,
-                              raw_png_output: bool = False
+                              raw_png_output: bool = False,
+                              abandon_after_first_chunk: bool = False
                               ) -> subprocess.Popen[bytes]:
     command = [str(helper), "requestor", target]
-    if target == "image/bmp" or allow_refusal:
+    if (target == "image/bmp" or allow_refusal or
+            abandon_after_first_chunk):
         command.append(str(delay_ms))
     if allow_refusal:
         command.append("allow-refusal")
+    if abandon_after_first_chunk:
+        if not allow_refusal:
+            raise ValueError(
+                "abandoning an INCR requestor requires allow_refusal mode")
+        command.append("abandon-after-first-chunk")
     environment = os.environ.copy()
     environment["DISPLAY"] = display
     if validate_png:
@@ -289,7 +296,8 @@ def start_clipboard_requestor(helper: Path, display: str, target: str,
     if raw_png_output:
         environment["XRDP_CONSOLE_CLIPBOARD_PEER_RAW_PNG"] = "1"
     return subprocess.Popen(
-        command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        command, stdin=subprocess.PIPE if abandon_after_first_chunk else None,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=environment, bufsize=0, start_new_session=True)
 
 
@@ -1197,6 +1205,144 @@ def assert_clipboard_inflight_format_list_session(
         client, client_log_path, peer_count_before, 10.0)
     if peer_count_after <= peer_count_before:
         raise AssertionError("RDP peer did not render graphics after clipboard overlap")
+
+
+def assert_clipboard_abandoned_incr_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, log_path: Path,
+        chansrv_process: subprocess.Popen[object], chansrv_logs: Path,
+        chansrv_stdout: Path, source_display: str) -> None:
+    """Require a new remote generation to recover after its X11 reader dies."""
+    initial_list = wait_for_chansrv_pattern(
+        chansrv_logs,
+        r"event=format-list[^\n]*stored_formats=1 dib_format_id=8 "
+        r"png_format_id=-1",
+        15.0, chansrv_process, chansrv_stdout)
+    wait_for_peer_marker(client, client_log_path,
+                         "PEER_INITIAL_FORMAT_LIST_SENT", 10.0)
+
+    requestor = start_clipboard_requestor(
+        helper, source_display, "image/bmp", allow_refusal=True,
+        abandon_after_first_chunk=True)
+    try:
+        wait_for_chansrv_pattern(
+            chansrv_logs,
+            r"event=request format_id=8 target=image/bmp attempt=1",
+            15.0, chansrv_process, chansrv_stdout)
+        wait_for_peer_marker(
+            client, client_log_path,
+            "PEER_OLD_DIB_RESPONSE_SENT", 45.0)
+        wait_for_chansrv_pattern(
+            chansrv_logs,
+            r"event=response status=0x1 bytes=\d+ format_id=8 attempt=1",
+            45.0, chansrv_process, chansrv_stdout)
+        wait_for_chansrv_pattern(
+            chansrv_logs,
+            r"event=x11-delivery-issued path=incr target=.*requestor=0x[0-9a-f]+ "
+            r"property=0x[0-9a-f]+ bytes=\d+ generation=",
+            15.0, chansrv_process, chansrv_stdout)
+
+        if requestor.stdout is None or requestor.stdin is None:
+            raise AssertionError("abandoning requestor pipes were not created")
+        first_chunk = read_line(requestor.stdout, 15.0)
+        if first_chunk is None or b"REQUESTOR_FIRST_CHUNK_READY " not in first_chunk:
+            raise AssertionError(
+                "requestor did not stop after receiving the first INCR chunk:\n"
+                f"{first_chunk!r}\n[chansrv]\n"
+                f"{chansrv_log_text(chansrv_logs)}")
+        requestor_xid_match = re.search(
+            rb"requestor=(0x[0-9a-f]+)", first_chunk)
+        if requestor_xid_match is None:
+            raise AssertionError(
+                f"first-chunk marker lacked a requestor XID: {first_chunk!r}")
+
+        display_environment = os.environ.copy()
+        display_environment["DISPLAY"] = source_display
+        cleared = subprocess.run(
+            [str(helper), "selection-clear"], env=display_environment,
+            capture_output=True, check=False, timeout=3.0, text=True)
+        if cleared.returncode != 0 or "owner=0x0" not in cleared.stdout:
+            raise AssertionError(
+                "could not clear the active X11 selection before the newer "
+                f"remote offer: {cleared.stdout}{cleared.stderr}")
+
+        if client.stdin is None:
+            raise AssertionError("controlled FreeRDP peer input is unavailable")
+        client.stdin.write(b"SEND_TEXT_FORMAT_LIST\n")
+        client.stdin.flush()
+        wait_for_peer_marker(
+            client, client_log_path,
+            "PEER_REFRESH_TEXT_FORMAT_LIST_SENT", 10.0)
+        deferred = wait_for_chansrv_pattern(
+            chansrv_logs,
+            r"event=selection-owner-deferred generation=\d+ "
+            r"current_owner=0x0 chansrv_window=0x[0-9a-f]+ "
+            r"c2s_incr=1 s2c_incr=0",
+            10.0, chansrv_process, chansrv_stdout)
+        if "stored_formats=1 dib_format_id=-1 png_format_id=-1" not in deferred:
+            raise AssertionError(
+                "the deferred replacement generation was not text-only:\n"
+                f"{deferred}")
+
+        requestor.stdin.write(b"abandon\n")
+        requestor.stdin.flush()
+        abandoned = finish_clipboard_requestor(
+            requestor, 10.0, chansrv_logs)
+        if (b"REQUESTOR_ABANDONED" not in abandoned.encode() or
+                requestor_xid_match.group(1).decode() not in abandoned):
+            raise AssertionError(
+                "the X11 requestor did not destroy the expected window after "
+                f"one chunk: {abandoned!r}")
+
+        wait_for_chansrv_pattern(
+            chansrv_logs,
+            rf"event=c2s-incr-aborted reason=requestor-destroyed "
+            rf"requestor={requestor_xid_match.group(1).decode()} ",
+            10.0, chansrv_process, chansrv_stdout)
+        restored = wait_for_chansrv_pattern(
+            chansrv_logs,
+            r"event=selection-owner-restored reason=deferred-format-list "
+            r"generation=\d+ owner=0x[0-9a-f]+",
+            10.0, chansrv_process, chansrv_stdout)
+        chansrv_owner = re.search(r"owner=(0x[0-9a-f]+)", restored)
+        if (chansrv_owner is None or
+                clipboard_selection_owner(helper, source_display) !=
+                chansrv_owner.group(1)):
+            raise AssertionError(
+                "selection ownership was not restored to chansrv:\n"
+                f"{restored}\n[chansrv]\n"
+                f"{chansrv_log_text(chansrv_logs)}")
+
+        targets = finish_clipboard_requestor(
+            start_clipboard_requestor(helper, source_display, "TARGETS"),
+            10.0, chansrv_logs)
+        if ("UTF8_STRING" not in targets or "image/png" in targets or
+                "image/bmp" in targets):
+            raise AssertionError(
+                "the current selection exposed stale image formats after "
+                f"recovery: {targets!r}")
+        text = finish_clipboard_requestor(
+            start_clipboard_requestor(
+                helper, source_display, "UTF8_STRING"),
+            15.0, chansrv_logs)
+        if "overlap recovered" not in text:
+            raise AssertionError(
+                f"the latest remote text was not available: {text!r}")
+        if "stored_formats=1 dib_format_id=8 png_format_id=-1" not in initial_list:
+            raise AssertionError(
+                f"unexpected initial remote image list: {initial_list}")
+    finally:
+        stop_process(requestor)
+
+    if client.poll() is not None or chansrv_process.poll() is not None:
+        raise AssertionError(
+            "RDP or chansrv exited after abandoned INCR recovery:\n"
+            f"[FreeRDP peer]\n{read_text(client_log_path)}\n"
+            f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
+    if "XRDP_CONSOLE_SESSION_EXIT event=" in read_text(log_path):
+        raise AssertionError(
+            "xrdp exited after abandoned INCR recovery:\n"
+            f"{xrdp_log_excerpt(log_path)}")
 
 
 def assert_clipboard_inflight_png_format_list_session(
@@ -3057,7 +3203,8 @@ def assert_client_pixel(client_display: str,
                         f"{read_text(client_log_path) if client_log_path else ''}"
                     ) from error
                 line = read_line(
-                    probe.stdout, min(0.5, deadline - time.monotonic()))
+                    probe.stdout,
+                    max(0.0, min(0.5, deadline - time.monotonic())))
                 if not line:
                     continue
                 last_pixel = line
@@ -3337,6 +3484,7 @@ def main() -> int:
     clipboard_named_png_mode = False
     clipboard_no_server_copy_reconnect_mode = False
     clipboard_inflight_format_list_mode = False
+    clipboard_abandoned_incr_mode = False
     clipboard_inflight_png_format_list_mode = False
     clipboard_png_prefetch_mode = False
     clipboard_png_prefetch_bmp_mode = False
@@ -3349,6 +3497,7 @@ def main() -> int:
         "--clipboard-stress", "--clipboard-named-png",
         "--clipboard-no-server-copy-reconnect",
         "--clipboard-inflight-format-list",
+        "--clipboard-abandoned-incr",
         "--clipboard-inflight-png-format-list",
         "--clipboard-png-prefetch", "--clipboard-png-prefetch-bmp",
         "--clipboard-png-prefetch-fail", "--clipboard-png-prefetch-pending",
@@ -3366,6 +3515,8 @@ def main() -> int:
             selected_clipboard_mode == "--clipboard-no-server-copy-reconnect")
         clipboard_inflight_format_list_mode = (
             selected_clipboard_mode == "--clipboard-inflight-format-list")
+        clipboard_abandoned_incr_mode = (
+            selected_clipboard_mode == "--clipboard-abandoned-incr")
         clipboard_inflight_png_format_list_mode = (
             selected_clipboard_mode == "--clipboard-inflight-png-format-list")
         clipboard_png_prefetch_mode = selected_clipboard_mode in (
@@ -3383,6 +3534,7 @@ def main() -> int:
             selected_clipboard_mode == "--clipboard-png-prefetch-stale-image")
     clipboard_inflight_mode = (
         clipboard_inflight_format_list_mode or
+        clipboard_abandoned_incr_mode or
         clipboard_inflight_png_format_list_mode)
     clipboard_peer_mode = (
         clipboard_inflight_mode or clipboard_png_prefetch_mode or
@@ -3448,6 +3600,7 @@ def main() -> int:
             "[clipboard helper [overlap peer] "
             "--clipboard-stress|--clipboard-named-png|"
             "--clipboard-inflight-format-list|"
+            "--clipboard-abandoned-incr|"
             "--clipboard-inflight-png-format-list|"
             "--clipboard-png-prefetch]"
         )
@@ -3719,6 +3872,9 @@ password=smoke
                             "XRDP_CONSOLE_TEST_CLIPBOARD_SERVER_AUDIT"] = "1"
                     if clipboard_inflight_png_format_list_mode:
                         client_environment["XRDP_CONSOLE_TEST_PNG_OVERLAP"] = "1"
+                    if clipboard_abandoned_incr_mode:
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_DEFER_OVERLAP_FORMAT_LIST"] = "1"
                     if clipboard_png_prefetch_mode:
                         client_environment[
                             "XRDP_CONSOLE_TEST_PNG_PREFETCH_DELAY"] = "1"
@@ -3844,7 +4000,8 @@ password=smoke
                                 presentation_height != 768),
                             presentation_width=presentation_width,
                             presentation_height=presentation_height,
-                            client_log_path=client_log_path)
+                            client_log_path=client_log_path,
+                            source_display=source_display)
                         if fullhd_source_mode:
                             assert_client_stays_connected(
                                 client, os.environ["DISPLAY"], window_title,
@@ -3908,6 +4065,11 @@ password=smoke
                                 log_path, stdout_path, chansrv_process,
                                 chansrv_logs_path, chansrv_stdout_path,
                                 source_display, stimulus)
+                        elif clipboard_abandoned_incr_mode:
+                            assert_clipboard_abandoned_incr_session(
+                                clipboard_helper, client, client_log_path,
+                                log_path, chansrv_process, chansrv_logs_path,
+                                chansrv_stdout_path, source_display)
                         elif clipboard_inflight_png_format_list_mode:
                             assert_clipboard_inflight_png_format_list_session(
                                 clipboard_helper, client, client_log_path,

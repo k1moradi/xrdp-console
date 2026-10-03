@@ -1,0 +1,243 @@
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -261,6 +261,8 @@
+ static int g_formatIds[16];
+ static int g_num_formatIds = 0;
+ static int g_clipboard_owner_update_pending = 0;
++static Time g_clipboard_owner_update_time = CurrentTime;
++static int g_clipboard_owner_update_time_valid = 0;
+ 
+ /* Format ID assigned to "FileGroupDescriptorW" by the client */
+ static int g_file_group_descriptor_format_id = -1;
+@@ -460,6 +462,17 @@
+ 
+ /*****************************************************************************/
+ /* this is one way to get the current time from the x server */
++static Bool
++clipboard_is_get_time_event(Display *display, XEvent *xevent, XPointer arg)
++{
++    (void)display;
++    (void)arg;
++    return xevent->type == PropertyNotify &&
++           xevent->xproperty.window == g_wnd &&
++           xevent->xproperty.atom == g_get_time_atom &&
++           xevent->xproperty.state == PropertyNewValue;
++}
++
+ static Time
+ clipboard_get_server_time(void)
+ {
+@@ -471,12 +484,8 @@
+     XChangeProperty(g_display, g_wnd, g_get_time_atom, XA_STRING, 8,
+                     PropModeAppend, no_text, 0);
+ 
+-    /* wait for PropertyNotify */
+-    do
+-    {
+-        XMaskEvent(g_display, PropertyChangeMask, &xevent);
+-    }
+-    while (xevent.type != PropertyNotify);
++    /* Keep unrelated property events queued for their normal handlers. */
++    XIfEvent(g_display, &xevent, clipboard_is_get_time_event, NULL);
+ 
+     return xevent.xproperty.time;
+ }
+@@ -532,6 +541,8 @@
+     g_image_incr_terminator_window = 0;
+     g_image_incr_terminator_property = None;
+     g_clipboard_owner_update_pending = 0;
++    g_clipboard_owner_update_time = CurrentTime;
++    g_clipboard_owner_update_time_valid = 0;
+     clipboard_image_retry_cancel(&g_image_retry.policy);
+     g_image_retry.format_id = -1;
+     g_image_retry.format_generation = 0;
+@@ -689,6 +700,8 @@
+     g_image_incr_terminator_window = 0;
+     g_image_incr_terminator_property = None;
+     g_clipboard_owner_update_pending = 0;
++    g_clipboard_owner_update_time = CurrentTime;
++    g_clipboard_owner_update_time_valid = 0;
+     if (g_wnd != 0)
+     {
+         XDestroyWindow(g_display, g_wnd);
+@@ -1025,6 +1038,7 @@
+     g_selection_time = clipboard_get_server_time();
+     XSetSelectionOwner(g_display, g_clipboard_atom, g_wnd, g_selection_time);
+     owner = XGetSelectionOwner(g_display, g_clipboard_atom);
++    g_clipboard_owner_update_time_valid = 0;
+ 
+     if (owner != g_wnd)
+     {
+@@ -1053,6 +1067,7 @@
+     if (g_num_formatIds == 0 || g_wnd == 0)
+     {
+         g_clipboard_owner_update_pending = 0;
++        g_clipboard_owner_update_time_valid = 0;
+         return;
+     }
+ 
+@@ -1061,11 +1076,18 @@
+     if (owner == g_wnd)
+     {
+         g_got_selection = 1;
++        g_clipboard_owner_update_time_valid = 0;
+         return;
+     }
+ 
+-    /* Use the completing X event's timestamp so a newer local owner change
+-     * wins instead of being overwritten by this deferred update. */
++    /* Use the timestamp captured when the latest remote format list arrived.
++     * A later local selection change must not be overwritten by this delayed
++     * restoration. */
++    if (g_clipboard_owner_update_time_valid)
++    {
++        selection_time = g_clipboard_owner_update_time;
++    }
++    g_clipboard_owner_update_time_valid = 0;
+     g_selection_time = selection_time;
+     XSetSelectionOwner(g_display, g_clipboard_atom, g_wnd,
+                        g_selection_time);
+@@ -1214,7 +1236,7 @@
+                                         PropModeReplace, (tui8 *)val1, 1);
+         /* we need events from that other window */
+         select_result = XSelectInput(g_display, req->requestor,
+-                                     PropertyChangeMask);
++                                     PropertyChangeMask | StructureNotifyMask);
+         g_memset(&xev, 0, sizeof(xev));
+         xev.xselection.type = SelectionNotify;
+         xev.xselection.send_event = True;
+@@ -1602,17 +1624,22 @@
+     if (g_num_formatIds > 0 &&
+             (g_clip_c2s.incr_in_progress || g_clip_s2c.incr_in_progress))
+     {
++        g_clipboard_owner_update_time = clipboard_get_server_time();
++        g_clipboard_owner_update_time_valid = 1;
+         LOG(LOG_LEVEL_INFO,
+             "XRDP_CONSOLE_CLIPBOARD_IMAGE event=selection-owner-deferred "
+             "generation=%llu current_owner=0x%lx chansrv_window=0x%lx "
+-            "c2s_incr=%d s2c_incr=%d",
++            "c2s_incr=%d s2c_incr=%d selection_timestamp=%lu",
+             (unsigned long long)g_clipboard_format_generation,
+             XGetSelectionOwner(g_display, g_clipboard_atom), g_wnd,
+-            g_clip_c2s.incr_in_progress, g_clip_s2c.incr_in_progress);
++            g_clip_c2s.incr_in_progress, g_clip_s2c.incr_in_progress,
++            g_clipboard_owner_update_time);
+     }
+     if (g_num_formatIds == 0)
+     {
+         g_clipboard_owner_update_pending = 0;
++        g_clipboard_owner_update_time = CurrentTime;
++        g_clipboard_owner_update_time_valid = 0;
+     }
+     else if (g_clip_c2s.incr_in_progress || g_clip_s2c.incr_in_progress)
+     {
+@@ -1621,6 +1648,8 @@
+     else
+     {
+         g_clipboard_owner_update_pending = 0;
++        g_clipboard_owner_update_time = CurrentTime;
++        g_clipboard_owner_update_time_valid = 0;
+         if (clipboard_set_selection_owner() != 0)
+         {
+             LOG_DEVEL(LOG_LEVEL_ERROR, "clipboard_process_format_announce: "
+@@ -4242,6 +4271,90 @@
+ }
+ 
+ /*****************************************************************************/
++static void
++clipboard_event_destroy_notify(XDestroyWindowEvent *event)
++{
++    int c2s_match;
++    int terminator_match;
++
++    c2s_match = g_clip_c2s.incr_in_progress &&
++                event->window == g_clip_c2s.window;
++    terminator_match = g_image_incr_terminator_pending &&
++                       event->window == g_image_incr_terminator_window;
++    if (!c2s_match && !terminator_match)
++    {
++        return;
++    }
++
++    if (c2s_match)
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=c2s-incr-aborted "
++            "reason=requestor-destroyed requestor=0x%lx "
++            "property=0x%lx bytes_sent=%d total_bytes=%d "
++            "terminator_pending=%d generation=%llu",
++            event->window, g_clip_c2s.property,
++            g_clip_c2s.incr_bytes_done, g_clip_c2s.total_bytes,
++            terminator_match,
++            (unsigned long long)g_clipboard_format_generation);
++    }
++    else
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=c2s-incr-terminator-aborted "
++            "reason=requestor-destroyed requestor=0x%lx "
++            "property=0x%lx bytes_sent=%d total_bytes=%d "
++            "generation=%llu",
++            event->window, g_image_incr_terminator_property,
++            g_clip_c2s.incr_bytes_done, g_clip_c2s.total_bytes,
++            (unsigned long long)g_clipboard_format_generation);
++    }
++
++    if (c2s_match)
++    {
++        if (g_png_x11_transaction_active &&
++                g_png_x11_requestor == event->window &&
++                g_png_x11_property == g_clip_c2s.property)
++        {
++            clipboard_png_digest_reset();
++        }
++        g_clip_c2s.incr_in_progress = 0;
++        g_clip_c2s.incr_bytes_done = 0;
++        g_clip_c2s.window = 0;
++        g_clip_c2s.property = None;
++    }
++    if (terminator_match)
++    {
++        if (g_png_x11_transaction_active &&
++                g_png_x11_requestor == event->window &&
++                g_png_x11_property == g_image_incr_terminator_property)
++        {
++            clipboard_png_digest_reset();
++        }
++        g_image_incr_terminator_pending = 0;
++        g_image_incr_terminator_window = 0;
++        g_image_incr_terminator_property = None;
++        g_image_incr_terminator_generation = 0;
++    }
++
++    clipboard_drain_image_waiters();
++    if (g_clipboard_owner_update_pending &&
++            !g_clipboard_owner_update_time_valid)
++    {
++        LOG(LOG_LEVEL_WARNING,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=selection-owner-restore-declined "
++            "reason=missing-deferred-format-list-timestamp "
++            "generation=%llu requestor=0x%lx",
++            (unsigned long long)g_clipboard_format_generation, event->window);
++    }
++    else
++    {
++        clipboard_restore_deferred_selection_owner(
++            g_clipboard_owner_update_time);
++    }
++}
++
++/*****************************************************************************/
+ /* returns 0, event handled, 1 unhandled */
+ int
+ clipboard_xevent(void *xevent)
+@@ -4273,6 +4386,9 @@
+         case PropertyNotify:
+             clipboard_event_property_notify(lxevent);
+             break;
++        case DestroyNotify:
++            clipboard_event_destroy_notify(&lxevent->xdestroywindow);
++            break;
+         case UnmapNotify:
+             LOG_DEVEL(LOG_LEVEL_DEBUG, "chansrv::clipboard_xevent: got UnmapNotify");
+             break;

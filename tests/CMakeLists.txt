@@ -909,6 +909,27 @@ if(TARGET xrdp-console)
                 RESOURCE_LOCK xrdp_console_loader_display
                 RUN_SERIAL TRUE
                 LABELS "clipboard;integration")
+
+            add_test(NAME xrdp-loader-clipboard-abandoned-incr
+                COMMAND ${Python3_EXECUTABLE} -B
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+                $<TARGET_FILE:xrdp-console>
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+                "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+                $<TARGET_FILE:x11-pixel-probe>
+                $<TARGET_FILE:x11-latency-stimulus>
+                $<TARGET_FILE:clipboard-x11-session-peer>
+                $<TARGET_FILE:freerdp-cliprdr-overlap-peer>
+                --gfx-h264
+                --clipboard-abandoned-incr)
+            set_tests_properties(xrdp-loader-clipboard-abandoned-incr
+                PROPERTIES
+                ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+                TIMEOUT 150
+                RESOURCE_LOCK xrdp_console_loader_display
+                RUN_SERIAL TRUE
+                LABELS "clipboard;integration")
             add_test(NAME xrdp-loader-clipboard-inflight-png-format-list-session
                 COMMAND ${Python3_EXECUTABLE} -B
                 ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py

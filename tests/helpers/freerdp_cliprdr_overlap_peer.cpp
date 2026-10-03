@@ -73,6 +73,7 @@ struct PeerContext
     bool pngOverlap;
     bool pngPrefetchDelay;
     bool pngPrefetchFail;
+    bool deferOverlapFormatList;
     bool pngAllowed;
     bool pendingPngResponse;
     bool auditServerClipboard;
@@ -495,7 +496,7 @@ UINT on_server_format_data_request(
 
     if (request->requestedFormatId == kCfDib && !peer->overlapFormatsSent)
     {
-        if (!peer->pngPrefetchDelay)
+        if (!peer->pngPrefetchDelay && !peer->deferOverlapFormatList)
         {
             CLIPRDR_FORMAT textFormat{};
             textFormat.formatId = kCfUnicodeText;
@@ -648,6 +649,33 @@ UINT on_server_format_data_request(
 
 void process_control_command(PeerContext* peer, const char* command)
 {
+    if (std::strcmp(command, "SEND_TEXT_FORMAT_LIST") == 0)
+    {
+        if (!peer->deferOverlapFormatList || peer->overlapFormatsSent ||
+                peer->cliprdr == nullptr)
+        {
+            peer->failed = true;
+            std::fprintf(stderr,
+                         "invalid SEND_TEXT_FORMAT_LIST test command\n");
+            return;
+        }
+        CLIPRDR_FORMAT textFormat{};
+        textFormat.formatId = kCfUnicodeText;
+        const UINT status = send_format_list(peer->cliprdr, &textFormat, 1U);
+        if (status != CHANNEL_RC_OK)
+        {
+            peer->failed = true;
+            std::fprintf(stderr,
+                         "replacement text format-list send failed: %u\n",
+                         status);
+            return;
+        }
+        peer->overlapFormatsSent = true;
+        std::puts("PEER_REFRESH_TEXT_FORMAT_LIST_SENT");
+        std::fflush(stdout);
+        return;
+    }
+
     constexpr char kPasteServerFormatPrefix[] = "PASTE_SERVER_FORMAT ";
     if (std::strncmp(command, kPasteServerFormatPrefix,
                      sizeof(kPasteServerFormatPrefix) - 1U) == 0)
@@ -1102,6 +1130,7 @@ int main(int argc, char** argv)
     peer->pngOverlap = false;
     peer->pngPrefetchDelay = false;
     peer->pngPrefetchFail = false;
+    peer->deferOverlapFormatList = false;
     peer->pngAllowed = false;
     peer->pendingPngResponse = false;
     peer->auditServerClipboard = false;
@@ -1128,6 +1157,10 @@ int main(int argc, char** argv)
         std::getenv("XRDP_CONSOLE_TEST_PNG_PREFETCH_FAIL");
     peer->pngPrefetchFail = pngPrefetchFail != nullptr &&
                             std::strcmp(pngPrefetchFail, "1") == 0;
+    const char* deferOverlapFormatList =
+        std::getenv("XRDP_CONSOLE_TEST_DEFER_OVERLAP_FORMAT_LIST");
+    peer->deferOverlapFormatList = deferOverlapFormatList != nullptr &&
+        std::strcmp(deferOverlapFormatList, "1") == 0;
     const char* auditServerClipboard =
         std::getenv("XRDP_CONSOLE_TEST_CLIPBOARD_SERVER_AUDIT");
     peer->auditServerClipboard = auditServerClipboard != nullptr &&

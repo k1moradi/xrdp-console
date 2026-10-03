@@ -1114,6 +1114,27 @@ print_selection_owner(void)
 }
 
 static int
+clear_selection_owner(void)
+{
+    Display *display = XOpenDisplay(NULL);
+    Atom clipboard;
+    Window owner;
+
+    if (display == NULL)
+    {
+        fputs("cannot open selection-owner display\n", stderr);
+        return 1;
+    }
+    clipboard = XInternAtom(display, "CLIPBOARD", False);
+    XSetSelectionOwner(display, clipboard, None, CurrentTime);
+    XSync(display, False);
+    owner = XGetSelectionOwner(display, clipboard);
+    printf("SELECTION_OWNER_CLEARED owner=0x%lx\n", (unsigned long)owner);
+    XCloseDisplay(display);
+    return owner == None ? 0 : 1;
+}
+
+static int
 wait_for_x_event(Display *display, Window window, Atom selection, Atom target,
                  Atom property, int event_type, int timeout_ms)
 {
@@ -1258,6 +1279,7 @@ run_requestor(int argc, char **argv)
     size_t incr_expected_bytes = 0;
     long delay_ms = 0;
     int accept_refusal = 0;
+    int abandon_after_first_chunk = 0;
     int used_incr = 0;
     const char *raw_png_env = getenv("XRDP_CONSOLE_CLIPBOARD_PEER_RAW_PNG");
     int raw_png_output = raw_png_env != NULL && strcmp(raw_png_env, "1") == 0;
@@ -1267,10 +1289,10 @@ run_requestor(int argc, char **argv)
                               strcmp(validate_png_env, "1") == 0;
     int status;
 
-    if (argc < 3 || argc > 5)
+    if (argc < 3 || argc > 6)
     {
         fputs("requestor usage: requestor TARGET "
-              "[delay_ms [allow-refusal]]\n",
+              "[delay_ms [allow-refusal [abandon-after-first-chunk]]]\n",
               stderr);
         return 2;
     }
@@ -1294,6 +1316,18 @@ run_requestor(int argc, char **argv)
             return 2;
         }
         accept_refusal = 1;
+    }
+    if (argc == 6)
+    {
+        if (strcmp(argv[4], "allow-refusal") != 0 ||
+                strcmp(argv[5], "abandon-after-first-chunk") != 0)
+        {
+            fputs("requestor modes must be allow-refusal and "
+                  "abandon-after-first-chunk\n", stderr);
+            return 2;
+        }
+        accept_refusal = 1;
+        abandon_after_first_chunk = 1;
     }
     display = XOpenDisplay(NULL);
     if (display == NULL)
@@ -1489,6 +1523,32 @@ run_requestor(int argc, char **argv)
                 XDeleteProperty(display, window, property);
                 XFlush(display);
                 break;
+            }
+            if (abandon_after_first_chunk)
+            {
+                char command[32];
+
+                printf("REQUESTOR_FIRST_CHUNK_READY target=%s "
+                       "requestor=0x%lx first_chunk_bytes=%zu "
+                       "announced_bytes=%zu\n",
+                       argv[2], window, chunk_bytes, incr_expected_bytes);
+                fflush(stdout);
+                if (fgets(command, sizeof(command), stdin) == NULL ||
+                        strcmp(command, "abandon\n") != 0)
+                {
+                    fputs("ERROR expected abandon command\n", stderr);
+                    XFree(chunk);
+                    status = 1;
+                    goto done;
+                }
+                printf("REQUESTOR_ABANDONED target=%s requestor=0x%lx "
+                       "after_chunks=1 first_chunk_bytes=%zu "
+                       "announced_bytes=%zu\n",
+                       argv[2], window, chunk_bytes, incr_expected_bytes);
+                fflush(stdout);
+                XFree(chunk);
+                status = 0;
+                goto done;
             }
             if (append_bytes(&result, &result_bytes, &result_capacity,
                              chunk, chunk_bytes) != 0)
@@ -2085,6 +2145,10 @@ main(int argc, char **argv)
     if (argc == 2 && strcmp(argv[1], "selection-owner") == 0)
     {
         return print_selection_owner();
+    }
+    if (argc == 2 && strcmp(argv[1], "selection-clear") == 0)
+    {
+        return clear_selection_owner();
     }
     if (argc >= 3 && strcmp(argv[1], "requestor") == 0)
     {
