@@ -296,91 +296,10 @@ convertBgraToNv12_709FullRange(
     FramebufferView source, std::span<std::byte> destination) noexcept
 {
     const PixelSize geometry{source.widthPixels, source.heightPixels};
-    const std::size_t requiredBytes = nv12FrameBytes(geometry);
-    if (!source.valid() || requiredBytes == 0 ||
-        static_cast<std::uint64_t>(source.widthPixels) *
-                source.heightPixels >
-            std::numeric_limits<std::size_t>::max() / 4U ||
-        source.strideBytes < static_cast<std::size_t>(source.widthPixels) * 4U ||
-        destination.size() < requiredBytes)
-    {
-        return false;
-    }
-
-    const std::size_t yPlaneBytes =
-        static_cast<std::size_t>(source.widthPixels) * source.heightPixels;
-    const auto *sourceBytes =
-        reinterpret_cast<const std::uint8_t *>(source.pixels.data());
-    auto *yPlane = reinterpret_cast<std::uint8_t *>(destination.data());
-    auto *uvPlane = yPlane + yPlaneBytes;
-
-    for (std::uint32_t y = 0; y < source.heightPixels; y += 2U)
-    {
-        const std::uint8_t *top = sourceBytes + source.strideBytes * y;
-        const std::uint8_t *bottom = top + source.strideBytes;
-        std::uint8_t *yTop = yPlane +
-            static_cast<std::size_t>(y) * source.widthPixels;
-        std::uint8_t *yBottom = yTop + source.widthPixels;
-        std::uint8_t *uv = uvPlane +
-            static_cast<std::size_t>(y / 2U) * source.widthPixels;
-
-#if defined(__GNUC__) && !defined(__clang__)
-        const std::uint8_t *topPixel = top;
-        const std::uint8_t *bottomPixel = bottom;
-        for (std::uint32_t x = 0; x < source.widthPixels;
-             x += 2U, topPixel += 8U, bottomPixel += 8U,
-             yTop += 2U, yBottom += 2U, uv += 2U)
-        {
-            const Yuv topLeft = bgraToYuv709FullRange(
-                topPixel[0], topPixel[1], topPixel[2]);
-            const Yuv topRight = bgraToYuv709FullRange(
-                topPixel[4], topPixel[5], topPixel[6]);
-            const Yuv bottomLeft = bgraToYuv709FullRange(
-                bottomPixel[0], bottomPixel[1], bottomPixel[2]);
-            const Yuv bottomRight = bgraToYuv709FullRange(
-                bottomPixel[4], bottomPixel[5], bottomPixel[6]);
-
-            yTop[0] = static_cast<std::uint8_t>(topLeft.y);
-            yTop[1] = static_cast<std::uint8_t>(topRight.y);
-            yBottom[0] = static_cast<std::uint8_t>(bottomLeft.y);
-            yBottom[1] = static_cast<std::uint8_t>(bottomRight.y);
-            uv[0] = static_cast<std::uint8_t>(
-                (topLeft.u + topRight.u + bottomLeft.u + bottomRight.u + 2) /
-                4);
-            uv[1] = static_cast<std::uint8_t>(
-                (topLeft.v + topRight.v + bottomLeft.v + bottomRight.v + 2) /
-                4);
-        }
-#else
-        for (std::uint32_t x = 0; x < source.widthPixels; x += 2U)
-        {
-            const std::size_t byteOffset = static_cast<std::size_t>(x) * 4U;
-            const Yuv topLeft = bgraToYuv709FullRange(
-                top[byteOffset], top[byteOffset + 1U], top[byteOffset + 2U]);
-            const Yuv topRight = bgraToYuv709FullRange(
-                top[byteOffset + 4U], top[byteOffset + 5U],
-                top[byteOffset + 6U]);
-            const Yuv bottomLeft = bgraToYuv709FullRange(
-                bottom[byteOffset], bottom[byteOffset + 1U],
-                bottom[byteOffset + 2U]);
-            const Yuv bottomRight = bgraToYuv709FullRange(
-                bottom[byteOffset + 4U], bottom[byteOffset + 5U],
-                bottom[byteOffset + 6U]);
-
-            yTop[x] = static_cast<std::uint8_t>(topLeft.y);
-            yTop[x + 1U] = static_cast<std::uint8_t>(topRight.y);
-            yBottom[x] = static_cast<std::uint8_t>(bottomLeft.y);
-            yBottom[x + 1U] = static_cast<std::uint8_t>(bottomRight.y);
-            uv[x] = static_cast<std::uint8_t>(
-                (topLeft.u + topRight.u + bottomLeft.u + bottomRight.u + 2) /
-                4);
-            uv[x + 1U] = static_cast<std::uint8_t>(
-                (topLeft.v + topRight.v + bottomLeft.v + bottomRight.v + 2) /
-                4);
-        }
-#endif
-    }
-    return true;
+    const Rectangle fullFrame{
+        0, 0, source.widthPixels, source.heightPixels};
+    return updateNv12RectangleFromBgraRegion_709FullRange(
+        source, fullFrame, fullFrame, geometry, destination);
 }
 
 bool

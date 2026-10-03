@@ -2,6 +2,7 @@
 
 #include "rdp/gfx_avc420_frame.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -34,6 +35,86 @@ std::uint32_t readU32(std::span<const std::byte> bytes, std::size_t offset)
 {
     return readU16(bytes, offset) |
            static_cast<std::uint32_t>(readU16(bytes, offset + 2)) << 16U;
+}
+
+struct ScalarYuv final
+{
+    std::uint8_t y{};
+    std::uint8_t u{};
+    std::uint8_t v{};
+};
+
+int divideBy256Floor(int value)
+{
+    return value >= 0 ? value / 256 : -((-value + 255) / 256);
+}
+
+ScalarYuv scalarBgraToYuv709FullRange(const std::uint8_t *pixel)
+{
+    const int blue = pixel[0];
+    const int green = pixel[1];
+    const int red = pixel[2];
+    return {
+        static_cast<std::uint8_t>(std::clamp(
+            (54 * red + 183 * green + 18 * blue) / 256, 0, 255)),
+        static_cast<std::uint8_t>(std::clamp(
+            divideBy256Floor(-29 * red - 99 * green + 128 * blue) + 128,
+            0, 255)),
+        static_cast<std::uint8_t>(std::clamp(
+            divideBy256Floor(128 * red - 116 * green - 12 * blue) + 128,
+            0, 255)),
+    };
+}
+
+std::vector<std::byte> scalarBgraToNv12Reference(FramebufferView source)
+{
+    const PixelSize geometry{source.widthPixels, source.heightPixels};
+    std::vector<std::byte> result(nv12FrameBytes(geometry));
+    if (!source.valid() || result.empty())
+    {
+        return {};
+    }
+
+    const auto *sourceBytes =
+        reinterpret_cast<const std::uint8_t *>(source.pixels.data());
+    auto *yPlane = reinterpret_cast<std::uint8_t *>(result.data());
+    const std::size_t yPlaneBytes =
+        static_cast<std::size_t>(source.widthPixels) * source.heightPixels;
+    auto *uvPlane = yPlane + yPlaneBytes;
+    for (std::uint32_t y = 0; y < source.heightPixels; y += 2U)
+    {
+        const auto *top = sourceBytes +
+            static_cast<std::size_t>(y) * source.strideBytes;
+        const auto *bottom = top + source.strideBytes;
+        for (std::uint32_t x = 0; x < source.widthPixels; x += 2U)
+        {
+            const std::size_t byteOffset = static_cast<std::size_t>(x) * 4U;
+            const ScalarYuv topLeft = scalarBgraToYuv709FullRange(
+                top + byteOffset);
+            const ScalarYuv topRight = scalarBgraToYuv709FullRange(
+                top + byteOffset + 4U);
+            const ScalarYuv bottomLeft = scalarBgraToYuv709FullRange(
+                bottom + byteOffset);
+            const ScalarYuv bottomRight = scalarBgraToYuv709FullRange(
+                bottom + byteOffset + 4U);
+            const std::size_t lumaOffset =
+                static_cast<std::size_t>(y) * source.widthPixels + x;
+            yPlane[lumaOffset] = topLeft.y;
+            yPlane[lumaOffset + 1U] = topRight.y;
+            yPlane[lumaOffset + source.widthPixels] = bottomLeft.y;
+            yPlane[lumaOffset + source.widthPixels + 1U] = bottomRight.y;
+
+            const std::size_t chromaOffset =
+                static_cast<std::size_t>(y / 2U) * source.widthPixels + x;
+            uvPlane[chromaOffset] = static_cast<std::uint8_t>(
+                (topLeft.u + topRight.u + bottomLeft.u + bottomRight.u + 2) /
+                4);
+            uvPlane[chromaOffset + 1U] = static_cast<std::uint8_t>(
+                (topLeft.v + topRight.v + bottomLeft.v + bottomRight.v + 2) /
+                4);
+        }
+    }
+    return result;
 }
 
 bool conversion_matches_xorgxrdp_reference()
@@ -126,21 +207,26 @@ bool rectangle_conversion_matches_scalar_reference()
         const std::size_t outputBytes =
             nv12FrameBytes({conversionCase.widthPixels,
                             conversionCase.heightPixels});
-        std::vector<std::byte> scalar(outputBytes);
+        const std::vector<std::byte> scalar =
+            scalarBgraToNv12Reference(source);
+        std::vector<std::byte> fullFrame(outputBytes);
         std::vector<std::byte> candidate(outputBytes);
         const Rectangle fullRectangle{
             0, 0, conversionCase.widthPixels, conversionCase.heightPixels};
-        const bool scalarConverted =
-            convertBgraToNv12_709FullRange(source, scalar);
+        const bool fullFrameConverted =
+            convertBgraToNv12_709FullRange(source, fullFrame);
         const bool candidateConverted =
             updateNv12RectangleFromBgraRegion_709FullRange(
                 source, fullRectangle, fullRectangle,
                 {conversionCase.widthPixels, conversionCase.heightPixels},
                 candidate);
-        success &= check(scalarConverted && candidateConverted,
+        success &= check(scalar.size() == outputBytes && fullFrameConverted &&
+                             candidateConverted,
                          "AVC420 parity case conversion failed");
+        success &= check(fullFrame == scalar,
+                         "full-frame AVC420 conversion diverged from scalar output");
         success &= check(candidate == scalar,
-                         "optimized AVC420 conversion diverged from scalar output");
+                         "rectangle AVC420 conversion diverged from scalar output");
     }
     return success;
 }
@@ -173,17 +259,17 @@ bool ssse3_channel_gather_matches_scalar_zero_ff_patterns()
     const FramebufferView source{
         std::as_bytes(std::span<const std::uint8_t>(bgra)),
         kWidthPixels, kHeightPixels, kStrideBytes};
-    std::vector<std::byte> scalar(nv12FrameBytes({kWidthPixels, kHeightPixels}));
-    std::vector<std::byte> candidate(scalar.size());
+    const std::vector<std::byte> scalar =
+        scalarBgraToNv12Reference(source);
+    std::vector<std::byte> candidate(
+        nv12FrameBytes({kWidthPixels, kHeightPixels}));
     const Rectangle fullRectangle{0, 0, kWidthPixels, kHeightPixels};
-    const bool scalarConverted =
-        convertBgraToNv12_709FullRange(source, scalar);
     const bool candidateConverted =
         updateNv12RectangleFromBgraRegion_709FullRange(
             source, fullRectangle, fullRectangle,
             {kWidthPixels, kHeightPixels}, candidate);
 
-    return check(scalarConverted && candidateConverted,
+    return check(!scalar.empty() && candidateConverted,
                  "exhaustive SSSE3 channel-gather conversion failed") &&
            check(candidate == scalar,
                  "SSSE3 channel gather diverged on a zero/255 byte pattern");

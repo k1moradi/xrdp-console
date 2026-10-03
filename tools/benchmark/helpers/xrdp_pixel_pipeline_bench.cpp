@@ -52,6 +52,7 @@ using xrdp_console::rdp::convertBgraToNv12_709FullRange;
 using xrdp_console::rdp::gfxAvc420CommandBytes;
 using xrdp_console::rdp::makeH264PresentationPlan;
 using xrdp_console::rdp::nv12FrameBytes;
+using xrdp_console::rdp::updateNv12RectangleFromBgraRegion_709FullRange;
 using xrdp_console::rdp::updateNv12Rectangle_709FullRange;
 
 struct X264Deleter final
@@ -78,6 +79,7 @@ struct Options final
 {
     std::size_t samples{kDefaultSamples};
     std::string displayName{};
+    bool nv12Only{};
     bool help{};
 };
 
@@ -128,9 +130,11 @@ parsePositiveSize(std::string_view text, std::size_t &value) noexcept
 void
 printUsage(const char *program)
 {
-    std::printf("Usage: %s [--samples COUNT] [--display DISPLAY] [--help]\n"
+    std::printf("Usage: %s [--samples COUNT] [--display DISPLAY] "
+                "[--nv12-only] [--help]\n"
                 "Measure CPU-side pixel-pipeline stages against the current "
                 "X11 root.\n"
+                "--nv12-only measures only full-frame BGRA-to-NV12 paths.\n"
                 "COUNT must be in [1, %zu] (default %zu). OpenGL is not used.\n",
                 program, kMaximumSamples, kDefaultSamples);
 }
@@ -149,6 +153,10 @@ parseOptions(int argc, char **argv, Options &options)
         if (argument == "--help")
         {
             options.help = true;
+        }
+        else if (argument == "--nv12-only")
+        {
+            options.nv12Only = true;
         }
         else if (argument == "--samples")
         {
@@ -319,6 +327,57 @@ framePixels(PixelSize size) noexcept
 bgraBytes(PixelSize size) noexcept
 {
     return framePixels(size) * kBytesPerBgraPixel;
+}
+
+[[nodiscard]] bool
+measureNv12FullFramePaths(std::size_t sampleCount, StageSamples &samples,
+                          FramebufferView source, Rectangle fullSource,
+                          PixelSize sourceGeometry,
+                          std::uint64_t sourcePixels,
+                          std::size_t sourceBgraBytes,
+                          std::vector<std::byte> &sourceNv12,
+                          std::vector<std::byte> &rectangleNv12)
+{
+    const std::size_t sourceNv12Bytes = nv12FrameBytes(sourceGeometry);
+    if (sourceNv12Bytes == 0)
+    {
+        std::fputs("source NV12 geometry is invalid\n", stderr);
+        return false;
+    }
+
+    const auto noPreparation = [](std::size_t) { return true; };
+    sourceNv12.resize(sourceNv12Bytes);
+    if (!measure(samples, sampleCount, noPreparation,
+                 [&](std::size_t, std::uint64_t &) {
+                     return convertBgraToNv12_709FullRange(source, sourceNv12);
+                 }))
+    {
+        std::fputs("source BGRA-to-NV12 conversion failed\n", stderr);
+        return false;
+    }
+    reportStage("bgra_to_nv12_full_range", samples, sourcePixels,
+                sourceBgraBytes, sourceNv12Bytes);
+
+    rectangleNv12.resize(sourceNv12Bytes);
+    if (!measure(samples, sampleCount, noPreparation,
+                 [&](std::size_t, std::uint64_t &) {
+                     return updateNv12RectangleFromBgraRegion_709FullRange(
+                         source, fullSource, fullSource, sourceGeometry,
+                         rectangleNv12);
+                 }))
+    {
+        std::fputs("full-frame NV12 rectangle conversion failed\n", stderr);
+        return false;
+    }
+    if (rectangleNv12 != sourceNv12)
+    {
+        std::fputs("full-frame NV12 rectangle output differs from reference\n",
+                   stderr);
+        return false;
+    }
+    reportStage("bgra_to_nv12_full_frame_rectangle_kernel", samples,
+                sourcePixels, sourceBgraBytes, sourceNv12Bytes);
+    return true;
 }
 
 [[nodiscard]] bool
@@ -649,17 +708,30 @@ runBenchmark(const Options &options)
         0, 0, sourceGeometry.widthPixels, sourceGeometry.heightPixels};
     FramebufferView liveCapture{};
     const auto noPreparation = [](std::size_t) { return true; };
-    if (!measure(samples, options.samples, noPreparation,
-                 [&](std::size_t, std::uint64_t &) {
-                     liveCapture = capture.capture(fullSource);
-                     return liveCapture.valid();
-                 }))
+    if (options.nv12Only)
     {
-        std::fputs("XShm capture measurement failed\n", stderr);
-        return false;
+        liveCapture = capture.capture(fullSource);
+        if (!liveCapture.valid())
+        {
+            std::fputs("XShm capture failed for NV12-only measurement\n",
+                       stderr);
+            return false;
+        }
     }
-    reportStage("xshm_capture_full_frame", samples, sourcePixels,
-                bgraBytes(sourceGeometry), bgraBytes(sourceGeometry));
+    else
+    {
+        if (!measure(samples, options.samples, noPreparation,
+                     [&](std::size_t, std::uint64_t &) {
+                         liveCapture = capture.capture(fullSource);
+                         return liveCapture.valid();
+                     }))
+        {
+            std::fputs("XShm capture measurement failed\n", stderr);
+            return false;
+        }
+        reportStage("xshm_capture_full_frame", samples, sourcePixels,
+                    bgraBytes(sourceGeometry), bgraBytes(sourceGeometry));
+    }
 
     std::vector<std::byte> sourceStorage;
     FramebufferView source{};
@@ -669,6 +741,23 @@ runBenchmark(const Options &options)
         return false;
     }
     const std::size_t sourceBgraBytes = bgraBytes(sourceGeometry);
+
+    if (options.nv12Only)
+    {
+        std::vector<std::byte> sourceNv12{};
+        std::vector<std::byte> rectangleNv12{};
+        if (!measureNv12FullFramePaths(
+                options.samples, samples, source, fullSource, sourceGeometry,
+                sourcePixels, sourceBgraBytes, sourceNv12, rectangleNv12))
+        {
+            return false;
+        }
+        std::printf("summary nv12_only=1 source_width=%u source_height=%u "
+                    "source_bgra_bytes=%zu source_nv12_bytes=%zu samples=%zu\n",
+                    sourceGeometry.widthPixels, sourceGeometry.heightPixels,
+                    sourceBgraBytes, sourceNv12.size(), options.samples);
+        return true;
+    }
 
     if (!measure(samples, options.samples, noPreparation,
                  [&](std::size_t, std::uint64_t &) {
@@ -784,19 +873,14 @@ runBenchmark(const Options &options)
                 outputPixels * kBytesPerBgraPixel,
                 outputPixels * kBytesPerBgraPixel);
 
-    const std::size_t sourceNv12Bytes = nv12FrameBytes(sourceGeometry);
-    std::vector<std::byte> sourceNv12(sourceNv12Bytes);
-    if (sourceNv12Bytes == 0 ||
-        !measure(samples, options.samples, noPreparation,
-                 [&](std::size_t, std::uint64_t &) {
-                     return convertBgraToNv12_709FullRange(source, sourceNv12);
-                 }))
+    std::vector<std::byte> sourceNv12{};
+    std::vector<std::byte> rectangleNv12{};
+    if (!measureNv12FullFramePaths(
+            options.samples, samples, source, fullSource, sourceGeometry,
+            sourcePixels, sourceBgraBytes, sourceNv12, rectangleNv12))
     {
-        std::fputs("source BGRA-to-NV12 conversion failed\n", stderr);
         return false;
     }
-    reportStage("bgra_to_nv12_full_range", samples, sourcePixels,
-                sourceBgraBytes, sourceNv12Bytes);
 
     const std::size_t presentationNv12Bytes =
         nv12FrameBytes(frameGeometry);
