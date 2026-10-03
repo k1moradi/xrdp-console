@@ -1,0 +1,66 @@
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -916,6 +916,12 @@
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_send_format_announce: data out, sending "
+               "CLIPRDR_FORMAT_ANNOUNCE (clip_msg_id = 2)");
+     rv = send_channel_data(g_cliprdr_chan_id, s->data, size);
++    if (rv == 0)
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_LOCAL_FORMAT_LIST event=sent "
++            "xrdp_clip_type=%d", xrdp_clip_type);
++    }
+     free_stream(s);
+     return rv;
+ }
+@@ -1457,6 +1463,28 @@
+     }
+ }
+ 
++static void
++clipboard_cancel_stale_local_format_discovery(void)
++{
++    if (!clipboard_retry_policy_active(&g_selection_retry.policy) ||
++            g_selection_retry.target != g_targets_atom ||
++            g_selection_retry.data_response_expected)
++    {
++        return;
++    }
++
++    LOG(LOG_LEVEL_INFO,
++        "XRDP_CONSOLE_CLIPBOARD_RETRY cancel target=TARGETS "
++        "reason=remote-format-list retry_generation=%llu attempt=%u",
++        (unsigned long long)g_selection_retry.policy.generation,
++        g_selection_retry.policy.attempt);
++    clipboard_retry_policy_cancel(&g_selection_retry.policy);
++    g_selection_retry.target = None;
++    g_selection_retry.time = CurrentTime;
++    g_selection_retry.data_response_expected = 0;
++    g_selection_retry.retry_timeout_pending = 0;
++}
++
+ /*****************************************************************************/
+ /* sent by client or server when its local system clipboard is
+    updated with new clipboard data; contains Clipboard Format ID
+@@ -1472,6 +1500,7 @@
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_format_announce: "
+               "CLIPRDR_FORMAT_ANNOUNCE");
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_format_announce %d", clip_msg_len);
++    clipboard_cancel_stale_local_format_discovery();
+     clipboard_invalidate_image_request("new-format-list");
+     g_clipboard_format_generation =
+         clipboard_image_retry_next_generation(g_clipboard_format_generation);
+@@ -2875,9 +2904,10 @@
+          lxevent->target == g_targets_atom) &&
+             !clipboard_retry_policy_active(&g_selection_retry.policy))
+     {
+-        LOG_DEVEL(LOG_LEVEL_DEBUG,
+-                  "clipboard_event_selection_notify: ignoring stale text "
+-                  "conversion response");
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_RETRY stale-response-ignored "
++            "target=%s reason=no-active-conversion",
++            get_atom_text(lxevent->target));
+         return 0;
+     }
+     if (lxevent->property == None)

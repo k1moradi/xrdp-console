@@ -848,7 +848,8 @@ def assert_clipboard_image_session(
     stealer_environment.pop("XAUTHORITY", None)
     with stealer_log_path.open("w", encoding="utf-8") as stealer_log:
         selection_stealer = subprocess.Popen(
-            [str(helper), "stealer"], stdin=subprocess.PIPE,
+            [str(helper), "stealer-stale-targets-retry"],
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=stealer_log,
             env=stealer_environment, bufsize=0, start_new_session=True)
     selection_stealers.append(selection_stealer)
@@ -867,10 +868,53 @@ def assert_clipboard_image_session(
         rf"event=x11-owner-change owner={re.escape(stealer_window_id)} ",
         5.0, chansrv_process, chansrv_stdout)
 
+    # Force the retry state instead of relying on X11/CPU scheduling. The
+    # helper refuses its first TARGETS conversion, then holds the retry's
+    # SelectionRequest until after the newer client Format List is accepted.
+    wait_for_owner_marker(
+        selection_stealer, "STEALER_TARGETS_REFUSED_ONCE", 5.0,
+        stealer_log_path)
+    wait_for_chansrv_pattern(
+        chansrv_logs,
+        r"XRDP_CONSOLE_CLIPBOARD_RETRY retry target=TARGETS attempt=2",
+        5.0, chansrv_process, chansrv_stdout)
+    wait_for_owner_marker(
+        selection_stealer, "STEALER_TARGETS_RETRY_HELD", 5.0,
+        stealer_log_path)
+
+    # A property=None SelectionNotify is a refusal, not a timeout. Keep this
+    # direct probe separate from chansrv's deliberately held TARGETS retry.
+    refusal_probe = start_clipboard_requestor(
+        helper, source_display, "application/x-xrdp-console-refusal-probe")
+    try:
+        refusal_stdout, refusal_stderr = refusal_probe.communicate(timeout=5.0)
+    except subprocess.TimeoutExpired as error:
+        stop_process(refusal_probe)
+        refusal_stdout, refusal_stderr = refusal_probe.communicate()
+        raise AssertionError(
+            "X11 refusal diagnostic probe timed out:\n"
+            f"stdout={refusal_stdout.decode(errors='replace')}\n"
+            f"stderr={refusal_stderr.decode(errors='replace')}") from error
+    refusal_stderr_text = refusal_stderr.decode("utf-8", errors="replace")
+    if (refusal_probe.returncode != 1 or
+            "ERROR selection-refused" not in refusal_stderr_text):
+        raise AssertionError(
+            "X11 property=None refusal was not diagnosed explicitly:\n"
+            f"returncode={refusal_probe.returncode}\n"
+            f"stdout={refusal_stdout.decode(errors='replace')}\n"
+            f"stderr={refusal_stderr_text}")
+
     formats_before_deferred_owner = clipboard_format_list_count(chansrv_logs)
+    local_format_lists_before_race = chansrv_log_text(chansrv_logs).count(
+        "XRDP_CONSOLE_CLIPBOARD_LOCAL_FORMAT_LIST event=sent")
     owner.stdin.write(b"switch-text\n")
     owner.stdin.flush()
     wait_for_owner_marker(owner, "TEXT_OWNER_CHANGED", 5.0, owner_log_path)
+    wait_for_chansrv_pattern(
+        chansrv_logs,
+        r"XRDP_CONSOLE_CLIPBOARD_RETRY cancel target=TARGETS "
+        r"reason=remote-format-list",
+        10.0, chansrv_process, chansrv_stdout)
     deferred_owner_logs = wait_for_chansrv_marker(
         chansrv_logs, "event=format-list", formats_before_deferred_owner + 1,
         10.0, chansrv_process, chansrv_stdout)
@@ -883,6 +927,49 @@ def assert_clipboard_image_session(
             "format-list did not defer chansrv selection ownership while the "
             "stolen-owner image INCR was active:\n"
             f"[chansrv]\n{deferred_owner_logs}")
+
+    if selection_stealer.stdin is None:
+        raise AssertionError("selection-stealer retry control pipe is unavailable")
+    stale_response_count_before_release = chansrv_log_text(chansrv_logs).count(
+        "XRDP_CONSOLE_CLIPBOARD_RETRY stale-response-ignored target=TARGETS")
+    selection_stealer.stdin.write(b"release-targets\n")
+    selection_stealer.stdin.flush()
+    release_marker = wait_for_owner_marker(
+        selection_stealer, "STEALER_TARGETS_RETRY_RELEASED", 5.0,
+        stealer_log_path)
+    released_count_match = re.search(r"count=(\d+)", release_marker)
+    if released_count_match is None or int(released_count_match.group(1)) < 1:
+        raise AssertionError(
+            "selection stealer did not release a held TARGETS retry:\n"
+            f"{release_marker}\n{read_text(stealer_log_path)}")
+    released_count = int(released_count_match.group(1))
+    stale_response_count = stale_response_count_before_release
+    wait_for_chansrv_pattern(
+        chansrv_logs,
+        r"XRDP_CONSOLE_CLIPBOARD_RETRY stale-response-ignored target=TARGETS",
+        5.0, chansrv_process, chansrv_stdout)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        stale_response_count = chansrv_log_text(chansrv_logs).count(
+            "XRDP_CONSOLE_CLIPBOARD_RETRY stale-response-ignored target=TARGETS")
+        if stale_response_count >= (
+                stale_response_count_before_release + released_count):
+            break
+        time.sleep(0.02)
+    if (stale_response_count <
+            stale_response_count_before_release + released_count):
+        raise AssertionError(
+            "not all released stale TARGETS responses were ignored:\n"
+            f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
+    local_format_lists_after_race = chansrv_log_text(chansrv_logs).count(
+        "XRDP_CONSOLE_CLIPBOARD_LOCAL_FORMAT_LIST event=sent")
+    if local_format_lists_after_race != local_format_lists_before_race:
+        raise AssertionError(
+            "a stale local TARGETS response emitted an out-of-order server "
+            "Format List after the newer client generation:\n"
+            f"before={local_format_lists_before_race} "
+            f"after={local_format_lists_after_race}\n"
+            f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
 
     delayed_image_output = finish_clipboard_requestor(
         delayed_image_request, 45.0, chansrv_logs)

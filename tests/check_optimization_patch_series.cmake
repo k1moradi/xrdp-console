@@ -18,6 +18,8 @@ set(png_x11_transaction_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0041-xrdp
 set(rdp_vc_diagnostics_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0043-xrdp-log-vc-negotiation-and-cliprdr-fragment-timing.patch")
 set(vc_chunk_size_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0044-xrdp-advertise-static-vc-chunk-size.patch")
 set(chansrv_vc_buffer_patch "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0045-xrdp-size-chansrv-channel-ipc-for-negotiated-chunks.patch")
+set(stale_targets_retry_patch
+    "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0046-xrdp-chansrv-cancel-stale-local-targets.patch")
 
 foreach(required IN ITEMS "${series_file}" "${h264_patch}" "${pacing_patch}"
         "${image_retry_patch}" "${image_waiters_patch}"
@@ -31,7 +33,8 @@ foreach(required IN ITEMS "${series_file}" "${h264_patch}" "${pacing_patch}"
         "${png_x11_transaction_patch}"
         "${rdp_vc_diagnostics_patch}"
         "${vc_chunk_size_patch}"
-        "${chansrv_vc_buffer_patch}")
+        "${chansrv_vc_buffer_patch}"
+        "${stale_targets_retry_patch}")
     if(NOT EXISTS "${required}")
         message(FATAL_ERROR "required optimization patch input is missing: ${required}")
     endif()
@@ -75,12 +78,15 @@ list(FIND series_lines "0042-xrdp-chansrv-prefetch-named-png.patch" png_prefetch
 list(FIND series_lines "0043-xrdp-log-vc-negotiation-and-cliprdr-fragment-timing.patch" rdp_vc_diagnostics_index)
 list(FIND series_lines "0044-xrdp-advertise-static-vc-chunk-size.patch" vc_chunk_size_index)
 list(FIND series_lines "0045-xrdp-size-chansrv-channel-ipc-for-negotiated-chunks.patch" chansrv_vc_buffer_index)
+list(FIND series_lines
+    "0046-xrdp-chansrv-cancel-stale-local-targets.patch"
+    stale_targets_retry_index)
 if(image_retire_terminator_index LESS 0 OR channel_containment_index LESS 0 OR
         png_priority_index LESS 0 OR image_x11_diagnostics_index LESS 0 OR
         image_deferred_owner_index LESS 0 OR image_targets_response_index LESS 0 OR
         wait_object_failure_source_index LESS 0 OR png_x11_transaction_index LESS 0 OR
         rdp_vc_diagnostics_index LESS 0 OR vc_chunk_size_index LESS 0 OR
-        chansrv_vc_buffer_index LESS 0 OR
+        chansrv_vc_buffer_index LESS 0 OR stale_targets_retry_index LESS 0 OR
         png_prefetch_index GREATER -1)
     message(FATAL_ERROR "xrdp clipboard diagnostics must be in series and experimental PNG prefetch must remain inactive")
 endif()
@@ -94,6 +100,7 @@ math(EXPR expected_png_x11_transaction_index "${wait_object_failure_source_index
 math(EXPR expected_rdp_vc_diagnostics_index "${png_x11_transaction_index} + 1")
 math(EXPR expected_vc_chunk_size_index "${rdp_vc_diagnostics_index} + 1")
 math(EXPR expected_chansrv_vc_buffer_index "${vc_chunk_size_index} + 1")
+math(EXPR expected_stale_targets_retry_index "${chansrv_vc_buffer_index} + 1")
 if(NOT channel_containment_index EQUAL expected_channel_containment_index OR
         NOT png_priority_index EQUAL expected_png_priority_index OR
         NOT image_x11_diagnostics_index EQUAL expected_image_x11_diagnostics_index OR
@@ -103,9 +110,23 @@ if(NOT channel_containment_index EQUAL expected_channel_containment_index OR
         NOT png_x11_transaction_index EQUAL expected_png_x11_transaction_index OR
         NOT rdp_vc_diagnostics_index EQUAL expected_rdp_vc_diagnostics_index OR
         NOT vc_chunk_size_index EQUAL expected_vc_chunk_size_index OR
-        NOT chansrv_vc_buffer_index EQUAL expected_chansrv_vc_buffer_index)
+        NOT chansrv_vc_buffer_index EQUAL expected_chansrv_vc_buffer_index OR
+        NOT stale_targets_retry_index EQUAL expected_stale_targets_retry_index)
     message(FATAL_ERROR "channel containment, PNG-priority, and xrdp diagnostics patches must follow clipboard fixes in order")
 endif()
+
+file(READ "${stale_targets_retry_patch}" stale_targets_retry_text)
+foreach(marker IN ITEMS
+        "clipboard_cancel_stale_local_format_discovery"
+        "reason=remote-format-list"
+        "clipboard_retry_policy_cancel"
+        "target=%s reason=no-active-conversion"
+        "XRDP_CONSOLE_CLIPBOARD_LOCAL_FORMAT_LIST event=sent")
+    string(FIND "${stale_targets_retry_text}" "${marker}" marker_index)
+    if(marker_index LESS 0)
+        message(FATAL_ERROR "stale TARGETS retry patch is missing marker: ${marker}")
+    endif()
+endforeach()
 
 file(READ "${png_x11_transaction_patch}" png_x11_transaction_text)
 foreach(marker IN ITEMS

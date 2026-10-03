@@ -916,8 +916,27 @@ run_owner(const char *named_png_path)
     return 0;
 }
 
+static void
+selection_stealer_respond_targets(Display *display,
+                                  const XSelectionRequestEvent *request,
+                                  Atom targets, Atom timestamp, Atom utf8)
+{
+    Atom supported[4];
+    int count = 0;
+    Atom property = request->property == None ? request->target :
+                    request->property;
+
+    supported[count++] = targets;
+    supported[count++] = timestamp;
+    supported[count++] = utf8;
+    supported[count++] = XA_STRING;
+    XChangeProperty(display, request->requestor, property, XA_ATOM, 32,
+                    PropModeReplace, (unsigned char *)supported, count);
+    send_selection_notify(display, request, property);
+}
+
 static int
-run_selection_stealer(void)
+run_selection_stealer(int refuse_first_targets, int hold_targets_retries)
 {
     Display *display = XOpenDisplay(NULL);
     Window window;
@@ -925,6 +944,9 @@ run_selection_stealer(void)
     Atom targets;
     Atom timestamp;
     Atom utf8;
+    XSelectionRequestEvent held_targets_requests[2];
+    size_t held_targets_count = 0;
+    unsigned int targets_request_count = 0;
     int x_fd;
 
     if (display == NULL)
@@ -982,6 +1004,21 @@ run_selection_stealer(void)
             {
                 break;
             }
+            if (strncmp(command, "release-targets", 15) == 0)
+            {
+                size_t index;
+                const size_t released_count = held_targets_count;
+                for (index = 0; index < held_targets_count; ++index)
+                {
+                    selection_stealer_respond_targets(
+                        display, &held_targets_requests[index], targets,
+                        timestamp, utf8);
+                }
+                held_targets_count = 0;
+                printf("STEALER_TARGETS_RETRY_RELEASED count=%zu\n",
+                       released_count);
+                fflush(stdout);
+            }
         }
 
         while (XPending(display) > 0)
@@ -990,46 +1027,63 @@ run_selection_stealer(void)
             XNextEvent(display, &event);
             if (event.type == SelectionRequest)
             {
-                const XSelectionRequestEvent *request =
-                    &event.xselectionrequest;
-                Atom property = request->property == None ? request->target :
-                                request->property;
+                const XSelectionRequestEvent request =
+                    event.xselectionrequest;
 
-                if (request->target == targets)
+                if (request.target == targets)
                 {
-                    Atom supported[4];
-                    int count = 0;
-                    supported[count++] = targets;
-                    supported[count++] = timestamp;
-                    supported[count++] = utf8;
-                    supported[count++] = XA_STRING;
-                    XChangeProperty(display, request->requestor, property,
-                                    XA_ATOM, 32, PropModeReplace,
-                                    (unsigned char *)supported, count);
-                    send_selection_notify(display, request, property);
+                    ++targets_request_count;
+                    if (refuse_first_targets && targets_request_count == 1U)
+                    {
+                        send_selection_notify(display, &request, None);
+                        puts("STEALER_TARGETS_REFUSED_ONCE");
+                        fflush(stdout);
+                    }
+                    else if (hold_targets_retries &&
+                             held_targets_count <
+                                     sizeof(held_targets_requests) /
+                                             sizeof(held_targets_requests[0]))
+                    {
+                        held_targets_requests[held_targets_count++] = request;
+                        printf("STEALER_TARGETS_RETRY_HELD requestor=0x%lx "
+                               "request=%u held=%zu\n",
+                               request.requestor, targets_request_count,
+                               held_targets_count);
+                        fflush(stdout);
+                    }
+                    else
+                    {
+                        selection_stealer_respond_targets(
+                            display, &request, targets, timestamp, utf8);
+                    }
                 }
-                else if (request->target == timestamp)
+                else if (request.target == timestamp)
                 {
-                    unsigned long selection_time = (unsigned long)request->time;
-                    XChangeProperty(display, request->requestor, property,
+                    const Atom property = request.property == None ?
+                                          request.target : request.property;
+                    unsigned long selection_time =
+                        (unsigned long)request.time;
+                    XChangeProperty(display, request.requestor, property,
                                     XA_INTEGER, 32, PropModeReplace,
                                     (unsigned char *)&selection_time, 1);
-                    send_selection_notify(display, request, property);
+                    send_selection_notify(display, &request, property);
                 }
-                else if (request->target == utf8 ||
-                         request->target == XA_STRING)
+                else if (request.target == utf8 ||
+                         request.target == XA_STRING)
                 {
+                    const Atom property = request.property == None ?
+                                          request.target : request.property;
                     static const char local_text[] =
                         "local clipboard selection owner";
-                    XChangeProperty(display, request->requestor, property,
-                                    request->target, 8, PropModeReplace,
+                    XChangeProperty(display, request.requestor, property,
+                                    request.target, 8, PropModeReplace,
                                     (const unsigned char *)local_text,
                                     (int)(sizeof(local_text) - 1U));
-                    send_selection_notify(display, request, property);
+                    send_selection_notify(display, &request, property);
                 }
                 else
                 {
-                    send_selection_notify(display, request, None);
+                    send_selection_notify(display, &request, None);
                 }
             }
         }
@@ -1268,7 +1322,11 @@ run_requestor(int argc, char **argv)
     }
     if (status != 0)
     {
-        if (status != -2)
+        if (status == 1)
+        {
+            fputs("ERROR selection-refused\n", stderr);
+        }
+        else if (status == -1)
         {
             fputs("ERROR selection-notify-timeout\n", stderr);
         }
@@ -2018,7 +2076,11 @@ main(int argc, char **argv)
     }
     if (argc == 2 && strcmp(argv[1], "stealer") == 0)
     {
-        return run_selection_stealer();
+        return run_selection_stealer(0, 0);
+    }
+    if (argc == 2 && strcmp(argv[1], "stealer-stale-targets-retry") == 0)
+    {
+        return run_selection_stealer(1, 1);
     }
     if (argc == 2 && strcmp(argv[1], "selection-owner") == 0)
     {
@@ -2033,7 +2095,7 @@ main(int argc, char **argv)
           "owner-png-file-incr-xrdp PNG_FILE | "
           "owner-png-file-incr-xrdp-targets PNG_FILE | "
           "owner-png-file-incr-xrdp-targets-delay PNG_FILE DELAY_MS | "
-          "stealer | selection-owner | "
+          "stealer | stealer-stale-targets-retry | selection-owner | "
           "requestor TARGET [delay_ms]\n",
           stderr);
     return 2;

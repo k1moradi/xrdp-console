@@ -42,3 +42,4 @@
 0043-xrdp-log-vc-negotiation-and-cliprdr-fragment-timing.patch
 0044-xrdp-advertise-static-vc-chunk-size.patch
 0045-xrdp-size-chansrv-channel-ipc-for-negotiated-chunks.patch
+0046-xrdp-chansrv-cancel-stale-local-targets.patch
