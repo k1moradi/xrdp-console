@@ -59,6 +59,7 @@ public:
 private:
     int check_h264_gfx() noexcept;
     int check_remote_fx() noexcept;
+    int apply_source_geometry_change() noexcept;
 
     struct Impl;
     Impl *impl_;

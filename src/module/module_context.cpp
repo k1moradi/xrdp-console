@@ -1042,6 +1042,8 @@ struct ModuleContext::Impl
     std::unique_ptr<X11InputController> inputController{};
     std::unique_ptr<X11PointerPositionTracker> pointerPositionTracker{};
     std::unique_ptr<ClipboardController> clipboard{};
+    PixelSize pendingSourceGeometry{};
+    PixelSize requestedClientResize{};
     PresentationTransform presentationTransform{};
     PresentationScaler presentationScaler{};
     DamageRegion damageRegion{};
@@ -1343,6 +1345,9 @@ ModuleContext::connect() noexcept
         }
 
         const PixelSize sourceGeometry = connection->sourceGeometry();
+        log_message(LOG_LEVEL_INFO,
+                    "XRDP_CONSOLE_GEOMETRY event=randr-monitor status=%s",
+                    connection->randrAvailable() ? "enabled" : "unavailable");
         log_message(
             LOG_LEVEL_INFO,
             "XRDP_CONSOLE_GEOMETRY event=connect source=%ux%u "
@@ -1839,12 +1844,154 @@ ModuleContext::connect() noexcept
         impl_->damageRegion.clear();
         impl_->interactionPriority = {};
         impl_->state.sourceGeometry = {};
+        impl_->pendingSourceGeometry = {};
+        impl_->requestedClientResize = {};
         impl_->presentationTransform = {};
         impl_->presentationScaler = {};
         impl_->fullPresentationInvalidation = false;
         impl_->outputSuppressed = false;
         impl_->x11EventBudgetPending = false;
         impl_->presentationDeadlineArmed = false;
+        return 1;
+    }
+}
+
+int
+ModuleContext::apply_source_geometry_change() noexcept
+{
+    if (!valid() || impl_->x11Connection == nullptr ||
+        impl_->pendingSourceGeometry.widthPixels == 0 ||
+        impl_->pendingSourceGeometry.heightPixels == 0)
+    {
+        return 1;
+    }
+
+    const PixelSize sourceGeometry = impl_->pendingSourceGeometry;
+    if (sourceGeometry == impl_->state.sourceGeometry)
+    {
+        impl_->pendingSourceGeometry = {};
+        return 0;
+    }
+    if (impl_->h264Frame.frameInFlight())
+    {
+        return 1;
+    }
+
+    const PixelSize previousGeometry = impl_->state.sourceGeometry;
+    try
+    {
+        auto damageTracker = std::make_unique<X11DamageTracker>(
+            *impl_->x11Connection->nativeConnection(),
+            impl_->x11Connection->rootWindow(), sourceGeometry);
+        if (!damageTracker->valid())
+        {
+            log_message(LOG_LEVEL_ERROR,
+                        "xrdp-console: XDamage resize setup failed: %s",
+                        damageTracker->failureReason() != nullptr
+                            ? damageTracker->failureReason()
+                            : "unknown error");
+            return 1;
+        }
+
+        const std::uint64_t sourcePixels =
+            static_cast<std::uint64_t>(sourceGeometry.widthPixels) *
+            sourceGeometry.heightPixels;
+        bool coherentCaptureAvailable =
+            impl_->graphicsTransport == GraphicsTransport::H264Gfx &&
+            xrdp_console::rdp::h264CoherentSnapshotFits(sourceGeometry);
+        auto sharedMemoryCapture = std::make_unique<X11SharedMemoryCapture>(
+            *impl_->x11Connection->nativeConnection(),
+            impl_->x11Connection->rootWindow(),
+            impl_->x11Connection->rootVisual(),
+            impl_->x11Connection->rootDepth(), sourceGeometry,
+            coherentCaptureAvailable ? sourcePixels
+                                     : kMaximumPaintPixelsPerService);
+        if (!sharedMemoryCapture->valid() && coherentCaptureAvailable)
+        {
+            log_message(
+                LOG_LEVEL_WARNING,
+                "xrdp-console: coherent H.264 source snapshot allocation "
+                "failed after RandR resize (%s); using bounded capture",
+                sharedMemoryCapture->failureReason() != nullptr
+                    ? sharedMemoryCapture->failureReason()
+                    : "unknown error");
+            sharedMemoryCapture.reset();
+            coherentCaptureAvailable = false;
+            sharedMemoryCapture = std::make_unique<X11SharedMemoryCapture>(
+                *impl_->x11Connection->nativeConnection(),
+                impl_->x11Connection->rootWindow(),
+                impl_->x11Connection->rootVisual(),
+                impl_->x11Connection->rootDepth(), sourceGeometry,
+                kMaximumPaintPixelsPerService);
+        }
+        if (!sharedMemoryCapture->valid())
+        {
+            log_message(LOG_LEVEL_ERROR,
+                        "xrdp-console: XShm resize setup failed: %s",
+                        sharedMemoryCapture->failureReason() != nullptr
+                            ? sharedMemoryCapture->failureReason()
+                            : "unknown error");
+            return 1;
+        }
+
+        auto inputController = std::make_unique<X11InputController>(
+            *impl_->x11Connection->nativeConnection(),
+            impl_->x11Connection->rootWindow(), sourceGeometry);
+        if (!inputController->valid())
+        {
+            log_message(LOG_LEVEL_ERROR,
+                        "xrdp-console: XTest resize setup failed: %s",
+                        inputController->failureReason() != nullptr
+                            ? inputController->failureReason()
+                            : "unknown error");
+            return 1;
+        }
+
+        auto pointerPositionTracker =
+            std::make_unique<X11PointerPositionTracker>(
+                *impl_->x11Connection->nativeConnection(),
+                impl_->x11Connection->rootWindow(), sourceGeometry);
+        if (!pointerPositionTracker->valid())
+        {
+            log_message(
+                LOG_LEVEL_WARNING,
+                "xrdp-console: physical pointer synchronization unavailable "
+                "after RandR resize: %s",
+                pointerPositionTracker->failureReason() != nullptr
+                    ? pointerPositionTracker->failureReason()
+                    : "unknown XInput2 error");
+            pointerPositionTracker.reset();
+        }
+
+        impl_->pendingPresentation.clear();
+        impl_->pendingH264Snapshot.clear();
+        impl_->pendingH264Tile.clear();
+        impl_->pendingRfx.clear();
+        impl_->rfxLetterboxFill.clear();
+        impl_->damageRegion.clear();
+        clearInteractionPriority(impl_->interactionPriority);
+        impl_->sharedMemoryCapture = std::move(sharedMemoryCapture);
+        impl_->damageTracker = std::move(damageTracker);
+        impl_->inputController = std::move(inputController);
+        impl_->pointerPositionTracker = std::move(pointerPositionTracker);
+        impl_->state.sourceGeometry = sourceGeometry;
+        impl_->h264CoherentCaptureAvailable = coherentCaptureAvailable;
+        impl_->pendingSourceGeometry = {};
+        impl_->scrollMotionObserver.reset();
+        impl_->h264SubmittedScrollBaselineSequence = 0;
+        log_message(
+            LOG_LEVEL_INFO,
+            "XRDP_CONSOLE_GEOMETRY event=source-resize "
+            "old_source=%ux%u new_source=%ux%u result=updated",
+            previousGeometry.widthPixels, previousGeometry.heightPixels,
+            sourceGeometry.widthPixels, sourceGeometry.heightPixels);
+        return 0;
+    }
+    catch (...)
+    {
+        log_message(LOG_LEVEL_ERROR,
+                    "xrdp-console: source resize allocation failed for %ux%u",
+                    sourceGeometry.widthPixels, sourceGeometry.heightPixels);
         return 1;
     }
 }
@@ -1857,6 +2004,24 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     if (!valid() || width <= 0 || height <= 0)
     {
         return 1;
+    }
+    if (impl_->pendingSourceGeometry.widthPixels != 0 &&
+        impl_->pendingSourceGeometry.heightPixels != 0)
+    {
+        if (impl_->h264Frame.frameInFlight())
+        {
+            log_message(
+                LOG_LEVEL_INFO,
+                "XRDP_CONSOLE_GEOMETRY event=source-resize "
+                "result=deferred reason=h264-frame-in-flight");
+        }
+        else if (apply_source_geometry_change() != 0)
+        {
+            log_message(LOG_LEVEL_ERROR,
+                        "xrdp-console: cannot apply pending source geometry "
+                        "before presentation resize");
+            return 1;
+        }
     }
     log_message(
         LOG_LEVEL_INFO,
@@ -2012,6 +2177,10 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     impl_->pendingRfx.clear();
     impl_->rfxLetterboxFill.clear();
     impl_->state.presentationGeometry = presentationGeometry;
+    if (impl_->requestedClientResize == presentationGeometry)
+    {
+        impl_->requestedClientResize = {};
+    }
     impl_->presentationTransform = transform;
     impl_->presentationScaler = std::move(scaler);
     impl_->rfxEncoder = std::move(rfxEncoder);
@@ -2386,6 +2555,12 @@ ModuleContext::frame_ack(int flags, int frame_id) noexcept
         impl_->h264SubmittedFrameId = 0;
         impl_->h264SubmittedAt = {};
 
+        if (impl_->pendingSourceGeometry.widthPixels != 0 &&
+            impl_->pendingSourceGeometry.heightPixels != 0)
+        {
+            impl_->armPresentationImmediately();
+        }
+
         if (!impl_->outputSuppressed &&
             (impl_->h264FallbackPending ||
              impl_->h264Frame.capturePending() ||
@@ -2444,6 +2619,8 @@ ModuleContext::end() noexcept
     impl_->presentationScaler = {};
     impl_->fullPresentationInvalidation = false;
     impl_->state.sourceGeometry = {};
+    impl_->pendingSourceGeometry = {};
+    impl_->requestedClientResize = {};
     impl_->state.presentationGeometry = {};
     impl_->state.bitsPerPixel = 0;
     impl_->state.started = false;
@@ -2593,7 +2770,12 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
              impl_->pendingPresentation.active() ||
              impl_->rfxLetterboxFill.active() ||
              !impl_->damageRegion.rectangles().empty());
-        if (impl_->x11EventBudgetPending || h264Continuation ||
+        const bool sourceGeometryContinuation =
+            impl_->pendingSourceGeometry.widthPixels != 0 &&
+            impl_->pendingSourceGeometry.heightPixels != 0 &&
+            !impl_->h264Frame.frameInFlight();
+        if (impl_->x11EventBudgetPending || sourceGeometryContinuation ||
+            h264Continuation ||
             remoteFxContinuation || classicContinuation)
         {
             // XCB may own more events in its private queue after the socket is
@@ -4143,6 +4325,70 @@ ModuleContext::check_wait_objs() noexcept
     impl_->profile.noteDamage(
         impl_->damageTracker->notificationCount() - previousNotifications,
         impl_->damageTracker->damagedPixelCount() - previousDamagedPixels);
+
+    const PixelSize observedSourceGeometry =
+        impl_->x11Connection->sourceGeometry();
+    if (observedSourceGeometry.widthPixels != 0 &&
+        observedSourceGeometry.heightPixels != 0 &&
+        observedSourceGeometry != impl_->state.sourceGeometry)
+    {
+        impl_->pendingSourceGeometry = observedSourceGeometry;
+    }
+    if (impl_->pendingSourceGeometry.widthPixels != 0 &&
+        impl_->pendingSourceGeometry.heightPixels != 0)
+    {
+        const PixelSize requestedGeometry = impl_->pendingSourceGeometry;
+        if (impl_->state.presentationGeometry != requestedGeometry &&
+            impl_->requestedClientResize != requestedGeometry)
+        {
+            const int resizeResult =
+                requestedGeometry.widthPixels <= INT_MAX &&
+                        requestedGeometry.heightPixels <= INT_MAX
+                    ? xrdp_console_module_request_client_resize(
+                          impl_->module,
+                          static_cast<int>(requestedGeometry.widthPixels),
+                          static_cast<int>(requestedGeometry.heightPixels))
+                    : 1;
+            impl_->requestedClientResize = requestedGeometry;
+            log_message(
+                resizeResult == 0 ? LOG_LEVEL_INFO : LOG_LEVEL_WARNING,
+                "XRDP_CONSOLE_GEOMETRY event=remote-resize-request "
+                "target=%ux%u result=%s",
+                requestedGeometry.widthPixels,
+                requestedGeometry.heightPixels,
+                resizeResult == 0 ? "queued" : "unavailable");
+        }
+        else if (impl_->state.presentationGeometry == requestedGeometry)
+        {
+            impl_->requestedClientResize = {};
+        }
+
+        if (!impl_->x11EventBudgetPending &&
+            !impl_->h264Frame.frameInFlight())
+        {
+            if (apply_source_geometry_change() != 0)
+            {
+                log_message(
+                    LOG_LEVEL_ERROR,
+                    "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                    "source=randr-source-resize");
+                return 1;
+            }
+            if (resize_presentation(
+                    static_cast<int>(
+                        impl_->state.presentationGeometry.widthPixels),
+                    static_cast<int>(
+                        impl_->state.presentationGeometry.heightPixels),
+                    0, nullptr) != 0)
+            {
+                log_message(
+                    LOG_LEVEL_ERROR,
+                    "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                    "source=randr-presentation-refresh");
+                return 1;
+            }
+        }
+    }
 
     if (impl_->damageTracker->notificationCount() != previousNotifications &&
         !impl_->presentationDeadlineArmed)

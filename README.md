@@ -121,7 +121,7 @@ sudo apt install -y \
   libx11-dev libxext-dev libxinerama-dev libxcursor-dev \
   libxdamage-dev libxfixes-dev libxi-dev libxkbfile-dev \
   libxrandr-dev libxrender-dev libxtst-dev \
-  libxcb1-dev libxcb-damage0-dev libxcb-shm0-dev \
+  libxcb1-dev libxcb-randr0-dev libxcb-damage0-dev libxcb-shm0-dev \
   libxcb-xfixes0-dev libxcb-xinput-dev libxcb-xtest0-dev
 ```
 

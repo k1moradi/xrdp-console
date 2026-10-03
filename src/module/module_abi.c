@@ -257,6 +257,27 @@ xrdp_console_module_destroy(xrdp_console_module *module)
 }
 
 int
+xrdp_console_module_request_client_resize(xrdp_console_module *module,
+                                          int width, int height)
+{
+    struct monitor_info monitor = {0};
+
+    if (module == NULL || width <= 0 || height <= 0 ||
+        module->abi.client_monitor_resize == NULL)
+    {
+        return 1;
+    }
+
+    monitor.right = width - 1;
+    monitor.bottom = height - 1;
+    monitor.desktop_scale_factor = 100;
+    monitor.device_scale_factor = 100;
+    monitor.is_primary = 1;
+    return module->abi.client_monitor_resize(&module->abi, width, height, 1,
+                                             &monitor);
+}
+
+int
 xrdp_console_module_update_callbacks_ready(
     const xrdp_console_module *module)
 {

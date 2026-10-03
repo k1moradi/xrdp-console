@@ -39,6 +39,8 @@ void *xrdp_console_module_abi(xrdp_console_module *module);
 void *xrdp_console_module_context(xrdp_console_module *module);
 void *xrdp_console_module_context_from_abi(void *abi);
 int xrdp_console_module_destroy(xrdp_console_module *module);
+int xrdp_console_module_request_client_resize(xrdp_console_module *module,
+                                              int width, int height);
 
 int xrdp_console_module_update_callbacks_ready(
     const xrdp_console_module *module);

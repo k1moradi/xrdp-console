@@ -15,8 +15,12 @@ presentation state, input-aware graphics scheduling, and bounded scroll-motion
 observation. `clipboard/` bridges text formats on the RDP `cliprdr` channel to
 the X11 `CLIPBOARD` selection.
 
-The physical X11 source remains authoritative: monitor resize changes the RDP
-presentation geometry and transform, not the Xorg mode. Mouse coordinates use
+The physical X11 source remains authoritative. A local RandR screen-size change
+updates source capture and requests the same single-screen size from xrdp's
+client-resize path when the client supports server-initiated resizing. If that
+request is unavailable, the new source is scaled into the current RDP
+presentation. Client-originated monitor resizes update the presentation
+geometry and transform without changing the Xorg mode. Mouse coordinates use
 the inverse transform, while letterbox input is excluded. RDP graphics are
 selected from negotiated capabilities and successfully initialized paths;
 the module does not force H.264 or RemoteFX when the client did not negotiate

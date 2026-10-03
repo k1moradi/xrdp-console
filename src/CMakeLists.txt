@@ -3,6 +3,7 @@
 if(XRDP_CONSOLE_BUILD_XRDP)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(XRDP_CONSOLE_XCB REQUIRED IMPORTED_TARGET xcb)
+    pkg_check_modules(XRDP_CONSOLE_XCB_RANDR REQUIRED IMPORTED_TARGET xcb-randr)
     pkg_check_modules(XRDP_CONSOLE_XCB_DAMAGE REQUIRED IMPORTED_TARGET xcb-damage)
     pkg_check_modules(XRDP_CONSOLE_XCB_SHM REQUIRED IMPORTED_TARGET xcb-shm)
     pkg_check_modules(XRDP_CONSOLE_XCB_XFIXES REQUIRED IMPORTED_TARGET xcb-xfixes)
@@ -115,6 +116,7 @@ if(XRDP_CONSOLE_BUILD_XRDP)
     target_compile_definitions(xrdp-console PRIVATE HAVE_CONFIG_H)
     target_link_libraries(xrdp-console PRIVATE
         PkgConfig::XRDP_CONSOLE_XCB
+        PkgConfig::XRDP_CONSOLE_XCB_RANDR
         PkgConfig::XRDP_CONSOLE_XCB_DAMAGE
         PkgConfig::XRDP_CONSOLE_XCB_SHM
         PkgConfig::XRDP_CONSOLE_XCB_XFIXES

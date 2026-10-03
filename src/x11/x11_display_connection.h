@@ -57,6 +57,7 @@ public:
     X11DisplayConnection &operator=(const X11DisplayConnection &) = delete;
 
     [[nodiscard]] bool valid() const noexcept;
+    [[nodiscard]] bool randrAvailable() const noexcept;
     [[nodiscard]] xcb_connection_t *nativeConnection() const noexcept;
     [[nodiscard]] PixelSize sourceGeometry() const noexcept;
     [[nodiscard]] int screenNumber() const noexcept;
@@ -86,6 +87,7 @@ private:
     xcb_window_t rootWindow_{XCB_WINDOW_NONE};
     xcb_visualid_t rootVisual_{XCB_NONE};
     std::uint8_t rootDepth_{0};
+    std::uint8_t randrFirstEvent_{0};
     PixelSize sourceGeometry_{};
     bool waitObjectUsesDuplicate_{false};
     bool failed_{false};

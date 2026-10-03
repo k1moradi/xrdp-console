@@ -7,6 +7,8 @@
 #include <string>
 #include <unistd.h>
 
+#include <xcb/randr.h>
+
 namespace
 {
 
@@ -41,7 +43,9 @@ constexpr int kMaxXrdpWaitFileDescriptor = 0xffff;
 ConnectionStatus
 dispatch_events(xcb_connection_t *connection, X11EventSink &eventSink,
                 bool readFromSocket, std::size_t eventBudget,
-                std::size_t &eventsDispatched, bool &failed) noexcept
+                std::size_t &eventsDispatched, bool &failed,
+                std::uint8_t randrFirstEvent, xcb_window_t rootWindow,
+                PixelSize &sourceGeometry) noexcept
 {
     xcb_generic_event_t *event = nullptr;
     while (eventsDispatched < eventBudget &&
@@ -58,6 +62,21 @@ dispatch_events(xcb_connection_t *connection, X11EventSink &eventSink,
             return ConnectionStatus::Failed;
         }
         eventSink.handle(*event);
+        const std::uint8_t responseType = event->response_type & 0x7f;
+        if (randrFirstEvent != 0 &&
+            responseType == static_cast<std::uint8_t>(
+                                randrFirstEvent +
+                                XCB_RANDR_SCREEN_CHANGE_NOTIFY))
+        {
+            const auto &screenChange =
+                reinterpret_cast<const xcb_randr_screen_change_notify_event_t &>(
+                    *event);
+            if (screenChange.root == rootWindow && screenChange.width != 0 &&
+                screenChange.height != 0)
+            {
+                sourceGeometry = {screenChange.width, screenChange.height};
+            }
+        }
         std::free(event);
         ++eventsDispatched;
     }
@@ -129,6 +148,21 @@ X11DisplayConnection::X11DisplayConnection(std::string_view displayName) noexcep
         return;
     }
 
+    const xcb_query_extension_reply_t *randrExtension =
+        xcb_get_extension_data(connection_, &xcb_randr_id);
+    if (randrExtension != nullptr && randrExtension->present)
+    {
+        const xcb_void_cookie_t selectCookie = xcb_randr_select_input_checked(
+            connection_, rootWindow_, XCB_RANDR_NOTIFY_MASK_SCREEN_CHANGE);
+        xcb_generic_error_t *selectError =
+            xcb_request_check(connection_, selectCookie);
+        if (selectError == nullptr)
+        {
+            randrFirstEvent_ = randrExtension->first_event;
+        }
+        std::free(selectError);
+    }
+
     connectionFileDescriptor_ = xcb_get_file_descriptor(connection_);
     if (connectionFileDescriptor_ < 0)
     {
@@ -198,6 +232,7 @@ X11DisplayConnection::close() noexcept
     rootWindow_ = XCB_WINDOW_NONE;
     rootVisual_ = XCB_NONE;
     rootDepth_ = 0;
+    randrFirstEvent_ = 0;
     sourceGeometry_ = {};
 }
 
@@ -212,6 +247,12 @@ X11DisplayConnection::valid() const noexcept
            rootVisual_ != XCB_NONE && rootDepth_ != 0 &&
            sourceGeometry_.widthPixels > 0 &&
            sourceGeometry_.heightPixels > 0;
+}
+
+bool
+X11DisplayConnection::randrAvailable() const noexcept
+{
+    return valid() && randrFirstEvent_ != 0;
 }
 
 xcb_connection_t *
@@ -283,7 +324,8 @@ X11DisplayConnection::processEvents(X11EventSink &eventSink,
 
     std::size_t eventsDispatched = 0;
     if (dispatch_events(connection_, eventSink, false, eventBudget,
-                        eventsDispatched, failed_) ==
+                        eventsDispatched, failed_, randrFirstEvent_,
+                        rootWindow_, sourceGeometry_) ==
         ConnectionStatus::Failed)
     {
         return ConnectionStatus::Failed;
@@ -291,7 +333,8 @@ X11DisplayConnection::processEvents(X11EventSink &eventSink,
 
     if (eventsDispatched < eventBudget && g_is_wait_obj_set(waitObject_) &&
         dispatch_events(connection_, eventSink, true, eventBudget,
-                        eventsDispatched, failed_) ==
+                        eventsDispatched, failed_, randrFirstEvent_,
+                        rootWindow_, sourceGeometry_) ==
             ConnectionStatus::Failed)
     {
         return ConnectionStatus::Failed;
