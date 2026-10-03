@@ -107,6 +107,67 @@ bool odd_width_visible_bytes_are_mixed_and_padding_is_ignored()
     return true;
 }
 
+bool four_lane_fingerprint_tracks_each_interleaved_lane()
+{
+    constexpr std::size_t widthPixels = 64U;
+    constexpr std::size_t heightPixels = 2U;
+    constexpr std::size_t rowBytes = widthPixels * 4U;
+    constexpr std::size_t strideBytes = rowBytes + 8U;
+    std::array<std::byte, strideBytes * heightPixels> pixels{};
+    for (std::size_t row = 0; row < heightPixels; ++row)
+    {
+        for (std::size_t byte = 0; byte < rowBytes; ++byte)
+        {
+            pixels[row * strideBytes + byte] = std::byte{
+                static_cast<unsigned char>((row * rowBytes + byte) * 17U)};
+        }
+        for (std::size_t byte = rowBytes; byte < strideBytes; ++byte)
+        {
+            pixels[row * strideBytes + byte] = std::byte{0xa5};
+        }
+    }
+
+    const FramebufferView view{pixels, widthPixels, heightPixels, strideBytes};
+    const auto baseline =
+        fingerprintBgraRectangle(view, {0, 0, widthPixels, heightPixels});
+    if (!check(baseline.valid, "four-lane baseline fingerprint was invalid"))
+    {
+        return false;
+    }
+
+    auto paddingChanged = pixels;
+    paddingChanged[rowBytes] ^= std::byte{0xff};
+    paddingChanged[strideBytes + rowBytes + 7U] ^= std::byte{0xff};
+    const auto paddingFingerprint = fingerprintBgraRectangle(
+        {paddingChanged, widthPixels, heightPixels, strideBytes},
+        {0, 0, widthPixels, heightPixels});
+    if (!check(paddingFingerprint.valid &&
+                   paddingFingerprint.value == baseline.value,
+               "four-lane fingerprint included row padding"))
+    {
+        return false;
+    }
+
+    constexpr std::array<std::size_t, 9> visibleOffsets{{
+        0U, 8U, 16U, 24U, 32U, 40U, 48U, 56U, strideBytes + 24U,
+    }};
+    for (const std::size_t offset : visibleOffsets)
+    {
+        auto changed = pixels;
+        changed[offset] ^= std::byte{1};
+        const auto changedFingerprint = fingerprintBgraRectangle(
+            {changed, widthPixels, heightPixels, strideBytes},
+            {0, 0, widthPixels, heightPixels});
+        if (!check(changedFingerprint.valid &&
+                       changedFingerprint.value != baseline.value,
+                   "a visible four-lane byte did not affect fingerprint"))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool edge_tile_and_reset_behave_transactionally()
 {
     TileFingerprintMap map;
@@ -230,6 +291,7 @@ int main()
     success &= visible_pixels_are_stable_and_padding_is_ignored();
     success &= one_pixel_change_is_detected();
     success &= odd_width_visible_bytes_are_mixed_and_padding_is_ignored();
+    success &= four_lane_fingerprint_tracks_each_interleaved_lane();
     success &= edge_tile_and_reset_behave_transactionally();
     success &= initialized_fingerprint_promotes_transactionally();
     success &= initialized_fingerprint_range_promotes_intersecting_tiles();

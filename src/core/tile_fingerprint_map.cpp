@@ -3,6 +3,8 @@
 #include "tile_fingerprint_map.h"
 
 #include <algorithm>
+#include <array>
+#include <bit>
 #include <limits>
 
 namespace xrdp_console
@@ -13,6 +15,12 @@ namespace
 constexpr std::uint64_t kFingerprintOffset = 14695981039346656037ULL;
 constexpr std::uint64_t kFingerprintPrime = 1099511628211ULL;
 constexpr std::size_t kBytesPerPixel = 4U;
+constexpr std::array<std::uint64_t, 4> kFingerprintLaneSeeds{{
+    kFingerprintOffset,
+    kFingerprintOffset ^ 0x9e3779b97f4a7c15ULL,
+    kFingerprintOffset ^ 0xd6e8feb86659fd93ULL,
+    kFingerprintOffset ^ 0xa0761d6478bd642fULL,
+}};
 
 [[nodiscard]] std::uint32_t
 loadLittleEndian32(const std::byte *bytes) noexcept
@@ -79,32 +87,50 @@ fingerprintBgraRectangle(FramebufferView framebuffer,
         static_cast<std::size_t>(rectangle.widthPixels) * kBytesPerPixel;
     const std::size_t xBytes = static_cast<std::size_t>(x) * kBytesPerPixel;
 
-    // Fingerprints are process-local equality tokens. Mix eight visible BGRA
-    // bytes per dependent multiply instead of one byte at a time, then retain
-    // the existing final avalanche for cross-bit diffusion. BGRA rows are a
-    // multiple of four bytes, so only a four-byte tail is possible.
-    std::uint64_t hash = kFingerprintOffset;
+    // Fingerprints are process-local equality tokens. Interleave four
+    // independent multiply chains so the CPU can execute useful work while a
+    // prior integer multiply is pending. BGRA rows are a multiple of four
+    // bytes, so only a four-byte tail is possible.
+    auto hashes = kFingerprintLaneSeeds;
     std::size_t rowOffset =
         static_cast<std::size_t>(y) * framebuffer.strideBytes + xBytes;
     for (std::uint32_t row = 0; row < rectangle.heightPixels; ++row)
     {
         const std::byte *bytes = framebuffer.pixels.data() + rowOffset;
         std::size_t remaining = rowBytes;
+        while (remaining >= 4U * sizeof(std::uint64_t))
+        {
+            hashes[0] = (hashes[0] ^ loadLittleEndian64(bytes)) *
+                        kFingerprintPrime;
+            hashes[1] = (hashes[1] ^ loadLittleEndian64(bytes + 8U)) *
+                        kFingerprintPrime;
+            hashes[2] = (hashes[2] ^ loadLittleEndian64(bytes + 16U)) *
+                        kFingerprintPrime;
+            hashes[3] = (hashes[3] ^ loadLittleEndian64(bytes + 24U)) *
+                        kFingerprintPrime;
+            bytes += 4U * sizeof(std::uint64_t);
+            remaining -= 4U * sizeof(std::uint64_t);
+        }
+        std::uint32_t lane = 0;
         while (remaining >= sizeof(std::uint64_t))
         {
-            hash ^= loadLittleEndian64(bytes);
-            hash *= kFingerprintPrime;
+            hashes[lane] = (hashes[lane] ^ loadLittleEndian64(bytes)) *
+                           kFingerprintPrime;
             bytes += sizeof(std::uint64_t);
             remaining -= sizeof(std::uint64_t);
+            lane = (lane + 1U) & 3U;
         }
         if (remaining != 0)
         {
-            hash ^= loadLittleEndian32(bytes);
-            hash *= kFingerprintPrime;
+            hashes[lane] = (hashes[lane] ^ loadLittleEndian32(bytes)) *
+                           kFingerprintPrime;
         }
         rowOffset += framebuffer.strideBytes;
     }
 
+    std::uint64_t hash = hashes[0] ^ std::rotl(hashes[1], 13) ^
+                         std::rotl(hashes[2], 29) ^
+                         std::rotl(hashes[3], 47);
     hash ^= static_cast<std::uint64_t>(rectangle.widthPixels) << 32U;
     hash ^= rectangle.heightPixels;
     return {avalanche(hash), true};
