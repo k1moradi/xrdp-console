@@ -1180,9 +1180,9 @@ fullhd_area_downscale_and_partial_update_tests()
     }
 
     bool blendedFineEdges = false;
-    for (const std::uint32_t y : {1U, 247U, 424U, 849U})
+    for (std::uint32_t y = 0; y < outputHeight; ++y)
     {
-        for (const std::uint32_t x : {1U, 333U, 756U, 1199U, 1511U})
+        for (std::uint32_t x = 0; x < outputWidth; ++x)
         {
             const std::uint32_t actual =
                 chunkedOutput[static_cast<std::size_t>(y) * outputWidth + x];

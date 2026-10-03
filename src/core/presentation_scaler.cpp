@@ -799,15 +799,31 @@ PresentationScaler::scaleRows(FramebufferView source,
                         source.strideBytes);
             auto *destinationRow = pixels_.data() +
                                    static_cast<std::size_t>(localY) * outputWidth;
-            for (std::uint32_t x = 0; x < outputWidth; ++x)
+            if (sourceLeft == 0U)
             {
-                const std::uint32_t sourceX =
-                    horizontalFastSourcePixels_[viewportLocalLeft + x];
-                const std::uint32_t sourceX2 =
-                    sourceX + static_cast<std::uint32_t>(areaFilterX_);
-                destinationRow[x] = averagePixel(
-                    sourceRow0[sourceX - sourceLeft],
-                    sourceRow1[sourceX2 - sourceLeft]);
+                const std::uint32_t diagonalOffset =
+                    static_cast<std::uint32_t>(areaFilterX_);
+                for (std::uint32_t x = 0; x < outputWidth; ++x)
+                {
+                    const std::uint32_t sourceX =
+                        horizontalFastSourcePixels_[viewportLocalLeft + x];
+                    destinationRow[x] = averagePixel(
+                        sourceRow0[sourceX],
+                        sourceRow1[sourceX + diagonalOffset]);
+                }
+            }
+            else
+            {
+                for (std::uint32_t x = 0; x < outputWidth; ++x)
+                {
+                    const std::uint32_t sourceX =
+                        horizontalFastSourcePixels_[viewportLocalLeft + x];
+                    const std::uint32_t sourceX2 =
+                        sourceX + static_cast<std::uint32_t>(areaFilterX_);
+                    destinationRow[x] = averagePixel(
+                        sourceRow0[sourceX - sourceLeft],
+                        sourceRow1[sourceX2 - sourceLeft]);
+                }
             }
         }
 
