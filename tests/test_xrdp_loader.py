@@ -3610,7 +3610,9 @@ def assert_client_pixel(client_display: str,
                         source_display: str | None = None,
                         full_screen_damage_burst: bool = False,
                         cpu_contention: bool = False,
-                        maximum_pixel_latency_ms: int | None = None) -> None:
+                        maximum_pixel_latency_ms: int | None = None,
+                        prestarted_cpu_spinner: subprocess.Popen[bytes] | None = None
+                        ) -> None:
     """Draw a known source color and require it in the FreeRDP framebuffer."""
     try:
         window = find_window(client_display, window_title, 8.0)
@@ -3636,7 +3638,7 @@ def assert_client_pixel(client_display: str,
             raise AssertionError("pixel assertion pipes were not created")
         if not read_line(probe.stdout, 5.0).startswith(b"READY "):
             raise AssertionError("pixel probe did not become ready")
-        if cpu_contention:
+        if cpu_contention and prestarted_cpu_spinner is None:
             cpu_spinner = subprocess.Popen(
                 [sys.executable, "-c", "while True: pass"],
                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -3772,6 +3774,9 @@ def assert_client_pixel(client_display: str,
                     "latest full-screen update exceeded the freshness budget: "
                     f"{latency_ms:.1f} ms > {maximum_pixel_latency_ms} ms\n"
                     f"{xrdp_log_excerpt(log_path)}")
+            print(
+                "XRDP_CONSOLE_FRESHNESS latest_pixel_ms="
+                f"{latency_ms:.1f} budget_ms={maximum_pixel_latency_ms}")
         if assert_sparse_planar_batch:
             # A client-visible pixel may precede the next xrdp GFX dirty
             # flush. Wait for the baseline draw's own completed Planar batch,
@@ -4125,9 +4130,13 @@ def main() -> int:
             raise SystemExit("--cpu-contention may be specified only once")
         arguments.remove("--cpu-contention")
         cpu_contention = True
-    if cpu_contention and not (coherence_mode or narrow_source_mode):
+    if cpu_contention and not (
+            coherence_mode or narrow_source_mode or fullhd_source_mode):
         raise SystemExit(
-            "--cpu-contention requires an H.264 coherence or narrow-source test")
+            "--cpu-contention requires an H.264 coherence, Full HD, or "
+            "narrow-source test")
+    full_screen_update_mode = narrow_source_mode or (
+        cpu_contention and fullhd_source_mode)
 
     if clipboard_enabled:
         expected_argument_count = 8 if clipboard_peer_mode else 7
@@ -4317,6 +4326,7 @@ password=smoke
         server: subprocess.Popen[object] | None = None
         client: subprocess.Popen[object] | None = None
         stimulus: subprocess.Popen[bytes] | None = None
+        startup_cpu_spinner: subprocess.Popen[bytes] | None = None
         chansrv_process: subprocess.Popen[object] | None = None
         clipboard_owner: subprocess.Popen[bytes] | None = None
         selection_stealers: list[subprocess.Popen[bytes]] = []
@@ -4328,7 +4338,12 @@ password=smoke
                 stimulus_path, source_display, os.environ.copy(),
                 coherence_mode=coherence_mode,
                 full_screen_size=(source_width, source_height)
-                if narrow_source_mode else None)
+                if full_screen_update_mode else None)
+            if cpu_contention and fullhd_source_mode:
+                startup_cpu_spinner = subprocess.Popen(
+                    [sys.executable, "-c", "while True: pass"],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, start_new_session=True)
             if clipboard_enabled:
                 chansrv_path = install_root / "sbin" / "xrdp-chansrv"
                 if not chansrv_path.is_file():
@@ -4579,11 +4594,13 @@ password=smoke
                             presentation_height=presentation_height,
                             client_log_path=client_log_path,
                             source_display=source_display,
-                            full_screen_damage_burst=narrow_source_mode,
+                            full_screen_damage_burst=full_screen_update_mode,
                             cpu_contention=cpu_contention,
                             maximum_pixel_latency_ms=(
-                                1000 if cpu_contention and narrow_source_mode
-                                else None))
+                                1000 if cpu_contention and
+                                (narrow_source_mode or fullhd_source_mode)
+                                else None),
+                            prestarted_cpu_spinner=startup_cpu_spinner)
                         if fullhd_source_mode:
                             assert_client_stays_connected(
                                 client, os.environ["DISPLAY"], window_title,
@@ -4736,6 +4753,7 @@ password=smoke
                                 *named_png_fixture_info, server, root,
                                 client_command)
         finally:
+            stop_process(startup_cpu_spinner)
             stop_process(client)
             stop_process(server)
             for selection_stealer in selection_stealers:

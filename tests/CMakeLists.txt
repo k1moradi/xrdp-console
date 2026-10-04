@@ -1275,6 +1275,23 @@ if(TARGET xrdp-console)
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 60
             LABELS "h264;integration")
+        add_test(NAME xrdp-loader-gfx-h264-fullhd-source-cpu-contention
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11-latency-stimulus>
+            --cpu-contention --gfx-h264-fullhd)
+        set_tests_properties(
+            xrdp-loader-gfx-h264-fullhd-source-cpu-contention PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 90
+            RESOURCE_LOCK xrdp_console_loader_display
+            RUN_SERIAL TRUE
+            LABELS "h264;latency;integration")
         add_test(NAME xrdp-loader-gfx-h264-narrow-source-smoke
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
