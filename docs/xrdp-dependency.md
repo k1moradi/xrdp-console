@@ -53,6 +53,13 @@ under a private prefix. A normal system installation should provide
 other xrdp build dependencies. FUSE is explicitly enabled for chansrv file
 clipboard support. The private install is never activated by CMake.
 
+GNU libtool can print `warning: relinking 'lib*.la'` during the install step.
+These are expected install-time relinks for libraries whose `dependency_libs`
+still name an uninstalled `.la` under the out-of-tree build directory. Libtool
+rewrites those references to the private install prefix. Do not hide these
+messages or bypass the relink; details and compiler-optimization experiments
+are in [`compiler-optimization.md`](compiler-optimization.md).
+
 ## Retained patch rationale
 
 The series is deliberately small and applies in this order:

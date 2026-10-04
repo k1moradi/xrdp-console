@@ -563,6 +563,8 @@ docs/              testing, dependency, validation, measurement, maintainer note
 - [`docs/validation.md`](docs/validation.md) — validation notes
 - [`docs/measurement-model.md`](docs/measurement-model.md) — benchmark and
   measurement model
+- [`docs/compiler-optimization.md`](docs/compiler-optimization.md) — libtool
+  install relinks and LTO/PGO experiment results
 - [`docs/network-latency.md`](docs/network-latency.md) — network-latency test
   setup
 - [`docs/maintainers.md`](docs/maintainers.md) — maintainer workflow

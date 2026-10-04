@@ -180,6 +180,10 @@ ExternalProject_Add(xrdp_upstream
         ${_xrdp_configure_args}
     BUILD_COMMAND "${XRDP_CONSOLE_MAKE_PROGRAM}" -j1 "${_xrdp_make_flags}"
     ${_xrdp_test_arguments}
+    # Libtool reports "warning: relinking" for installed .la targets whose
+    # dependency_libs still point into the out-of-tree build directory. The
+    # install relink rewrites those references to the private install prefix;
+    # retain it rather than filtering or suppressing these expected notices.
     INSTALL_COMMAND "${XRDP_CONSOLE_MAKE_PROGRAM}" install "${_xrdp_make_flags}"
     BUILD_BYPRODUCTS
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
