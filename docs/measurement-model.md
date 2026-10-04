@@ -92,6 +92,16 @@ notification count; `damage_snapshot_pixels` sums the bounded delta rectangles
 after local coalescing, so overlapping rectangles can make it exceed unique
 changed-pixel area.
 
+The standalone `xrdp-pixel-pipeline-bench` accepts `--x264-threads 1|2` for a
+controlled encoder comparison; this option does not change production xrdp
+configuration. Its x264 stage reports `cpu_clock=process`, which includes
+encoder worker threads, while other stages report calling-thread CPU. The
+`mmap_frame_snapshot_copy`, `mmap_full_encode_rectangle_snapshot`, and
+`mmap_sparse_encode_rectangles_snapshot` compare a full-frame copy, the
+production helper's full-frame fast path, and a sparse encode-rectangle copy.
+Their estimated read/write traffic counts copied bytes, not resident pages or
+total virtual mapping size.
+
 Input-roundtrip also supports `--transport rfb --mode input-roundtrip`. The
 benchmark sends the same F9 RFB KeyEvent pulse as the RDP input path to the
 private `-nopw` listener, while the physical X11 stimulus and marker probe

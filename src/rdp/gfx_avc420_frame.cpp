@@ -564,6 +564,81 @@ nv12FrameBytes(PixelSize geometry) noexcept
 }
 
 bool
+copyNv12EncodeRectangles(
+    std::span<const std::byte> sourceFrame, PixelSize frameGeometry,
+    std::span<const Rectangle> encodeRectangles,
+    std::span<std::byte> destinationFrame) noexcept
+{
+    const std::size_t requiredBytes = nv12FrameBytes(frameGeometry);
+    if (requiredBytes == 0 || encodeRectangles.empty() ||
+        sourceFrame.size() < requiredBytes ||
+        destinationFrame.size() < requiredBytes)
+    {
+        return false;
+    }
+    for (const Rectangle rectangle : encodeRectangles)
+    {
+        if (rectangle.x < 0 || rectangle.y < 0 ||
+            rectangle.widthPixels == 0 || rectangle.heightPixels == 0 ||
+            (rectangle.x & 1) != 0 || (rectangle.y & 1) != 0 ||
+            (rectangle.widthPixels & 1U) != 0 ||
+            (rectangle.heightPixels & 1U) != 0 ||
+            static_cast<std::uint64_t>(rectangle.x) +
+                    rectangle.widthPixels > frameGeometry.widthPixels ||
+            static_cast<std::uint64_t>(rectangle.y) +
+                    rectangle.heightPixels > frameGeometry.heightPixels)
+        {
+            return false;
+        }
+    }
+
+    if (encodeRectangles.size() == 1U)
+    {
+        const Rectangle rectangle = encodeRectangles.front();
+        if (rectangle.x == 0 && rectangle.y == 0 &&
+            rectangle.widthPixels == frameGeometry.widthPixels &&
+            rectangle.heightPixels == frameGeometry.heightPixels)
+        {
+            std::memcpy(destinationFrame.data(), sourceFrame.data(),
+                        requiredBytes);
+            return true;
+        }
+    }
+
+    const std::size_t lumaBytes =
+        static_cast<std::size_t>(frameGeometry.widthPixels) *
+        frameGeometry.heightPixels;
+    for (const Rectangle rectangle : encodeRectangles)
+    {
+        const std::size_t x = static_cast<std::size_t>(rectangle.x);
+        const std::size_t width = rectangle.widthPixels;
+        for (std::uint32_t row = 0; row < rectangle.heightPixels; ++row)
+        {
+            const std::size_t offset =
+                (static_cast<std::size_t>(rectangle.y) + row) *
+                    frameGeometry.widthPixels +
+                x;
+            std::memcpy(destinationFrame.data() + offset,
+                        sourceFrame.data() + offset, width);
+        }
+
+        const std::size_t firstChromaRow =
+            static_cast<std::size_t>(rectangle.y) / 2U;
+        const std::size_t chromaRowCount = rectangle.heightPixels / 2U;
+        for (std::size_t row = 0; row < chromaRowCount; ++row)
+        {
+            const std::size_t offset =
+                lumaBytes + (firstChromaRow + row) *
+                                frameGeometry.widthPixels +
+                x;
+            std::memcpy(destinationFrame.data() + offset,
+                        sourceFrame.data() + offset, width);
+        }
+    }
+    return true;
+}
+
+bool
 convertBgraToNv12_709FullRange(
     FramebufferView source, std::span<std::byte> destination) noexcept
 {

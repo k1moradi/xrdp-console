@@ -24,6 +24,7 @@ using xrdp_console::fingerprintBgraRectangle;
 using xrdp_console::rdp::GfxAvc420Command;
 using xrdp_console::rdp::H264LatestFrameState;
 using xrdp_console::rdp::buildGfxAvc420Command;
+using xrdp_console::rdp::copyNv12EncodeRectangles;
 using xrdp_console::rdp::gfxAvc420CommandBytes;
 using xrdp_console::rdp::nv12FrameBytes;
 using xrdp_console::rdp::updateNv12RectangleFromBgraRegion_709FullRange;
@@ -139,8 +140,11 @@ snapshotAndBuildCommand(H264LatestFrameState &state,
     {
         return false;
     }
-    std::memcpy(frame.bytes().data(), state.frameBytes().data(),
-                state.frameBytes().size());
+    if (!copyNv12EncodeRectangles(
+            state.frameBytes(), state.geometry(), rectSpan, frame.bytes()))
+    {
+        return false;
+    }
 
     std::vector<std::byte> command(
         gfxAvc420CommandBytes(rectSpan.size(), rectSpan.size()));
@@ -160,6 +164,112 @@ snapshotAndBuildCommand(H264LatestFrameState &state,
         static_cast<void>(munmap(released.data, released.sizeBytes));
     }
     return releasedCorrectly;
+}
+
+bool
+sparse_encoder_snapshot_copies_only_avc420_encode_rectangles()
+{
+    constexpr PixelSize geometry{12, 8};
+    constexpr std::byte untouched{0xa5};
+    const std::size_t frameBytes = nv12FrameBytes(geometry);
+    std::vector<std::byte> source(frameBytes);
+    for (std::size_t index = 0; index < source.size(); ++index)
+    {
+        source[index] = static_cast<std::byte>((index * 37U + 11U) & 0xffU);
+    }
+    std::vector<std::byte> fullSnapshot(frameBytes, untouched);
+    const Rectangle fullFrame{0, 0, geometry.widthPixels,
+                              geometry.heightPixels};
+    bool success = check(copyNv12EncodeRectangles(
+                             source, geometry, std::span(&fullFrame, 1),
+                             fullSnapshot),
+                         "full-frame H264 snapshot was rejected");
+    success &= check(fullSnapshot == source,
+                     "full-frame H264 snapshot did not copy every byte");
+
+    std::vector<std::byte> snapshot(frameBytes, untouched);
+    const std::array<Rectangle, 2> rectangles{{
+        {2, 2, 4, 4},
+        {8, 0, 2, 2},
+    }};
+
+    success &= check(copyNv12EncodeRectangles(
+                         source, geometry, rectangles, snapshot),
+                     "sparse H264 frame snapshot was rejected");
+    const std::size_t lumaBytes =
+        static_cast<std::size_t>(geometry.widthPixels) *
+        geometry.heightPixels;
+    for (std::uint32_t y = 0; y < geometry.heightPixels; ++y)
+    {
+        for (std::uint32_t x = 0; x < geometry.widthPixels; ++x)
+        {
+            bool encoded = false;
+            for (const Rectangle rectangle : rectangles)
+            {
+                encoded |= x >= static_cast<std::uint32_t>(rectangle.x) &&
+                           x < static_cast<std::uint32_t>(rectangle.x) +
+                                   rectangle.widthPixels &&
+                           y >= static_cast<std::uint32_t>(rectangle.y) &&
+                           y < static_cast<std::uint32_t>(rectangle.y) +
+                                   rectangle.heightPixels;
+            }
+            const std::size_t offset =
+                static_cast<std::size_t>(y) * geometry.widthPixels + x;
+            success &= check(snapshot[offset] ==
+                                 (encoded ? source[offset] : untouched),
+                             "sparse luma snapshot touched a non-encoded pixel");
+        }
+    }
+    for (std::uint32_t row = 0; row < geometry.heightPixels / 2U; ++row)
+    {
+        for (std::uint32_t byteX = 0; byteX < geometry.widthPixels; ++byteX)
+        {
+            bool encoded = false;
+            for (const Rectangle rectangle : rectangles)
+            {
+                encoded |= byteX >= static_cast<std::uint32_t>(rectangle.x) &&
+                           byteX < static_cast<std::uint32_t>(rectangle.x) +
+                                       rectangle.widthPixels &&
+                           row >= static_cast<std::uint32_t>(rectangle.y) / 2U &&
+                           row < static_cast<std::uint32_t>(rectangle.y) / 2U +
+                                     rectangle.heightPixels / 2U;
+            }
+            const std::size_t offset =
+                lumaBytes + static_cast<std::size_t>(row) *
+                                geometry.widthPixels + byteX;
+            success &= check(snapshot[offset] ==
+                                 (encoded ? source[offset] : untouched),
+                             "sparse chroma snapshot touched a non-encoded pixel");
+        }
+    }
+
+    std::vector<std::byte> invalidOutput(frameBytes, untouched);
+    const Rectangle oddRectangle{1, 0, 2, 2};
+    success &= check(!copyNv12EncodeRectangles(
+                         source, geometry, std::span(&oddRectangle, 1),
+                         invalidOutput),
+                     "odd AVC420 snapshot rectangle was accepted");
+    success &= check(std::all_of(invalidOutput.begin(), invalidOutput.end(),
+                                 [](std::byte value) {
+                                     return value == untouched;
+                                 }),
+                     "invalid snapshot modified its destination");
+    const Rectangle outOfBoundsRectangle{10, 6, 4, 2};
+    success &= check(!copyNv12EncodeRectangles(
+                         source, geometry,
+                         std::span(&outOfBoundsRectangle, 1), invalidOutput),
+                     "out-of-bounds AVC420 snapshot rectangle was accepted");
+    success &= check(!copyNv12EncodeRectangles(
+                         source, geometry, rectangles,
+                         std::span<std::byte>(invalidOutput).first(
+                             frameBytes - 1U)),
+                     "undersized asynchronous frame mapping was accepted");
+    success &= check(std::all_of(invalidOutput.begin(), invalidOutput.end(),
+                                 [](std::byte value) {
+                                     return value == untouched;
+                                 }),
+                     "invalid snapshot validation partially modified its destination");
+    return success;
 }
 
 bool
@@ -277,6 +387,7 @@ int
 main()
 {
     bool success = true;
+    success &= sparse_encoder_snapshot_copies_only_avc420_encode_rectangles();
     success &= pipeline_coalesces_unchanged_then_sends_newest_changed_tile();
     success &= newer_generation_survives_older_capture_commit();
     return success ? EXIT_SUCCESS : EXIT_FAILURE;

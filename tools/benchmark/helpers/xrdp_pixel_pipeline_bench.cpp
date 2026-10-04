@@ -51,6 +51,7 @@ using xrdp_console::rdp::ScrollMotionObserver;
 using xrdp_console::rdp::buildGfxAvc420Command;
 using xrdp_console::rdp::classifyExactVerticalScrollReuse;
 using xrdp_console::rdp::convertBgraToNv12_709FullRange;
+using xrdp_console::rdp::copyNv12EncodeRectangles;
 using xrdp_console::rdp::gfxAvc420CommandBytes;
 using xrdp_console::rdp::makeH264PresentationPlan;
 using xrdp_console::rdp::nv12FrameBytes;
@@ -81,6 +82,7 @@ constexpr std::size_t kBytesPerBgraPixel = 4U;
 struct Options final
 {
     std::size_t samples{kDefaultSamples};
+    std::uint32_t x264Threads{1};
     std::string displayName{};
     bool nv12Only{};
     bool help{};
@@ -91,6 +93,7 @@ struct StageSamples final
     std::vector<std::uint64_t> wallNanoseconds{};
     std::vector<std::uint64_t> cpuNanoseconds{};
     std::uint64_t outputBytes{};
+    bool processCpuTime{};
 };
 
 [[nodiscard]] bool
@@ -133,11 +136,14 @@ parsePositiveSize(std::string_view text, std::size_t &value) noexcept
 void
 printUsage(const char *program)
 {
-    std::printf("Usage: %s [--samples COUNT] [--display DISPLAY] "
+    std::printf("Usage: %s [--samples COUNT] [--x264-threads 1|2] "
+                "[--display DISPLAY] "
                 "[--nv12-only] [--help]\n"
                 "Measure CPU-side pixel-pipeline stages against the current "
                 "X11 root.\n"
                 "--nv12-only measures only full-frame BGRA-to-NV12 paths.\n"
+                "--x264-threads selects 1 or 2 encoder workers "
+                "(default 1).\n"
                 "COUNT must be in [1, %zu] (default %zu). OpenGL is not used.\n",
                 program, kMaximumSamples, kDefaultSamples);
 }
@@ -173,6 +179,18 @@ parseOptions(int argc, char **argv, Options &options)
             }
             ++index;
         }
+        else if (argument == "--x264-threads")
+        {
+            std::size_t parsed{};
+            if (index + 1 >= argc ||
+                !parsePositiveSize(argv[index + 1], parsed) || parsed > 2U)
+            {
+                std::fputs("--x264-threads requires 1 or 2\n", stderr);
+                return false;
+            }
+            options.x264Threads = static_cast<std::uint32_t>(parsed);
+            ++index;
+        }
         else if (argument == "--display")
         {
             if (index + 1 >= argc || argv[index + 1][0] == '\0')
@@ -196,11 +214,13 @@ parseOptions(int argc, char **argv, Options &options)
 template <typename Prepare, typename Operation>
 [[nodiscard]] bool
 measure(StageSamples &samples, std::size_t sampleCount,
-        Prepare &&prepare, Operation &&operation)
+        Prepare &&prepare, Operation &&operation,
+        clockid_t cpuClock = CLOCK_THREAD_CPUTIME_ID)
 {
     samples.wallNanoseconds.clear();
     samples.cpuNanoseconds.clear();
     samples.outputBytes = 0;
+    samples.processCpuTime = cpuClock == CLOCK_PROCESS_CPUTIME_ID;
     samples.wallNanoseconds.reserve(sampleCount);
     samples.cpuNanoseconds.reserve(sampleCount);
 
@@ -221,7 +241,7 @@ measure(StageSamples &samples, std::size_t sampleCount,
         std::uint64_t wallStart{};
         std::uint64_t cpuStart{};
         if (!clockNanoseconds(CLOCK_MONOTONIC, wallStart) ||
-            !clockNanoseconds(CLOCK_THREAD_CPUTIME_ID, cpuStart))
+            !clockNanoseconds(cpuClock, cpuStart))
         {
             return false;
         }
@@ -234,7 +254,7 @@ measure(StageSamples &samples, std::size_t sampleCount,
 
         std::uint64_t cpuEnd{};
         std::uint64_t wallEnd{};
-        if (!clockNanoseconds(CLOCK_THREAD_CPUTIME_ID, cpuEnd) ||
+        if (!clockNanoseconds(cpuClock, cpuEnd) ||
             !clockNanoseconds(CLOCK_MONOTONIC, wallEnd) ||
             wallEnd < wallStart || cpuEnd < cpuStart)
         {
@@ -296,12 +316,13 @@ reportStage(std::string_view name, const StageSamples &samples,
         std::printf("na");
     }
     std::printf(
-        " wall_max_us=%.3f cpu_avg_us=%.3f cpu_p50_us=%.3f "
+        " wall_max_us=%.3f cpu_clock=%s cpu_avg_us=%.3f cpu_p50_us=%.3f "
         "cpu_p95_us=%.3f cpu_core_percent=%.1f calls_per_s=%.2f "
         "pixels_per_call=%llu pixels_per_s=%.0f estimated_read_bytes_per_call="
         "%llu estimated_write_bytes_per_call=%llu estimated_bytes_per_s=%.0f "
         "observed_output_bytes_per_call=%.1f\n",
         static_cast<double>(wall.maximumNanoseconds) / 1000.0,
+        samples.processCpuTime ? "process" : "thread",
         cpu.averageNanoseconds / 1000.0,
         static_cast<double>(cpu.p50Nanoseconds) / 1000.0,
         static_cast<double>(cpu.p95Nanoseconds) / 1000.0,
@@ -526,11 +547,13 @@ scaleAndConvertDirect(PresentationScaler &scaler, FramebufferView source,
 
 [[nodiscard]] bool
 initializeX264(const std::vector<std::byte> &inputNv12,
-               PixelSize geometry, x264_t *&encoder,
+               PixelSize geometry, std::uint32_t threadCount,
+               x264_t *&encoder,
                x264_param_t &parameters, std::vector<std::byte> &padded)
 {
     if (geometry.widthPixels == 0 || geometry.heightPixels == 0 ||
-        inputNv12.size() != nv12FrameBytes(geometry))
+        inputNv12.size() != nv12FrameBytes(geometry) ||
+        threadCount == 0 || threadCount > 2)
     {
         return false;
     }
@@ -542,7 +565,7 @@ initializeX264(const std::vector<std::byte> &inputNv12,
     parameters.i_width = static_cast<int>((geometry.widthPixels + 15U) & ~15U);
     parameters.i_height =
         static_cast<int>((geometry.heightPixels + 15U) & ~15U);
-    parameters.i_threads = 1;
+    parameters.i_threads = static_cast<int>(threadCount);
     parameters.i_fps_num = 60;
     parameters.i_fps_den = 1;
     parameters.i_log_level = X264_LOG_NONE;
@@ -1344,7 +1367,7 @@ runBenchmark(const Options &options)
 
     const std::size_t snapshotBytes = presentationNv12Bytes;
     if (!measure(samples, options.samples, noPreparation,
-                 [&](std::size_t, std::uint64_t &) {
+                 [&](std::size_t, std::uint64_t &outputBytes) {
                      auto mapping = xrdp_console::MappedBuffer::allocate(
                          snapshotBytes);
                      if (!mapping.valid())
@@ -1353,6 +1376,7 @@ runBenchmark(const Options &options)
                      }
                      std::memcpy(mapping.bytes().data(), presentationNv12.data(),
                                  snapshotBytes);
+                     outputBytes = snapshotBytes;
                      return true;
                  }))
     {
@@ -1361,6 +1385,31 @@ runBenchmark(const Options &options)
     }
     reportStage("mmap_frame_snapshot_copy", samples, outputPixels,
                 snapshotBytes, snapshotBytes);
+
+    const Rectangle fullFrameSnapshotRectangle{
+        0, 0, frameGeometry.widthPixels, frameGeometry.heightPixels};
+    if (!measure(samples, options.samples, noPreparation,
+                 [&](std::size_t, std::uint64_t &outputBytes) {
+                     auto mapping = xrdp_console::MappedBuffer::allocate(
+                         snapshotBytes);
+                     if (!mapping.valid() ||
+                         !copyNv12EncodeRectangles(
+                             presentationNv12, frameGeometry,
+                             std::span<const Rectangle>(
+                                 &fullFrameSnapshotRectangle, 1),
+                             mapping.bytes()))
+                     {
+                         return false;
+                     }
+                     outputBytes = snapshotBytes;
+                     return true;
+                 }))
+    {
+        std::fputs("mmap full-rectangle snapshot failed\n", stderr);
+        return false;
+    }
+    reportStage("mmap_full_encode_rectangle_snapshot", samples,
+                outputPixels, snapshotBytes, snapshotBytes);
 
     std::array<Rectangle, kGfxRectangleCount> gfxRectangles{};
     for (std::size_t index = 0; index < gfxRectangles.size(); ++index)
@@ -1372,6 +1421,45 @@ runBenchmark(const Options &options)
             outputRectangle.y + static_cast<std::int32_t>(row * 64U),
             64U, 64U};
     }
+    std::uint64_t encodeRectanglePixels = 0;
+    for (const Rectangle rectangle : gfxRectangles)
+    {
+        encodeRectanglePixels +=
+            static_cast<std::uint64_t>(rectangle.widthPixels) *
+            rectangle.heightPixels;
+    }
+    const std::uint64_t sparseSnapshotBytes =
+        encodeRectanglePixels + encodeRectanglePixels / 2U;
+    if (encodeRectanglePixels == 0 ||
+        sparseSnapshotBytes >= presentationNv12Bytes)
+    {
+        std::fputs("H.264 sparse snapshot benchmark rectangles are invalid\n",
+                   stderr);
+        return false;
+    }
+    if (!measure(samples, options.samples, noPreparation,
+                 [&](std::size_t, std::uint64_t &outputBytes) {
+                     auto mapping = xrdp_console::MappedBuffer::allocate(
+                         presentationNv12Bytes);
+                     if (!mapping.valid() ||
+                         !copyNv12EncodeRectangles(
+                             presentationNv12, frameGeometry, gfxRectangles,
+                             mapping.bytes()))
+                     {
+                         return false;
+                     }
+                     outputBytes = sparseSnapshotBytes;
+                     return true;
+                 }))
+    {
+        std::fputs("mmap sparse-frame snapshot failed\n", stderr);
+        return false;
+    }
+    reportStage("mmap_sparse_encode_rectangles_snapshot", samples,
+                encodeRectanglePixels,
+                static_cast<std::uint64_t>(sparseSnapshotBytes),
+                static_cast<std::uint64_t>(sparseSnapshotBytes));
+
     std::array<std::byte, 4096> commandBuffer{};
     std::uint32_t frameId = 1U;
     const GfxAvc420Command gfxCommand{
@@ -1400,7 +1488,8 @@ runBenchmark(const Options &options)
     x264_t *rawEncoder = nullptr;
     x264_param_t parameters{};
     std::vector<std::byte> paddedNv12;
-    if (!initializeX264(presentationNv12, frameGeometry, rawEncoder,
+    if (!initializeX264(presentationNv12, frameGeometry, options.x264Threads,
+                        rawEncoder,
                         parameters, paddedNv12))
     {
         std::fputs("software x264 encoder setup failed\n", stderr);
@@ -1416,7 +1505,7 @@ runBenchmark(const Options &options)
         [&](std::size_t index, std::uint64_t &outputBytes) {
             return encodeX264(encoder.get(), parameters, paddedNv12, index,
                               outputBytes);
-        });
+        }, CLOCK_PROCESS_CPUTIME_ID);
     if (!x264Measured)
     {
         std::fputs("software x264 frame encode measurement failed\n", stderr);
@@ -1434,7 +1523,7 @@ runBenchmark(const Options &options)
                 "source_bgra_bytes=%zu frame_nv12_bytes=%zu "
                 "x264_padded_nv12_bytes=%zu "
                 "samples=%zu checksum=%llu x264_preset=ultrafast "
-                "x264_tune=zerolatency x264_threads=1 x264_fps=60 "
+                "x264_tune=zerolatency x264_threads=%u x264_fps=60 "
                 "x264_profile=baseline\n",
                 sourceGeometry.widthPixels, sourceGeometry.heightPixels,
                 kRequestedPresentationGeometry.widthPixels,
@@ -1445,7 +1534,8 @@ runBenchmark(const Options &options)
                 static_cast<unsigned long long>(outputPixels),
                 sourceBgraBytes, presentationNv12Bytes, paddedNv12.size(),
                 options.samples,
-                static_cast<unsigned long long>(checksum));
+                static_cast<unsigned long long>(checksum),
+                options.x264Threads);
     return true;
 }
 

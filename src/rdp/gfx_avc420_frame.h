@@ -43,6 +43,14 @@ struct GfxSolidFillCommand final
 
 [[nodiscard]] std::size_t nv12FrameBytes(PixelSize geometry) noexcept;
 
+// Copy only the pixels covered by AVC420 encode rectangles into a full-frame
+// NV12 snapshot for xrdp's asynchronous encoder. The destination retains the
+// full-frame layout and stride; bytes outside encodeRectangles are untouched.
+[[nodiscard]] bool copyNv12EncodeRectangles(
+    std::span<const std::byte> sourceFrame, PixelSize frameGeometry,
+    std::span<const Rectangle> encodeRectangles,
+    std::span<std::byte> destinationFrame) noexcept;
+
 // Match xorgxrdp's a8r8g8b8_to_nv12_709fr_box() reference conversion.
 // The destination is tightly packed: Y first, followed by interleaved UV.
 [[nodiscard]] bool convertBgraToNv12_709FullRange(

@@ -53,7 +53,11 @@ have been converted. Full invalidation still captures the full source. The
 snapshot arena is capped at 32 MiB; if the geometry exceeds that budget or the
 arena cannot be allocated, direct H.264 is not used and the negotiated GFX
 path falls back to Planar rather than reverting to mixed-time per-tile
-captures.
+captures. Before asynchronous submission, a full-stride NV12 mapping is
+allocated but only AVC420 encode rectangles are copied into it. The pinned
+xrdp x264 and OpenH264 backends consume those rectangles from the mapping;
+untouched anonymous pages stay demand-zero. The encode-rectangle list passed
+to xrdp must remain the source of truth for this sparse snapshot.
 
 The canonical `scripts/build-direct-console.sh` first builds the pinned client
 with `scripts/build-test-freerdp.sh` if it is not already present, then passes

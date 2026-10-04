@@ -3164,6 +3164,7 @@ ModuleContext::check_h264_gfx() noexcept
     using xrdp_console::rdp::buildGfxAvc420CommandSharedRectangles;
     using xrdp_console::rdp::buildGfxSolidFillCommand;
     using xrdp_console::rdp::buildGfxSurfaceToSurfaceCommand;
+    using xrdp_console::rdp::copyNv12EncodeRectangles;
     using xrdp_console::rdp::ScaledNv12UpdateResult;
     using xrdp_console::rdp::updateNv12Rectangle_709FullRange;
     using xrdp_console::rdp::updateNv12RectangleFromBgraRegion_709FullRange;
@@ -4152,8 +4153,15 @@ ModuleContext::check_h264_gfx() noexcept
     {
         return 1;
     }
-    std::memcpy(frame.bytes().data(), impl_->h264Frame.frameBytes().data(),
-                frame.sizeBytes());
+    // xrdp's AVC420 encoder reads the pixels in the encoded rectangles from
+    // this full-stride NV12 mapping. Keep its full logical size while leaving
+    // non-encoded anonymous pages untouched and demand-zero.
+    if (!copyNv12EncodeRectangles(
+            impl_->h264Frame.frameBytes(), impl_->h264Frame.geometry(),
+            rectangleSpan, frame.bytes()))
+    {
+        return 1;
+    }
     const MappedBuffer::ReleasedMapping released = frame.release();
     const int submitResult = xrdp_console_module_submit_h264_gfx(
         impl_->module, reinterpret_cast<char *>(commandBytes.data()),

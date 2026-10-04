@@ -25,12 +25,21 @@ def main() -> int:
     if help_result.returncode != 0 or "--samples COUNT" not in help_result.stdout:
         raise AssertionError("--help did not print the benchmark usage")
 
+    two_thread_help = run(binary, "--x264-threads", "2", "--help")
+    if (two_thread_help.returncode != 0 or
+            "--x264-threads 1|2" not in two_thread_help.stdout):
+        raise AssertionError("the benchmark cannot select two x264 threads")
+
     for arguments in (
         ("--samples", "0"),
         ("--samples", "-1"),
         ("--samples", "many"),
         ("--samples",),
         ("--display",),
+        ("--x264-threads",),
+        ("--x264-threads", "0"),
+        ("--x264-threads", "3"),
+        ("--x264-threads", "many"),
         ("--unknown-option",),
     ):
         result = run(binary, *arguments)
