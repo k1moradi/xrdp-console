@@ -179,6 +179,58 @@ GenerationTileMap::dirtyTileCount() const noexcept
     return dirtyTileCount_;
 }
 
+Rectangle
+GenerationTileMap::dirtyBounds() const noexcept
+{
+    if (dirtyTileCount_ == 0 || columns_ == 0 || rows_ == 0)
+    {
+        return {};
+    }
+
+    std::uint32_t firstColumn = columns_;
+    std::uint32_t firstRow = rows_;
+    std::uint32_t lastColumn = 0;
+    std::uint32_t lastRow = 0;
+    bool found = false;
+    for (std::uint32_t row = 0; row < rows_; ++row)
+    {
+        const std::size_t rowOffset =
+            static_cast<std::size_t>(row) * columns_;
+        for (std::uint32_t column = 0; column < columns_; ++column)
+        {
+            if (tileGenerations_[rowOffset + column] == 0)
+            {
+                continue;
+            }
+            found = true;
+            firstColumn = std::min(firstColumn, column);
+            firstRow = std::min(firstRow, row);
+            lastColumn = std::max(lastColumn, column);
+            lastRow = std::max(lastRow, row);
+        }
+    }
+    if (!found)
+    {
+        return {};
+    }
+
+    const std::uint64_t left =
+        static_cast<std::uint64_t>(firstColumn) * kTileWidthPixels;
+    const std::uint64_t top =
+        static_cast<std::uint64_t>(firstRow) * kTileHeightPixels;
+    const std::uint64_t right = std::min<std::uint64_t>(
+        bounds_.widthPixels,
+        (static_cast<std::uint64_t>(lastColumn) + 1U) * kTileWidthPixels);
+    const std::uint64_t bottom = std::min<std::uint64_t>(
+        bounds_.heightPixels,
+        (static_cast<std::uint64_t>(lastRow) + 1U) * kTileHeightPixels);
+    return {
+        static_cast<std::int32_t>(left), static_cast<std::int32_t>(top),
+        static_cast<std::uint32_t>(right - left),
+        static_cast<std::uint32_t>(bottom - top),
+    };
+}
+
 std::uint64_t
 GenerationTileMap::generation() const noexcept
 {

@@ -2,6 +2,8 @@
 
 #include "h264_latest_frame.h"
 
+#include "../core/presentation_scaler.h"
+
 #include <algorithm>
 #include <array>
 #include <climits>
@@ -10,6 +12,55 @@
 
 namespace xrdp_console::rdp
 {
+
+namespace
+{
+
+[[nodiscard]] Rectangle
+unionRectangles(Rectangle first, Rectangle second) noexcept
+{
+    if (first.widthPixels == 0 || first.heightPixels == 0)
+    {
+        return second;
+    }
+    if (second.widthPixels == 0 || second.heightPixels == 0)
+    {
+        return first;
+    }
+    const std::int64_t left = std::min<std::int64_t>(first.x, second.x);
+    const std::int64_t top = std::min<std::int64_t>(first.y, second.y);
+    const std::int64_t right = std::max<std::int64_t>(
+        static_cast<std::int64_t>(first.x) + first.widthPixels,
+        static_cast<std::int64_t>(second.x) + second.widthPixels);
+    const std::int64_t bottom = std::max<std::int64_t>(
+        static_cast<std::int64_t>(first.y) + first.heightPixels,
+        static_cast<std::int64_t>(second.y) + second.heightPixels);
+    return {static_cast<std::int32_t>(left), static_cast<std::int32_t>(top),
+            static_cast<std::uint32_t>(right - left),
+            static_cast<std::uint32_t>(bottom - top)};
+}
+
+[[nodiscard]] Rectangle
+intersectRectangles(Rectangle first, Rectangle second) noexcept
+{
+    const std::int64_t left = std::max<std::int64_t>(first.x, second.x);
+    const std::int64_t top = std::max<std::int64_t>(first.y, second.y);
+    const std::int64_t right = std::min<std::int64_t>(
+        static_cast<std::int64_t>(first.x) + first.widthPixels,
+        static_cast<std::int64_t>(second.x) + second.widthPixels);
+    const std::int64_t bottom = std::min<std::int64_t>(
+        static_cast<std::int64_t>(first.y) + first.heightPixels,
+        static_cast<std::int64_t>(second.y) + second.heightPixels);
+    if (right <= left || bottom <= top)
+    {
+        return {};
+    }
+    return {static_cast<std::int32_t>(left), static_cast<std::int32_t>(top),
+            static_cast<std::uint32_t>(right - left),
+            static_cast<std::uint32_t>(bottom - top)};
+}
+
+} // namespace
 
 bool
 makeH264PresentationPlan(PixelSize source, PixelSize presentation,
@@ -520,6 +571,68 @@ H264LatestFrameState::collectCaptureSelectionsIntersecting(
     return valid()
                ? captureDamage_.collectSelectionsIntersecting(clip, output)
                : 0;
+}
+
+bool
+H264LatestFrameState::sourceCaptureBoundsForPendingDamage(
+    const PresentationScaler &scaler,
+    Rectangle &sourceRectangle) const noexcept
+{
+    sourceRectangle = {};
+    if (!valid() || !scaler.valid())
+    {
+        return false;
+    }
+
+    const Rectangle pendingDamage = captureDamage_.dirtyBounds();
+    if (pendingDamage.widthPixels == 0 || pendingDamage.heightPixels == 0)
+    {
+        return false;
+    }
+
+    sourceRectangle = pendingDamage;
+    Rectangle mappedDamage{};
+    Rectangle requiredSource{};
+    const RectangleMapResult mapping = scaler.mapSourceRectangle(
+        pendingDamage, mappedDamage, requiredSource);
+    if (mapping == RectangleMapResult::Invalid)
+    {
+        sourceRectangle = {};
+        return false;
+    }
+    sourceRectangle = unionRectangles(sourceRectangle, requiredSource);
+
+    if (mapping == RectangleMapResult::Mapped)
+    {
+        const Rectangle aligned =
+            alignAvc420Rectangle(mappedDamage, geometry_);
+        const Rectangle visible = intersectRectangles(aligned, viewport_);
+        if (visible.widthPixels != 0 && visible.heightPixels != 0)
+        {
+            Rectangle alignedCoverage{};
+            if (!scaler.sourceCoverageForPresentationRectangle(
+                    visible, alignedCoverage))
+            {
+                sourceRectangle = {};
+                return false;
+            }
+            sourceRectangle = unionRectangles(sourceRectangle,
+                                               alignedCoverage);
+        }
+    }
+
+    if (sourceRectangle.x < 0 || sourceRectangle.y < 0 ||
+        static_cast<std::uint64_t>(sourceRectangle.x) +
+                sourceRectangle.widthPixels >
+            sourceGeometry_.widthPixels ||
+        static_cast<std::uint64_t>(sourceRectangle.y) +
+                sourceRectangle.heightPixels >
+            sourceGeometry_.heightPixels)
+    {
+        sourceRectangle = {};
+        return false;
+    }
+    return true;
 }
 
 namespace

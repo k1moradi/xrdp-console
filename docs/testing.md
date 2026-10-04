@@ -45,13 +45,15 @@ server's requested policy log so the A/B arms cannot silently collapse to the
 same configuration. First-failure PPM screenshots and per-run xrdp/FreeRDP
 logs are retained under `build-direct-console/test-artifacts/`.
 
-For direct AVC420, the module captures one immutable full-source XShm snapshot
-for each pending H.264 damage batch and derives tile fingerprints and NV12
-updates from that same view. It does not issue another source capture until
-all selected tiles from the snapshot have been converted. The snapshot arena
-is capped at 32 MiB; if the geometry exceeds that budget or the arena cannot
-be allocated, direct H.264 is not used and the negotiated GFX path falls back
-to Planar rather than reverting to mixed-time per-tile captures.
+For direct AVC420, the module captures one immutable XShm snapshot covering
+all pending H.264 damage tiles and the scaler filter footprint for their
+AVC420-aligned output. It derives tile fingerprints and NV12 updates from that
+same view and does not issue another source capture until all selected tiles
+have been converted. Full invalidation still captures the full source. The
+snapshot arena is capped at 32 MiB; if the geometry exceeds that budget or the
+arena cannot be allocated, direct H.264 is not used and the negotiated GFX
+path falls back to Planar rather than reverting to mixed-time per-tile
+captures.
 
 The canonical `scripts/build-direct-console.sh` first builds the pinned client
 with `scripts/build-test-freerdp.sh` if it is not already present, then passes

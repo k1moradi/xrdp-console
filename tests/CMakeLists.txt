@@ -401,7 +401,8 @@ if(TARGET xrdp-console)
 
     add_executable(gfx-avc420-frame-unit
         test_gfx_avc420_frame.cpp
-        ${CMAKE_SOURCE_DIR}/src/rdp/gfx_avc420_frame.cpp)
+        ${CMAKE_SOURCE_DIR}/src/rdp/gfx_avc420_frame.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/presentation_scaler.cpp)
     set_target_properties(gfx-avc420-frame-unit PROPERTIES
         CXX_STANDARD 23
         CXX_STANDARD_REQUIRED ON
@@ -533,6 +534,7 @@ if(TARGET xrdp-console)
         ${CMAKE_SOURCE_DIR}/src/core/generation_tile_map.cpp
         ${CMAKE_SOURCE_DIR}/src/core/tile_fingerprint_map.cpp
         ${CMAKE_SOURCE_DIR}/src/core/mapped_buffer.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/presentation_scaler.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/gfx_avc420_frame.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/h264_latest_frame.cpp)
     set_target_properties(optimization-pipeline-unit PROPERTIES

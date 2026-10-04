@@ -1500,6 +1500,189 @@ bool downscaled_filter_coverage_includes_unselected_source_pixels()
     return success;
 }
 
+bool coherent_h264_capture_bounds_are_damage_limited_and_filter_complete()
+{
+    PresentationScaler scaler;
+    H264LatestFrameState state;
+    bool success = check(
+        scaler.configure(kFullHdSource, kFullHdPresentation,
+                         kFullHdViewport),
+        "Full HD bounded-capture scaler setup failed");
+    success &= check(state.configure(kFullHdSource, kFullHdPresentation,
+                                     kFullHdFrame, kFullHdViewport),
+                     "Full HD bounded-capture state setup failed");
+    if (!success)
+    {
+        return false;
+    }
+
+    Rectangle initialCapture{};
+    success &= check(state.sourceCaptureBoundsForPendingDamage(
+                         scaler, initialCapture) &&
+                         initialCapture == Rectangle{
+                             0, 0, kFullHdSource.widthPixels,
+                             kFullHdSource.heightPixels},
+                     "initial H264 baseline did not retain full-source capture");
+
+    // Finish the initial baseline so later damage represents an ordinary
+    // small update rather than the required full-screen first frame.
+    std::array<GenerationTileMap::Selection, 64> baselineSelections{};
+    const std::size_t baselineCount =
+        state.collectCaptureSelections(baselineSelections);
+    success &= check(baselineCount != 0 &&
+                         baselineCount < baselineSelections.size(),
+                     "initial Full HD capture selection count is unexpected");
+    for (std::size_t index = 0; index < baselineCount; ++index)
+    {
+        success &= check(state.commitCaptured(baselineSelections[index]),
+                         "initial Full HD capture tile failed to commit");
+    }
+    success &= check(!state.capturePending(),
+                     "initial Full HD baseline remained pending");
+
+    state.markDamage({270, 270, 1, 1});
+    state.markDamage({350, 300, 1, 1});
+    state.markDamage({390, 350, 1, 1});
+
+    Rectangle captureBounds{};
+    success &= check(state.sourceCaptureBoundsForPendingDamage(
+                         scaler, captureBounds),
+                     "pending Full HD damage had no capture bounds");
+    const std::uint64_t capturePixels =
+        static_cast<std::uint64_t>(captureBounds.widthPixels) *
+        captureBounds.heightPixels;
+    const std::uint64_t fullPixels =
+        static_cast<std::uint64_t>(kFullHdSource.widthPixels) *
+        kFullHdSource.heightPixels;
+    success &= check(captureBounds.widthPixels < kFullHdSource.widthPixels &&
+                         captureBounds.heightPixels < kFullHdSource.heightPixels &&
+                         capturePixels * 8U < fullPixels,
+                     "small Full HD damage still captures a full-screen-sized area");
+
+    std::array<GenerationTileMap::Selection, 16> damageSelections{};
+    const std::size_t damageCount =
+        state.collectCaptureSelections(damageSelections);
+    success &= check(damageCount >= 2 && damageCount < damageSelections.size(),
+                     "Full HD damage did not produce the expected tile set");
+    for (std::size_t index = 0; index < damageCount; ++index)
+    {
+        const Rectangle tile = damageSelections[index].rectangle;
+        Rectangle mapped{};
+        Rectangle required{};
+        const RectangleMapResult result = scaler.mapSourceRectangle(
+            tile, mapped, required);
+        success &= check(result != RectangleMapResult::Invalid,
+                         "pending tile could not be mapped for snapshot coverage");
+        Rectangle aligned = alignAvc420Rectangle(mapped, kFullHdFrame);
+        if (aligned.widthPixels != 0 && aligned.heightPixels != 0)
+        {
+            const std::int64_t left = std::max<std::int64_t>(
+                aligned.x, kFullHdViewport.x);
+            const std::int64_t top = std::max<std::int64_t>(
+                aligned.y, kFullHdViewport.y);
+            const std::int64_t right = std::min<std::int64_t>(
+                static_cast<std::int64_t>(aligned.x) + aligned.widthPixels,
+                static_cast<std::int64_t>(kFullHdViewport.x) +
+                    kFullHdViewport.widthPixels);
+            const std::int64_t bottom = std::min<std::int64_t>(
+                static_cast<std::int64_t>(aligned.y) + aligned.heightPixels,
+                static_cast<std::int64_t>(kFullHdViewport.y) +
+                    kFullHdViewport.heightPixels);
+            if (right > left && bottom > top)
+            {
+                Rectangle alignedCoverage{};
+                success &= check(scaler.sourceCoverageForPresentationRectangle(
+                                     {static_cast<std::int32_t>(left),
+                                      static_cast<std::int32_t>(top),
+                                      static_cast<std::uint32_t>(right - left),
+                                      static_cast<std::uint32_t>(bottom - top)},
+                                     alignedCoverage),
+                                 "AVC420 alignment had no scaler coverage");
+                if (alignedCoverage.widthPixels != 0 &&
+                    alignedCoverage.heightPixels != 0)
+                {
+                    const std::int64_t unionLeft = std::min<std::int64_t>(
+                        required.x, alignedCoverage.x);
+                    const std::int64_t unionTop = std::min<std::int64_t>(
+                        required.y, alignedCoverage.y);
+                    const std::int64_t unionRight = std::max<std::int64_t>(
+                        static_cast<std::int64_t>(required.x) +
+                            required.widthPixels,
+                        static_cast<std::int64_t>(alignedCoverage.x) +
+                            alignedCoverage.widthPixels);
+                    const std::int64_t unionBottom = std::max<std::int64_t>(
+                        static_cast<std::int64_t>(required.y) +
+                            required.heightPixels,
+                        static_cast<std::int64_t>(alignedCoverage.y) +
+                            alignedCoverage.heightPixels);
+                    required = {
+                        static_cast<std::int32_t>(unionLeft),
+                        static_cast<std::int32_t>(unionTop),
+                        static_cast<std::uint32_t>(unionRight - unionLeft),
+                        static_cast<std::uint32_t>(unionBottom - unionTop),
+                    };
+                }
+            }
+        }
+
+        const bool contains =
+            captureBounds.x <= required.x &&
+            captureBounds.y <= required.y &&
+            static_cast<std::uint64_t>(captureBounds.x) +
+                    captureBounds.widthPixels >=
+                static_cast<std::uint64_t>(required.x) +
+                    required.widthPixels &&
+            static_cast<std::uint64_t>(captureBounds.y) +
+                    captureBounds.heightPixels >=
+                static_cast<std::uint64_t>(required.y) +
+                    required.heightPixels;
+        success &= check(contains,
+                         "shared snapshot bounds omit a dirty tile's filter samples");
+    }
+
+    std::vector<std::uint32_t> sourcePixels = makeFullHdTextPattern();
+    std::vector<std::uint32_t> croppedPixels;
+    success &= check(cropFullHdPixels(sourcePixels, captureBounds,
+                                      croppedPixels),
+                     "shared Full HD damage snapshot crop failed");
+    if (croppedPixels.empty())
+    {
+        return false;
+    }
+    const FramebufferView captured{
+        std::as_bytes(std::span<const std::uint32_t>(croppedPixels)),
+        captureBounds.widthPixels, captureBounds.heightPixels,
+        static_cast<std::size_t>(captureBounds.widthPixels) * 4U};
+    std::vector<std::byte> stagedNv12(nv12FrameBytes(kFullHdFrame),
+                                      std::byte{0xa5});
+    std::vector<std::byte> directNv12(nv12FrameBytes(kFullHdFrame),
+                                      std::byte{0xa5});
+    for (std::size_t index = 0; index < damageCount; ++index)
+    {
+        Rectangle mapped{};
+        success &= check(state.mapSourceRectangle(
+                             damageSelections[index].rectangle, mapped),
+                         "shared Full HD damage tile did not map");
+        const Rectangle destination =
+            alignAvc420Rectangle(mapped, kFullHdFrame);
+        if (destination.widthPixels == 0 || destination.heightPixels == 0)
+        {
+            continue;
+        }
+        success &= check(scaleAndConvertStaged(
+                             scaler, captured, captureBounds, destination,
+                             stagedNv12, 18),
+                         "staged conversion rejected shared damage snapshot");
+        success &= check(scaleAndConvertDirect(
+                             scaler, captured, captureBounds, destination,
+                             directNv12, 22),
+                         "fused conversion rejected shared damage snapshot");
+    }
+    success &= check(directNv12 == stagedNv12,
+                     "shared damage snapshot produced different staged and fused NV12");
+    return success;
+}
+
 bool full_hd_scaled_nv12_fusion_matches_staged_and_partial_updates()
 {
     PresentationScaler scaler;
@@ -1816,6 +1999,7 @@ int main()
     success &= native_resolution_keeps_identity_h264_geometry();
     success &= scaled_capture_maps_to_global_nv12_pixels();
     success &= downscaled_filter_coverage_includes_unselected_source_pixels();
+    success &= coherent_h264_capture_bounds_are_damage_limited_and_filter_complete();
     success &= full_hd_scaled_nv12_fusion_matches_staged_and_partial_updates();
     success &= oversized_nv12_frame_is_rejected_before_allocation();
     success &= scaled_newer_source_damage_blocks_stale_frame_tile();

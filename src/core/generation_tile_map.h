@@ -40,6 +40,7 @@ public:
     }
     [[nodiscard]] std::size_t dirtyTileCount() const noexcept;
     [[nodiscard]] std::uint64_t generation() const noexcept;
+    [[nodiscard]] Rectangle dirtyBounds() const noexcept;
     [[nodiscard]] bool intersects(Rectangle rectangle) const noexcept;
     // Column and row are map tile coordinates; out-of-range queries are clean.
     [[nodiscard]] bool tileDirty(std::uint32_t column,

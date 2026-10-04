@@ -46,6 +46,12 @@ public:
         Rectangle sourceRectangle, Rectangle &presentationRectangle,
         Rectangle &requiredSourceRectangle) const noexcept;
 
+    // Return the complete source footprint, including downscale filter
+    // coverage, needed to render a presentation rectangle.
+    [[nodiscard]] bool sourceCoverageForPresentationRectangle(
+        Rectangle presentationRectangle,
+        Rectangle &sourceRectangle) const noexcept;
+
     [[nodiscard]] std::uint32_t maximumRowsForWidth(
         std::uint32_t widthPixels) const noexcept;
 
@@ -59,10 +65,6 @@ public:
 private:
     friend class xrdp_console::rdp::PresentationScalerNv12Converter;
     friend struct PresentationScalerTestPeer;
-
-    [[nodiscard]] bool sourceCoverageForPresentationRectangle(
-        Rectangle presentationRectangle,
-        Rectangle &sourceRectangle) const noexcept;
 
     PixelSize sourceGeometry_{};
     PixelSize presentationGeometry_{};

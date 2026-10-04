@@ -3262,15 +3262,18 @@ ModuleContext::check_h264_gfx() noexcept
         !impl_->pendingH264Snapshot.active() &&
         impl_->h264Frame.capturePending())
     {
-        const Rectangle fullSource{
-            0, 0, impl_->h264Frame.sourceGeometry().widthPixels,
-            impl_->h264Frame.sourceGeometry().heightPixels};
+        Rectangle captureRectangle{};
+        if (!impl_->h264Frame.sourceCaptureBoundsForPendingDamage(
+                impl_->presentationScaler, captureRectangle))
+        {
+            return 1;
+        }
         const bool profileH264Timing = impl_->profile.enabled();
         const auto captureStarted = profileH264Timing
                                         ? std::chrono::steady_clock::now()
                                         : std::chrono::steady_clock::time_point{};
         const FramebufferView snapshot =
-            impl_->sharedMemoryCapture->capture(fullSource);
+            impl_->sharedMemoryCapture->capture(captureRectangle);
         if (profileH264Timing)
         {
             impl_->profile.noteH264Capture(
@@ -3281,11 +3284,12 @@ ModuleContext::check_h264_gfx() noexcept
             return 1;
         }
 
-        impl_->pendingH264Snapshot.sourceRectangle = fullSource;
+        impl_->pendingH264Snapshot.sourceRectangle = captureRectangle;
         impl_->pendingH264Snapshot.sourcePixels = snapshot;
-        impl_->profile.noteCapture(fullSource);
+        impl_->profile.noteCapture(captureRectangle);
         if (impl_->scrollMotionObserver.valid() &&
-            !impl_->scrollMotionObserver.stageCapture(snapshot, fullSource))
+            !impl_->scrollMotionObserver.stageCapture(
+                snapshot, captureRectangle))
         {
             log_message(LOG_LEVEL_WARNING,
                         "xrdp-console: disabling scroll motion "

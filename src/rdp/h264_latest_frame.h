@@ -82,6 +82,12 @@ public:
         Rectangle clip,
         std::span<GenerationTileMap::Selection> output) const noexcept;
 
+    // Find one source rectangle that contains all pending capture tiles and
+    // every scaler sample needed for their AVC420-aligned output regions.
+    [[nodiscard]] bool sourceCaptureBoundsForPendingDamage(
+        const PresentationScaler &scaler,
+        Rectangle &sourceRectangle) const noexcept;
+
     // Returns only tiles whose current NV12 pixels are not already known to
     // be stale because a newer XDamage generation is waiting for capture.
     [[nodiscard]] std::size_t collectReadyTransmissionSelections(

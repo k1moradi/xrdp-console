@@ -43,6 +43,7 @@ namespace
 using xrdp_console::benchmark::DurationSummary;
 using xrdp_console::benchmark::summarizeDurations;
 using xrdp_console::rdp::GfxAvc420Command;
+using xrdp_console::rdp::H264LatestFrameState;
 using xrdp_console::rdp::H264PresentationPlan;
 using xrdp_console::rdp::ExactScrollCopyRun;
 using xrdp_console::rdp::ScaledNv12UpdateResult;
@@ -893,11 +894,119 @@ runBenchmark(const Options &options)
                 sourceBgraBytes * 2U, 0U);
 
     PresentationScaler scaler{};
-    if (!scaler.configure(sourceGeometry, frameGeometry, outputRectangle))
+    if (!scaler.configure(sourceGeometry,
+                          kRequestedPresentationGeometry,
+                          outputRectangle))
     {
         std::fputs("presentation scaler setup failed\n", stderr);
         return false;
     }
+
+    H264LatestFrameState captureBoundsState{};
+    if (!captureBoundsState.configure(sourceGeometry,
+                                      kRequestedPresentationGeometry,
+                                      frameGeometry, outputRectangle))
+    {
+        std::fputs("H.264 capture-bounds state setup failed\n", stderr);
+        return false;
+    }
+    std::array<GenerationTileMap::Selection, 256> baselineSelections{};
+    const std::size_t baselineSelectionCount =
+        captureBoundsState.collectCaptureSelections(baselineSelections);
+    if (baselineSelectionCount == 0 ||
+        baselineSelectionCount >= baselineSelections.size())
+    {
+        std::fputs("H.264 capture-bounds baseline selection failed\n",
+                   stderr);
+        return false;
+    }
+    for (std::size_t index = 0; index < baselineSelectionCount; ++index)
+    {
+        if (!captureBoundsState.commitCaptured(baselineSelections[index]))
+        {
+            std::fputs("H.264 capture-bounds baseline commit failed\n",
+                       stderr);
+            return false;
+        }
+    }
+    if (captureBoundsState.capturePending())
+    {
+        std::fputs("H.264 capture-bounds baseline remained pending\n",
+                   stderr);
+        return false;
+    }
+
+    const PixelSize damageGeometry{
+        std::min(192U, sourceGeometry.widthPixels),
+        std::min(128U, sourceGeometry.heightPixels),
+    };
+    const std::uint32_t damageX =
+        ((sourceGeometry.widthPixels - damageGeometry.widthPixels) / 2U) /
+        GenerationTileMap::kTileWidthPixels *
+        GenerationTileMap::kTileWidthPixels;
+    const std::uint32_t damageY =
+        ((sourceGeometry.heightPixels - damageGeometry.heightPixels) / 2U) /
+        GenerationTileMap::kTileHeightPixels *
+        GenerationTileMap::kTileHeightPixels;
+    const Rectangle damageRectangle{
+        static_cast<std::int32_t>(damageX),
+        static_cast<std::int32_t>(damageY),
+        damageGeometry.widthPixels, damageGeometry.heightPixels};
+    captureBoundsState.markDamage(damageRectangle);
+
+    Rectangle damageCaptureRectangle{};
+    if (!captureBoundsState.sourceCaptureBoundsForPendingDamage(
+            scaler, damageCaptureRectangle))
+    {
+        std::fputs("H.264 bounded damage capture region failed\n", stderr);
+        return false;
+    }
+    const PixelSize damageCaptureGeometry{
+        damageCaptureRectangle.widthPixels,
+        damageCaptureRectangle.heightPixels};
+    const std::uint64_t damagePixels = framePixels(damageCaptureGeometry);
+    if (!measure(samples, options.samples,
+                 [&](std::size_t) {
+                     captureBoundsState.markDamage(damageRectangle);
+                     return true;
+                 },
+                 [&](std::size_t, std::uint64_t &outputBytes) {
+                     Rectangle currentCaptureRectangle{};
+                     if (!captureBoundsState.sourceCaptureBoundsForPendingDamage(
+                             scaler, currentCaptureRectangle))
+                     {
+                         return false;
+                     }
+                     outputBytes = 0;
+                     checksum += static_cast<std::uint64_t>(
+                         currentCaptureRectangle.x +
+                         currentCaptureRectangle.y) +
+                         framePixels({currentCaptureRectangle.widthPixels,
+                                      currentCaptureRectangle.heightPixels});
+                     return currentCaptureRectangle == damageCaptureRectangle;
+                 }))
+    {
+        std::fputs("H.264 bounded damage capture-bounds measurement failed\n",
+                   stderr);
+        return false;
+    }
+    reportStage("h264_damage_capture_bounds", samples, damagePixels, 0U, 0U);
+
+    FramebufferView damageCapture{};
+    if (!measure(samples, options.samples, noPreparation,
+                 [&](std::size_t, std::uint64_t &) {
+                     damageCapture = capture.capture(damageCaptureRectangle);
+                     return damageCapture.valid();
+                 }))
+    {
+        std::fputs("XShm bounded-damage capture measurement failed\n",
+                   stderr);
+        return false;
+    }
+    reportStage("xshm_capture_bounded_damage", samples, damagePixels,
+                bgraBytes(damageCaptureGeometry),
+                bgraBytes(damageCaptureGeometry));
+
     if (!measure(samples, options.samples, noPreparation,
                  [&](std::size_t, std::uint64_t &) {
                      return scaleComplete(scaler, source, fullSource,

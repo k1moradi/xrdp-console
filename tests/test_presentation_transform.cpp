@@ -534,6 +534,14 @@ scaler_tests()
     {
         return false;
     }
+    Rectangle identityCoverage{};
+    if (!check(identity.sourceCoverageForPresentationRectangle(
+                   {1, 1, 1, 1}, identityCoverage) &&
+                   identityCoverage == Rectangle{1, 1, 1, 1},
+               "identity filter coverage did not map exactly to source"))
+    {
+        return false;
+    }
 
     PresentationScaler oversized;
     if (!check(!oversized.configure({1366, 768}, {8192, 8192},

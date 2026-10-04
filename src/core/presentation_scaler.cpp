@@ -490,7 +490,7 @@ PresentationScaler::sourceCoverageForPresentationRectangle(
     Rectangle &sourceRectangle) const noexcept
 {
     sourceRectangle = {};
-    if (!valid() || identity_ || presentationRectangle.x < viewport_.x ||
+    if (!valid() || presentationRectangle.x < viewport_.x ||
         presentationRectangle.y < viewport_.y ||
         presentationRectangle.widthPixels == 0 ||
         presentationRectangle.heightPixels == 0 ||
@@ -502,6 +502,12 @@ PresentationScaler::sourceCoverageForPresentationRectangle(
             static_cast<std::uint64_t>(viewport_.y) + viewport_.heightPixels)
     {
         return false;
+    }
+
+    if (identity_)
+    {
+        sourceRectangle = presentationRectangle;
+        return true;
     }
 
     const std::uint32_t localLeft = static_cast<std::uint32_t>(
