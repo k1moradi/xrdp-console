@@ -401,6 +401,17 @@ if(TARGET xrdp-console)
     add_test(NAME classic-graphics-scheduler-unit
         COMMAND classic-graphics-scheduler-unit)
 
+    add_executable(h264-capture-service-budget-unit
+        test_h264_capture_service_budget.cpp)
+    set_target_properties(h264-capture-service-budget-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(h264-capture-service-budget-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    add_test(NAME h264-capture-service-budget-unit
+        COMMAND h264-capture-service-budget-unit)
+
     add_executable(gfx-avc420-frame-unit
         test_gfx_avc420_frame.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/gfx_avc420_frame.cpp

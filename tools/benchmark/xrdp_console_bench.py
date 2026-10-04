@@ -3227,13 +3227,17 @@ def run_graphics_under_churn(
             raise RuntimeError("graphics marker produced no warm-up frame")
         _, warmup_draw_done_ns, warmup_state = parse_physical_marker(warmup)
         warmup_diagnostics = MarkerWaitDiagnostics()
-        if wait_marker(
-                probe_reader, probe.stdin, 1 - warmup_state,
-                warmup_draw_done_ns, args.timeout,
-                args.poll_ms / 1000.0,
-                diagnostic=True, wait_diagnostics=warmup_diagnostics) is None:
+        warmup_latency = wait_marker(
+            probe_reader, probe.stdin, 1 - warmup_state,
+            warmup_draw_done_ns, args.timeout,
+            args.poll_ms / 1000.0,
+            diagnostic=True, wait_diagnostics=warmup_diagnostics)
+        if warmup_latency is None:
             raise RuntimeError(
                 "graphics marker did not arrive during sustained-load warm-up")
+        print(
+            f"graphics-under-churn warmup_e2e_ms={warmup_latency:.1f} "
+            f"deadline_ms={args.timeout * 1000:.0f}")
 
         samples = max(1, int(args.duration * GRAPHICS_LATENCY_MARKER_HZ))
         latencies: list[float] = []

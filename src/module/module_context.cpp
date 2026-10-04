@@ -36,6 +36,7 @@ extern "C" {
 #include "../rdp/gfx_bitmap_cache_commands.h"
 #include "../rdp/gfx_bitmap_cache_observer.h"
 #include "../rdp/h264_capture_policy.h"
+#include "h264_capture_service_budget.h"
 #include "../rdp/h264_interaction_scheduler.h"
 #include "../rdp/h264_latest_frame.h"
 #include "../rdp/scroll_motion_observer.h"
@@ -844,17 +845,6 @@ constexpr std::uint64_t kMaximumPaintPixelsPerService = 128U * 1024U;
 // input. This is separate from the source/XShm capture budget above.
 constexpr std::uint64_t kMaximumPresentationPixelsPerService =
     128U * 1024U;
-// Identity-mapped H.264 capture visits at most one 64x64 source tile per
-// check_h264_gfx() call. Re-entering that existing path up to this count keeps
-// one service quantum within the same 128 KiPixel presentation-work budget.
-constexpr std::uint64_t kMaximumH264IdentityTilePixels =
-    static_cast<std::uint64_t>(GenerationTileMap::kTileWidthPixels) *
-    GenerationTileMap::kTileHeightPixels;
-constexpr std::size_t kMaximumH264IdentityPassesPerService =
-    static_cast<std::size_t>(
-        kMaximumPresentationPixelsPerService /
-        kMaximumH264IdentityTilePixels);
-static_assert(kMaximumH264IdentityPassesPerService != 0);
 constexpr std::size_t kMaximumH264Selections =
     (UINT16_MAX + GenerationTileMap::kTileHeightPixels - 1U) /
     GenerationTileMap::kTileHeightPixels;
@@ -4626,9 +4616,14 @@ ModuleContext::check_wait_objs() noexcept
             return 1;
         }
 
+        const std::size_t maximumPasses =
+            xrdp_console::module::h264CapturePassesPerService(
+                impl_->h264Frame.sourceGeometry(),
+                impl_->h264Frame.geometry(),
+                kMaximumPresentationPixelsPerService);
         int h264Result = 0;
         for (std::size_t passIndex = 0;
-             passIndex < kMaximumH264IdentityPassesPerService;
+             passIndex < maximumPasses;
              ++passIndex)
         {
             h264Result = check_h264_gfx();
@@ -4637,13 +4632,10 @@ ModuleContext::check_wait_objs() noexcept
                 break;
             }
 
-            // Identity mapping bounds each newly visited capture tile to
-            // 64x64 pixels. Drain more current-snapshot tiles while staying
-            // within the same bounded service quantum. Stop as soon as a
-            // frame is submitted so asynchronous producer ownership remains
-            // exactly the same as the single-pass path.
-            if (!impl_->h264Frame.identityMapping() ||
-                impl_->h264Frame.frameInFlight() ||
+            // The pass budget accounts for bounded output coverage per tile.
+            // Drain the current coherent snapshot while leaving asynchronous
+            // producer ownership unchanged: stop immediately on submission.
+            if (impl_->h264Frame.frameInFlight() ||
                 !impl_->h264Frame.capturePending())
             {
                 return 0;
