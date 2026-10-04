@@ -44,3 +44,4 @@
 0045-xrdp-size-chansrv-channel-ipc-for-negotiated-chunks.patch
 0046-xrdp-chansrv-cancel-stale-local-targets.patch
 0047-xrdp-chansrv-abort-destroyed-c2s-incr-requestor.patch
+0048-xrdp-chansrv-serialize-format-data-generations.patch

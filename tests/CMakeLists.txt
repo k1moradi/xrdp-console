@@ -941,6 +941,27 @@ if(TARGET xrdp-console)
                 RUN_SERIAL TRUE
                 LABELS "clipboard;integration")
 
+            add_test(NAME xrdp-loader-clipboard-stale-text-generation
+                COMMAND ${Python3_EXECUTABLE} -B
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+                $<TARGET_FILE:xrdp-console>
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+                "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+                $<TARGET_FILE:x11-pixel-probe>
+                $<TARGET_FILE:x11-latency-stimulus>
+                $<TARGET_FILE:clipboard-x11-session-peer>
+                $<TARGET_FILE:freerdp-cliprdr-overlap-peer>
+                --gfx-h264
+                --clipboard-stale-text-generation)
+            set_tests_properties(xrdp-loader-clipboard-stale-text-generation
+                PROPERTIES
+                ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+                TIMEOUT 150
+                RESOURCE_LOCK xrdp_console_loader_display
+                RUN_SERIAL TRUE
+                LABELS "clipboard;integration")
+
             add_test(NAME xrdp-loader-clipboard-abandoned-incr
                 COMMAND ${Python3_EXECUTABLE} -B
                 ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
@@ -977,6 +998,52 @@ if(TARGET xrdp-console)
             set_tests_properties(xrdp-loader-clipboard-inflight-png-format-list-session
                 PROPERTIES
                 ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+                TIMEOUT 150
+                RESOURCE_LOCK xrdp_console_loader_display
+                RUN_SERIAL TRUE
+                LABELS "clipboard;integration")
+            foreach(_png_format_id IN ITEMS 49341 49173)
+                add_test(NAME
+                    xrdp-loader-clipboard-inflight-png-id-${_png_format_id}
+                    COMMAND ${Python3_EXECUTABLE} -B
+                    ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+                    $<TARGET_FILE:xrdp-console>
+                    "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+                    "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+                    "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+                    $<TARGET_FILE:x11-pixel-probe>
+                    $<TARGET_FILE:x11-latency-stimulus>
+                    $<TARGET_FILE:clipboard-x11-session-peer>
+                    $<TARGET_FILE:freerdp-cliprdr-overlap-peer>
+                    --gfx-h264
+                    --clipboard-inflight-png-format-list)
+                set_tests_properties(
+                    xrdp-loader-clipboard-inflight-png-id-${_png_format_id}
+                    PROPERTIES
+                    ENVIRONMENT
+                    "PYTHONDONTWRITEBYTECODE=1;XRDP_CONSOLE_TEST_PNG_FORMAT_ID=${_png_format_id}"
+                    TIMEOUT 150
+                    RESOURCE_LOCK xrdp_console_loader_display
+                    RUN_SERIAL TRUE
+                    LABELS "clipboard;integration")
+            endforeach()
+            add_test(NAME xrdp-loader-clipboard-png-id-generation
+                COMMAND ${Python3_EXECUTABLE} -B
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+                $<TARGET_FILE:xrdp-console>
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+                "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+                $<TARGET_FILE:x11-pixel-probe>
+                $<TARGET_FILE:x11-latency-stimulus>
+                $<TARGET_FILE:clipboard-x11-session-peer>
+                $<TARGET_FILE:freerdp-cliprdr-overlap-peer>
+                --gfx-h264
+                --clipboard-inflight-png-format-list)
+            set_tests_properties(xrdp-loader-clipboard-png-id-generation
+                PROPERTIES
+                ENVIRONMENT
+                "PYTHONDONTWRITEBYTECODE=1;XRDP_CONSOLE_TEST_PNG_FORMAT_ID=40005;XRDP_CONSOLE_TEST_NEXT_PNG_FORMAT_ID=49341"
                 TIMEOUT 150
                 RESOURCE_LOCK xrdp_console_loader_display
                 RUN_SERIAL TRUE

@@ -34,7 +34,8 @@ foreach(_series_line IN LISTS _series_lines)
 
     message(STATUS "Applying xrdp patch ${_patch_name}")
     execute_process(
-        COMMAND "${PATCH_EXECUTABLE}" --batch --forward -p1 -i "${_patch_file}"
+        COMMAND "${PATCH_EXECUTABLE}" --batch --forward --fuzz=0 -p1
+                -i "${_patch_file}"
         WORKING_DIRECTORY "${XRDP_SOURCE_DIR}"
         RESULT_VARIABLE _patch_result
         OUTPUT_VARIABLE _patch_output

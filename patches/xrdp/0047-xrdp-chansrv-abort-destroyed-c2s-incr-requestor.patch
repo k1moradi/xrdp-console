@@ -181,7 +181,7 @@
 +            terminator_match,
 +            (unsigned long long)g_clipboard_format_generation);
 +    }
-+    else
++    else if (terminator_match)
 +    {
 +        LOG(LOG_LEVEL_INFO,
 +            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=c2s-incr-terminator-aborted "

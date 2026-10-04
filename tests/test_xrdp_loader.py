@@ -32,7 +32,10 @@ COHERENCE_CAPTURE_COUNT = 2000
 COHERENCE_MINIMUM_UNIQUE_FRAMES = 10
 NAMED_PNG_WIDTH = 512
 NAMED_PNG_HEIGHT = 512
-NAMED_PNG_FORMAT_ID = 40005
+NAMED_PNG_FORMAT_ID = int(
+    os.environ.get("XRDP_CONSOLE_TEST_PNG_FORMAT_ID", "40005"))
+NEXT_NAMED_PNG_FORMAT_ID = int(os.environ.get(
+    "XRDP_CONSOLE_TEST_NEXT_PNG_FORMAT_ID", str(NAMED_PNG_FORMAT_ID)))
 
 
 class TestSkipped(Exception):
@@ -1252,9 +1255,11 @@ def assert_clipboard_inflight_format_list_session(
             r"event=format-list[^\n]*stored_formats=1 dib_format_id=-1 "
             r"png_format_id=-1",
             15.0, chansrv_process, chansrv_stdout)
-        response_log = wait_for_chansrv_pattern(
+        discarded_log = wait_for_chansrv_pattern(
             chansrv_logs,
-            r"event=response status=0x1 bytes=\d+ format_id=8 attempt=1",
+            r"event=format-data-response-discarded "
+            r"reason=invalidated-generation request_generation=1 "
+            r"current_generation=\d+ format_id=8 flags=0x1 bytes=\d+",
             45.0, chansrv_process, chansrv_stdout)
 
         full_log = chansrv_log_text(chansrv_logs)
@@ -1263,22 +1268,24 @@ def assert_clipboard_inflight_format_list_session(
         new_list_match = re.search(
             r"event=format-list[^\n]*stored_formats=1 dib_format_id=-1 "
             r"png_format_id=-1", full_log)
-        response_match = re.search(
-            r"event=response status=0x1 bytes=(\d+) format_id=8 attempt=1",
+        discarded_match = re.search(
+            r"event=format-data-response-discarded "
+            r"reason=invalidated-generation request_generation=1 "
+            r"current_generation=\d+ format_id=8 flags=0x1 bytes=(\d+)",
             full_log)
         if (image_request_match is None or new_list_match is None or
-                response_match is None or
+                discarded_match is None or
                 not (image_request_match.start() < new_list_match.start() <
-                     response_match.start())):
+                     discarded_match.start())):
             raise AssertionError(
-                "replacement FORMAT_LIST did not arrive between the original "
-                "DIB request and its successful response:\n"
+                "replacement FORMAT_LIST did not invalidate the outstanding "
+                "DIB request before its late response was discarded:\n"
                 f"[chansrv]\n{full_log}\n[FreeRDP peer]\n"
                 f"{read_text(client_log_path)}")
-        if int(response_match.group(1)) < 20_000_000:
+        if int(discarded_match.group(1)) < 20_000_000:
             raise AssertionError(
-                "overlapped response was not the expected large DIB: "
-                f"{response_match.group(1)} bytes\n[chansrv]\n{full_log}")
+                "discarded response was not the expected large DIB: "
+                f"{discarded_match.group(1)} bytes\n[chansrv]\n{full_log}")
         if "PEER_OVERLAP_FORMAT_LIST_SENT" not in read_text(client_log_path):
             raise AssertionError(
                 "FreeRDP peer did not emit its overlap marker:\n"
@@ -1291,10 +1298,10 @@ def assert_clipboard_inflight_format_list_session(
             raise AssertionError(
                 "the replacement text-only format list was not observed:\n"
                 f"{changed_list}")
-        if "event=response status=0x1 bytes=" not in response_log:
+        if "event=format-data-response-discarded" not in discarded_log:
             raise AssertionError(
-                "the outstanding image request did not receive its response:\n"
-                f"{response_log}")
+                "the stale DIB response was not discarded:\n"
+                f"{discarded_log}")
 
         image_result = finish_clipboard_requestor(
             requestor, 45.0, chansrv_logs)
@@ -1342,6 +1349,101 @@ def assert_clipboard_inflight_format_list_session(
         client, client_log_path, peer_count_before, 10.0)
     if peer_count_after <= peer_count_before:
         raise AssertionError("RDP peer did not render graphics after clipboard overlap")
+
+
+def assert_clipboard_stale_text_generation_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, chansrv_process: subprocess.Popen[object],
+        chansrv_logs: Path, chansrv_stdout: Path, source_display: str) -> None:
+    """Retire a text request when a newer image-only offer replaces it."""
+    if client.stdin is None:
+        raise AssertionError("stale-text peer control pipe is unavailable")
+
+    initial_list = wait_for_chansrv_pattern(
+        chansrv_logs,
+        r"event=format-list[^\n]*stored_formats=1 dib_format_id=-1 "
+        r"png_format_id=-1",
+        15.0, chansrv_process, chansrv_stdout)
+    wait_for_peer_marker(client, client_log_path,
+                         "PEER_INITIAL_FORMAT_LIST_SENT text=13", 10.0)
+    old_text = start_clipboard_requestor(helper, source_display, "UTF8_STRING")
+    try:
+        wait_for_chansrv_pattern(
+            chansrv_logs,
+            r"event=x11-request target=UTF8_STRING [^\n]*generation=\d+",
+            10.0, chansrv_process, chansrv_stdout)
+        wait_for_peer_marker(
+            client, client_log_path,
+            "PEER_STALE_TEXT_RESPONSE_HELD generation=1", 10.0)
+
+        format_lists_before = clipboard_format_list_count(chansrv_logs)
+        client.stdin.write(b"STALE_TEXT_CHANGE_TO_IMAGE\n")
+        client.stdin.flush()
+        wait_for_peer_marker(
+            client, client_log_path,
+            "PEER_STALE_TEXT_REPLACEMENT_SENT generation=2", 10.0)
+        new_list = wait_for_chansrv_pattern(
+            chansrv_logs,
+            r"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+            r"png_format_id=\d+",
+            10.0, chansrv_process, chansrv_stdout)
+        if clipboard_format_list_count(chansrv_logs) <= format_lists_before:
+            raise AssertionError("replacement Format List did not advance")
+
+        targets = finish_clipboard_requestor(
+            start_clipboard_requestor(helper, source_display, "TARGETS"),
+            5.0, chansrv_logs)
+        if ("image/png" not in targets or "image/bmp" not in targets or
+                "UTF8_STRING" in targets or "STRING" in targets):
+            raise AssertionError(
+                "image-only Format List did not replace the old text offer in "
+                f"TARGETS: {targets!r}\n{new_list}")
+
+        retired_before_response = False
+        try:
+            old_stdout, old_stderr = old_text.communicate(timeout=1.0)
+            retired_before_response = True
+        except subprocess.TimeoutExpired:
+            old_stdout = b""
+            old_stderr = b""
+
+        client.stdin.write(b"RESPOND_STALE_TEXT\n")
+        client.stdin.flush()
+        wait_for_peer_marker(
+            client, client_log_path,
+            "PEER_STALE_TEXT_RESPONSE_SENT request_generation=1", 10.0)
+
+        if not retired_before_response:
+            old_stdout, old_stderr = old_text.communicate(timeout=5.0)
+        result = (old_stdout + old_stderr).decode("utf-8", errors="replace")
+        if (not retired_before_response or old_text.returncode != 1 or
+                "selection-refused" not in result or
+                "stale offer" in result):
+            raise AssertionError(
+                "old UTF8_STRING request was not refused before the late "
+                f"response: early={retired_before_response} "
+                f"rc={old_text.returncode} result={result!r}\n"
+                f"[chansrv]\n{chansrv_log_text(chansrv_logs)}\n"
+                f"[FreeRDP peer]\n{read_text(client_log_path)}")
+        response_discarded = wait_for_chansrv_pattern(
+            chansrv_logs,
+            r"event=format-data-response-discarded "
+            r"reason=invalidated-generation request_generation=1 "
+            r"current_generation=\d+ format_id=13",
+            10.0, chansrv_process, chansrv_stdout)
+
+        final_targets = finish_clipboard_requestor(
+            start_clipboard_requestor(helper, source_display, "TARGETS"),
+            5.0, chansrv_logs)
+        if final_targets != targets:
+            raise AssertionError(
+                "late old-text response changed the current X11 offer: "
+                f"before={targets!r} after={final_targets!r}\n"
+                f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
+        if "stored_formats=1 dib_format_id=-1 png_format_id=-1" not in initial_list:
+            raise AssertionError(f"initial offer was not text-only: {initial_list}")
+    finally:
+        stop_process(old_text)
 
 
 def assert_clipboard_abandoned_incr_session(
@@ -1494,8 +1596,8 @@ def assert_clipboard_inflight_png_format_list_session(
 
     initial_list = wait_for_chansrv_pattern(
         chansrv_logs,
-        r"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
-        r"png_format_id=40005",
+        rf"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        rf"png_format_id={NAMED_PNG_FORMAT_ID}",
         15.0, chansrv_process, chansrv_stdout)
     wait_for_peer_marker(client, client_log_path,
                          "PEER_INITIAL_FORMAT_LIST_SENT", 10.0)
@@ -1506,11 +1608,12 @@ def assert_clipboard_inflight_png_format_list_session(
     try:
         wait_for_chansrv_pattern(
             chansrv_logs,
-            r"event=request format_id=40005 target=image/png attempt=1",
+            rf"event=request format_id={NAMED_PNG_FORMAT_ID} "
+            r"target=image/png attempt=1",
             15.0, chansrv_process, chansrv_stdout)
         wait_for_peer_marker(
             client, client_log_path,
-            "PEER_PNG_RESPONSE_HELD format_id=40005", 10.0)
+            f"PEER_PNG_RESPONSE_HELD format_id={NAMED_PNG_FORMAT_ID}", 10.0)
 
         cross_target_bmp = start_clipboard_requestor(
             helper, source_display, "image/bmp", allow_refusal=True)
@@ -1583,41 +1686,39 @@ def assert_clipboard_inflight_png_format_list_session(
         client.stdin.flush()
         peer_log = wait_for_peer_marker(
             client, client_log_path, "PEER_OLD_PNG_RESPONSE_SENT", 10.0)
-        response_log = wait_for_chansrv_pattern(
-            chansrv_logs,
-            r"event=response status=0x1 bytes=\d+ "
-            r"format_id=40005 attempt=1",
-            15.0, chansrv_process, chansrv_stdout)
         discarded_log = wait_for_chansrv_pattern(
             chansrv_logs,
-            r"event=response-discarded reason=stale-generation "
-            r"format_id=40005",
-            5.0, chansrv_process, chansrv_stdout)
+            rf"event=format-data-response-discarded "
+            rf"reason=invalidated-generation request_generation=1 "
+            rf"current_generation=\d+ format_id={NAMED_PNG_FORMAT_ID} "
+            r"flags=0x1 bytes=\d+",
+            15.0, chansrv_process, chansrv_stdout)
 
         full_log = chansrv_log_text(chansrv_logs)
         request_match = re.search(
-            r"event=request format_id=40005 target=image/png attempt=1",
+            rf"event=request format_id={NAMED_PNG_FORMAT_ID} "
+            r"target=image/png attempt=1",
             full_log)
         format_match = re.search(
             r"event=format-list[^\n]*stored_formats=1 dib_format_id=-1 "
             r"png_format_id=-1", full_log)
-        response_match = re.search(
-            r"event=response status=0x1 bytes=(\d+) "
-            r"format_id=40005 attempt=1", full_log)
         discard_match = re.search(
-            r"event=response-discarded reason=stale-generation "
-            r"format_id=40005", full_log)
+            rf"event=format-data-response-discarded "
+            rf"reason=invalidated-generation request_generation=1 "
+            rf"current_generation=\d+ format_id={NAMED_PNG_FORMAT_ID} "
+            r"flags=0x1 bytes=(\d+)", full_log)
         if (request_match is None or format_match is None or
-                response_match is None or discard_match is None or
+                discard_match is None or
                 not (request_match.start() < format_match.start() <
-                     response_match.start() < discard_match.start())):
+                     discard_match.start())):
             raise AssertionError(
                 "the replacement generation did not overlap and invalidate "
                 "the outstanding PNG response in the required order:\n"
                 f"[chansrv]\n{full_log}\n[FreeRDP peer]\n"
                 f"{read_text(client_log_path)}")
         png_remote_requests = re.findall(
-            r"event=request format_id=40005 target=image/png attempt=\d+",
+            rf"event=request format_id={NAMED_PNG_FORMAT_ID} "
+            r"target=image/png attempt=\d+",
             full_log)
         dib_remote_requests = re.findall(
             r"event=request format_id=8 target=image/bmp attempt=\d+",
@@ -1633,11 +1734,14 @@ def assert_clipboard_inflight_png_format_list_session(
                 f"PNG requests={png_remote_requests!r}; "
                 f"DIB requests={dib_remote_requests!r}; "
                 f"BMP refusals={len(bmp_refusals)}\n[chansrv]\n{full_log}")
-        if int(response_match.group(1)) == 0:
-            raise AssertionError("the held PNG response was unexpectedly empty")
-        if "PEER_PNG_RESPONSE_HELD format_id=40005" not in peer_log:
+        if int(discard_match.group(1)) == 0:
+            raise AssertionError(
+                "the discarded PNG response was unexpectedly empty")
+        if (f"PEER_PNG_RESPONSE_HELD format_id={NAMED_PNG_FORMAT_ID}"
+                not in peer_log):
             raise AssertionError("FreeRDP peer did not hold the PNG response")
-        if "stored_formats=2 dib_format_id=8 png_format_id=40005" not in initial_list:
+        if (f"stored_formats=2 dib_format_id=8 "
+                f"png_format_id={NAMED_PNG_FORMAT_ID}" not in initial_list):
             raise AssertionError(
                 "initial clipboard did not contain both Mac-style image formats:\n"
                 f"{initial_list}")
@@ -1645,9 +1749,7 @@ def assert_clipboard_inflight_png_format_list_session(
             raise AssertionError(
                 "replacement clipboard generation was not text-only:\n"
                 f"{changed_list}")
-        if "event=response status=0x1 bytes=" not in response_log:
-            raise AssertionError(f"PNG response was not logged:\n{response_log}")
-        if "event=response-discarded reason=stale-generation" not in discarded_log:
+        if "event=format-data-response-discarded" not in discarded_log:
             raise AssertionError(
                 f"stale PNG response was not discarded:\n{discarded_log}")
 
@@ -1668,6 +1770,101 @@ def assert_clipboard_inflight_png_format_list_session(
             f"{text_result!r}\n[chansrv]\n{chansrv_log_text(chansrv_logs)}")
     wait_for_peer_marker(client, client_log_path,
                          "PEER_FINAL_TEXT_RESPONSE_SENT", 10.0)
+
+    if NEXT_NAMED_PNG_FORMAT_ID != NAMED_PNG_FORMAT_ID:
+        format_lists_before = clipboard_format_list_count(chansrv_logs)
+        client.stdin.write(b"CHANGE_FORMATS_IMAGE\n")
+        client.stdin.flush()
+        wait_for_peer_marker(
+            client, client_log_path,
+            "PEER_NEXT_IMAGE_FORMAT_LIST_SENT while_old_png_pending=1 "
+            f"generation=3 png_id={NEXT_NAMED_PNG_FORMAT_ID}",
+            10.0)
+        wait_for_chansrv_marker(
+            chansrv_logs, "event=format-list", format_lists_before + 1,
+            10.0, chansrv_process, chansrv_stdout)
+        next_image_list = wait_for_chansrv_pattern(
+            chansrv_logs,
+            rf"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+            rf"png_format_id={NEXT_NAMED_PNG_FORMAT_ID}",
+            10.0, chansrv_process, chansrv_stdout)
+
+        cold_png = start_clipboard_requestor(
+            helper, source_display, "image/png", validate_png=True)
+        wait_for_chansrv_pattern(
+            chansrv_logs,
+            rf"event=request format_id={NEXT_NAMED_PNG_FORMAT_ID} "
+            r"target=image/png attempt=1",
+            10.0, chansrv_process, chansrv_stdout)
+        targets_request = start_clipboard_requestor(
+            helper, source_display, "TARGETS")
+        targets_result = finish_clipboard_requestor(
+            targets_request, 10.0, chansrv_logs)
+        if ("image/png" not in targets_result or "image/bmp" not in targets_result or
+                "UTF8_STRING" in targets_result or "STRING" in targets_result):
+            raise AssertionError(
+                "image-only Format List did not replace the prior text offer "
+                f"in X11 TARGETS: {targets_result!r}")
+        wait_for_peer_marker(
+            client, client_log_path,
+            f"PEER_PNG_RESPONSE_HELD format_id={NEXT_NAMED_PNG_FORMAT_ID}",
+            10.0)
+        response_markers_before = len(re.findall(
+            r"^PEER_OLD_PNG_RESPONSE_SENT ", read_text(client_log_path),
+            re.MULTILINE))
+        client.stdin.write(b"RESPOND_PNG\n")
+        client.stdin.flush()
+        wait_for_log_pattern_occurrence(
+            client, client_log_path,
+            r"^PEER_OLD_PNG_RESPONSE_SENT ", response_markers_before + 1,
+            10.0, "new-generation PNG Format Data Response")
+        cold_result = finish_clipboard_requestor(
+            cold_png, 15.0, chansrv_logs)
+        size_match = re.search(r"RESULT target=image/png bytes=(\d+) ",
+                               cold_result)
+        if (size_match is None or
+                "signature=valid decode=valid" not in cold_result):
+            raise AssertionError(
+                "new registered-PNG generation was not materialized and "
+                f"decoded: {cold_result!r}")
+        expected_bytes = int(size_match.group(1))
+        requests_after_cold = len(re.findall(
+            rf"event=request format_id={NEXT_NAMED_PNG_FORMAT_ID} "
+            r"target=image/png attempt=1", chansrv_log_text(chansrv_logs)))
+
+        warm_png = start_clipboard_requestor(
+            helper, source_display, "image/png", validate_png=True)
+        warm_result = finish_clipboard_requestor(
+            warm_png, 10.0, chansrv_logs)
+        if (f"RESULT target=image/png bytes={expected_bytes} "
+                "signature=valid decode=valid" not in warm_result):
+            raise AssertionError(
+                "cached same-generation PNG request changed payload bytes: "
+                f"{warm_result!r}")
+        requests_after_warm = len(re.findall(
+            rf"event=request format_id={NEXT_NAMED_PNG_FORMAT_ID} "
+            r"target=image/png attempt=1", chansrv_log_text(chansrv_logs)))
+        if requests_after_warm != requests_after_cold:
+            raise AssertionError(
+                "cached PNG request caused another CLIPRDR Format Data Request: "
+                f"before={requests_after_cold} after={requests_after_warm}")
+        generation_matches = re.findall(
+            r"event=x11-request target=image/png [^\n]*generation=(\d+)",
+            chansrv_log_text(chansrv_logs))
+        if not generation_matches:
+            raise AssertionError(
+                "replacement image was not installed as an X11 generation: "
+                f"{chansrv_log_text(chansrv_logs)}")
+        new_generation = int(generation_matches[-1])
+        if not re.search(
+                rf"event=x11-delivery-issued path=(?:direct|incr) "
+                rf"target=image/png requestor=0x[0-9a-fA-F]+ "
+                rf"property=0x[0-9a-fA-F]+ bytes={expected_bytes} "
+                rf"generation={new_generation} cache_generation={new_generation}",
+                chansrv_log_text(chansrv_logs)):
+            raise AssertionError(
+                "cached PNG delivery was not bound to the new format "
+                f"generation:\n{chansrv_log_text(chansrv_logs)}")
 
     if client.poll() is not None or chansrv_process.poll() is not None:
         raise AssertionError(
@@ -3828,6 +4025,7 @@ def main() -> int:
     clipboard_inflight_format_list_mode = False
     clipboard_abandoned_incr_mode = False
     clipboard_inflight_png_format_list_mode = False
+    clipboard_stale_text_generation_mode = False
     clipboard_png_prefetch_mode = False
     clipboard_png_prefetch_bmp_mode = False
     clipboard_png_prefetch_fail_mode = False
@@ -3841,6 +4039,7 @@ def main() -> int:
         "--clipboard-inflight-format-list",
         "--clipboard-abandoned-incr",
         "--clipboard-inflight-png-format-list",
+        "--clipboard-stale-text-generation",
         "--clipboard-png-prefetch", "--clipboard-png-prefetch-bmp",
         "--clipboard-png-prefetch-fail", "--clipboard-png-prefetch-pending",
         "--clipboard-png-prefetch-stale-image") if option in arguments]
@@ -3861,6 +4060,8 @@ def main() -> int:
             selected_clipboard_mode == "--clipboard-abandoned-incr")
         clipboard_inflight_png_format_list_mode = (
             selected_clipboard_mode == "--clipboard-inflight-png-format-list")
+        clipboard_stale_text_generation_mode = (
+            selected_clipboard_mode == "--clipboard-stale-text-generation")
         clipboard_png_prefetch_mode = selected_clipboard_mode in (
             "--clipboard-png-prefetch", "--clipboard-png-prefetch-bmp",
             "--clipboard-png-prefetch-fail",
@@ -3877,7 +4078,8 @@ def main() -> int:
     clipboard_inflight_mode = (
         clipboard_inflight_format_list_mode or
         clipboard_abandoned_incr_mode or
-        clipboard_inflight_png_format_list_mode)
+        clipboard_inflight_png_format_list_mode or
+        clipboard_stale_text_generation_mode)
     clipboard_peer_mode = (
         clipboard_inflight_mode or clipboard_png_prefetch_mode or
         clipboard_no_server_copy_reconnect_mode)
@@ -3951,9 +4153,10 @@ def main() -> int:
             "[clipboard helper [overlap peer] "
             "--clipboard-stress|--clipboard-named-png|"
             "--clipboard-inflight-format-list|"
-            "--clipboard-abandoned-incr|"
-            "--clipboard-inflight-png-format-list|"
-            "--clipboard-png-prefetch]"
+                            "--clipboard-abandoned-incr|"
+                            "--clipboard-inflight-png-format-list|"
+                            "--clipboard-stale-text-generation|"
+                            "--clipboard-png-prefetch]"
         )
 
     presentation_width = (
@@ -4236,6 +4439,11 @@ password=smoke
                             "XRDP_CONSOLE_TEST_CLIPBOARD_SERVER_AUDIT"] = "1"
                     if clipboard_inflight_png_format_list_mode:
                         client_environment["XRDP_CONSOLE_TEST_PNG_OVERLAP"] = "1"
+                    if clipboard_stale_text_generation_mode:
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_STALE_TEXT_GENERATION"] = "1"
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_NEXT_PNG_FORMAT_ID"] = "49341"
                     if clipboard_abandoned_incr_mode:
                         client_environment[
                             "XRDP_CONSOLE_TEST_DEFER_OVERLAP_FORMAT_LIST"] = "1"
@@ -4454,6 +4662,11 @@ password=smoke
                             assert_clipboard_abandoned_incr_session(
                                 clipboard_helper, client, client_log_path,
                                 log_path, chansrv_process, chansrv_logs_path,
+                                chansrv_stdout_path, source_display)
+                        elif clipboard_stale_text_generation_mode:
+                            assert_clipboard_stale_text_generation_session(
+                                clipboard_helper, client, client_log_path,
+                                chansrv_process, chansrv_logs_path,
                                 chansrv_stdout_path, source_display)
                         elif clipboard_inflight_png_format_list_mode:
                             assert_clipboard_inflight_png_format_list_session(

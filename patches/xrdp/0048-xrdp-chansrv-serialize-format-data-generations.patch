@@ -1,0 +1,322 @@
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -270,6 +270,27 @@
+ static int g_png_format_id = -1;
+ static uint64_t g_clipboard_format_generation = 0;
+ 
++enum clipboard_format_data_request_state
++{
++    CLIPBOARD_FORMAT_DATA_REQUEST_NONE = 0,
++    CLIPBOARD_FORMAT_DATA_REQUEST_ACTIVE,
++    CLIPBOARD_FORMAT_DATA_REQUEST_INVALIDATED
++};
++
++struct clipboard_format_data_request
++{
++    enum clipboard_format_data_request_state state;
++    int format_id;
++    uint64_t generation;
++    int clip_type;
++    Atom target;
++    XSelectionRequestEvent selection_request;
++    int requestor_destroyed;
++    int selection_refused;
++};
++
++static struct clipboard_format_data_request g_pending_format_data_request;
++
+ static char g_last_atom_name[256] = "";
+ 
+ static void
+@@ -532,6 +553,8 @@
+     g_incr_max_req_size = XMaxRequestSize(g_display) * 4 - 24;
+     g_memset(&g_clip_c2s, 0, sizeof(g_clip_c2s));
+     g_memset(&g_clip_s2c, 0, sizeof(g_clip_s2c));
++    g_memset(&g_pending_format_data_request, 0,
++             sizeof(g_pending_format_data_request));
+     clipboard_png_digest_reset();
+     clipboard_image_waiters_clear(&g_image_waiters);
+     g_image_cached_generation = 0;
+@@ -687,6 +710,8 @@
+     g_selection_retry.data_response_expected = 0;
+     g_selection_retry.retry_timeout_pending = 0;
+     clipboard_invalidate_image_request("clipboard-deinit");
++    g_memset(&g_pending_format_data_request, 0,
++             sizeof(g_pending_format_data_request));
+     clipboard_image_retry_cancel(&g_image_retry.policy);
+     g_image_retry.format_id = -1;
+     g_image_retry.format_generation = 0;
+@@ -731,6 +756,32 @@
+ 
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_send_data_request:");
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_send_data_request: %d", format_id);
++    if (g_pending_format_data_request.state !=
++            CLIPBOARD_FORMAT_DATA_REQUEST_NONE)
++    {
++        LOG(LOG_LEVEL_WARNING,
++            "XRDP_CONSOLE_CLIPBOARD "
++            "event=format-data-request-refused reason=request-outstanding "
++            "format_id=%d pending_format_id=%d generation=%llu",
++            format_id, g_pending_format_data_request.format_id,
++            (unsigned long long)g_pending_format_data_request.generation);
++        return 1;
++    }
++    g_pending_format_data_request.state =
++        CLIPBOARD_FORMAT_DATA_REQUEST_ACTIVE;
++    g_pending_format_data_request.format_id = format_id;
++    g_pending_format_data_request.generation =
++        g_clipboard_format_generation;
++    g_pending_format_data_request.clip_type = g_clip_c2s.xrdp_clip_type;
++    g_pending_format_data_request.target = g_clip_c2s.type;
++    g_memcpy(&g_pending_format_data_request.selection_request,
++             &g_saved_selection_req_event,
++             sizeof(g_pending_format_data_request.selection_request));
++    g_pending_format_data_request.requestor_destroyed = 0;
++    g_pending_format_data_request.selection_refused = 0;
++    XSelectInput(g_display,
++                 g_pending_format_data_request.selection_request.requestor,
++                 StructureNotifyMask);
+     g_clip_c2s.in_request = 1;
+     make_stream(s);
+     init_stream(s, 8192);
+@@ -745,6 +796,12 @@
+               "CLIPRDR_DATA_REQUEST (clip_msg_id = 4)");
+     rv = send_channel_data(g_cliprdr_chan_id, s->data, size);
+     free_stream(s);
++    if (rv != 0)
++    {
++        g_clip_c2s.in_request = 0;
++        g_memset(&g_pending_format_data_request, 0,
++                 sizeof(g_pending_format_data_request));
++    }
+     return rv;
+ }
+ 
+@@ -1349,6 +1406,37 @@
+     return 0;
+ }
+ 
++static void
++clipboard_invalidate_pending_format_data_request(const char *reason)
++{
++    struct clipboard_format_data_request *pending =
++        &g_pending_format_data_request;
++
++    if (pending->state != CLIPBOARD_FORMAT_DATA_REQUEST_ACTIVE)
++    {
++        return;
++    }
++
++    pending->state = CLIPBOARD_FORMAT_DATA_REQUEST_INVALIDATED;
++    if (pending->clip_type == XRDP_CB_BITMAP && g_image_original_refused)
++    {
++        pending->selection_refused = 1;
++    }
++    if (!pending->requestor_destroyed && !pending->selection_refused)
++    {
++        clipboard_refuse_selection(&pending->selection_request);
++        pending->selection_refused = 1;
++    }
++
++    LOG(LOG_LEVEL_INFO,
++        "XRDP_CONSOLE_CLIPBOARD event=format-data-request-invalidated "
++        "reason=%s format_id=%d generation=%llu target=%s "
++        "requestor_destroyed=%d",
++        reason, pending->format_id,
++        (unsigned long long)pending->generation,
++        get_atom_text(pending->target), pending->requestor_destroyed);
++}
++
+ static const char *
+ clipboard_image_target_name(Atom target)
+ {
+@@ -1544,6 +1632,7 @@
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_format_announce %d", clip_msg_len);
+     clipboard_cancel_stale_local_format_discovery();
+     clipboard_invalidate_image_request("new-format-list");
++    clipboard_invalidate_pending_format_data_request("new-format-list");
+     g_clipboard_format_generation =
+         clipboard_image_retry_next_generation(g_clipboard_format_generation);
+     if (clipboard_image_incr_terminator_is_stale(
+@@ -2468,12 +2557,90 @@
+ {
+     int rv = 0;
+     int is_image;
+-
+-    XSelectionRequestEvent *lxev = &g_saved_selection_req_event;
++    struct clipboard_format_data_request request;
++    XSelectionRequestEvent *lxev;
+ 
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_process_data_response:");
++
++    if (g_pending_format_data_request.state ==
++            CLIPBOARD_FORMAT_DATA_REQUEST_NONE)
++    {
++        LOG(LOG_LEVEL_WARNING,
++            "XRDP_CONSOLE_CLIPBOARD event=format-data-response-discarded "
++            "reason=unsolicited flags=0x%x bytes=%d",
++            clip_msg_status, clip_msg_len);
++        return rv;
++    }
++
++    g_memcpy(&request, &g_pending_format_data_request, sizeof(request));
++    is_image = request.clip_type == XRDP_CB_BITMAP;
++    if (request.state == CLIPBOARD_FORMAT_DATA_REQUEST_INVALIDATED ||
++            request.generation != g_clipboard_format_generation)
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD event=format-data-response-discarded "
++            "reason=invalidated-generation request_generation=%llu "
++            "current_generation=%llu format_id=%d flags=0x%x bytes=%d",
++            (unsigned long long)request.generation,
++            (unsigned long long)g_clipboard_format_generation,
++            request.format_id, clip_msg_status, clip_msg_len);
++        if (!request.requestor_destroyed && !request.selection_refused)
++        {
++            clipboard_refuse_selection(&request.selection_request);
++        }
++        g_clip_c2s.in_request = 0;
++        g_memset(&g_pending_format_data_request, 0,
++                 sizeof(g_pending_format_data_request));
++        if (is_image)
++        {
++            clipboard_refuse_image_waiters();
++            g_clip_c2s.converted = 0;
++            g_image_cached_generation = 0;
++            clipboard_finish_image_retry();
++        }
++        if (!request.requestor_destroyed)
++        {
++            clipboard_release_image_requestor_events(
++                request.selection_request.requestor);
++        }
++        return rv;
++    }
++
++    g_memcpy(&g_saved_selection_req_event, &request.selection_request,
++             sizeof(g_saved_selection_req_event));
++    g_clip_c2s.type = request.target;
++    g_clip_c2s.xrdp_clip_type = request.clip_type;
+     g_clip_c2s.in_request = 0;
+-    is_image = g_clip_c2s.xrdp_clip_type == XRDP_CB_BITMAP;
++    g_memset(&g_pending_format_data_request, 0,
++             sizeof(g_pending_format_data_request));
++    lxev = &g_saved_selection_req_event;
++
++    if ((clip_msg_status != CB_RESPONSE_OK &&
++            clip_msg_status != CB_RESPONSE_FAIL) ||
++            (clip_msg_status == CB_RESPONSE_FAIL && clip_msg_len != 0))
++    {
++        LOG(LOG_LEVEL_ERROR,
++            "XRDP_CONSOLE_CLIPBOARD event=format-data-response-rejected "
++            "reason=malformed flags=0x%x bytes=%d format_id=%d "
++            "generation=%llu",
++            clip_msg_status, clip_msg_len, request.format_id,
++            (unsigned long long)request.generation);
++        if (is_image)
++        {
++            clipboard_fail_image_retry("malformed-response");
++        }
++        else if (!request.requestor_destroyed)
++        {
++            clipboard_refuse_selection(lxev);
++        }
++        if (!request.requestor_destroyed)
++        {
++            clipboard_release_image_requestor_events(
++                request.selection_request.requestor);
++        }
++        return rv;
++    }
++
+     if (is_image)
+     {
+         LOG(LOG_LEVEL_INFO,
+@@ -2572,6 +2739,11 @@
+         clipboard_process_data_response_for_text(s, clip_msg_status,
+                 clip_msg_len);
+     }
++    if (!request.requestor_destroyed)
++    {
++        clipboard_release_image_requestor_events(
++            request.selection_request.requestor);
++    }
+     return rv;
+ }
+ 
+@@ -3520,6 +3692,22 @@
+         clipboard_refuse_selection(lxev);
+         return 0;
+     }
++    else if (g_pending_format_data_request.state !=
++                     CLIPBOARD_FORMAT_DATA_REQUEST_NONE &&
++             clipboard_is_data_selection_target(lxev->target))
++    {
++        /* Format Data Responses have no request identifier. Keep the saved
++         * X11 request associated with the sole outstanding CLIPRDR request. */
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD event=x11-request-refused "
++            "reason=format-data-request-outstanding target=%s "
++            "pending_format_id=%d pending_generation=%llu",
++            get_atom_text(lxev->target),
++            g_pending_format_data_request.format_id,
++            (unsigned long long)g_pending_format_data_request.generation);
++        clipboard_refuse_selection(lxev);
++        return 0;
++    }
+ 
+     if ((g_clip_c2s.incr_in_progress || g_image_incr_terminator_pending) &&
+             g_clip_c2s.xrdp_clip_type == XRDP_CB_BITMAP &&
+@@ -3901,6 +4089,7 @@
+             xevent->xselectionclear.selection == g_clipboard_atom)
+     {
+         clipboard_invalidate_image_request("selection-clear");
++        clipboard_invalidate_pending_format_data_request("selection-clear");
+         g_got_selection = 0;
+     }
+     LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_clear:");
+@@ -4296,6 +4485,7 @@
+ {
+     int c2s_match;
+     int terminator_match;
++    int pending_request_match;
+     size_t removed_waiters;
+ 
+     removed_waiters = clipboard_image_waiters_remove_requestor(
+@@ -4311,7 +4501,24 @@
+                 event->window == g_clip_c2s.window;
+     terminator_match = g_image_incr_terminator_pending &&
+                        event->window == g_image_incr_terminator_window;
+-    if (!c2s_match && !terminator_match)
++    pending_request_match =
++        g_pending_format_data_request.state !=
++                CLIPBOARD_FORMAT_DATA_REQUEST_NONE &&
++        event->window ==
++                g_pending_format_data_request.selection_request.requestor;
++    if (pending_request_match)
++    {
++        g_pending_format_data_request.requestor_destroyed = 1;
++        g_pending_format_data_request.state =
++            CLIPBOARD_FORMAT_DATA_REQUEST_INVALIDATED;
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD "
++            "event=format-data-request-invalidated "
++            "reason=requestor-destroyed format_id=%d generation=%llu",
++            g_pending_format_data_request.format_id,
++            (unsigned long long)g_pending_format_data_request.generation);
++    }
++    if (!c2s_match && !terminator_match && !pending_request_match)
+     {
+         return;
+     }
+@@ -4366,6 +4573,10 @@
+         g_image_incr_terminator_property = None;
+         g_image_incr_terminator_generation = 0;
+     }
++    if (pending_request_match)
++    {
++        g_pending_format_data_request.selection_refused = 1;
++    }
+ 
+     clipboard_drain_image_waiters();
+     if (g_clipboard_owner_update_pending &&
