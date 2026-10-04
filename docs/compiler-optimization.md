@@ -86,6 +86,85 @@ workload shows a repeatable end-to-end win. Build directories, CMake caches,
 CTest logs, profile data, and benchmark output are retained under
 `/home/keivan/checkpoints/xrdp-console/2026-10-03/build-optimization/`.
 
+## Current-main compiler follow-up (2026-10-04)
+
+These follow-up checks used current `main` at
+`6ab6a75fb27c682dde798ae34094decd6752290e`. Raw build logs and benchmark runs
+are under
+`/home/keivan/checkpoints/xrdp-console/2026-10-04/compiler-optimization/`.
+
+### Libtool relink warnings
+
+A fresh isolated build of pinned xrdp 0.10.6.1 reproduced exactly seven
+`libtool: warning: relinking` messages, for `libvnc.la`, `libxup.la`,
+`libmc.la`, `libipm.la`, `libxrdp.la`, `libsesman.la`, and `libxrdpapi.la`.
+There were no other warning or error lines in the captured build log.
+
+The source `.la` metadata for those libraries says `installed=no` and records
+dependencies such as the build-tree `common/libcommon.la` and `libipm/libipm.la`.
+GNU libtool sets `need_relink=yes` when it sees an uninstalled `.la` dependency,
+then runs the stored link command during `make install`. This rewrites the
+installed `.la` dependency paths to the private install prefix and relinks the
+shared object for that prefix. For example, the build-tree `libvnc.so` RUNPATH
+contained both `common/.libs` and the private prefix; the installed library's
+RUNPATH contains only the private prefix. Installed `.la` files are marked
+`installed=yes`, and none retain an `xrdp-build-*` path.
+
+These are install-time relocation warnings, not first-party compiler warnings
+or failed links. The relink is producing correct runtime metadata and should
+remain enabled; suppressing it or copying the pre-install shared objects would
+leave build-tree paths in the private runtime. No source-level libtool defect
+was found to fix.
+
+### Static LTO coverage
+
+The static LTO checks were rerun against current sources with both GCC 15.2.0
+and Clang 23.1.3. GCC used `-static -flto`; Clang used `-static -flto` with
+LLD. These four test executables were confirmed by `file` to be statically
+linked, and all four passed under each compiler:
+
+* `presentation-transform-unit`
+* `h264-latest-frame-unit`
+* `optimization-pipeline-unit`
+* `scroll-motion-observer-unit`
+
+This verifies static LTO for first-party test executables. The production
+`xrdp-console` artifact is a loadable `MODULE`, so the production artifact
+remains a shared object; it cannot be substituted by a fully static executable.
+
+### Current GCC LTO + PGO pipeline result
+
+The current-source benchmark compared GCC Release without LTO to GCC Release
+with CMake IPO/LTO and profile use. The benchmark ran under Xvfb at 1920x1080
+with the 1512x949 presentation request and 1512x850 image viewport. Each
+configuration had three runs of 100 samples; values below are the median of
+the three per-run `wall_p50_us` measurements. All six runs produced the same
+output checksum (`595530542`).
+
+| Stage | GCC no LTO | GCC LTO + PGO | Change |
+| --- | ---: | ---: | ---: |
+| Full-grid tile fingerprint | 2072.1 us | 2119.7 us | +2.3% |
+| Presentation scaling | 2516.0 us | 2300.8 us | -8.6% |
+| Full-frame BGRA to NV12 | 5277.7 us | 5444.0 us | +3.2% |
+| Fused scale + direct NV12 | 5286.2 us | 5179.2 us | -2.0% |
+| x264 software frame encode | 8428.3 us | 8544.5 us | +1.4% |
+
+The measured gain is concentrated in presentation scaling; other stages are
+mixed. The x264 encoder is a system shared library and is not instrumented by
+this PGO build. `stage-statistics-unit` and `pixel-pipeline-bench-cli` both
+passed in the profile-generate and profile-use builds.
+
+The production module was also built as a shared object with GCC LTO and PGO.
+Profile generation exercised it with
+`xrdp-loader-gfx-h264-fullhd-source-smoke`; the same test passed after the
+profile-use rebuild. The isolated pinned xrdp install reproduced the seven
+relink warnings above. All 37 module translation units and both diagnostic
+helpers had profile data, and the final profile-use build emitted no compiler
+warnings. The H.264 loader test passed in 4.6 seconds after profile use.
+
+This remains an opt-in experiment: the scaling gain is useful, but the overall
+pipeline has no broad, end-to-end win established by these measurements.
+
 ## Scroll-observer snapshot allocation
 
 The scroll observer keeps two contiguous BGRA history buffers. Before this
