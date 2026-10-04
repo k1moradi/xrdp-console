@@ -73,14 +73,15 @@
      clipboard_send_format_ack();
  
      xfuse_clear_clip_dir();
-@@ -1043,6 +1074,11 @@
+@@ -1043,6 +1074,12 @@
          }
      }
  
 +    LOG(LOG_LEVEL_INFO,
 +        "XRDP_CONSOLE_CLIPBOARD_IMAGE event=format-list stored_formats=%d "
-+        "dib_format_id=%d png_format_id=%d",
-+        g_num_formatIds, g_dib_format_id, g_png_format_id);
++        "dib_format_id=%d png_format_id=%d generation=%llu",
++        g_num_formatIds, g_dib_format_id, g_png_format_id,
++        (unsigned long long)g_clipboard_format_generation);
 +
      if ((g_num_formatIds > 0) &&
              (g_clip_c2s.incr_in_progress == 0) && /* don't interrupt incr */

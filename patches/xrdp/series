@@ -46,3 +46,4 @@
 0047-xrdp-chansrv-abort-destroyed-c2s-incr-requestor.patch
 0048-xrdp-chansrv-serialize-format-data-generations.patch
 0049-xrdp-console-ignore-unavailable-gfx-queue-depth.patch
+0050-xrdp-chansrv-retire-pending-format-request-on-disconnect.patch

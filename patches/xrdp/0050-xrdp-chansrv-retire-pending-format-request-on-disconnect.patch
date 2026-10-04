@@ -1,0 +1,18 @@
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -441,5 +441,6 @@
+ static void clipboard_cancel_pending_image_retry(const char *reason);
+ static void clipboard_invalidate_image_request(const char *reason);
++static void clipboard_invalidate_pending_format_data_request(const char *reason);
+ static void clipboard_refuse_image_waiters(void);
+ static void clipboard_drain_image_waiters(void);
+ 
+@@ -709,6 +710,8 @@
+     g_selection_retry.data_response_expected = 0;
+     g_selection_retry.retry_timeout_pending = 0;
+     clipboard_invalidate_image_request("clipboard-deinit");
++    clipboard_invalidate_pending_format_data_request("clipboard-deinit");
++    XFlush(g_display);
+     g_memset(&g_pending_format_data_request, 0,
+              sizeof(g_pending_format_data_request));
+     clipboard_image_retry_cancel(&g_image_retry.policy);

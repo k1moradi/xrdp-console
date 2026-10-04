@@ -38,10 +38,7 @@
      }
      return 0;
  }
-@@ -1264,6 +1288,17 @@
-         "dib_format_id=%d png_format_id=%d",
-         g_num_formatIds, g_dib_format_id, g_png_format_id);
- 
+@@ -1267,3 +1291,14 @@
 +    if (g_num_formatIds > 0 &&
 +            (g_clip_c2s.incr_in_progress || g_clip_s2c.incr_in_progress))
 +    {

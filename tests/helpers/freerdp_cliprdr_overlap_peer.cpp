@@ -23,8 +23,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <poll.h>
+#include <time.h>
 #include <unistd.h>
 
 namespace
@@ -75,6 +77,16 @@ struct PeerContext
     bool pngOverlap;
     bool pngPrefetchDelay;
     bool pngPrefetchFail;
+    bool pngResponseDelayEnabled;
+    bool pngResponseFail;
+    bool pngResponseFlagsEnabled;
+    bool pngResponseFailWithPayload;
+    UINT16 pngResponseFlags;
+    bool pngResponseInjectionMode;
+    bool delayedPngResponseActive;
+    bool disconnectRequested;
+    UINT32 pngResponseDelayMs;
+    UINT64 pngResponseDeadlineNs;
     bool deferOverlapFormatList;
     bool staleTextGeneration;
     bool staleTextResponseHeld;
@@ -119,6 +131,59 @@ bool parse_format_id(const char* value, UINT32* parsed)
         return false;
     }
     *parsed = result;
+    return true;
+}
+
+bool parse_delay_ms(const char* value, UINT32* parsed)
+{
+    if (value == nullptr || parsed == nullptr || *value == '\0')
+    {
+        return false;
+    }
+    UINT32 result = 0U;
+    const char* end = value + std::strlen(value);
+    const auto conversion = std::from_chars(value, end, result, 10);
+    if (conversion.ec != std::errc{} || conversion.ptr != end ||
+        result > 60000U)
+    {
+        return false;
+    }
+    *parsed = result;
+    return true;
+}
+
+bool parse_response_flags(const char* value, UINT16* parsed)
+{
+    if (value == nullptr || parsed == nullptr || *value == '\0')
+    {
+        return false;
+    }
+    UINT32 result = 0U;
+    const char* end = value + std::strlen(value);
+    const auto conversion = std::from_chars(value, end, result, 10);
+    if (conversion.ec != std::errc{} || conversion.ptr != end ||
+        result > std::numeric_limits<UINT16>::max())
+    {
+        return false;
+    }
+    *parsed = static_cast<UINT16>(result);
+    return true;
+}
+
+bool monotonic_time_ns(UINT64* value)
+{
+    if (value == nullptr)
+    {
+        return false;
+    }
+    timespec now{};
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 || now.tv_sec < 0 ||
+        now.tv_nsec < 0)
+    {
+        return false;
+    }
+    *value = static_cast<UINT64>(now.tv_sec) * 1000000000ULL +
+             static_cast<UINT64>(now.tv_nsec);
     return true;
 }
 
@@ -275,12 +340,16 @@ UINT send_pending_client_format_response(PeerContext* peer, UINT16 flags,
     const UINT status = send_data_response(peer->cliprdr, flags, data, size);
     if (status == CHANNEL_RC_OK)
     {
+        UINT64 sentMonoNs = 0U;
+        (void)monotonic_time_ns(&sentMonoNs);
         std::printf("PEER_CLIENT_FORMAT_RESPONSE_SENT format_id=%u "
-                    "request_generation=%llu flags=0x%04x bytes=%zu\n",
+                    "request_generation=%llu flags=0x%04x bytes=%zu "
+                    "mono_ns=%llu\n",
                     peer->pendingClientFormatId,
                     static_cast<unsigned long long>(
                         peer->pendingClientFormatGeneration),
-                    flags, size);
+                    flags, size,
+                    static_cast<unsigned long long>(sentMonoNs));
         peer->pendingClientFormatDataResponse = false;
         peer->pendingClientFormatId = 0U;
         peer->pendingClientFormatGeneration = 0U;
@@ -378,7 +447,9 @@ UINT on_monitor_ready(CliprdrClientContext* cliprdr,
     formats[0].formatId = peer->staleTextGeneration ?
         kCfUnicodeText : kCfDib;
     const bool advertisePng = peer->pngEnabled &&
-        (peer->pngOverlap || peer->pngPrefetchDelay);
+        (peer->pngOverlap || peer->pngPrefetchDelay ||
+         peer->pngResponseDelayEnabled || peer->pngResponseFail ||
+         peer->pngResponseFlagsEnabled || peer->pngResponseInjectionMode);
     if (advertisePng)
     {
         formats[1].formatId = peer->pngFormatId;
@@ -645,6 +716,93 @@ UINT on_server_format_data_request(
     peer->pendingClientFormatId = request->requestedFormatId;
     peer->pendingClientFormatGeneration = peer->clientFormatGeneration;
 
+    UINT64 requestMonoNs = 0U;
+    if (!monotonic_time_ns(&requestMonoNs))
+    {
+        peer->failed = true;
+        return CHANNEL_RC_BAD_PROC;
+    }
+    std::printf("PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id=%u "
+                "request_generation=%llu mono_ns=%llu\n",
+                request->requestedFormatId,
+                static_cast<unsigned long long>(
+                    peer->pendingClientFormatGeneration),
+                static_cast<unsigned long long>(requestMonoNs));
+    std::fflush(stdout);
+
+    if (request->requestedFormatId == peer->pngFormatId && peer->pngEnabled &&
+        peer->pngResponseFail)
+    {
+        const UINT status = send_pending_client_format_response(
+            peer, CB_RESPONSE_FAIL, nullptr, 0U);
+        if (status == CHANNEL_RC_OK)
+        {
+            std::puts("PEER_PNG_FORMAT_RESPONSE_FAIL_SENT");
+            std::fflush(stdout);
+        }
+        return status;
+    }
+
+    if (request->requestedFormatId == peer->pngFormatId && peer->pngEnabled &&
+        peer->pngResponseFlagsEnabled)
+    {
+        const BYTE* responseData = peer->pngResponseFailWithPayload ?
+            peer_png_data(peer) : nullptr;
+        const std::size_t responseSize = peer->pngResponseFailWithPayload ?
+            peer_png_size(peer) : 0U;
+        const UINT status = send_pending_client_format_response(
+            peer, peer->pngResponseFlags, responseData, responseSize);
+        if (status == CHANNEL_RC_OK)
+        {
+            std::printf("PEER_PNG_INJECTED_RESPONSE_SENT flags=0x%04x "
+                        "bytes=%zu\n",
+                        peer->pngResponseFlags, responseSize);
+            std::fflush(stdout);
+        }
+        return status;
+    }
+
+    if (request->requestedFormatId == peer->pngFormatId && peer->pngEnabled &&
+        peer->pngResponseDelayEnabled)
+    {
+        if (peer->pngResponseDelayMs == 0U)
+        {
+            const UINT status = send_pending_client_format_response(
+                peer, CB_RESPONSE_OK, peer_png_data(peer), peer_png_size(peer));
+            if (status == CHANNEL_RC_OK)
+            {
+                peer->imageResponseSent = true;
+                UINT64 completedMonoNs = 0U;
+                (void)monotonic_time_ns(&completedMonoNs);
+                std::printf("PEER_PNG_DELAY_RESPONSE_SENT delay_ms=0 "
+                            "bytes=%zu mono_ns=%llu\n",
+                            peer_png_size(peer),
+                            static_cast<unsigned long long>(completedMonoNs));
+                std::fflush(stdout);
+            }
+            return status;
+        }
+
+        if (!peer->pngResponseDelayEnabled ||
+            peer->delayedPngResponseActive ||
+            peer->pngResponseDelayMs >
+                (UINT64_MAX - requestMonoNs) / 1000000ULL)
+        {
+            peer->failed = true;
+            return CHANNEL_RC_BAD_PROC;
+        }
+        peer->pngResponseDeadlineNs = requestMonoNs +
+            static_cast<UINT64>(peer->pngResponseDelayMs) * 1000000ULL;
+        peer->delayedPngResponseActive = true;
+        std::printf("PEER_PNG_DELAY_RESPONSE_PENDING delay_ms=%u "
+                    "deadline_mono_ns=%llu\n",
+                    peer->pngResponseDelayMs,
+                    static_cast<unsigned long long>(
+                        peer->pngResponseDeadlineNs));
+        std::fflush(stdout);
+        return CHANNEL_RC_OK;
+    }
+
     if (peer->staleTextGeneration &&
         request->requestedFormatId == kCfUnicodeText &&
         !peer->staleTextResponseHeld)
@@ -816,6 +974,50 @@ UINT on_server_format_data_request(
 
 void process_control_command(PeerContext* peer, const char* command)
 {
+    if (std::strcmp(command, "DISCONNECT_WHILE_PNG_RESPONSE_PENDING") == 0)
+    {
+        if (!peer->delayedPngResponseActive ||
+            !peer->pendingClientFormatDataResponse || peer->disconnectRequested)
+        {
+            peer->failed = true;
+            std::fputs("invalid pending-response disconnect command\n", stderr);
+            return;
+        }
+        peer->disconnectRequested = true;
+        std::puts("PEER_DELAYED_PNG_DISCONNECT_REQUESTED");
+        std::fflush(stdout);
+        return;
+    }
+
+    if (std::strcmp(command, "SEND_UNSOLICITED_PNG_RESPONSE") == 0 ||
+        std::strcmp(command, "SEND_DUPLICATE_PNG_RESPONSE") == 0)
+    {
+        const bool isDuplicate =
+            std::strcmp(command, "SEND_DUPLICATE_PNG_RESPONSE") == 0;
+        if (!peer->pngResponseInjectionMode || peer->cliprdr == nullptr ||
+            peer->png == nullptr || peer->pngSize == 0U ||
+            peer->pendingClientFormatDataResponse)
+        {
+            peer->failed = true;
+            std::fprintf(stderr, "invalid %s test command\n", command);
+            return;
+        }
+        const UINT status = send_data_response(
+            peer->cliprdr, CB_RESPONSE_OK, peer_png_data(peer),
+            peer_png_size(peer));
+        if (status != CHANNEL_RC_OK)
+        {
+            peer->failed = true;
+            std::fprintf(stderr, "%s send failed: %u\n", command, status);
+            return;
+        }
+        std::printf("PEER_PNG_UNSOLICITED_RESPONSE_SENT kind=%s bytes=%zu\n",
+                    isDuplicate ? "duplicate" : "unsolicited",
+                    peer_png_size(peer));
+        std::fflush(stdout);
+        return;
+    }
+
     if (std::strcmp(command, "SEND_TEXT_FORMAT_LIST") == 0)
     {
         if (!peer->deferOverlapFormatList || peer->overlapFormatsSent ||
@@ -1052,8 +1254,7 @@ void process_control_command(PeerContext* peer, const char* command)
     {
         if ((!peer->pngOverlap &&
              (!peer->pngPrefetchDelay || peer->pngPrefetchFail)) ||
-            !peer->pendingPngResponse ||
-            (peer->pngOverlap && !peer->overlapFormatsSent))
+            !peer->pendingPngResponse)
         {
             peer->failed = true;
             std::fprintf(stderr, "invalid RESPOND_PNG test command\n");
@@ -1297,6 +1498,50 @@ BOOL client_new(freerdp* instance, rdpContext* context)
     return TRUE;
 }
 
+bool complete_delayed_png_response(PeerContext* peer)
+{
+    if (peer == nullptr || !peer->delayedPngResponseActive)
+    {
+        return true;
+    }
+
+    UINT64 nowNs = 0U;
+    if (!monotonic_time_ns(&nowNs))
+    {
+        peer->failed = true;
+        std::fputs("could not read monotonic clock for delayed PNG response\n",
+                   stderr);
+        return false;
+    }
+    if (nowNs < peer->pngResponseDeadlineNs)
+    {
+        return true;
+    }
+
+    const UINT status = send_pending_client_format_response(
+        peer, CB_RESPONSE_OK, peer_png_data(peer), peer_png_size(peer));
+    peer->delayedPngResponseActive = false;
+    if (status != CHANNEL_RC_OK)
+    {
+        peer->failed = true;
+        std::fprintf(stderr, "delayed PNG response send failed: %u\n", status);
+        return false;
+    }
+    peer->imageResponseSent = true;
+    UINT64 completedMonoNs = 0U;
+    if (!monotonic_time_ns(&completedMonoNs))
+    {
+        peer->failed = true;
+        return false;
+    }
+    std::printf("PEER_PNG_DELAY_RESPONSE_SENT delay_ms=%u bytes=%zu "
+                "mono_ns=%llu\n",
+                peer->pngResponseDelayMs, peer_png_size(peer),
+                static_cast<unsigned long long>(completedMonoNs));
+    std::fflush(stdout);
+    return true;
+}
+
 DWORD run_client(freerdp* instance, PeerContext* peer)
 {
     if (!freerdp_connect(instance))
@@ -1307,7 +1552,8 @@ DWORD run_client(freerdp* instance, PeerContext* peer)
     }
 
     HANDLE handles[MAXIMUM_WAIT_OBJECTS] = {};
-    while (!freerdp_shall_disconnect_context(instance->context) && !peer->failed)
+    while (!freerdp_shall_disconnect_context(instance->context) &&
+           !peer->disconnectRequested && !peer->failed)
     {
         const DWORD count = freerdp_get_event_handles(instance->context, handles,
                                                        MAXIMUM_WAIT_OBJECTS);
@@ -1316,7 +1562,34 @@ DWORD run_client(freerdp* instance, PeerContext* peer)
             std::fputs("freerdp_get_event_handles failed\n", stderr);
             return 1U;
         }
-        const DWORD waitStatus = WaitForMultipleObjects(count, handles, FALSE, 25U);
+        DWORD waitTimeoutMs = 25U;
+        if (peer->delayedPngResponseActive)
+        {
+            UINT64 nowNs = 0U;
+            if (!monotonic_time_ns(&nowNs))
+            {
+                std::fputs("could not read monotonic clock for wait deadline\n",
+                           stderr);
+                return 1U;
+            }
+            if (nowNs >= peer->pngResponseDeadlineNs)
+            {
+                waitTimeoutMs = 0U;
+            }
+            else
+            {
+                const UINT64 remainingNs =
+                    peer->pngResponseDeadlineNs - nowNs;
+                const UINT64 remainingMs =
+                    (remainingNs + 999999ULL) / 1000000ULL;
+                if (remainingMs < waitTimeoutMs)
+                {
+                    waitTimeoutMs = static_cast<DWORD>(remainingMs);
+                }
+            }
+        }
+        const DWORD waitStatus = WaitForMultipleObjects(
+            count, handles, FALSE, waitTimeoutMs);
         if (waitStatus == WAIT_FAILED)
         {
             std::fputs("WaitForMultipleObjects failed\n", stderr);
@@ -1330,6 +1603,21 @@ DWORD run_client(freerdp* instance, PeerContext* peer)
             return 1U;
         }
         poll_control_commands(peer);
+        if (!complete_delayed_png_response(peer))
+        {
+            return 1U;
+        }
+    }
+    if (peer->delayedPngResponseActive)
+    {
+        UINT64 cancelledMonoNs = 0U;
+        (void)monotonic_time_ns(&cancelledMonoNs);
+        std::printf("PEER_PNG_DELAY_RESPONSE_CANCELLED reason=disconnect "
+                    "mono_ns=%llu\n",
+                    static_cast<unsigned long long>(cancelledMonoNs));
+        peer->delayedPngResponseActive = false;
+        peer->pendingClientFormatDataResponse = false;
+        std::fflush(stdout);
     }
     std::puts("PEER_DISCONNECTED");
     std::fflush(stdout);
@@ -1415,6 +1703,16 @@ int main(int argc, char** argv)
     peer->pngOverlap = false;
     peer->pngPrefetchDelay = false;
     peer->pngPrefetchFail = false;
+    peer->pngResponseDelayEnabled = false;
+    peer->pngResponseFail = false;
+    peer->pngResponseFlagsEnabled = false;
+    peer->pngResponseFailWithPayload = false;
+    peer->pngResponseFlags = 0U;
+    peer->pngResponseInjectionMode = false;
+    peer->delayedPngResponseActive = false;
+    peer->pngResponseDelayMs = 0U;
+    peer->pngResponseDeadlineNs = 0U;
+    peer->disconnectRequested = false;
     peer->deferOverlapFormatList = false;
     peer->staleTextGeneration = false;
     peer->staleTextResponseHeld = false;
@@ -1451,6 +1749,86 @@ int main(int argc, char** argv)
         std::getenv("XRDP_CONSOLE_TEST_PNG_PREFETCH_DELAY");
     peer->pngPrefetchDelay = pngPrefetchDelay != nullptr &&
                              std::strcmp(pngPrefetchDelay, "1") == 0;
+    const char* pngResponseDelayText = std::getenv(
+        "XRDP_CONSOLE_TEST_DELAY_PNG_RESPONSE_MS");
+    peer->pngResponseDelayEnabled = pngResponseDelayText != nullptr;
+    if (peer->pngResponseDelayEnabled &&
+        !parse_delay_ms(pngResponseDelayText, &peer->pngResponseDelayMs))
+    {
+        std::fputs("invalid synthetic PNG response delay\n", stderr);
+        freerdp_disconnect(context->instance);
+        freerdp_client_stop(context);
+        freerdp_client_context_free(context);
+        return 2;
+    }
+    const char* pngResponseFailText = std::getenv(
+        "XRDP_CONSOLE_TEST_FAIL_PNG_RESPONSE");
+    if (pngResponseFailText != nullptr &&
+        std::strcmp(pngResponseFailText, "0") != 0 &&
+        std::strcmp(pngResponseFailText, "1") != 0)
+    {
+        std::fputs("invalid synthetic PNG failure configuration\n", stderr);
+        freerdp_disconnect(context->instance);
+        freerdp_client_stop(context);
+        freerdp_client_context_free(context);
+        return 2;
+    }
+    peer->pngResponseFail = pngResponseFailText != nullptr &&
+        std::strcmp(pngResponseFailText, "1") == 0;
+    const char* pngResponseFlagsText = std::getenv(
+        "XRDP_CONSOLE_TEST_PNG_RESPONSE_FLAGS");
+    peer->pngResponseFlagsEnabled = pngResponseFlagsText != nullptr;
+    if (peer->pngResponseFlagsEnabled &&
+        !parse_response_flags(pngResponseFlagsText,
+                              &peer->pngResponseFlags))
+    {
+        std::fputs("invalid synthetic PNG response flags\n", stderr);
+        freerdp_disconnect(context->instance);
+        freerdp_client_stop(context);
+        freerdp_client_context_free(context);
+        return 2;
+    }
+    const char* pngResponsePayloadText = std::getenv(
+        "XRDP_CONSOLE_TEST_PNG_RESPONSE_FAIL_PAYLOAD");
+    if (pngResponsePayloadText != nullptr &&
+        std::strcmp(pngResponsePayloadText, "0") != 0 &&
+        std::strcmp(pngResponsePayloadText, "1") != 0)
+    {
+        std::fputs("invalid synthetic PNG failure-payload configuration\n",
+                   stderr);
+        freerdp_disconnect(context->instance);
+        freerdp_client_stop(context);
+        freerdp_client_context_free(context);
+        return 2;
+    }
+    peer->pngResponseFailWithPayload = pngResponsePayloadText != nullptr &&
+        std::strcmp(pngResponsePayloadText, "1") == 0;
+    if (peer->pngResponseFailWithPayload &&
+        (!peer->pngResponseFlagsEnabled ||
+         peer->pngResponseFlags != CB_RESPONSE_FAIL))
+    {
+        std::fputs("failure payload requires CB_RESPONSE_FAIL injection\n",
+                   stderr);
+        freerdp_disconnect(context->instance);
+        freerdp_client_stop(context);
+        freerdp_client_context_free(context);
+        return 2;
+    }
+    const char* pngResponseInjectionText = std::getenv(
+        "XRDP_CONSOLE_TEST_PNG_RESPONSE_INJECTION");
+    if (pngResponseInjectionText != nullptr &&
+        std::strcmp(pngResponseInjectionText, "0") != 0 &&
+        std::strcmp(pngResponseInjectionText, "1") != 0)
+    {
+        std::fputs("invalid synthetic PNG response injection configuration\n",
+                   stderr);
+        freerdp_disconnect(context->instance);
+        freerdp_client_stop(context);
+        freerdp_client_context_free(context);
+        return 2;
+    }
+    peer->pngResponseInjectionMode = pngResponseInjectionText != nullptr &&
+        std::strcmp(pngResponseInjectionText, "1") == 0;
     const char* pngPrefetchFail =
         std::getenv("XRDP_CONSOLE_TEST_PNG_PREFETCH_FAIL");
     peer->pngPrefetchFail = pngPrefetchFail != nullptr &&
@@ -1467,12 +1845,15 @@ int main(int argc, char** argv)
         std::getenv("XRDP_CONSOLE_TEST_CLIPBOARD_SERVER_AUDIT");
     peer->auditServerClipboard = auditServerClipboard != nullptr &&
         std::strcmp(auditServerClipboard, "1") == 0;
-    if (peer->pngPrefetchDelay)
+    if (peer->pngPrefetchDelay || peer->pngResponseDelayEnabled ||
+        peer->pngOverlap || peer->pngResponseFlagsEnabled ||
+        peer->pngResponseInjectionMode)
     {
         const char* pngPath = std::getenv("XRDP_CONSOLE_TEST_PNG_FILE");
         if (!load_png(peer, pngPath))
         {
-            std::fputs("could not load PNG fixture for prefetch test\n", stderr);
+            std::fputs("could not load PNG fixture for clipboard response test\n",
+                       stderr);
             freerdp_disconnect(context->instance);
             freerdp_client_stop(context);
             freerdp_client_context_free(context);

@@ -21,7 +21,6 @@
 #define IMAGE_HEIGHT 1932U
 #define IMAGE_HEADER_BYTES 54U
 #define IMAGE_CHUNK_BYTES (64U * 1024U)
-#define IMAGE_CHUNK_DELAY_NS 10000000L
 #define MAX_RESULT_BYTES (64U * 1024U * 1024U)
 #define MAX_DECODED_PNG_BYTES (64U * 1024U * 1024U)
 #define MAX_PNG_DIMENSION 16384U
@@ -737,7 +736,7 @@ handle_selection_request(Display *display,
 }
 
 static int
-run_owner(const char *named_png_path)
+run_owner(const char *named_png_path, int delayed_activation)
 {
     Display *display = XOpenDisplay(NULL);
     Window image_owner;
@@ -765,7 +764,7 @@ run_owner(const char *named_png_path)
     const int named_png_mode = named_png_path != NULL;
     struct image_transfer transfer = {0};
     int text_generation = 0;
-    unsigned int owner_generation = 1U;
+    unsigned int owner_generation = delayed_activation ? 0U : 1U;
     int x_fd;
 
     if (display == NULL)
@@ -832,7 +831,10 @@ run_owner(const char *named_png_path)
                         raw_format_list_data,
                         (int)raw_format_list_length);
     }
-    XSetSelectionOwner(display, clipboard, image_owner, CurrentTime);
+    if (!delayed_activation)
+    {
+        XSetSelectionOwner(display, clipboard, image_owner, CurrentTime);
+    }
     XSync(display, False);
     x_fd = ConnectionNumber(display);
     if (named_png_mode)
@@ -844,7 +846,8 @@ run_owner(const char *named_png_path)
     }
     else
     {
-        printf("OWNER_READY image_bytes=%zu\n", bitmap_length);
+        printf("OWNER_READY image_bytes=%zu active=%d\n", bitmap_length,
+               !delayed_activation);
     }
     fflush(stdout);
 
@@ -877,7 +880,29 @@ run_owner(const char *named_png_path)
             {
                 break;
             }
-            if (strncmp(command, "reannounce-image", 16) == 0 &&
+            if (strncmp(command, "activate-image", 14) == 0 &&
+                    delayed_activation && !text_generation)
+            {
+                const Window old_owner =
+                    XGetSelectionOwner(display, clipboard);
+                XSetSelectionOwner(display, clipboard, image_owner, CurrentTime);
+                XSync(display, False);
+                const Window new_owner =
+                    XGetSelectionOwner(display, clipboard);
+                if (old_owner != None || new_owner != image_owner)
+                {
+                    fprintf(stderr,
+                            "OWNER_ACTIVATION_FAILED old=0x%lx new=0x%lx "
+                            "expected=0x%lx\n",
+                            old_owner, new_owner, image_owner);
+                    return 1;
+                }
+                delayed_activation = 0;
+                owner_generation = 1U;
+                puts("IMAGE_OWNER_ACTIVATED");
+                fflush(stdout);
+            }
+            else if (strncmp(command, "reannounce-image", 16) == 0 &&
                 !text_generation)
             {
                 const Window old_owner = XGetSelectionOwner(display, clipboard);
@@ -994,13 +1019,6 @@ run_owner(const char *named_png_path)
                         puts(transfer.first_chunk_marker != NULL ?
                              transfer.first_chunk_marker : "INCR_FIRST_CHUNK");
                         fflush(stdout);
-                    }
-                    {
-                        struct timespec delay = {0, IMAGE_CHUNK_DELAY_NS};
-                        while (nanosleep(&delay, &delay) != 0 && errno == EINTR)
-                        {
-                            /* Resume the remaining delay after a signal. */
-                        }
                     }
                 }
                 else
@@ -1379,6 +1397,66 @@ wait_for_x_event(Display *display, Window window, Atom selection, Atom target,
 }
 
 static int
+wait_monotonic_delay(Display *display, long delay_ms)
+{
+    struct timespec deadline;
+
+    if (display == NULL || delay_ms < 0 ||
+            clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+    {
+        return -1;
+    }
+    deadline.tv_sec += delay_ms / 1000L;
+    deadline.tv_nsec += (delay_ms % 1000L) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L)
+    {
+        ++deadline.tv_sec;
+        deadline.tv_nsec -= 1000000000L;
+    }
+
+    for (;;)
+    {
+        struct timespec now;
+        struct pollfd descriptor;
+        long long remaining_ns;
+        int timeout_ms;
+        int poll_status;
+
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+        {
+            return -1;
+        }
+        remaining_ns =
+            ((long long)deadline.tv_sec - (long long)now.tv_sec) *
+                1000000000LL +
+            ((long long)deadline.tv_nsec - (long long)now.tv_nsec);
+        if (remaining_ns <= 0)
+        {
+            return 0;
+        }
+        remaining_ns = (remaining_ns + 999999LL) / 1000000LL;
+        timeout_ms = remaining_ns > INT_MAX ? INT_MAX : (int)remaining_ns;
+        descriptor.fd = ConnectionNumber(display);
+        descriptor.events = POLLIN;
+        descriptor.revents = 0;
+        poll_status = poll(&descriptor, 1, timeout_ms);
+        if (poll_status < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            return -1;
+        }
+        if (poll_status > 0 && (descriptor.revents & POLLIN) != 0)
+        {
+            /* Queue unrelated X events while the controlled delay expires. */
+            (void)XEventsQueued(display, QueuedAfterReading);
+        }
+    }
+}
+
+static int
 append_bytes(unsigned char **buffer, size_t *used, size_t *capacity,
              const unsigned char *source, size_t length)
 {
@@ -1424,6 +1502,7 @@ run_requestor(int argc, char **argv)
     Atom clipboard;
     Atom target;
     Atom targets;
+    Atom timestamp;
     Atom property;
     Atom incr;
     Atom actual_type = None;
@@ -1438,6 +1517,8 @@ run_requestor(int argc, char **argv)
     long delay_ms = 0;
     int accept_refusal = 0;
     int abandon_after_first_chunk = 0;
+    int abandon_after_terminator = 0;
+    int stall_after_first_chunk = 0;
     int used_incr = 0;
     const char *raw_png_env = getenv("XRDP_CONSOLE_CLIPBOARD_PEER_RAW_PNG");
     int raw_png_output = raw_png_env != NULL && strcmp(raw_png_env, "1") == 0;
@@ -1450,7 +1531,9 @@ run_requestor(int argc, char **argv)
     if (argc < 3 || argc > 6)
     {
         fputs("requestor usage: requestor TARGET "
-              "[delay_ms [allow-refusal [abandon-after-first-chunk]]]\n",
+              "[delay_ms [allow-refusal "
+              "[abandon-after-first-chunk|abandon-after-terminator|"
+              "stall-after-first-chunk]]]\n",
               stderr);
         return 2;
     }
@@ -1478,14 +1561,23 @@ run_requestor(int argc, char **argv)
     if (argc == 6)
     {
         if (strcmp(argv[4], "allow-refusal") != 0 ||
-                strcmp(argv[5], "abandon-after-first-chunk") != 0)
+                (strcmp(argv[5], "abandon-after-first-chunk") != 0 &&
+                 strcmp(argv[5], "abandon-after-terminator") != 0 &&
+                 strcmp(argv[5], "stall-after-first-chunk") != 0))
         {
             fputs("requestor modes must be allow-refusal and "
-                  "abandon-after-first-chunk\n", stderr);
+                  "abandon-after-first-chunk or "
+                  "abandon-after-terminator or "
+                  "stall-after-first-chunk\n", stderr);
             return 2;
         }
         accept_refusal = 1;
-        abandon_after_first_chunk = 1;
+        abandon_after_first_chunk =
+            strcmp(argv[5], "abandon-after-first-chunk") == 0;
+        abandon_after_terminator =
+            strcmp(argv[5], "abandon-after-terminator") == 0;
+        stall_after_first_chunk =
+            strcmp(argv[5], "stall-after-first-chunk") == 0;
     }
     display = XOpenDisplay(NULL);
     if (display == NULL)
@@ -1496,6 +1588,7 @@ run_requestor(int argc, char **argv)
     clipboard = XInternAtom(display, "CLIPBOARD", False);
     target = XInternAtom(display, argv[2], False);
     targets = XInternAtom(display, "TARGETS", False);
+    timestamp = XInternAtom(display, "TIMESTAMP", False);
     property = XInternAtom(display, "XRDP_CONSOLE_CLIPBOARD_TEST", False);
     incr = XInternAtom(display, "INCR", False);
     window = XCreateSimpleWindow(display, DefaultRootWindow(display),
@@ -1546,6 +1639,20 @@ run_requestor(int argc, char **argv)
     if (actual_type != incr)
     {
         size_t bytes;
+        if (target == timestamp)
+        {
+            if (actual_type != XA_INTEGER || actual_format != 32 ||
+                item_count != 1 || bytes_after != 0 || property_data == NULL)
+            {
+                fputs("ERROR invalid-timestamp-property\n", stderr);
+                status = 1;
+                goto done;
+            }
+            printf("RESULT target=TIMESTAMP value=%lu\n",
+                   ((const unsigned long *)property_data)[0]);
+            status = 0;
+            goto done;
+        }
         if (target == targets)
         {
             const unsigned long *atoms;
@@ -1677,12 +1784,36 @@ run_requestor(int argc, char **argv)
             chunk_bytes = (size_t)chunk_items;
             if (chunk_bytes == 0)
             {
+                if (abandon_after_terminator)
+                {
+                    char command[32];
+
+                    printf("REQUESTOR_TERMINATOR_READY target=%s "
+                           "requestor=0x%lx bytes=%zu\n",
+                           argv[2], window, result_bytes);
+                    fflush(stdout);
+                    if (fgets(command, sizeof(command), stdin) == NULL ||
+                            strcmp(command, "abandon\n") != 0)
+                    {
+                        fputs("ERROR expected abandon command\n", stderr);
+                        XFree(chunk);
+                        status = 1;
+                        goto done;
+                    }
+                    printf("REQUESTOR_ABANDONED target=%s requestor=0x%lx "
+                           "after_chunks=terminator bytes=%zu\n",
+                           argv[2], window, result_bytes);
+                    fflush(stdout);
+                    XFree(chunk);
+                    status = 0;
+                    goto done;
+                }
                 XFree(chunk);
                 XDeleteProperty(display, window, property);
                 XFlush(display);
                 break;
             }
-            if (abandon_after_first_chunk)
+            if (abandon_after_first_chunk || stall_after_first_chunk)
             {
                 char command[32];
 
@@ -1691,22 +1822,43 @@ run_requestor(int argc, char **argv)
                        "announced_bytes=%zu\n",
                        argv[2], window, chunk_bytes, incr_expected_bytes);
                 fflush(stdout);
-                if (fgets(command, sizeof(command), stdin) == NULL ||
-                        strcmp(command, "abandon\n") != 0)
+                if (stall_after_first_chunk)
                 {
-                    fputs("ERROR expected abandon command\n", stderr);
+                    printf("REQUESTOR_STALLED target=%s requestor=0x%lx\n",
+                           argv[2], window);
+                    fflush(stdout);
+                }
+                if (fgets(command, sizeof(command), stdin) == NULL)
+                {
+                    fputs("ERROR missing requestor control command\n", stderr);
                     XFree(chunk);
                     status = 1;
                     goto done;
                 }
-                printf("REQUESTOR_ABANDONED target=%s requestor=0x%lx "
-                       "after_chunks=1 first_chunk_bytes=%zu "
-                       "announced_bytes=%zu\n",
-                       argv[2], window, chunk_bytes, incr_expected_bytes);
+                if (strcmp(command, "abandon\n") == 0)
+                {
+                    printf("REQUESTOR_ABANDONED target=%s requestor=0x%lx "
+                           "after_chunks=1 first_chunk_bytes=%zu "
+                           "announced_bytes=%zu\n",
+                           argv[2], window, chunk_bytes, incr_expected_bytes);
+                    fflush(stdout);
+                    XFree(chunk);
+                    status = 0;
+                    goto done;
+                }
+                if (!stall_after_first_chunk ||
+                        strcmp(command, "continue\n") != 0)
+                {
+                    fputs("ERROR expected abandon or continue command\n",
+                          stderr);
+                    XFree(chunk);
+                    status = 1;
+                    goto done;
+                }
+                printf("REQUESTOR_STALL_RELEASED target=%s requestor=0x%lx\n",
+                       argv[2], window);
                 fflush(stdout);
-                XFree(chunk);
-                status = 0;
-                goto done;
+                stall_after_first_chunk = 0;
             }
             if (append_bytes(&result, &result_bytes, &result_capacity,
                              chunk, chunk_bytes) != 0)
@@ -1719,12 +1871,11 @@ run_requestor(int argc, char **argv)
             XFree(chunk);
             if (delay_ms > 0)
             {
-                struct timespec delay;
-                delay.tv_sec = delay_ms / 1000;
-                delay.tv_nsec = (delay_ms % 1000) * 1000000L;
-                while (nanosleep(&delay, &delay) != 0 && errno == EINTR)
+                if (wait_monotonic_delay(display, delay_ms) != 0)
                 {
-                    /* Resume the remaining delay after a signal. */
+                    perror("requestor monotonic delay failed");
+                    status = 1;
+                    goto done;
                 }
             }
             XDeleteProperty(display, window, property);
@@ -2451,11 +2602,15 @@ main(int argc, char **argv)
     }
     if (argc == 2 && strcmp(argv[1], "owner") == 0)
     {
-        return run_owner(NULL);
+        return run_owner(NULL, 0);
+    }
+    if (argc == 2 && strcmp(argv[1], "owner-delayed") == 0)
+    {
+        return run_owner(NULL, 1);
     }
     if (argc == 3 && strcmp(argv[1], "owner-named-png") == 0)
     {
-        return run_owner(argv[2]);
+        return run_owner(argv[2], 0);
     }
     if (argc == 3 && strcmp(argv[1], "owner-png-file") == 0)
     {
@@ -2551,7 +2706,8 @@ main(int argc, char **argv)
     {
         return run_requestor(argc, argv);
     }
-    fputs("usage: clipboard_x11_session_peer owner | owner-named-png PNG_FILE | "
+    fputs("usage: clipboard_x11_session_peer owner | owner-delayed | "
+          "owner-named-png PNG_FILE | "
           "owner-png-file PNG_FILE | owner-png-file-incr PNG_FILE | "
           "owner-png-file-incr-xrdp PNG_FILE | "
           "owner-png-file-incr-xrdp-targets PNG_FILE | "
@@ -2560,7 +2716,9 @@ main(int argc, char **argv)
           "owner-png-file-direct-xrdp-targets-prenotify-delay PNG_FILE DELAY_MS | "
           "stealer | stealer-stale-targets-retry | selection-owner | "
           "window-exists WINDOW_ID | "
-          "requestor TARGET [delay_ms]\n",
+          "requestor TARGET [delay_ms [allow-refusal "
+          "[abandon-after-first-chunk|abandon-after-terminator|"
+          "stall-after-first-chunk]]]\n",
           stderr);
     return 2;
 }

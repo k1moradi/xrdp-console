@@ -253,6 +253,26 @@ def wait_for_chansrv_pattern(log_directory: Path, pattern: str,
         f"[chansrv stdout]\n{read_text(stdout_path)}")
 
 
+def wait_for_chansrv_pattern_occurrence(
+        log_directory: Path, pattern: str, occurrence: int, timeout: float,
+        process: subprocess.Popen[object], stdout_path: Path) -> str:
+    if occurrence < 1:
+        raise ValueError("chansrv pattern occurrence must be positive")
+    expression = re.compile(pattern, re.MULTILINE)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        text = chansrv_log_text(log_directory)
+        if len(expression.findall(text)) >= occurrence:
+            return text
+        if process.poll() is not None:
+            break
+        time.sleep(0.025)
+    raise AssertionError(
+        f"xrdp-chansrv did not log occurrence {occurrence} of {pattern!r}:\n"
+        f"{chansrv_log_text(log_directory)}\n"
+        f"[chansrv stdout]\n{read_text(stdout_path)}")
+
+
 def wait_for_chansrv_pattern_after_lines(
         log_directory: Path, pattern: str, first_new_line: int,
         timeout: float, process: subprocess.Popen[object],
@@ -327,6 +347,31 @@ def wait_for_owner_marker_occurrence(owner: subprocess.Popen[bytes],
         f"{read_text(owner_log_path)}")
 
 
+def wait_for_owner_line_pattern(owner: subprocess.Popen[bytes], pattern: str,
+                                timeout: float,
+                                owner_log_path: Path) -> str:
+    if owner.stdout is None:
+        raise AssertionError("clipboard owner stdout was not created")
+    expression = re.compile(pattern)
+    observed_lines = getattr(owner, "_xrdp_clipboard_owner_lines", None)
+    if observed_lines is None:
+        observed_lines = []
+        setattr(owner, "_xrdp_clipboard_owner_lines", observed_lines)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for line in reversed(observed_lines):
+            if expression.search(line):
+                return line
+        if owner.poll() is not None:
+            break
+        line = read_line(owner.stdout, min(0.1, deadline - time.monotonic()))
+        if line:
+            observed_lines.append(line.decode("utf-8", errors="replace").strip())
+    raise AssertionError(
+        f"clipboard owner did not report a line matching {pattern!r}; "
+        f"owner lines={observed_lines[-30:]!r}\n{read_text(owner_log_path)}")
+
+
 def wait_for_log_pattern_occurrence(
         process: subprocess.Popen[object], log_path: Path, pattern: str,
         occurrence: int, timeout: float, boundary: str) -> str:
@@ -349,19 +394,29 @@ def start_clipboard_requestor(helper: Path, display: str, target: str,
                               delay_ms: int = 0,
                               validate_png: bool = False,
                               raw_png_output: bool = False,
-                              abandon_after_first_chunk: bool = False
+                              abandon_after_first_chunk: bool = False,
+                              abandon_after_terminator: bool = False,
+                              stall_after_first_chunk: bool = False
                               ) -> subprocess.Popen[bytes]:
+    requestor_modes = sum((abandon_after_first_chunk,
+                           abandon_after_terminator,
+                           stall_after_first_chunk))
+    if requestor_modes > 1:
+        raise ValueError("an INCR requestor has only one control mode")
     command = [str(helper), "requestor", target]
     if (target == "image/bmp" or allow_refusal or
-            abandon_after_first_chunk):
+            requestor_modes != 0):
         command.append(str(delay_ms))
     if allow_refusal:
         command.append("allow-refusal")
-    if abandon_after_first_chunk:
+    if requestor_modes != 0:
         if not allow_refusal:
-            raise ValueError(
-                "abandoning an INCR requestor requires allow_refusal mode")
-        command.append("abandon-after-first-chunk")
+            raise ValueError("controlled INCR requestor requires allow_refusal")
+        requestor_mode = (
+            "abandon-after-first-chunk" if abandon_after_first_chunk else
+            "abandon-after-terminator" if abandon_after_terminator else
+            "stall-after-first-chunk")
+        command.append(requestor_mode)
     environment = os.environ.copy()
     environment["DISPLAY"] = display
     if validate_png:
@@ -369,9 +424,48 @@ def start_clipboard_requestor(helper: Path, display: str, target: str,
     if raw_png_output:
         environment["XRDP_CONSOLE_CLIPBOARD_PEER_RAW_PNG"] = "1"
     return subprocess.Popen(
-        command, stdin=subprocess.PIPE if abandon_after_first_chunk else None,
+        command, stdin=subprocess.PIPE if requestor_modes != 0 else None,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=environment, bufsize=0, start_new_session=True)
+
+
+def start_clipboard_owner(
+        helper: Path, root: Path, log_path: Path, *, delayed: bool = False,
+        named_png_path: Path | None = None) -> subprocess.Popen[bytes]:
+    if delayed and named_png_path is not None:
+        raise ValueError("delayed and named-PNG clipboard owners are separate")
+    command = ([str(helper), "owner-delayed"] if delayed else
+               [str(helper), "owner-named-png", str(named_png_path)]
+               if named_png_path is not None else
+               [str(helper), "owner"])
+    with log_path.open("w", encoding="utf-8") as owner_log:
+        owner = subprocess.Popen(
+            command, cwd=root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=owner_log, env=os.environ.copy(), bufsize=0,
+            start_new_session=True)
+    wait_for_owner_marker(owner, "OWNER_READY", 8.0, log_path)
+    return owner
+
+
+def wait_for_clipboard_requestor_marker(
+        process: subprocess.Popen[bytes], marker: str,
+        timeout: float) -> str:
+    if process.stdout is None:
+        raise AssertionError("clipboard requestor stdout pipe is unavailable")
+    deadline = time.monotonic() + timeout
+    observed: list[str] = []
+    while time.monotonic() < deadline:
+        line = read_line(process.stdout, min(0.1, deadline - time.monotonic()))
+        if line:
+            decoded = line.decode("utf-8", errors="replace").strip()
+            observed.append(decoded)
+            if marker in decoded:
+                return decoded
+        if process.poll() is not None:
+            break
+    raise AssertionError(
+        f"X11 requestor did not report {marker!r}; "
+        f"observed={observed!r}, returncode={process.poll()}")
 
 
 def clipboard_selection_owner(helper: Path, display: str) -> str:
@@ -450,8 +544,9 @@ def clipboard_format_list_count(log_directory: Path) -> int:
     return chansrv_log_text(log_directory).count("event=format-list")
 
 
-def clipboard_image_response_count(log_directory: Path) -> int:
-    return len(re.findall(r"event=response\b", chansrv_log_text(log_directory)))
+def clipboard_image_success_response_count(log_directory: Path) -> int:
+    return len(re.findall(r"event=response status=0x1\b",
+                          chansrv_log_text(log_directory)))
 
 
 def clipboard_image_request_count(log_directory: Path) -> int:
@@ -561,67 +656,66 @@ def assert_clipboard_image_session(
     if owner.stdin is None:
         raise AssertionError("clipboard owner stdin was not created")
 
-    # Drain all owner-side X requests that were already queued before testing
-    # this deliberate owner transition. The marker is emitted only after the
-    # helper has flushed its X connection and serviced the resulting events.
+    # Drain owner-side X requests before measuring this deliberate owner
+    # transition. In the stress fixture the client is already monitor-ready,
+    # and the owner starts without selection ownership.
     owner.stdin.write(b"barrier\n")
     owner.stdin.flush()
     wait_for_owner_marker(owner, "OWNER_BARRIER", 5.0, owner_log_path)
 
-    owner_lines = getattr(owner, "_xrdp_clipboard_owner_lines", [])
-    targets_responses_before = sum(
-        line.startswith("TARGETS_RESPONSE_SENT") for line in owner_lines)
-    client_targets_notifies_before = len(re.findall(
-        r"got event SelectionNotify \[selection CLIPBOARD, target TARGETS,",
-        read_text(client_log_path)))
-    client_dib_lists_before = len(re.findall(
-        r"\[\d+\]: id=0x00000008 \[CF_DIB\|",
-        read_text(client_log_path)))
     vc_format_lists_before = len(re.findall(
         r"event=cliprdr-first-fragment "
         r"direction=client-to-server [^\n]*msg_type=2",
         read_text(log_path)))
-    formats_before_reannounce = clipboard_format_list_count(chansrv_logs)
-    chansrv_lines_before_reannounce = len(
+    formats_before_activation = clipboard_format_list_count(chansrv_logs)
+    chansrv_lines_before_activation = len(
         chansrv_log_text(chansrv_logs).splitlines())
-    owner.stdin.write(b"reannounce-image\n")
+    owner.stdin.write(b"activate-image\n")
     owner.stdin.flush()
-    wait_for_owner_marker(owner, "OWNER_REANNOUNCE_STEP step=clear", 5.0,
-                          owner_log_path)
-    wait_for_owner_marker(owner, "OWNER_REANNOUNCE_STEP step=image", 5.0,
-                          owner_log_path)
-    wait_for_owner_marker(owner, "IMAGE_OWNER_REANNOUNCED", 5.0,
+    wait_for_owner_marker(owner, "IMAGE_OWNER_ACTIVATED", 5.0,
                           owner_log_path)
 
-    # Follow the clipboard transition boundary by boundary. In particular,
-    # the owner marker proves only that the X11 helper changed the owner; a
-    # subsequent TARGETS response proves that FreeRDP noticed and queried it.
-    wait_for_owner_marker_occurrence(
-        owner, "TARGETS_RESPONSE_SENT", targets_responses_before + 1,
+    # The owner request itself is issued by FreeRDP's main X11 window. Verify
+    # the TARGETS response and then use the incoming VC PDU as the authoritative
+    # proof that FreeRDP constructed and sent a replacement Format List. Its
+    # diagnostic text log is not an authoritative boundary: the pinned client
+    # can parse the property and call ClientFormatList without emitting the
+    # optional per-format DEBUG lines.
+    client_window = find_window(client_display, window_title, 0.25).lower()
+    target_response = wait_for_owner_line_pattern(
+        owner,
+        rf"TARGETS_RESPONSE_SENT requestor={re.escape(client_window)} "
+        rf"owner=\S+ "
+        rf"owner_generation=\d+ text_generation=0",
         10.0, owner_log_path)
-    wait_for_log_pattern_occurrence(
-        client, client_log_path,
-        r"got event SelectionNotify \[selection CLIPBOARD, target TARGETS,",
-        client_targets_notifies_before + 1, 10.0,
-        "FreeRDP received the owner's TARGETS SelectionNotify")
-    wait_for_log_pattern_occurrence(
-        client, client_log_path,
-        r"\[\d+\]: id=0x00000008 \[CF_DIB\|",
-        client_dib_lists_before + 1, 10.0,
-        "FreeRDP constructed a client Format List containing CF_DIB")
+    target_notify = next((
+        line for line in reversed(
+            getattr(owner, "_xrdp_clipboard_owner_lines", []))
+        if "PNG_FILE_OWNER_SELECTION_NOTIFY" in line and
+        f"requestor={client_window} " in line and "target=TARGETS " in line),
+        None)
+    if (target_notify is None or "send_result=1" not in target_notify or
+            "property=0x0 " in target_notify or
+            "property=0x00000000 " in target_notify):
+        raise AssertionError(
+            "first missing clipboard boundary: owner did not successfully "
+            "send TARGETS SelectionNotify to FreeRDP after receiving its "
+            f"request; request={target_response!r}, notify={target_notify!r}, "
+            f"client_window={client_window}")
     wait_for_log_pattern_occurrence(
         client, log_path,
         r"event=cliprdr-first-fragment "
         r"direction=client-to-server [^\n]*msg_type=2",
         vc_format_lists_before + 1, 10.0,
-        "xrdp received client-to-server CB_FORMAT_LIST (msgType=2)")
+        "first missing boundary after TARGETS: FreeRDP did not construct/send "
+        "CB_FORMAT_LIST or xrdp did not receive msgType=2")
     wait_for_chansrv_marker(
-        chansrv_logs, "event=format-list", formats_before_reannounce + 1,
+        chansrv_logs, "event=format-list", formats_before_activation + 1,
         10.0, chansrv_process, chansrv_stdout)
     try:
         first_list = wait_for_chansrv_pattern_after_lines(
             chansrv_logs, r"event=format-list[^\n]*dib_format_id=8",
-            chansrv_lines_before_reannounce,
+            chansrv_lines_before_activation,
             10.0, chansrv_process, chansrv_stdout)
     except AssertionError as error:
         raise AssertionError(
@@ -835,16 +929,26 @@ def assert_clipboard_image_session(
         chansrv_process, chansrv_stdout)
 
     requests_before_stress = clipboard_image_request_count(chansrv_logs)
+    successful_responses_before_stress = (
+        clipboard_image_success_response_count(chansrv_logs))
+    first_chunks_before_stress = read_text(owner_log_path).count(
+        "IMAGE_FIRST_CHUNK")
+    deliveries_before_stress = chansrv_log_text(chansrv_logs).count(
+        "event=x11-delivery-issued path=incr target=image/bmp")
+    coalesces_before_stress = chansrv_log_text(chansrv_logs).count(
+        "event=request-coalesced target=image/bmp")
     image_request_1 = start_clipboard_requestor(
-        helper, source_display, "image/bmp", allow_refusal=True)
-    responses_before_stress = clipboard_image_response_count(chansrv_logs)
+        helper, source_display, "image/bmp", allow_refusal=True,
+        stall_after_first_chunk=True)
     wait_for_owner_marker(owner, "IMAGE_REQUEST", 15.0, owner_log_path)
-    wait_for_owner_marker(owner, "IMAGE_FIRST_CHUNK", 5.0, owner_log_path)
+    wait_for_owner_marker_occurrence(
+        owner, "IMAGE_FIRST_CHUNK", first_chunks_before_stress + 1,
+        15.0, owner_log_path)
     image_request_2 = start_clipboard_requestor(
         helper, source_display, "image/bmp", allow_refusal=True)
     wait_for_chansrv_marker(
-        chansrv_logs, "event=request-coalesced target=image/bmp", 1, 10.0,
-        chansrv_process, chansrv_stdout)
+        chansrv_logs, "event=request-coalesced target=image/bmp",
+        coalesces_before_stress + 1, 10.0, chansrv_process, chansrv_stdout)
 
     # Match the Mac trace's cross-target probes while the BMP request is still
     # outstanding. They must be refused at the X11 boundary, not start another
@@ -879,6 +983,21 @@ def assert_clipboard_image_session(
             "CLIPRDR data request:\n"
             f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
 
+    # Wait for the remote payload to be completely materialized and then hold
+    # its first downstream X11 INCR chunk. This gives the following format-list
+    # update a deterministic overlap with a live X11 transfer.
+    wait_for_chansrv_pattern_occurrence(
+        chansrv_logs, r"event=response status=0x1\b",
+        successful_responses_before_stress + 1, 15.0,
+        chansrv_process, chansrv_stdout)
+    wait_for_clipboard_requestor_marker(
+        image_request_1, "REQUESTOR_STALLED", 15.0)
+    wait_for_chansrv_pattern_occurrence(
+        chansrv_logs,
+        r"event=x11-delivery-issued path=incr target=image/bmp",
+        deliveries_before_stress + 1, 10.0,
+        chansrv_process, chansrv_stdout)
+
     formats_before_final_text = clipboard_format_list_count(chansrv_logs)
     owner.stdin.write(b"switch-text\n")
     owner.stdin.flush()
@@ -886,21 +1005,20 @@ def assert_clipboard_image_session(
     wait_for_chansrv_marker(
         chansrv_logs, "event=format-list", formats_before_final_text + 1,
         10.0, chansrv_process, chansrv_stdout)
-    responses_after_stress_list = clipboard_image_response_count(chansrv_logs)
-    if responses_after_stress_list != responses_before_stress + 1:
+    successful_responses_after_stress_list = (
+        clipboard_image_success_response_count(chansrv_logs))
+    if successful_responses_after_stress_list != \
+            successful_responses_before_stress + 1:
         raise AssertionError(
-            "expected exactly one remote image response before the stress "
-            "format-list:\n"
+            "expected exactly one successful remote image response before the "
+            "stress format-list; successful response counts "
+            f"before={successful_responses_before_stress} "
+            f"after={successful_responses_after_stress_list}:\n"
             f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
-    # FreeRDP queues a local-owner format-list update behind its outstanding
-    # CLIPRDR image response. The actual Mac can overlap those protocol events;
-    # this integration still exercises the dangerous adjacent state: the new
-    # generation arrives while chansrv is delivering the completed large BMP
-    # to the X11 requestor through INCR.
     if image_request_1.poll() is not None:
         raise AssertionError(
-            "large X11 INCR transfer completed before the changed format-list "
-            "was processed; overlap was not exercised:\n"
+            "the first-chunk-held X11 requestor exited before the changed "
+            "format-list was processed; overlap was not exercised:\n"
             f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
 
     png_during_incr = start_clipboard_requestor(
@@ -916,6 +1034,11 @@ def assert_clipboard_image_session(
         chansrv_logs,
         r"event=request-refused reason=image-transfer-in-flight target=image/png",
         5.0, chansrv_process, chansrv_stdout)
+
+    if image_request_1.stdin is None:
+        raise AssertionError("stalled X11 requestor control pipe is unavailable")
+    image_request_1.stdin.write(b"continue\n")
+    image_request_1.stdin.flush()
 
     first_stress_result = finish_clipboard_requestor(
         image_request_1, 30.0, chansrv_logs)
@@ -958,10 +1081,14 @@ def assert_clipboard_image_session(
         "event=x11-delivery-issued path=incr target=image/bmp")
     responses_before_owner_test = chansrv_log_text(chansrv_logs).count(
         "event=response status=0x1")
+    first_chunks_before_owner_test = read_text(owner_log_path).count(
+        "IMAGE_FIRST_CHUNK")
     delayed_image_request = start_clipboard_requestor(
         helper, source_display, "image/bmp", allow_refusal=True, delay_ms=50)
     wait_for_owner_marker(owner, "IMAGE_REQUEST", 15.0, owner_log_path)
-    wait_for_owner_marker(owner, "IMAGE_FIRST_CHUNK", 5.0, owner_log_path)
+    wait_for_owner_marker_occurrence(
+        owner, "IMAGE_FIRST_CHUNK", first_chunks_before_owner_test + 1,
+        15.0, owner_log_path)
     wait_for_owner_marker(owner, "IMAGE_INCR_DONE", 30.0, owner_log_path)
     wait_for_chansrv_marker(
         chansrv_logs, "event=response status=0x1",
@@ -1450,7 +1577,9 @@ def assert_clipboard_abandoned_incr_session(
         helper: Path, client: subprocess.Popen[object],
         client_log_path: Path, log_path: Path,
         chansrv_process: subprocess.Popen[object], chansrv_logs: Path,
-        chansrv_stdout: Path, source_display: str) -> None:
+        chansrv_stdout: Path, source_display: str,
+        abandon_after_terminator: bool = False,
+        local_owner_wins: bool = False) -> None:
     """Require a new remote generation to recover after its X11 reader dies."""
     initial_list = wait_for_chansrv_pattern(
         chansrv_logs,
@@ -1462,7 +1591,9 @@ def assert_clipboard_abandoned_incr_session(
 
     requestor = start_clipboard_requestor(
         helper, source_display, "image/bmp", allow_refusal=True,
-        abandon_after_first_chunk=True)
+        abandon_after_first_chunk=not abandon_after_terminator,
+        abandon_after_terminator=abandon_after_terminator)
+    local_owner: subprocess.Popen[bytes] | None = None
     try:
         wait_for_chansrv_pattern(
             chansrv_logs,
@@ -1483,17 +1614,88 @@ def assert_clipboard_abandoned_incr_session(
 
         if requestor.stdout is None or requestor.stdin is None:
             raise AssertionError("abandoning requestor pipes were not created")
-        first_chunk = read_line(requestor.stdout, 15.0)
-        if first_chunk is None or b"REQUESTOR_FIRST_CHUNK_READY " not in first_chunk:
+        ready_marker = read_line(requestor.stdout, 60.0)
+        expected_marker = (
+            b"REQUESTOR_TERMINATOR_READY " if abandon_after_terminator else
+            b"REQUESTOR_FIRST_CHUNK_READY ")
+        if ready_marker is None or expected_marker not in ready_marker:
             raise AssertionError(
-                "requestor did not stop after receiving the first INCR chunk:\n"
-                f"{first_chunk!r}\n[chansrv]\n"
+                "requestor did not reach the requested INCR abandonment point:\n"
+                f"{ready_marker!r}\n[chansrv]\n"
                 f"{chansrv_log_text(chansrv_logs)}")
         requestor_xid_match = re.search(
-            rb"requestor=(0x[0-9a-f]+)", first_chunk)
+            rb"requestor=(0x[0-9a-f]+)", ready_marker)
         if requestor_xid_match is None:
             raise AssertionError(
-                f"first-chunk marker lacked a requestor XID: {first_chunk!r}")
+                f"INCR marker lacked a requestor XID: {ready_marker!r}")
+
+        if abandon_after_terminator:
+            requestor_id = requestor_xid_match.group(1).decode()
+            wait_for_chansrv_pattern(
+                chansrv_logs,
+                rf"event=x11-incr-terminator-issued target=image/bmp "
+                rf"requestor={requestor_id} ",
+                10.0, chansrv_process, chansrv_stdout)
+            if not clipboard_window_exists(helper, source_display, requestor_id):
+                raise AssertionError(
+                    "terminator requestor disappeared before explicit "
+                    "destruction")
+            if requestor.stdin is None:
+                raise AssertionError("terminator requestor control pipe is missing")
+            requestor.stdin.write(b"abandon\n")
+            requestor.stdin.flush()
+            abandoned = finish_clipboard_requestor(
+                requestor, 10.0, chansrv_logs)
+            if ("REQUESTOR_ABANDONED" not in abandoned or
+                    "after_chunks=terminator" not in abandoned):
+                raise AssertionError(
+                    "requestor did not abandon after observing the zero-length "
+                    f"terminator: {abandoned!r}")
+            wait_for_chansrv_pattern(
+                chansrv_logs,
+                rf"event=c2s-incr-terminator-aborted "
+                rf"reason=requestor-destroyed requestor={requestor_id} ",
+                10.0, chansrv_process, chansrv_stdout)
+
+            if client.stdin is None:
+                raise AssertionError("controlled peer input is unavailable")
+            client.stdin.write(b"SEND_TEXT_FORMAT_LIST\n")
+            client.stdin.flush()
+            wait_for_peer_marker(
+                client, client_log_path,
+                "PEER_REFRESH_TEXT_FORMAT_LIST_SENT", 10.0)
+            text_offer = wait_for_chansrv_pattern(
+                chansrv_logs,
+                r"event=format-list[^\n]*stored_formats=1 "
+                r"dib_format_id=-1 png_format_id=-1 generation=\d+",
+                10.0, chansrv_process, chansrv_stdout)
+            owner = clipboard_selection_owner(helper, source_display)
+            if owner == "0x0":
+                raise AssertionError(
+                    "new text generation did not own CLIPBOARD after the "
+                    f"terminator requestor disappeared: {text_offer}")
+            targets = finish_clipboard_requestor(
+                start_clipboard_requestor(helper, source_display, "TARGETS"),
+                10.0, chansrv_logs)
+            if ("UTF8_STRING" not in targets or "image/png" in targets or
+                    "image/bmp" in targets):
+                raise AssertionError(
+                    "terminator recovery exposed stale image targets: "
+                    f"{targets!r}\n{text_offer}")
+            text = finish_clipboard_requestor(
+                start_clipboard_requestor(helper, source_display, "UTF8_STRING"),
+                15.0, chansrv_logs)
+            if "overlap recovered" not in text:
+                raise AssertionError(
+                    "new text generation was not usable after terminator "
+                    f"requestor destruction: {text!r}")
+            if client.poll() is not None or chansrv_process.poll() is not None:
+                raise AssertionError(
+                    "RDP or chansrv exited after terminator requestor "
+                    "destruction")
+            return
+
+        first_chunk = ready_marker
 
         display_environment = os.environ.copy()
         display_environment["DISPLAY"] = source_display
@@ -1523,6 +1725,58 @@ def assert_clipboard_abandoned_incr_session(
                 "the deferred replacement generation was not text-only:\n"
                 f"{deferred}")
 
+        deferred_generation_match = re.search(
+            r"selection-owner-deferred generation=(\d+)", deferred)
+        if deferred_generation_match is None:
+            raise AssertionError(
+                f"deferred owner marker omitted its generation: {deferred}")
+        deferred_generation = deferred_generation_match.group(1)
+
+        stalled_requestor_id = requestor_xid_match.group(1).decode()
+        if (requestor.poll() is not None or
+                not clipboard_window_exists(
+                    helper, source_display, stalled_requestor_id)):
+            raise AssertionError(
+                "the stalled INCR requestor disappeared before the test's "
+                "explicit abandon step")
+        if re.search(
+                rf"event=c2s-incr-aborted [^\n]*requestor="
+                rf"{re.escape(stalled_requestor_id)} ",
+                chansrv_log_text(chansrv_logs)):
+            raise AssertionError(
+                "chansrv aborted an alive requestor that had stopped deleting "
+                "the INCR property")
+
+        local_owner_id: str | None = None
+        if local_owner_wins:
+            local_owner_environment = os.environ.copy()
+            local_owner_environment["DISPLAY"] = source_display
+            local_owner = subprocess.Popen(
+                [str(helper), "owner"], stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env=local_owner_environment, bufsize=0,
+                start_new_session=True)
+            if local_owner.stdout is None:
+                raise AssertionError("local clipboard owner pipe is unavailable")
+            owner_ready = read_line(local_owner.stdout, 10.0)
+            if owner_ready is None or b"OWNER_READY " not in owner_ready:
+                raise AssertionError(
+                    f"local clipboard owner did not start: {owner_ready!r}")
+            local_owner_id = clipboard_selection_owner(helper, source_display)
+            server_window_match = re.search(
+                r"chansrv_window=(0x[0-9a-fA-F]+)", deferred)
+            if server_window_match is None:
+                raise AssertionError(
+                    f"deferred owner marker omitted chansrv XID: {deferred}")
+            if local_owner_id in ("0x0", server_window_match.group(1).lower()):
+                raise AssertionError(
+                    "real local Linux owner did not take CLIPBOARD after the "
+                    f"deferred remote generation: {owner_ready!r} {deferred}")
+            wait_for_chansrv_pattern(
+                chansrv_logs,
+                rf"event=x11-owner-change owner={re.escape(local_owner_id)} ",
+                5.0, chansrv_process, chansrv_stdout)
+
         requestor.stdin.write(b"abandon\n")
         requestor.stdin.flush()
         abandoned = finish_clipboard_requestor(
@@ -1538,6 +1792,33 @@ def assert_clipboard_abandoned_incr_session(
             rf"event=c2s-incr-aborted reason=requestor-destroyed "
             rf"requestor={requestor_xid_match.group(1).decode()} ",
             10.0, chansrv_process, chansrv_stdout)
+        if local_owner_wins:
+            current_owner = clipboard_selection_owner(helper, source_display)
+            if current_owner != local_owner_id:
+                raise AssertionError(
+                    "destroyed old requestor caused chansrv to steal CLIPBOARD "
+                    f"from the newer local owner: expected={local_owner_id} "
+                    f"actual={current_owner}\n"
+                    f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
+            full_log = chansrv_log_text(chansrv_logs)
+            if (f"event=selection-owner-restored "
+                    f"reason=deferred-format-list generation="
+                    f"{deferred_generation} " in full_log):
+                raise AssertionError(
+                    "chansrv logged restoration over a newer local clipboard "
+                    f"owner:\n{full_log}")
+            local_text = finish_clipboard_requestor(
+                start_clipboard_requestor(helper, source_display, "UTF8_STRING"),
+                10.0, chansrv_logs)
+            if "initial clipboard text" not in local_text:
+                raise AssertionError(
+                    "new local Linux clipboard owner did not serve its own "
+                    f"text after remote INCR cleanup: {local_text!r}")
+            if client.poll() is not None or chansrv_process.poll() is not None:
+                raise AssertionError(
+                    "RDP or chansrv exited while preserving a newer local "
+                    "clipboard owner")
+            return
         restored = wait_for_chansrv_pattern(
             chansrv_logs,
             r"event=selection-owner-restored reason=deferred-format-list "
@@ -1572,6 +1853,7 @@ def assert_clipboard_abandoned_incr_session(
                 f"unexpected initial remote image list: {initial_list}")
     finally:
         stop_process(requestor)
+        stop_process(local_owner)
 
     if client.poll() is not None or chansrv_process.poll() is not None:
         raise AssertionError(
@@ -2542,6 +2824,674 @@ def assert_clipboard_png_prefetch_stale_image_session(
     if wait_for_peer_frame_after(client, client_log_path,
                                  peer_count_before, 10.0) <= peer_count_before:
         raise AssertionError("RDP graphics did not continue after stale PNG overlap")
+
+
+def _chansrv_event_time(line: str) -> datetime:
+    match = re.match(r"^\[([^\]]+)\]", line)
+    if match is None:
+        raise AssertionError(f"clipboard event lacks a timestamp: {line}")
+    return datetime.fromisoformat(match.group(1))
+
+
+def assert_clipboard_delayed_png_response_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, chansrv_process: subprocess.Popen[object],
+        chansrv_logs: Path, chansrv_stdout: Path, source_display: str,
+        expected_png_bytes: int, expected_png_sha256: str) -> None:
+    """Delay one complete CLIPRDR PNG response without blocking peer events."""
+    delay_ms = int(os.environ["XRDP_CONSOLE_TEST_DELAY_PNG_RESPONSE_MS"])
+    initial_list = wait_for_chansrv_pattern(
+        chansrv_logs,
+        rf"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        rf"png_format_id={NAMED_PNG_FORMAT_ID} generation=(\d+)",
+        15.0, chansrv_process, chansrv_stdout)
+    generation_match = re.search(
+        r"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        rf"png_format_id={NAMED_PNG_FORMAT_ID} generation=(\d+)",
+        initial_list)
+    if generation_match is None:
+        raise AssertionError(f"initial image offer was not installed: {initial_list}")
+    generation = int(generation_match.group(1))
+    wait_for_peer_marker(
+        client, client_log_path,
+        f"PEER_INITIAL_FORMAT_LIST_SENT dib=8 png={NAMED_PNG_FORMAT_ID}",
+        10.0)
+
+    requestor = start_clipboard_requestor(
+        helper, source_display, "image/png", validate_png=True,
+        raw_png_output=True)
+    extra_requestors: list[subprocess.Popen[bytes]] = []
+    try:
+        request_line_pattern = (
+            rf"event=x11-request target=image/png requestor=0x[0-9a-fA-F]+ "
+            rf"[^\n]*generation={generation}")
+        wait_for_chansrv_pattern(
+            chansrv_logs, request_line_pattern, 10.0,
+            chansrv_process, chansrv_stdout)
+        initial_png_request_line = next(
+            line for line in chansrv_log_text(chansrv_logs).splitlines()
+            if re.search(request_line_pattern, line))
+        initial_requestor_match = re.search(
+            r"requestor=(0x[0-9a-fA-F]+)", initial_png_request_line)
+        if initial_requestor_match is None:
+            raise AssertionError(
+                f"initial PNG request lacked a requestor XID: "
+                f"{initial_png_request_line}")
+        initial_requestor = initial_requestor_match.group(1).lower()
+        wait_for_peer_marker(
+            client, client_log_path,
+            "PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED ", 10.0)
+        if delay_ms >= 1000:
+            targets_result = finish_clipboard_requestor(
+                start_clipboard_requestor(helper, source_display, "TARGETS"),
+                5.0, chansrv_logs)
+            if "image/png" not in targets_result:
+                raise AssertionError(
+                    "TARGETS did not remain serviceable during the delayed "
+                    f"CLIPRDR response: {targets_result!r}")
+            timestamp_result = finish_clipboard_requestor(
+                start_clipboard_requestor(helper, source_display, "TIMESTAMP"),
+                5.0, chansrv_logs)
+            if not re.search(r"RESULT target=TIMESTAMP value=\d+",
+                             timestamp_result):
+                raise AssertionError(
+                    "TIMESTAMP did not remain serviceable during the delayed "
+                    f"CLIPRDR response: {timestamp_result!r}")
+        if delay_ms >= 2500:
+            first_waiter = start_clipboard_requestor(
+                helper, source_display, "image/png", allow_refusal=True,
+                validate_png=True)
+            extra_requestors.append(first_waiter)
+            wait_for_chansrv_pattern(
+                chansrv_logs,
+                r"event=request-coalesced target=image/png waiters=1",
+                5.0, chansrv_process, chansrv_stdout)
+            second_waiter = start_clipboard_requestor(
+                helper, source_display, "image/png", allow_refusal=True,
+                validate_png=True)
+            extra_requestors.append(second_waiter)
+            wait_for_chansrv_pattern(
+                chansrv_logs,
+                r"event=request-coalesced target=image/png waiters=2",
+                5.0, chansrv_process, chansrv_stdout)
+            pending_request_lines = [
+                line for line in chansrv_log_text(chansrv_logs).splitlines()
+                if "event=x11-request target=image/png requestor=" in line]
+            if len(pending_request_lines) != 3:
+                raise AssertionError(
+                    "expected primary and two PNG waiters during "
+                    f"the held response:\n{chansrv_log_text(chansrv_logs)}")
+            disposed_requestor = re.search(
+                r"requestor=(0x[0-9a-fA-F]+)", pending_request_lines[-2])
+            if disposed_requestor is None:
+                raise AssertionError(
+                    "disposable PNG requestor lacked an XID")
+            stop_process(first_waiter)
+            wait_for_chansrv_pattern(
+                chansrv_logs,
+                rf"event=waiter-discarded reason=requestor-destroyed "
+                rf"requestor={re.escape(disposed_requestor.group(1))} removed=1",
+                5.0, chansrv_process, chansrv_stdout)
+        response_sent_marker = (
+            f"PEER_PNG_DELAY_RESPONSE_SENT delay_ms={delay_ms} ")
+        wait_for_peer_marker(
+            client, client_log_path, response_sent_marker,
+            max(10.0, delay_ms / 1000.0 + 5.0))
+        png_payload, validation_log = finish_raw_png_requestor(
+            requestor, 30.0, chansrv_logs)
+        if delay_ms >= 2500:
+            surviving_waiter = extra_requestors[1]
+            waiter_result = finish_clipboard_requestor(
+                surviving_waiter, 30.0, chansrv_logs)
+            extra_requestors.remove(surviving_waiter)
+            if (f"RESULT target=image/png bytes={expected_png_bytes} "
+                    "signature=valid decode=valid "
+                    f"width={NAMED_PNG_WIDTH} height={NAMED_PNG_HEIGHT} "
+                    not in waiter_result):
+                raise AssertionError(
+                    "surviving same-generation PNG waiter did not receive the "
+                    f"exactly sized decoded image: {waiter_result!r}")
+    finally:
+        stop_process(requestor)
+        for extra_requestor in extra_requestors:
+            stop_process(extra_requestor)
+
+    if (len(png_payload) != expected_png_bytes or
+            hashlib.sha256(png_payload).hexdigest() != expected_png_sha256 or
+            f"PNG_VALIDATION bytes={expected_png_bytes} signature=valid "
+            f"decode=valid width={NAMED_PNG_WIDTH} "
+            f"height={NAMED_PNG_HEIGHT} " not in validation_log):
+        raise AssertionError(
+            "delayed CLIPRDR PNG response did not produce the exact validated "
+            f"payload: bytes={len(png_payload)} expected={expected_png_bytes}\n"
+            f"{validation_log}")
+
+    peer_log = read_text(client_log_path)
+    request_times = re.findall(
+        r"PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id="
+        rf"{NAMED_PNG_FORMAT_ID} request_generation=(\d+) mono_ns=(\d+)",
+        peer_log)
+    response_times = re.findall(
+        r"PEER_CLIENT_FORMAT_RESPONSE_SENT format_id="
+        rf"{NAMED_PNG_FORMAT_ID} request_generation=(\d+) "
+        r"flags=0x0001 bytes=\d+ mono_ns=(\d+)", peer_log)
+    if (len(request_times) != 1 or len(response_times) != 1 or
+            request_times[0][0] != response_times[0][0]):
+        raise AssertionError(
+            "peer did not observe exactly one correlated PNG request/response:\n"
+            f"{peer_log}")
+    measured_peer_delay_ms = (
+        int(response_times[0][1]) - int(request_times[0][1])) / 1_000_000.0
+    if measured_peer_delay_ms < delay_ms or measured_peer_delay_ms > delay_ms + 500:
+        raise AssertionError(
+            f"synthetic response delay {measured_peer_delay_ms:.3f}ms is outside "
+            f"the configured {delay_ms}ms deadline tolerance")
+
+    full_log = chansrv_log_text(chansrv_logs)
+    patterns = {
+        "selection_request": (
+            rf"event=x11-request target=image/png "
+            rf"requestor={re.escape(initial_requestor)} "
+            rf"[^\n]*generation={generation}"),
+        "format_data_request": (
+            rf"event=request format_id={NAMED_PNG_FORMAT_ID} "
+            r"target=image/png attempt=1"),
+        "complete_format_data_response": (
+            rf"event=response status=0x1 bytes={expected_png_bytes} "
+            rf"format_id={NAMED_PNG_FORMAT_ID} attempt=1"),
+        "selection_notify": (
+            r"event=x11-selection-notify-issued path=incr "
+            rf"requestor={re.escape(initial_requestor)} .*target=image/png"),
+        "first_x11_chunk": (
+            rf"event=x11-incr-chunk-issued requestor="
+            rf"{re.escape(initial_requestor)} "
+            r".*target=image/png .*chunk=1 "),
+        "terminator_ack": (
+            rf"event=x11-incr-terminator-ack requestor="
+            rf"{re.escape(initial_requestor)} "
+            r".*target=image/png "),
+    }
+    event_lines: dict[str, str] = {}
+    for name, pattern in patterns.items():
+        matches = [line for line in full_log.splitlines()
+                   if re.search(pattern, line)]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"expected one {name} marker, found {len(matches)}:\n{full_log}")
+        event_lines[name] = matches[0]
+
+    event_order = list(event_lines)
+    event_times = [_chansrv_event_time(event_lines[name])
+                   for name in event_order]
+    intervals_ms = [
+        (event_times[index + 1] - event_times[index]).total_seconds() * 1000.0
+        for index in range(len(event_times) - 1)]
+    if any(interval < 0.0 for interval in intervals_ms):
+        raise AssertionError(
+            "clipboard latency stages were not observed in protocol order: "
+            f"{dict(zip(event_order, event_times))}\n{full_log}")
+    print(
+        "DELAYED_PNG_STAGES "
+        f"delay_ms={delay_ms} peer_request_to_response="
+        f"{measured_peer_delay_ms:.3f}ms "
+        f"selection_to_cliprdr_request={intervals_ms[0]:.3f}ms "
+        f"cliprdr_request_to_complete_response={intervals_ms[1]:.3f}ms "
+        f"complete_response_to_selection_notify={intervals_ms[2]:.3f}ms "
+        f"selection_notify_to_first_chunk={intervals_ms[3]:.3f}ms "
+        f"first_chunk_to_terminator_ack={intervals_ms[4]:.3f}ms")
+
+
+def assert_clipboard_delayed_png_cancellation_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, chansrv_process: subprocess.Popen[object],
+        chansrv_logs: Path, chansrv_stdout: Path, source_display: str,
+        cancel_reason: str) -> None:
+    """A late remote response must not revive an abandoned X11 conversion."""
+    delay_ms = int(os.environ["XRDP_CONSOLE_TEST_DELAY_PNG_RESPONSE_MS"])
+    if delay_ms < 1000:
+        raise AssertionError("cancellation cases require a visibly held response")
+
+    wait_for_chansrv_pattern(
+        chansrv_logs,
+        rf"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        rf"png_format_id={NAMED_PNG_FORMAT_ID} generation=\d+",
+        15.0, chansrv_process, chansrv_stdout)
+    wait_for_peer_marker(
+        client, client_log_path,
+        f"PEER_INITIAL_FORMAT_LIST_SENT dib=8 png={NAMED_PNG_FORMAT_ID}",
+        10.0)
+
+    requestor = start_clipboard_requestor(
+        helper, source_display, "image/png", allow_refusal=True)
+    requestor_xid: str | None = None
+    try:
+        x11_request = wait_for_chansrv_pattern(
+            chansrv_logs,
+            r"event=x11-request target=image/png requestor=0x[0-9a-fA-F]+ "
+            r"[^\n]*generation=\d+",
+            10.0, chansrv_process, chansrv_stdout)
+        match = re.search(r"requestor=(0x[0-9a-fA-F]+)", x11_request)
+        if match is None:
+            raise AssertionError(f"PNG request omitted its XID: {x11_request}")
+        requestor_xid = match.group(1).lower()
+        wait_for_peer_marker(
+            client, client_log_path,
+            "PEER_PNG_DELAY_RESPONSE_PENDING ", 10.0)
+
+        if cancel_reason == "selection-clear":
+            display_environment = os.environ.copy()
+            display_environment["DISPLAY"] = source_display
+            cleared = subprocess.run(
+                [str(helper), "selection-clear"], env=display_environment,
+                capture_output=True, check=False, timeout=3.0, text=True)
+            if (cleared.returncode != 0 or
+                    "SELECTION_OWNER_CLEARED owner=0x0" not in cleared.stdout):
+                raise AssertionError(
+                    "could not replace the X11 clipboard owner while a remote "
+                    f"PNG response was pending: {cleared.stdout}{cleared.stderr}")
+            refusal = finish_clipboard_requestor(requestor, 5.0, chansrv_logs)
+            if "RESULT target=image/png refused" not in refusal:
+                raise AssertionError(
+                    "SelectionClear did not promptly retire the pending "
+                    f"conversion: {refusal!r}")
+        elif cancel_reason == "requestor-destroyed":
+            if not clipboard_window_exists(helper, source_display, requestor_xid):
+                raise AssertionError(
+                    "PNG requestor disappeared before explicit destruction")
+            stop_process(requestor)
+            if clipboard_window_exists(helper, source_display, requestor_xid):
+                raise AssertionError(
+                    "destroyed PNG requestor XID still exists")
+        elif cancel_reason == "disconnect":
+            if client.stdin is None:
+                raise AssertionError("controlled peer input is unavailable")
+            client.stdin.write(b"DISCONNECT_WHILE_PNG_RESPONSE_PENDING\n")
+            client.stdin.flush()
+            wait_for_peer_marker(
+                client, client_log_path,
+                "PEER_DELAYED_PNG_DISCONNECT_REQUESTED", 5.0)
+            wait_for_peer_marker(
+                client, client_log_path,
+                "PEER_PNG_DELAY_RESPONSE_CANCELLED reason=disconnect", 5.0)
+            wait_for_peer_marker(
+                client, client_log_path, "PEER_DISCONNECTED", 5.0)
+            try:
+                client.wait(timeout=5.0)
+            except subprocess.TimeoutExpired as error:
+                raise AssertionError(
+                    "synthetic RDP client did not exit after the controlled "
+                    "disconnect") from error
+            invalidated = wait_for_chansrv_pattern(
+                chansrv_logs,
+                r"event=format-data-request-invalidated "
+                r"reason=clipboard-deinit format_id="
+                rf"{NAMED_PNG_FORMAT_ID} generation=\d+",
+                10.0, chansrv_process, chansrv_stdout)
+            result = finish_clipboard_requestor(
+                requestor, 5.0, chansrv_logs)
+            if "RESULT target=image/png refused" not in result:
+                raise AssertionError(
+                    "RDP disconnect did not retire the pending X11 image "
+                    f"conversion: {result!r}\n{invalidated}")
+            if "PEER_PNG_DELAY_RESPONSE_SENT" in read_text(client_log_path):
+                raise AssertionError(
+                    "peer sent PNG bytes after deliberately disconnecting")
+        else:
+            raise AssertionError(f"unsupported cancellation case: {cancel_reason}")
+
+        if cancel_reason != "disconnect":
+            invalidated = wait_for_chansrv_pattern(
+                chansrv_logs,
+                rf"event=format-data-request-invalidated reason={cancel_reason} "
+                rf"format_id={NAMED_PNG_FORMAT_ID} generation=\d+",
+                5.0, chansrv_process, chansrv_stdout)
+            wait_for_peer_marker(
+                client, client_log_path,
+                f"PEER_PNG_DELAY_RESPONSE_SENT delay_ms={delay_ms} ",
+                delay_ms / 1000.0 + 5.0)
+            discarded = wait_for_chansrv_pattern(
+                chansrv_logs,
+                r"event=format-data-response-discarded "
+                r"reason=invalidated-generation request_generation=\d+ "
+                rf"current_generation=\d+ format_id={NAMED_PNG_FORMAT_ID} "
+                r"flags=0x1 bytes=\d+",
+                10.0, chansrv_process, chansrv_stdout)
+        full_log = chansrv_log_text(chansrv_logs)
+        if re.search(
+                rf"event=x11-selection-notify-issued path=incr "
+                rf"requestor={re.escape(requestor_xid)} ", full_log):
+            raise AssertionError(
+                "cancelled cold PNG conversion was later revived as X11 INCR:\n"
+                f"[chansrv]\n{full_log}")
+        if "event=x11-delivery-issued path=incr target=image/png " in full_log:
+            raise AssertionError(
+                "cancelled cold PNG conversion delivered image bytes:\n"
+                f"[chansrv]\n{full_log}")
+        if ("event=format-data-request-invalidated" not in invalidated or
+                (cancel_reason != "disconnect" and
+                 "event=format-data-response-discarded" not in discarded)):
+            raise AssertionError(
+                "cancel/late-response boundaries were not both observed")
+    finally:
+        stop_process(requestor)
+
+    if ((cancel_reason != "disconnect" and client.poll() is not None) or
+            (cancel_reason == "disconnect" and client.poll() is None) or
+            chansrv_process.poll() is not None):
+        raise AssertionError(
+            "RDP or chansrv exited after delayed response cancellation:\n"
+            f"[peer]\n{read_text(client_log_path)}\n"
+            f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
+
+
+def assert_clipboard_cold_png_waiters_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, chansrv_process: subprocess.Popen[object],
+        chansrv_logs: Path, chansrv_stdout: Path, source_display: str,
+        expected_png_bytes: int, expected_png_sha256: str) -> None:
+    """Three requestors coalesce behind one held same-generation PNG fetch."""
+    if client.stdin is None:
+        raise AssertionError("held PNG peer control pipe was not created")
+    wait_for_chansrv_pattern(
+        chansrv_logs,
+        rf"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        rf"png_format_id={NAMED_PNG_FORMAT_ID} generation=\d+",
+        15.0, chansrv_process, chansrv_stdout)
+    wait_for_peer_marker(
+        client, client_log_path,
+        f"PEER_INITIAL_FORMAT_LIST_SENT dib=8 png={NAMED_PNG_FORMAT_ID}",
+        10.0)
+
+    requestors: list[subprocess.Popen[bytes]] = []
+    try:
+        for index in range(3):
+            requestor = start_clipboard_requestor(
+                helper, source_display, "image/png", validate_png=True,
+                raw_png_output=True)
+            requestors.append(requestor)
+            if index == 0:
+                wait_for_peer_marker(
+                    client, client_log_path,
+                    f"PEER_PNG_RESPONSE_HELD format_id={NAMED_PNG_FORMAT_ID}",
+                    10.0)
+            else:
+                wait_for_chansrv_pattern(
+                    chansrv_logs,
+                    rf"event=request-coalesced target=image/png "
+                    rf"waiters={index}",
+                    10.0, chansrv_process, chansrv_stdout)
+
+        full_log = chansrv_log_text(chansrv_logs)
+        requests = re.findall(
+            rf"event=request format_id={NAMED_PNG_FORMAT_ID} "
+            r"target=image/png attempt=1", full_log)
+        peer_requests = re.findall(
+            rf"PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id="
+            rf"{NAMED_PNG_FORMAT_ID} ", read_text(client_log_path))
+        if len(requests) != 1 or len(peer_requests) != 1:
+            raise AssertionError(
+                "cold same-generation consumers did not share one CLIPRDR "
+                f"request (chansrv={len(requests)}, peer={len(peer_requests)}):\n"
+                f"{full_log}\n{read_text(client_log_path)}")
+        if "waiters=2" not in full_log:
+            raise AssertionError(f"third PNG consumer was not queued:\n{full_log}")
+
+        client.stdin.write(b"RESPOND_PNG\n")
+        client.stdin.flush()
+        wait_for_peer_marker(
+            client, client_log_path,
+            "PEER_OLD_PNG_RESPONSE_SENT", 10.0)
+        payloads: list[bytes] = []
+        for requestor in requestors:
+            payload, validation = finish_raw_png_requestor(
+                requestor, 30.0, chansrv_logs)
+            if (len(payload) != expected_png_bytes or
+                    hashlib.sha256(payload).hexdigest() != expected_png_sha256 or
+                    f"PNG_VALIDATION bytes={expected_png_bytes} signature=valid "
+                    f"decode=valid " not in validation):
+                raise AssertionError(
+                    "coalesced requestor received different or invalid PNG: "
+                    f"bytes={len(payload)}\n{validation}")
+            payloads.append(payload)
+        if not (payloads[0] == payloads[1] == payloads[2]):
+            raise AssertionError("same-generation PNG waiters received different bytes")
+        if len(re.findall(
+                rf"event=request format_id={NAMED_PNG_FORMAT_ID} "
+                r"target=image/png attempt=1", chansrv_log_text(chansrv_logs))) != 1:
+            raise AssertionError(
+                "queued PNG consumers caused more than one remote format fetch")
+    finally:
+        for requestor in requestors:
+            stop_process(requestor)
+
+
+def assert_clipboard_png_response_failure_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, chansrv_process: subprocess.Popen[object],
+        chansrv_logs: Path, chansrv_stdout: Path, source_display: str) -> None:
+    """A remote render failure must remain a failed X11 conversion."""
+    wait_for_chansrv_pattern(
+        chansrv_logs,
+        rf"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        rf"png_format_id={NAMED_PNG_FORMAT_ID} generation=\d+",
+        15.0, chansrv_process, chansrv_stdout)
+    requestor = start_clipboard_requestor(
+        helper, source_display, "image/png", allow_refusal=True)
+    try:
+        wait_for_chansrv_pattern(
+            chansrv_logs,
+            rf"event=request format_id={NAMED_PNG_FORMAT_ID} "
+            r"target=image/png attempt=1",
+            10.0, chansrv_process, chansrv_stdout)
+        wait_for_peer_marker(
+            client, client_log_path,
+            "PEER_PNG_FORMAT_RESPONSE_FAIL_SENT", 10.0)
+        result = finish_clipboard_requestor(requestor, 20.0, chansrv_logs)
+    finally:
+        stop_process(requestor)
+
+    if "RESULT target=image/png refused" not in result:
+        raise AssertionError(
+            "remote CB_RESPONSE_FAIL was not represented as a failed X11 "
+            f"conversion: {result!r}\n{chansrv_log_text(chansrv_logs)}")
+    full_log = chansrv_log_text(chansrv_logs)
+    if not re.search(
+            rf"event=response status=0x2 bytes=0 "
+            rf"format_id={NAMED_PNG_FORMAT_ID} attempt=\d+", full_log):
+        raise AssertionError(
+            f"chansrv did not observe a zero-length CLIPRDR FAIL:\n{full_log}")
+    if ("event=x11-selection-notify-issued path=incr " in full_log or
+            "event=x11-incr-announcement " in full_log or
+            "event=x11-delivery-issued path=incr target=image/png" in full_log):
+        raise AssertionError(
+            "failed remote rendering was committed as a successful X11 INCR "
+            f"conversion:\n{full_log}")
+    if client.poll() is not None or chansrv_process.poll() is not None:
+        raise AssertionError(
+            "RDP or chansrv disconnected while handling a valid clipboard "
+            f"render failure:\n{read_text(client_log_path)}\n{full_log}")
+
+
+def assert_clipboard_no_png_offer_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, chansrv_process: subprocess.Popen[object],
+        chansrv_logs: Path, chansrv_stdout: Path, source_display: str) -> None:
+    """A DIB-only offer must not synthesize an image/png X11 target."""
+    offer = wait_for_chansrv_pattern(
+        chansrv_logs,
+        r"event=format-list[^\n]*stored_formats=1 dib_format_id=8 "
+        r"png_format_id=-1 generation=\d+",
+        15.0, chansrv_process, chansrv_stdout)
+    wait_for_peer_marker(
+        client, client_log_path, "PEER_INITIAL_FORMAT_LIST_SENT dib=8", 10.0)
+    targets = finish_clipboard_requestor(
+        start_clipboard_requestor(helper, source_display, "TARGETS"),
+        10.0, chansrv_logs)
+    if "image/bmp" not in targets or "image/png" in targets:
+        raise AssertionError(
+            f"DIB-only remote offer produced incorrect TARGETS: {targets!r}\n"
+            f"{offer}")
+    peer_log = read_text(client_log_path)
+    if not re.search(r"PEER_FORMAT_LIST_GENERATION generation=1 png_id=\d+ "
+                     r"png_offered=0", peer_log):
+        raise AssertionError(
+            f"synthetic peer did not record a PNG-free generation:\n{peer_log}")
+    if client.poll() is not None or chansrv_process.poll() is not None:
+        raise AssertionError(
+            "RDP or chansrv exited after installing a DIB-only format offer")
+
+
+def assert_clipboard_png_malformed_response_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, chansrv_process: subprocess.Popen[object],
+        chansrv_logs: Path, chansrv_stdout: Path,
+        source_display: str) -> None:
+    """Malformed CLIPRDR response flags/payload must fail the X11 conversion."""
+    flags = int(os.environ["XRDP_CONSOLE_TEST_PNG_RESPONSE_FLAGS"])
+    failure_payload = (
+        os.environ.get("XRDP_CONSOLE_TEST_PNG_RESPONSE_FAIL_PAYLOAD", "0") == "1")
+    response_bytes = 1049471 if failure_payload else 0
+    wait_for_chansrv_pattern(
+        chansrv_logs,
+        rf"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        rf"png_format_id={NAMED_PNG_FORMAT_ID} generation=\d+",
+        15.0, chansrv_process, chansrv_stdout)
+    requestor = start_clipboard_requestor(
+        helper, source_display, "image/png", allow_refusal=True)
+    try:
+        wait_for_chansrv_pattern(
+            chansrv_logs,
+            rf"event=request format_id={NAMED_PNG_FORMAT_ID} "
+            r"target=image/png attempt=1",
+            10.0, chansrv_process, chansrv_stdout)
+        wait_for_peer_marker(
+            client, client_log_path,
+            f"PEER_PNG_INJECTED_RESPONSE_SENT flags=0x{flags:04x} "
+            f"bytes={response_bytes}", 10.0)
+        result = finish_clipboard_requestor(requestor, 20.0, chansrv_logs)
+    finally:
+        stop_process(requestor)
+
+    if "RESULT target=image/png refused" not in result:
+        raise AssertionError(
+            "malformed CLIPRDR response was not represented as failed X11 "
+            f"conversion: {result!r}\n{chansrv_log_text(chansrv_logs)}")
+    rejected = wait_for_chansrv_pattern(
+        chansrv_logs,
+        rf"event=format-data-response-rejected reason=malformed "
+        rf"flags=0x{flags:x} bytes={response_bytes} "
+        rf"format_id={NAMED_PNG_FORMAT_ID} generation=\d+",
+        5.0, chansrv_process, chansrv_stdout)
+    if ("event=x11-selection-notify-issued path=incr " in rejected or
+            "event=x11-incr-announcement " in rejected):
+        raise AssertionError(
+            "malformed remote response was committed as a successful X11 INCR "
+            f"conversion:\n{chansrv_log_text(chansrv_logs)}")
+    full_log = chansrv_log_text(chansrv_logs)
+    if ("event=x11-selection-notify-issued path=incr " in full_log or
+            "event=x11-incr-announcement " in full_log):
+        raise AssertionError(
+            "malformed response produced an X11 INCR announcement:\n"
+            f"{full_log}")
+    if client.poll() is not None or chansrv_process.poll() is not None:
+        raise AssertionError(
+            "RDP or chansrv exited after rejecting a malformed response:\n"
+            f"[peer]\n{read_text(client_log_path)}\n{full_log}")
+
+
+def assert_clipboard_data_response_oracle_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, chansrv_process: subprocess.Popen[object],
+        chansrv_logs: Path, chansrv_stdout: Path, source_display: str,
+        expected_png_bytes: int, expected_png_sha256: str) -> None:
+    """Unsolicited/duplicate responses are ignored; cache remains usable."""
+    if client.stdin is None:
+        raise AssertionError("response-oracle peer control pipe is unavailable")
+    wait_for_chansrv_pattern(
+        chansrv_logs,
+        rf"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        rf"png_format_id={NAMED_PNG_FORMAT_ID} generation=\d+",
+        15.0, chansrv_process, chansrv_stdout)
+    wait_for_peer_marker(
+        client, client_log_path,
+        f"PEER_INITIAL_FORMAT_LIST_SENT dib=8 png={NAMED_PNG_FORMAT_ID}",
+        10.0)
+
+    client.stdin.write(b"SEND_UNSOLICITED_PNG_RESPONSE\n")
+    client.stdin.flush()
+    wait_for_peer_marker(
+        client, client_log_path,
+        "PEER_PNG_UNSOLICITED_RESPONSE_SENT kind=unsolicited", 10.0)
+    wait_for_chansrv_pattern(
+        chansrv_logs,
+        r"event=format-data-response-discarded reason=unsolicited "
+        r"flags=0x1 bytes=\d+",
+        10.0, chansrv_process, chansrv_stdout)
+
+    requestor = start_clipboard_requestor(
+        helper, source_display, "image/png", validate_png=True,
+        raw_png_output=True)
+    try:
+        wait_for_peer_marker(
+            client, client_log_path,
+            f"PEER_PNG_RESPONSE_HELD format_id={NAMED_PNG_FORMAT_ID}", 10.0)
+        client.stdin.write(b"RESPOND_PNG\n")
+        client.stdin.flush()
+        wait_for_peer_marker(
+            client, client_log_path, "PEER_OLD_PNG_RESPONSE_SENT", 10.0)
+        payload, validation = finish_raw_png_requestor(
+            requestor, 30.0, chansrv_logs)
+    finally:
+        stop_process(requestor)
+
+    if (len(payload) != expected_png_bytes or
+            hashlib.sha256(payload).hexdigest() != expected_png_sha256 or
+            f"PNG_VALIDATION bytes={expected_png_bytes} signature=valid "
+            f"decode=valid width={NAMED_PNG_WIDTH} "
+            f"height={NAMED_PNG_HEIGHT} " not in validation):
+        raise AssertionError(
+            "valid response after an unsolicited response was corrupted: "
+            f"bytes={len(payload)} validation={validation!r}")
+
+    cached = start_clipboard_requestor(
+        helper, source_display, "image/png", validate_png=True,
+        raw_png_output=True)
+    cached_payload, cached_validation = finish_raw_png_requestor(
+        cached, 30.0, chansrv_logs)
+    if (cached_payload != payload or
+            f"PNG_VALIDATION bytes={expected_png_bytes} signature=valid "
+            f"decode=valid width={NAMED_PNG_WIDTH} "
+            f"height={NAMED_PNG_HEIGHT} " not in cached_validation):
+        raise AssertionError(
+            "same-generation cached PNG request changed bytes or failed decode")
+
+    client.stdin.write(b"SEND_DUPLICATE_PNG_RESPONSE\n")
+    client.stdin.flush()
+    wait_for_peer_marker(
+        client, client_log_path,
+        "PEER_PNG_UNSOLICITED_RESPONSE_SENT kind=duplicate", 10.0)
+    wait_for_chansrv_pattern_occurrence(
+        chansrv_logs,
+        r"event=format-data-response-discarded reason=unsolicited "
+        r"flags=0x1 bytes=\d+",
+        2, 10.0, chansrv_process, chansrv_stdout)
+    full_log = chansrv_log_text(chansrv_logs)
+    request_count = len(re.findall(
+        rf"event=request format_id={NAMED_PNG_FORMAT_ID} "
+        r"target=image/png attempt=1", full_log))
+    peer_request_count = len(re.findall(
+        rf"PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id="
+        rf"{NAMED_PNG_FORMAT_ID} ", read_text(client_log_path)))
+    if request_count != 1 or peer_request_count != 1:
+        raise AssertionError(
+            "same-generation cached control initiated another remote request: "
+            f"chansrv={request_count} peer={peer_request_count}\n{full_log}")
+    targets = finish_clipboard_requestor(
+        start_clipboard_requestor(helper, source_display, "TARGETS"),
+        10.0, chansrv_logs)
+    if "image/png" not in targets:
+        raise AssertionError(
+            f"unsolicited responses corrupted the current format offer: {targets}")
 
 
 def assert_clipboard_named_png_session(
@@ -4029,6 +4979,8 @@ def main() -> int:
     clipboard_no_server_copy_reconnect_mode = False
     clipboard_inflight_format_list_mode = False
     clipboard_abandoned_incr_mode = False
+    clipboard_abandoned_incr_terminator_mode = False
+    clipboard_abandoned_incr_local_owner_mode = False
     clipboard_inflight_png_format_list_mode = False
     clipboard_stale_text_generation_mode = False
     clipboard_png_prefetch_mode = False
@@ -4036,6 +4988,14 @@ def main() -> int:
     clipboard_png_prefetch_fail_mode = False
     clipboard_png_prefetch_pending_mode = False
     clipboard_png_prefetch_stale_image_mode = False
+    clipboard_delayed_png_response_mode = False
+    clipboard_cold_png_waiters_mode = False
+    clipboard_png_response_fail_mode = False
+    clipboard_png_malformed_response_mode = False
+    clipboard_data_response_oracle_mode = False
+    clipboard_no_png_offer_mode = False
+    clipboard_delayed_png_cancel_mode = False
+    clipboard_delayed_png_cancel_reason = ""
     clipboard_helper: Path | None = None
     overlap_client: Path | None = None
     clipboard_options = [option for option in (
@@ -4043,11 +5003,22 @@ def main() -> int:
         "--clipboard-no-server-copy-reconnect",
         "--clipboard-inflight-format-list",
         "--clipboard-abandoned-incr",
+        "--clipboard-abandoned-incr-terminator",
+        "--clipboard-abandoned-incr-local-owner-wins",
         "--clipboard-inflight-png-format-list",
         "--clipboard-stale-text-generation",
         "--clipboard-png-prefetch", "--clipboard-png-prefetch-bmp",
         "--clipboard-png-prefetch-fail", "--clipboard-png-prefetch-pending",
-        "--clipboard-png-prefetch-stale-image") if option in arguments]
+        "--clipboard-png-prefetch-stale-image",
+        "--clipboard-delayed-png-response",
+        "--clipboard-delayed-png-selection-clear",
+        "--clipboard-delayed-png-requestor-destroyed",
+        "--clipboard-delayed-png-disconnect",
+        "--clipboard-cold-png-waiters",
+        "--clipboard-png-response-fail",
+        "--clipboard-png-malformed-response",
+        "--clipboard-data-response-oracle",
+        "--clipboard-no-png-offer") if option in arguments]
     if clipboard_options:
         selected_clipboard_mode = clipboard_options[0]
         if (len(clipboard_options) != 1 or arguments[-1] != selected_clipboard_mode or
@@ -4062,7 +5033,15 @@ def main() -> int:
         clipboard_inflight_format_list_mode = (
             selected_clipboard_mode == "--clipboard-inflight-format-list")
         clipboard_abandoned_incr_mode = (
-            selected_clipboard_mode == "--clipboard-abandoned-incr")
+            selected_clipboard_mode in (
+                "--clipboard-abandoned-incr",
+                "--clipboard-abandoned-incr-terminator",
+                "--clipboard-abandoned-incr-local-owner-wins"))
+        clipboard_abandoned_incr_terminator_mode = (
+            selected_clipboard_mode == "--clipboard-abandoned-incr-terminator")
+        clipboard_abandoned_incr_local_owner_mode = (
+            selected_clipboard_mode ==
+            "--clipboard-abandoned-incr-local-owner-wins")
         clipboard_inflight_png_format_list_mode = (
             selected_clipboard_mode == "--clipboard-inflight-png-format-list")
         clipboard_stale_text_generation_mode = (
@@ -4080,6 +5059,27 @@ def main() -> int:
             selected_clipboard_mode == "--clipboard-png-prefetch-pending")
         clipboard_png_prefetch_stale_image_mode = (
             selected_clipboard_mode == "--clipboard-png-prefetch-stale-image")
+        clipboard_delayed_png_response_mode = (
+            selected_clipboard_mode == "--clipboard-delayed-png-response")
+        clipboard_cold_png_waiters_mode = (
+            selected_clipboard_mode == "--clipboard-cold-png-waiters")
+        clipboard_png_response_fail_mode = (
+            selected_clipboard_mode == "--clipboard-png-response-fail")
+        clipboard_png_malformed_response_mode = (
+            selected_clipboard_mode == "--clipboard-png-malformed-response")
+        clipboard_data_response_oracle_mode = (
+            selected_clipboard_mode == "--clipboard-data-response-oracle")
+        clipboard_no_png_offer_mode = (
+            selected_clipboard_mode == "--clipboard-no-png-offer")
+        clipboard_delayed_png_cancel_mode = selected_clipboard_mode in (
+            "--clipboard-delayed-png-selection-clear",
+            "--clipboard-delayed-png-requestor-destroyed",
+            "--clipboard-delayed-png-disconnect")
+        clipboard_delayed_png_cancel_reason = {
+            "--clipboard-delayed-png-selection-clear": "selection-clear",
+            "--clipboard-delayed-png-requestor-destroyed": "requestor-destroyed",
+            "--clipboard-delayed-png-disconnect": "disconnect",
+        }.get(selected_clipboard_mode, "")
     clipboard_inflight_mode = (
         clipboard_inflight_format_list_mode or
         clipboard_abandoned_incr_mode or
@@ -4087,11 +5087,21 @@ def main() -> int:
         clipboard_stale_text_generation_mode)
     clipboard_peer_mode = (
         clipboard_inflight_mode or clipboard_png_prefetch_mode or
-        clipboard_no_server_copy_reconnect_mode)
+        clipboard_no_server_copy_reconnect_mode or
+        clipboard_delayed_png_response_mode or
+        clipboard_delayed_png_cancel_mode or
+        clipboard_cold_png_waiters_mode or clipboard_png_response_fail_mode or
+        clipboard_png_malformed_response_mode or
+        clipboard_data_response_oracle_mode or clipboard_no_png_offer_mode)
     clipboard_enabled = (
         clipboard_stress_mode or clipboard_named_png_mode or
         clipboard_inflight_mode or clipboard_png_prefetch_mode or
-        clipboard_no_server_copy_reconnect_mode)
+        clipboard_no_server_copy_reconnect_mode or
+        clipboard_delayed_png_response_mode or
+        clipboard_delayed_png_cancel_mode or
+        clipboard_cold_png_waiters_mode or clipboard_png_response_fail_mode or
+        clipboard_png_malformed_response_mode or
+        clipboard_data_response_oracle_mode or clipboard_no_png_offer_mode)
     mode_options = [option for option in (
         "--rfx", "--rfx-fullhd", "--classic-fullhd-source",
         "--gfx-planar", "--gfx-h264",
@@ -4251,7 +5261,13 @@ def main() -> int:
         named_png_fixture_path = root / "peer-named.png"
         named_png_fixture_info = (
             write_named_png_fixture(named_png_fixture_path)
-            if clipboard_named_png_mode or clipboard_png_prefetch_mode else None)
+            if (clipboard_named_png_mode or clipboard_png_prefetch_mode or
+                clipboard_inflight_png_format_list_mode or
+                clipboard_delayed_png_response_mode or
+                clipboard_delayed_png_cancel_mode or
+                clipboard_cold_png_waiters_mode or
+                clipboard_png_malformed_response_mode or
+                clipboard_data_response_oracle_mode) else None)
         log_path = root / "xrdp.log"
         stdout_path = root / "xrdp-stdout.log"
         client_log_path = root / "freerdp.log"
@@ -4377,22 +5393,11 @@ password=smoke
 
                 if clipboard_helper is None:
                     raise AssertionError("clipboard helper path was not configured")
-                if not clipboard_peer_mode:
-                    owner_command = (
-                        [str(clipboard_helper), "owner-named-png",
-                         str(named_png_fixture_path)]
-                        if clipboard_named_png_mode else
-                        [str(clipboard_helper), "owner"])
-                    with clipboard_owner_log_path.open(
-                            "w", encoding="utf-8") as owner_log:
-                        clipboard_owner = subprocess.Popen(
-                            owner_command, cwd=root,
-                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=owner_log, env=os.environ.copy(), bufsize=0,
-                            start_new_session=True)
-                    wait_for_owner_marker(
-                        clipboard_owner, "OWNER_READY", 8.0,
-                        clipboard_owner_log_path)
+                if not clipboard_peer_mode and not clipboard_stress_mode:
+                    clipboard_owner = start_clipboard_owner(
+                        clipboard_helper, root, clipboard_owner_log_path,
+                        named_png_path=(named_png_fixture_path
+                                        if clipboard_named_png_mode else None))
             with stdout_path.open("w", encoding="utf-8") as server_stdout:
                 server = subprocess.Popen(
                     [
@@ -4454,6 +5459,9 @@ password=smoke
                             "XRDP_CONSOLE_TEST_CLIPBOARD_SERVER_AUDIT"] = "1"
                     if clipboard_inflight_png_format_list_mode:
                         client_environment["XRDP_CONSOLE_TEST_PNG_OVERLAP"] = "1"
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_PNG_FILE"] = str(
+                                named_png_fixture_path)
                     if clipboard_stale_text_generation_mode:
                         client_environment[
                             "XRDP_CONSOLE_TEST_STALE_TEXT_GENERATION"] = "1"
@@ -4468,6 +5476,47 @@ password=smoke
                         client_environment[
                             "XRDP_CONSOLE_TEST_PNG_FILE"] = str(
                                 named_png_fixture_path)
+                    if (clipboard_delayed_png_response_mode or
+                            clipboard_delayed_png_cancel_mode):
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_DELAY_PNG_RESPONSE_MS"] = (
+                                os.environ[
+                                    "XRDP_CONSOLE_TEST_DELAY_PNG_RESPONSE_MS"])
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_PNG_FILE"] = str(
+                                named_png_fixture_path)
+                    if clipboard_cold_png_waiters_mode:
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_PNG_OVERLAP"] = "1"
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_PNG_FILE"] = str(
+                                named_png_fixture_path)
+                    if clipboard_png_response_fail_mode:
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_FAIL_PNG_RESPONSE"] = "1"
+                    if clipboard_png_malformed_response_mode:
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_PNG_RESPONSE_FLAGS"] = os.environ[
+                                "XRDP_CONSOLE_TEST_PNG_RESPONSE_FLAGS"]
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_PNG_RESPONSE_FAIL_PAYLOAD"] = (
+                                os.environ.get(
+                                    "XRDP_CONSOLE_TEST_PNG_RESPONSE_FAIL_PAYLOAD",
+                                    "0"))
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_PNG_FILE"] = str(
+                                named_png_fixture_path)
+                    if clipboard_data_response_oracle_mode:
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_PNG_OVERLAP"] = "1"
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_PNG_RESPONSE_INJECTION"] = "1"
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_PNG_FILE"] = str(
+                                named_png_fixture_path)
+                    if clipboard_no_png_offer_mode:
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_NO_PNG"] = "1"
                     if clipboard_png_prefetch_fail_mode:
                         client_environment[
                             "XRDP_CONSOLE_TEST_PNG_PREFETCH_FAIL"] = "1"
@@ -4657,7 +5706,8 @@ password=smoke
                     if clipboard_enabled:
                         if (clipboard_helper is None or chansrv_process is None or
                                 (clipboard_owner is None and
-                                 not clipboard_peer_mode)):
+                                 not clipboard_peer_mode and
+                                 not clipboard_stress_mode)):
                             raise AssertionError(
                                 "clipboard integration processes were not started")
                         if clipboard_no_server_copy_reconnect_mode:
@@ -4679,7 +5729,9 @@ password=smoke
                             assert_clipboard_abandoned_incr_session(
                                 clipboard_helper, client, client_log_path,
                                 log_path, chansrv_process, chansrv_logs_path,
-                                chansrv_stdout_path, source_display)
+                                chansrv_stdout_path, source_display,
+                                clipboard_abandoned_incr_terminator_mode,
+                                clipboard_abandoned_incr_local_owner_mode)
                         elif clipboard_stale_text_generation_mode:
                             assert_clipboard_stale_text_generation_session(
                                 clipboard_helper, client, client_log_path,
@@ -4725,10 +5777,73 @@ password=smoke
                                     chansrv_logs_path, chansrv_stdout_path,
                                     source_display, stimulus,
                                     *named_png_fixture_info)
-                        elif clipboard_stress_mode:
-                            if clipboard_owner is None:
+                        elif clipboard_delayed_png_response_mode:
+                            if named_png_fixture_info is None:
                                 raise AssertionError(
-                                    "clipboard stress owner did not start")
+                                    "delayed PNG fixture metadata was not prepared")
+                            assert_clipboard_delayed_png_response_session(
+                                clipboard_helper, client, client_log_path,
+                                chansrv_process, chansrv_logs_path,
+                                chansrv_stdout_path, source_display,
+                                *named_png_fixture_info)
+                        elif clipboard_delayed_png_cancel_mode:
+                            assert_clipboard_delayed_png_cancellation_session(
+                                clipboard_helper, client, client_log_path,
+                                chansrv_process, chansrv_logs_path,
+                                chansrv_stdout_path, source_display,
+                                clipboard_delayed_png_cancel_reason)
+                        elif clipboard_cold_png_waiters_mode:
+                            if named_png_fixture_info is None:
+                                raise AssertionError(
+                                    "cold PNG waiter fixture metadata was not prepared")
+                            assert_clipboard_cold_png_waiters_session(
+                                clipboard_helper, client, client_log_path,
+                                chansrv_process, chansrv_logs_path,
+                                chansrv_stdout_path, source_display,
+                                *named_png_fixture_info)
+                        elif clipboard_png_response_fail_mode:
+                            assert_clipboard_png_response_failure_session(
+                                clipboard_helper, client, client_log_path,
+                                chansrv_process, chansrv_logs_path,
+                                chansrv_stdout_path, source_display)
+                        elif clipboard_png_malformed_response_mode:
+                            assert_clipboard_png_malformed_response_session(
+                                clipboard_helper, client, client_log_path,
+                                chansrv_process, chansrv_logs_path,
+                                chansrv_stdout_path, source_display)
+                        elif clipboard_data_response_oracle_mode:
+                            if named_png_fixture_info is None:
+                                raise AssertionError(
+                                    "response-oracle PNG fixture was not prepared")
+                            assert_clipboard_data_response_oracle_session(
+                                clipboard_helper, client, client_log_path,
+                                chansrv_process, chansrv_logs_path,
+                                chansrv_stdout_path, source_display,
+                                *named_png_fixture_info)
+                        elif clipboard_no_png_offer_mode:
+                            assert_clipboard_no_png_offer_session(
+                                clipboard_helper, client, client_log_path,
+                                chansrv_process, chansrv_logs_path,
+                                chansrv_stdout_path, source_display)
+                        elif clipboard_stress_mode:
+                            wait_for_log(
+                                client, client_log_path,
+                                "cliprdr_process_monitor_ready", 10.0)
+                            # The FreeRDP log is emitted from inside its
+                            # MonitorReady callback, before that callback sets
+                            # clipboard->sync. Wait for its initial CLIPRDR
+                            # Format List to traverse xrdp/chansrv before
+                            # creating the synthetic owner, so the ownership
+                            # change cannot race clipboard initialization.
+                            if clipboard_format_list_count(
+                                    chansrv_logs_path) == 0:
+                                wait_for_chansrv_marker(
+                                    chansrv_logs_path, "event=format-list", 1,
+                                    10.0, chansrv_process,
+                                    chansrv_stdout_path)
+                            clipboard_owner = start_clipboard_owner(
+                                clipboard_helper, root,
+                                clipboard_owner_log_path, delayed=True)
                             assert_clipboard_image_session(
                                 clipboard_helper, clipboard_owner,
                                 clipboard_owner_log_path, client,
