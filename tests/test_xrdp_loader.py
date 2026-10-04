@@ -664,6 +664,17 @@ def assert_clipboard_image_session(
     owner.stdin.flush()
     wait_for_owner_marker(owner, "OWNER_BARRIER", 5.0, owner_log_path)
 
+    client_x11_lists_before_activation = len(re.findall(
+        r"XRDP_CONSOLE_TEST_CLIPRDR event=x11-format-list-built "
+        r"formats=[1-9]\d*\b",
+        read_text(client_log_path)))
+    client_dib_formats_before_activation = len(re.findall(
+        r"XRDP_CONSOLE_TEST_CLIPRDR event=x11-format id=0x00000008\b",
+        read_text(client_log_path)))
+    client_core_sends_before_activation = len(re.findall(
+        r"XRDP_CONSOLE_TEST_CLIPRDR event=core-format-list-send "
+        r"status=0 formats=[1-9]\d*\b",
+        read_text(client_log_path)))
     vc_format_lists_before = len(re.findall(
         r"event=cliprdr-first-fragment "
         r"direction=client-to-server [^\n]*msg_type=2",
@@ -677,11 +688,10 @@ def assert_clipboard_image_session(
                           owner_log_path)
 
     # The owner request itself is issued by FreeRDP's main X11 window. Verify
-    # the TARGETS response and then use the incoming VC PDU as the authoritative
-    # proof that FreeRDP constructed and sent a replacement Format List. Its
-    # diagnostic text log is not an authoritative boundary: the pinned client
-    # can parse the property and call ClientFormatList without emitting the
-    # optional per-format DEBUG lines.
+    # the TARGETS response, then prove each FreeRDP and server boundary
+    # independently. The test-only pinned-client diagnostics are emitted when
+    # the X11 TARGETS are mapped, when CF_DIB is present in that mapping, and
+    # after the core CLIPRDR callback successfully sends a non-empty list.
     client_window = find_window(client_display, window_title, 0.25).lower()
     target_response = wait_for_owner_line_pattern(
         owner,
@@ -704,12 +714,30 @@ def assert_clipboard_image_session(
             f"request; request={target_response!r}, notify={target_notify!r}, "
             f"client_window={client_window}")
     wait_for_log_pattern_occurrence(
+        client, client_log_path,
+        r"XRDP_CONSOLE_TEST_CLIPRDR event=x11-format-list-built "
+        r"formats=[1-9]\d*\b",
+        client_x11_lists_before_activation + 1, 10.0,
+        "after TARGETS: FreeRDP did not map a non-empty X11 target list "
+        "into CLIPRDR formats")
+    wait_for_log_pattern_occurrence(
+        client, client_log_path,
+        r"XRDP_CONSOLE_TEST_CLIPRDR event=x11-format id=0x00000008\b",
+        client_dib_formats_before_activation + 1, 10.0,
+        "FreeRDP mapped X11 TARGETS but omitted CF_DIB format ID 8")
+    wait_for_log_pattern_occurrence(
+        client, client_log_path,
+        r"XRDP_CONSOLE_TEST_CLIPRDR event=core-format-list-send "
+        r"status=0 formats=[1-9]\d*\b",
+        client_core_sends_before_activation + 1, 10.0,
+        "FreeRDP did not successfully send its non-empty CLIPRDR Format List")
+    wait_for_log_pattern_occurrence(
         client, log_path,
         r"event=cliprdr-first-fragment "
         r"direction=client-to-server [^\n]*msg_type=2",
         vc_format_lists_before + 1, 10.0,
-        "first missing boundary after TARGETS: FreeRDP did not construct/send "
-        "CB_FORMAT_LIST or xrdp did not receive msgType=2")
+        "after FreeRDP constructed CB_FORMAT_LIST: xrdp did not receive "
+        "client-to-server CLIPRDR msgType=2")
     wait_for_chansrv_marker(
         chansrv_logs, "event=format-list", formats_before_activation + 1,
         10.0, chansrv_process, chansrv_stdout)

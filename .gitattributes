@@ -8,3 +8,4 @@ patches/xrdp/0040-xrdp-log-window-manager-check-source.patch whitespace=-blank-a
 patches/xrdp/0041-xrdp-chansrv-log-png-x11-transaction.patch whitespace=-blank-at-eol,-space-before-tab,-blank-at-eof
 patches/xrdp/0042-xrdp-chansrv-prefetch-named-png.patch whitespace=-blank-at-eol,-blank-at-eof
 patches/xrdp/0017-xrdp-chansrv-bounded-text-selection-retry.patch whitespace=-blank-at-eol,-space-before-tab,-blank-at-eof
+tests/patches/*.patch whitespace=-blank-at-eol,-space-before-tab,-blank-at-eof

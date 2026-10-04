@@ -1,0 +1,51 @@
+diff --git a/channels/cliprdr/client/cliprdr_main.c b/channels/cliprdr/client/cliprdr_main.c
+index 9640a93..3573d0a 100644
+--- a/channels/cliprdr/client/cliprdr_main.c
++++ b/channels/cliprdr/client/cliprdr_main.c
+@@ -687,6 +687,11 @@ static UINT cliprdr_client_format_list(CliprdrClientContext* context,
+ 	CLIPRDR_FORMAT_LIST filterList = cliprdr_filter_format_list(
+ 	    formatList, mask, CLIPRDR_FLAG_LOCAL_TO_REMOTE | CLIPRDR_FLAG_LOCAL_TO_REMOTE_FILES);
+ 
++	WLog_Print(cliprdr->log, WLOG_WARN,
++	           "XRDP_CONSOLE_TEST_CLIPRDR event=core-format-list input=%" PRIu32
++	           " filtered=%" PRIu32 " initial=%u",
++	           formatList->numFormats, filterList.numFormats, cliprdr->initialFormatListSent);
++
+ 	/* Allow initial format list from monitor ready, but ignore later attempts */
+ 	if ((filterList.numFormats == 0) && cliprdr->initialFormatListSent)
+ 	{
+@@ -718,7 +723,12 @@ static UINT cliprdr_client_format_list(CliprdrClientContext* context,
+ 		return ERROR_INTERNAL_ERROR;
+ 	}
+ 
+-	return cliprdr_packet_send(cliprdr, s);
++	const UINT status = cliprdr_packet_send(cliprdr, s);
++	WLog_Print(cliprdr->log, WLOG_WARN,
++	           "XRDP_CONSOLE_TEST_CLIPRDR event=core-format-list-send "
++	           "status=%u formats=%" PRIu32,
++	           status, formatList->numFormats);
++	return status;
+ }
+ 
+ /**
+diff --git a/client/X11/xf_cliprdr.c b/client/X11/xf_cliprdr.c
+index 0f82344..2622df2 100644
+--- a/client/X11/xf_cliprdr.c
++++ b/client/X11/xf_cliprdr.c
+@@ -852,6 +852,16 @@ static UINT xf_cliprdr_send_format_list(xfClipboard* clipboard, const CLIPRDR_FORMAT* formats,
+ 	WINPR_ASSERT(clipboard);
+ 	WINPR_ASSERT(formats || (numFormats == 0));
+ 
++	WLog_WARN(TAG, "XRDP_CONSOLE_TEST_CLIPRDR "
++	               "event=x11-format-list-built formats=%" PRIu32,
++	          numFormats);
++	for (UINT32 x = 0; x < numFormats; x++)
++	{
++		WLog_WARN(TAG, "XRDP_CONSOLE_TEST_CLIPRDR event=x11-format "
++		               "id=0x%08" PRIx32 " name=%s",
++		          formats[x].formatId, formats[x].formatName ? formats[x].formatName : "");
++	}
++
+ #if defined(WITH_DEBUG_CLIPRDR)
+ 	for (UINT32 x = 0; x < numFormats; x++)
+ 	{

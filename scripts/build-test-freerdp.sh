@@ -16,6 +16,8 @@ install_root=$build_root/install
 freerdp_version=3.31.0
 freerdp_commit=aa8650b300aa4cabd85d9c72b431301509b9043f
 freerdp_repository=https://github.com/FreeRDP/FreeRDP.git
+# Keep deterministic clipboard-boundary diagnostics in the test-only client.
+clipboard_boundary_patch=$workspace_root/tests/patches/freerdp-clipboard-boundary-diagnostics.patch
 build_jobs=${XRDP_CONSOLE_FREERDP_BUILD_JOBS:-1}
 
 for required in cmake ninja git pkg-config; do
@@ -64,11 +66,6 @@ else
         echo "Choose a fresh directory with XRDP_CONSOLE_FREERDP_BUILD_DIR; existing files were left untouched." >&2
         exit 1
     fi
-    if [ -n "$(git -C "$source_root" status --porcelain)" ]; then
-        echo "FreeRDP source tree has local changes: $source_root" >&2
-        echo "Choose a fresh directory with XRDP_CONSOLE_FREERDP_BUILD_DIR; existing files were left untouched." >&2
-        exit 1
-    fi
 fi
 
 actual_commit=$(git -C "$source_root" rev-parse HEAD)
@@ -77,6 +74,35 @@ if [ "$actual_commit" != "$freerdp_commit" ]; then
     echo "Expected pinned commit: $freerdp_commit" >&2
     exit 1
 fi
+
+expected_patch_status=$(printf '%s\n' \
+    ' M channels/cliprdr/client/cliprdr_main.c' \
+    ' M client/X11/xf_cliprdr.c')
+source_status=$(git -C "$source_root" status --porcelain --untracked-files=all)
+if [ -n "$source_status" ]; then
+    if [ "$source_status" != "$expected_patch_status" ]; then
+        echo "FreeRDP source tree has changes outside the expected" \
+            "clipboard diagnostic patch: $source_root" >&2
+        echo "$source_status" >&2
+        echo "Choose a fresh directory with XRDP_CONSOLE_FREERDP_BUILD_DIR; existing files were left untouched." >&2
+        exit 1
+    fi
+
+    if ! git -C "$source_root" apply --reverse --check "$clipboard_boundary_patch"; then
+        echo "FreeRDP source changes do not match the clipboard diagnostic patch: $source_root" >&2
+        exit 1
+    fi
+    git -C "$source_root" apply --reverse "$clipboard_boundary_patch"
+    if [ -n "$(git -C "$source_root" status --porcelain --untracked-files=all)" ]; then
+        git -C "$source_root" apply "$clipboard_boundary_patch"
+        echo "FreeRDP source contains additional modifications to patched files: $source_root" >&2
+        exit 1
+    fi
+fi
+
+git -C "$source_root" apply --check "$clipboard_boundary_patch"
+git -C "$source_root" apply "$clipboard_boundary_patch"
+git -C "$source_root" diff --check
 
 cmake -S "$source_root" -B "$freerdp_build_root" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
