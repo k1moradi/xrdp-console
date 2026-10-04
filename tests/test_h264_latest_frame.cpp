@@ -1411,6 +1411,122 @@ bool native_resolution_keeps_identity_h264_geometry()
     return success;
 }
 
+bool narrow_1366_to_1364_h264_capture_tiles_are_convertible()
+{
+    constexpr PixelSize sourceGeometry{1366, 768};
+    constexpr PixelSize presentationGeometry{1364, 768};
+    constexpr PixelSize frameGeometry{1364, 768};
+    constexpr Rectangle viewport{0, 2, 1364, 766};
+    constexpr Rectangle sourceRectangle{0, 0, 1366, 768};
+
+    PresentationScaler scaler;
+    H264LatestFrameState state;
+    bool success = check(
+        scaler.configure(sourceGeometry, presentationGeometry, viewport),
+        "1366x768 to 1364x768 presentation scaler setup failed");
+    success &= check(state.configure(sourceGeometry, presentationGeometry,
+                                     frameGeometry, viewport),
+                     "1366x768 to 1364x768 H264 state setup failed");
+    if (!success)
+    {
+        return false;
+    }
+    Rectangle captureBounds{};
+    success &= check(
+        state.sourceCaptureBoundsForPendingDamage(scaler, captureBounds) &&
+            captureBounds == sourceRectangle,
+        "narrow H264 full-damage capture bounds changed unexpectedly");
+    if (!success)
+    {
+        return false;
+    }
+
+    std::vector<std::uint32_t> pixels(
+        static_cast<std::size_t>(sourceGeometry.widthPixels) *
+        sourceGeometry.heightPixels);
+    for (std::uint32_t y = 0; y < sourceGeometry.heightPixels; ++y)
+    {
+        for (std::uint32_t x = 0; x < sourceGeometry.widthPixels; ++x)
+        {
+            const std::uint8_t shade =
+                ((x ^ (y * 13U)) & 1U) != 0U ? 0xf0U : 0x10U;
+            pixels[static_cast<std::size_t>(y) *
+                       sourceGeometry.widthPixels + x] =
+                0xff000000U |
+                (static_cast<std::uint32_t>(shade) << 16U) |
+                (static_cast<std::uint32_t>(shade) << 8U) | shade;
+        }
+    }
+    const FramebufferView source{
+        std::as_bytes(std::span<const std::uint32_t>(pixels)),
+        sourceGeometry.widthPixels, sourceGeometry.heightPixels,
+        static_cast<std::size_t>(sourceGeometry.widthPixels) *
+            sizeof(std::uint32_t)};
+    const std::size_t outputBytes = nv12FrameBytes(frameGeometry);
+    std::vector<std::byte> direct(outputBytes);
+    std::vector<std::byte> staged(outputBytes);
+    std::size_t convertedTiles = 0;
+
+    for (std::uint32_t y = 0; y < sourceGeometry.heightPixels; y += 64U)
+    {
+        for (std::uint32_t x = 0; x < sourceGeometry.widthPixels; x += 64U)
+        {
+            const Rectangle sourceTile{
+                static_cast<std::int32_t>(x),
+                static_cast<std::int32_t>(y),
+                std::min(64U, sourceGeometry.widthPixels - x),
+                std::min(64U, sourceGeometry.heightPixels - y),
+            };
+            Rectangle mapped{};
+            success &= check(state.mapSourceRectangle(sourceTile, mapped),
+                             "narrow H264 source tile could not be mapped");
+            if (!success)
+            {
+                return false;
+            }
+            mapped = alignAvc420Rectangle(mapped, frameGeometry);
+            if (mapped.widthPixels == 0 || mapped.heightPixels == 0)
+            {
+                continue;
+            }
+
+            const ScaledNv12UpdateResult directResult =
+                updateNv12RectangleFromFastDiagonalScaler_709FullRange(
+                    scaler, source, sourceRectangle, mapped, frameGeometry,
+                    direct, 0, mapped.heightPixels);
+            success &= check(
+                directResult != ScaledNv12UpdateResult::InvalidInput,
+                "narrow H264 capture tile was rejected by fused conversion");
+            if (!success)
+            {
+                return false;
+            }
+            if (directResult == ScaledNv12UpdateResult::Unsupported)
+            {
+                const FramebufferView scaled = scaler.scaleRows(
+                    source, sourceRectangle, mapped, 0, mapped.heightPixels);
+                success &= check(scaled.valid() &&
+                                     updateNv12Rectangle_709FullRange(
+                                         scaled, mapped, frameGeometry, direct),
+                                 "narrow H264 reference conversion failed");
+            }
+            const FramebufferView scaled = scaler.scaleRows(
+                source, sourceRectangle, mapped, 0, mapped.heightPixels);
+            success &= check(scaled.valid() &&
+                                 updateNv12Rectangle_709FullRange(
+                                     scaled, mapped, frameGeometry, staged),
+                             "narrow H264 reference conversion failed");
+            ++convertedTiles;
+        }
+    }
+
+    success &= check(convertedTiles != 0,
+                     "narrow H264 test did not convert any source tiles");
+    success &= check(direct == staged,
+                     "narrow H264 fused tiles differ from staged conversion");
+    return success;
+}
+
 bool scaled_capture_maps_to_global_nv12_pixels()
 {
     const std::array<std::uint32_t, 8> sourcePixels{{
@@ -1997,6 +2113,7 @@ int main()
     success &= grouped_capture_can_convert_only_changed_subtile();
     success &= odd_presentation_uses_even_coded_viewport_and_black_fringe();
     success &= native_resolution_keeps_identity_h264_geometry();
+    success &= narrow_1366_to_1364_h264_capture_tiles_are_convertible();
     success &= scaled_capture_maps_to_global_nv12_pixels();
     success &= downscaled_filter_coverage_includes_unselected_source_pixels();
     success &= coherent_h264_capture_bounds_are_damage_limited_and_filter_complete();

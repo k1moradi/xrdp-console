@@ -2,6 +2,11 @@
 
 #pragma once
 
+#include <chrono>
+
+inline constexpr auto kMaximumReplaceablePresentationAge =
+    std::chrono::seconds{1};
+
 enum class ClassicWorkClass
 {
     Idle,
@@ -42,4 +47,16 @@ shouldServiceClassicWorkImmediately(ClassicWorkClass workClass) noexcept
 {
     return workClass == ClassicWorkClass::ImmediateContinuation ||
            workClass == ClassicWorkClass::PriorityDamage;
+}
+
+[[nodiscard]] inline bool
+shouldSupersedeStaleClassicWork(
+    bool snapshottedDamage, bool newerDamage,
+    std::chrono::steady_clock::time_point workStarted,
+    std::chrono::steady_clock::time_point now) noexcept
+{
+    return snapshottedDamage && newerDamage &&
+           workStarted != std::chrono::steady_clock::time_point{} &&
+           now >= workStarted &&
+           now - workStarted >= kMaximumReplaceablePresentationAge;
 }

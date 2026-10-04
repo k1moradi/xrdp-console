@@ -3669,6 +3669,7 @@ def main() -> int:
     gfx_h264_mode = False
     coherence_mode = False
     fullhd_source_mode = False
+    narrow_source_mode = False
     randr_resize_mode = False
     randr_resize_dynamic_resolution = False
     cpu_contention = False
@@ -3738,6 +3739,7 @@ def main() -> int:
     mode_options = [option for option in (
         "--rfx", "--gfx-planar", "--gfx-h264",
         "--gfx-h264-coherence", "--gfx-h264-fullhd",
+        "--gfx-h264-narrow-source",
         "--gfx-h264-randr-resize",
         "--gfx-h264-randr-resize-no-dynamic-resolution")
                     if option in arguments]
@@ -3752,10 +3754,12 @@ def main() -> int:
         gfx_planar_mode = selected_mode == "--gfx-planar"
         gfx_h264_mode = selected_mode in (
             "--gfx-h264", "--gfx-h264-coherence", "--gfx-h264-fullhd",
+            "--gfx-h264-narrow-source",
             "--gfx-h264-randr-resize",
             "--gfx-h264-randr-resize-no-dynamic-resolution")
         coherence_mode = selected_mode == "--gfx-h264-coherence"
         fullhd_source_mode = selected_mode == "--gfx-h264-fullhd"
+        narrow_source_mode = selected_mode == "--gfx-h264-narrow-source"
         randr_resize_mode = selected_mode in (
             "--gfx-h264-randr-resize",
             "--gfx-h264-randr-resize-no-dynamic-resolution")
@@ -3786,7 +3790,8 @@ def main() -> int:
             "PIXEL_OR_FRAME_PROBE STIMULUS "
             "[PRESENTATION_WIDTH PRESENTATION_HEIGHT] "
             "[--rfx|--gfx-planar|--gfx-h264|--gfx-h264-coherence|"
-            "--gfx-h264-fullhd|--gfx-h264-randr-resize|"
+            "--gfx-h264-fullhd|--gfx-h264-narrow-source|"
+            "--gfx-h264-randr-resize|"
             "--gfx-h264-randr-resize-no-dynamic-resolution] "
             "[--cpu-contention before the graphics-mode option] "
             "[clipboard helper [overlap peer] "
@@ -3799,9 +3804,11 @@ def main() -> int:
 
     presentation_width = (
         COHERENCE_SOURCE_WIDTH if coherence_mode else
+        1364 if narrow_source_mode else
         1512 if fullhd_source_mode else 1024)
     presentation_height = (
         COHERENCE_SOURCE_HEIGHT if coherence_mode else
+        768 if narrow_source_mode else
         949 if fullhd_source_mode else 768)
     if len(arguments) == 8:
         try:
@@ -3855,9 +3862,11 @@ def main() -> int:
             return 1
     source_width = (
         COHERENCE_SOURCE_WIDTH if coherence_mode else
+        1366 if narrow_source_mode else
         1920 if fullhd_source_mode else 1024)
     source_height = (
         COHERENCE_SOURCE_HEIGHT if coherence_mode else
+        768 if narrow_source_mode else
         1080 if fullhd_source_mode else 768)
     probe_x, probe_y = presentation_probe_point(
         presentation_width, presentation_height, source_width, source_height)
@@ -4171,6 +4180,11 @@ password=smoke
                                 server, log_path,
                                 "source=1920x1080 presentation=1512x949",
                                 4.0, stdout_path, client_log_path)
+                        if narrow_source_mode:
+                            wait_for_log(
+                                server, log_path,
+                                "source=1366x768 presentation=1364x768",
+                                4.0, stdout_path, client_log_path)
                     if clipboard_peer_mode:
                         wait_for_peer_marker(
                             client, client_log_path, "PEER_CONNECTED", 10.0)
@@ -4198,6 +4212,17 @@ password=smoke
                             assert_client_stays_connected(
                                 client, os.environ["DISPLAY"], window_title,
                                 client_log_path, log_path, stdout_path)
+                        if narrow_source_mode:
+                            assert_client_stays_connected(
+                                client, os.environ["DISPLAY"], window_title,
+                                client_log_path, log_path, stdout_path)
+                            if ("XRDP_CONSOLE_H264_RECOVERY "
+                                    "event=service-failure" in
+                                    read_text(log_path)):
+                                raise AssertionError(
+                                    "narrow-source H.264 smoke fell back from "
+                                    "H.264 service after the display update:\n"
+                                    f"{xrdp_log_excerpt(log_path)}")
                         if randr_resize_mode:
                             resize_source_x11_display(
                                 source_display, 1920, 1080)

@@ -95,10 +95,53 @@ work_states_are_classified()
     return success;
 }
 
+bool
+stale_work_is_superseded_only_after_one_second_with_newer_damage()
+{
+    using Clock = std::chrono::steady_clock;
+    const Clock::time_point started{std::chrono::seconds{10}};
+    bool success = true;
+
+    success &= check(
+        !shouldSupersedeStaleClassicWork(
+            true, true, started,
+            started + std::chrono::milliseconds{999}),
+        "classic work must remain replaceable only after the age budget");
+    success &= check(
+        shouldSupersedeStaleClassicWork(
+            true, true, started,
+            started + kMaximumReplaceablePresentationAge),
+        "one-second-old classic work with newer damage must be superseded");
+    success &= check(
+        !shouldSupersedeStaleClassicWork(
+            true, false, started,
+            started + std::chrono::seconds{2}),
+        "classic work without newer damage must not be superseded");
+    success &= check(
+        !shouldSupersedeStaleClassicWork(
+            false, true, started,
+            started + std::chrono::seconds{2}),
+        "new damage without older queued work must not trigger supersession");
+    success &= check(
+        !shouldSupersedeStaleClassicWork(
+            true, true, Clock::time_point{},
+            started + std::chrono::seconds{2}),
+        "unstarted classic work must not be treated as stale");
+    success &= check(
+        !shouldSupersedeStaleClassicWork(
+            true, true, started,
+            started - std::chrono::milliseconds{1}),
+        "clock values before work start must not supersede work");
+    return success;
+}
+
 } // namespace
 
 int
 main()
 {
-    return work_states_are_classified() ? 0 : 1;
+    return work_states_are_classified() &&
+                   stale_work_is_superseded_only_after_one_second_with_newer_damage()
+               ? 0
+               : 1;
 }
