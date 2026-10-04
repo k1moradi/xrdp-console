@@ -97,9 +97,39 @@ they do not exercise or provide a production display transport.
 | `xrdp-loader-smoke` | generated xrdp loading the module through FreeRDP, accepting the initial cursor update, then drawing a known red/blue source marker and asserting that the expected pixel reaches the FreeRDP framebuffer |
 | `xrdp-loader-gfx-h264-odd-scaled-smoke` | standard H.264 GFX AVC420 loader/pixel smoke at odd scaled presentation geometry; CMake requires the selected FreeRDP's H.264 decoder before registering the test |
 | `xrdp-loader-gfx-h264-fullhd-source-cpu-contention` | scaled 1920x1080-to-1512x949 H.264 full-screen update burst while the client/server share one CPU; requires the latest drawn color to reach the FreeRDP framebuffer within 1000 ms |
+| `xrdp-loader-gfx-h264-popup-ui-stress` | repeatedly opens and closes a synthetic launcher popup with remote taskbar clicks over scaled H.264, one-CPU contention, and a changing 20 Hz full-screen scene; each opening must show the expected generation and match a source-side popup reference within measured color-error limits in 1000 ms, then remain coherent during 250 ms of sampled updates |
 | `xrdp-loader-gfx-h264-randr-resize` | changes the X11 source from 1024x768 to 1920x1080 during an H.264 session, then checks the queued remote resize, FreeRDP window geometry, rendered pixels, and connection; requires Xephyr and is skipped when it is unavailable |
 | `xrdp-loader-gfx-h264-randr-resize-no-dynamic-resolution` | repeats the source RandR resize without enabling FreeRDP's client-driven Dynamic Resolution option, while checking the same server-initiated resize result |
 | `xrdp-loader-gfx-h264-coherence*` | repeated whole-client-frame H.264 coherence checks under normal/contended CPU and a four-arm scroll/cache A/B; preserves first torn-frame screenshots and server/client diagnostics |
+
+The popup UI stress test uses a synthetic Xlib launcher, a locally launched
+xrdp instance, and the project-built FreeRDP client on the same Linux host. It
+checks the complete popup region against a source-side reference using
+area-weighted scaling and bounded decoded RGB error, and retains the source
+reference, summary, failure screenshots, and a representative passing client
+frame under
+`build-direct-console/test-artifacts/xrdp-loader-gfx-h264-popup-ui-stress/`.
+Menu structure is sampled during a 250 ms stability window while the background
+changes at 20 Hz. The pixel reference is checked when the popup opens and at
+the end of that window; the test does not continuously record every displayed
+frame.
+
+Build and run this test with:
+
+```bash
+cmake --build build-direct-console --target \
+  xrdp-console x11-popup-menu-stress x11-popup-ui-probe
+ctest --test-dir build-direct-console --output-on-failure \
+  -R '^xrdp-loader-gfx-h264-popup-ui-stress$'
+```
+
+This test measures the local H.264 path under single-CPU contention. It does
+not display the real desktop Start menu, emulate WAN packet loss or bandwidth
+limits, or exercise Microsoft Remote Desktop/Windows App input, decoding, and
+scaling behavior. A pass is useful server-path evidence, but it does not
+reproduce or rule out the reported minute-long delay or corruption with a
+different client or network. Validate that issue separately with the same
+Microsoft client and connection path.
 
 The marker correlation contract is:
 

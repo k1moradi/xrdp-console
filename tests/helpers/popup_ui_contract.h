@@ -1,0 +1,24 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+#ifndef XRDP_CONSOLE_POPUP_UI_CONTRACT_H
+#define XRDP_CONSOLE_POPUP_UI_CONTRACT_H
+
+/* The stress fixture models a common lower-left application/start menu. */
+#define POPUP_SOURCE_WIDTH 1920
+#define POPUP_SOURCE_HEIGHT 1080
+#define POPUP_PANEL_X 24
+#define POPUP_PANEL_WIDTH 520
+#define POPUP_PANEL_HEIGHT 720
+#define POPUP_PANEL_BOTTOM_MARGIN 48
+#define POPUP_HEADER_HEIGHT 72
+#define POPUP_MARKER_X 330
+#define POPUP_MARKER_Y 24
+#define POPUP_MARKER_CELL_WIDTH 16
+#define POPUP_MARKER_CELL_HEIGHT 24
+#define POPUP_MARKER_STEP 20
+#define POPUP_SWATCH_X 365
+#define POPUP_SWATCH_Y 560
+#define POPUP_SWATCH_BAR_WIDTH 12
+#define POPUP_SWATCH_BAR_COUNT 10
+
+#endif

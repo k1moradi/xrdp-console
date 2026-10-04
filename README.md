@@ -114,7 +114,7 @@ sudo apt update
 
 sudo apt install -y \
   git cmake ninja-build build-essential pkg-config python3 \
-  xrdp iproute2 xauth xvfb x11-utils \
+  xrdp iproute2 xauth xvfb xserver-xephyr x11-xserver-utils x11-utils \
   libpam0g-dev libfuse3-dev libssl-dev \
   libx264-dev libjpeg-dev libfreetype-dev \
   libavcodec-dev libavutil-dev libswscale-dev libusb-1.0-0-dev \

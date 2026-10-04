@@ -13,6 +13,7 @@ import select
 import shutil
 import signal
 import socket
+import statistics
 import struct
 import subprocess
 import sys
@@ -4341,6 +4342,487 @@ def start_stimulus(stimulus_path: Path, display: str,
     return process
 
 
+def start_popup_ui_stimulus(stimulus_path: Path, display: str,
+                            environment: dict[str, str]
+                            ) -> subprocess.Popen[bytes]:
+    process = subprocess.Popen(
+        [str(stimulus_path), display], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment,
+        bufsize=0, start_new_session=True)
+    if process.stdout is None:
+        stop_process(process)
+        raise AssertionError("popup stress stimulus stdout was not created")
+    ready = read_line(process.stdout, 5.0)
+    if ready != b"READY source=1920x1080 trigger=taskbar-button background_fps=20\n":
+        stop_process(process)
+        details = process.stderr.read().decode(errors="replace") if process.stderr else ""
+        raise AssertionError(
+            f"popup stress stimulus did not become ready: {ready!r} {details}")
+    return process
+
+
+def parse_popup_probe_frame(line: bytes
+                            ) -> tuple[int, int, int, int, int, int, int, int] | None:
+    fields = line.decode("ascii", errors="replace").split()
+    if len(fields) != 9 or fields[0] != "FRAME":
+        return None
+    try:
+        values = tuple(int(value) for value in fields[1:])
+    except ValueError:
+        return None
+    if any(value < 0 for value in values):
+        return None
+    return values  # type: ignore[return-value]
+
+
+def map_source_point_to_client(source_x: int, source_y: int,
+                               source_width: int, source_height: int,
+                               client_width: int,
+                               client_height: int) -> tuple[int, int]:
+    if client_width * source_height <= client_height * source_width:
+        viewport_width = client_width
+        viewport_height = max(1, client_width * source_height // source_width)
+    else:
+        viewport_height = client_height
+        viewport_width = max(1, client_height * source_width // source_height)
+    viewport_x = (client_width - viewport_width) // 2
+    coded_height = client_height & ~1
+    viewport_y = ((coded_height - viewport_height) // 2 + 1) & ~1
+    return (
+        viewport_x + source_x * viewport_width // source_width,
+        viewport_y + source_y * viewport_height // source_height,
+    )
+
+
+def popup_probe_command(probe: subprocess.Popen[bytes], command: str,
+                        timeout: float = 1.0) -> bytes:
+    if probe.stdin is None or probe.stdout is None:
+        raise AssertionError("popup UI probe pipes were not created")
+    probe.stdin.write(command.encode("ascii") + b"\n")
+    probe.stdin.flush()
+    setattr(probe, "_xrdp_popup_pending_command", command)
+    line = read_line(probe.stdout, timeout)
+    if not line:
+        raise AssertionError(f"popup UI probe returned no result for {command}")
+    setattr(probe, "_xrdp_popup_pending_command", None)
+    return line
+
+
+def assert_popup_ui_stress_session(
+        client: subprocess.Popen[object], client_display: str,
+        window_title: str, probe_path: Path,
+        stimulus: subprocess.Popen[bytes], client_log_path: Path,
+        log_path: Path, stdout_path: Path, artifact_dir: Path,
+        client_width: int, client_height: int, cycles: int = 20,
+        freshness_budget_ms: float = 1000.0) -> None:
+    """Stress launcher-popup presentation and quality through H.264 RDP."""
+    window = find_window(client_display, window_title, 8.0)
+    probe = subprocess.Popen(
+        [str(probe_path), client_display, window, "1920", "1080"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, env=os.environ.copy(), bufsize=0,
+        start_new_session=True)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    if probe.stdin is None or probe.stdout is None:
+        stop_process(probe)
+        raise AssertionError("popup UI quality probe pipes were not created")
+    ready = read_line(probe.stdout, 5.0).decode(errors="replace").strip()
+    expected_dimensions = f"READY {client_width} {client_height} ROI="
+    if not ready.startswith(expected_dimensions):
+        stop_process(probe)
+        raise AssertionError(
+            f"popup UI quality probe geometry is wrong: {ready!r}; "
+            f"expected {client_width}x{client_height}")
+    if stimulus.stdout is None:
+        stop_process(probe)
+        raise AssertionError("popup stress stimulus stdout is unavailable")
+
+    click_x, click_y = map_source_point_to_client(
+        40, 1056, 1920, 1080, client_width, client_height)
+    latencies_ms: list[float] = []
+    stable_samples_total = 0
+    minimum_observed_contrast = 255
+    failure_artifact = artifact_dir / f"popup-ui-failure-{os.getpid()}.ppm"
+    reference_path = artifact_dir / "popup-ui-reference.ppm"
+    passing_frame_path = artifact_dir / "popup-ui-passing-frame.ppm"
+    summary_path = artifact_dir / "popup-ui-stress-summary.txt"
+    worst_quality = (-1.0, -1.0, -1.0, -1.0, -1, -1)
+    worst_quality_score = -1.0
+    source_events: list[str] = []
+
+    def fail(message: str) -> None:
+        failure_roi_artifact = failure_artifact.with_name(
+            f"{failure_artifact.stem}-last-sample.ppm")
+        single_line_message = " ".join(message.splitlines())
+        summary_lines = [
+            "XRDP_CONSOLE_POPUP_UI_STRESS",
+            "status=FAIL",
+            f"reason={single_line_message}",
+            f"source=1920x1080",
+            f"presentation={client_width}x{client_height}",
+            "background_fps=20",
+            "cpu_contention=1",
+            f"freshness_budget_ms={freshness_budget_ms:.0f}",
+            f"completed_cycles={len(latencies_ms)}",
+            "latencies_ms=" + ",".join(
+            f"{value:.1f}" for value in latencies_ms),
+            f"last_quality={worst_quality}",
+            f"failure_frame={failure_artifact}",
+            f"failure_roi={failure_roi_artifact}",
+            "source_events=" + " | ".join(source_events),
+        ]
+        try:
+            summary_path.write_text(
+                "\n".join(summary_lines) + "\n", encoding="utf-8")
+        except OSError:
+            pass
+
+        pending_command = getattr(
+            probe, "_xrdp_popup_pending_command", None)
+        pending_result = b""
+        can_dump = True
+        if pending_command is not None and probe.stdout is not None:
+            try:
+                pending_result = read_line(probe.stdout, 5.0)
+            except (AssertionError, OSError, ValueError):
+                pending_result = b""
+            if pending_result:
+                setattr(probe, "_xrdp_popup_pending_command", None)
+            else:
+                can_dump = False
+                stop_process(probe)
+        last_sample_artifact = failure_artifact.with_name(
+            f"popup-ui-failure-{os.getpid()}-last-sample.ppm")
+        if can_dump:
+            try:
+                last_sample_result = popup_probe_command(
+                    probe, f"dump-last {last_sample_artifact}", 5.0)
+            except (AssertionError, BrokenPipeError, OSError):
+                last_sample_result = b"DUMP_LAST_FAILED\n"
+            try:
+                dump_result = popup_probe_command(
+                    probe, f"dump {failure_artifact}", 5.0)
+            except (AssertionError, BrokenPipeError, OSError):
+                dump_result = b"DUMP_FAILED\n"
+        else:
+            last_sample_result = b"DUMP_SKIPPED_PENDING_PROBE_COMMAND\n"
+            dump_result = b"DUMP_SKIPPED_PENDING_PROBE_COMMAND\n"
+        raise AssertionError(
+            f"{message}\nremote framebuffer artifact: "
+            f"{dump_result.decode(errors='replace').strip()} "
+            f"{failure_artifact}\nlast sampled ROI: "
+            f"{last_sample_result.decode(errors='replace').strip()} "
+            f"{last_sample_artifact}\n"
+            f"late probe response to {pending_command!r}: "
+            f"{pending_result.decode(errors='replace').strip()}\n"
+            f"stress summary: {summary_path}\n[xrdp log]\n"
+            f"{xrdp_log_excerpt(log_path)}\n"
+            f"[popup stimulus events]\n{source_events}\n"
+            f"[xrdp stdout]\n{read_text(stdout_path)}\n"
+            f"[FreeRDP client]\n{read_text(client_log_path)}")
+
+    if not reference_path.is_file():
+        fail(f"source popup reference image is missing: {reference_path}")
+
+    def sample(timeout: float = 0.5
+               ) -> tuple[int, int, int, int, int, int, int, int]:
+        try:
+            line = popup_probe_command(probe, "sample", timeout)
+        except AssertionError as error:
+            late_line = b""
+            if probe.stdout is not None:
+                try:
+                    late_line = read_line(probe.stdout, 5.0)
+                except (OSError, ValueError):
+                    late_line = b""
+            if late_line:
+                setattr(probe, "_xrdp_popup_pending_command", None)
+                late_frame = parse_popup_probe_frame(late_line)
+                if late_frame is not None:
+                    return late_frame
+            fail(
+                f"popup framebuffer sample was not available within "
+                f"{timeout * 1000.0:.0f} ms: {error}; "
+                f"late sample={late_line.decode(errors='replace').strip()!r}")
+        parsed = parse_popup_probe_frame(line)
+        if parsed is None:
+            fail(f"popup quality probe returned malformed frame: {line!r}")
+        return parsed
+
+    def check_reference_quality(
+            cycle: int
+            ) -> tuple[bool, tuple[float, float, float, float, int, int]]:
+        nonlocal worst_quality, worst_quality_score
+        result = popup_probe_command(
+            probe, f"compare {reference_path}", 2.0)
+        match = re.fullmatch(
+            rb"QUALITY pixels=(\d+) mean_abs_rgb=([0-9.]+) "
+            rb"p95_max_channel=(\d+) outlier_pct=([0-9.]+) "
+            rb"max_block_mean_abs_rgb=([0-9.]+) max_block=(\d+),(\d+)\n",
+            result)
+        if match is None:
+            fail(
+                f"popup reference comparison failed at cycle={cycle}: "
+                f"{result!r}")
+        (pixels, mean_text, p95_text, outlier_text, block_text,
+         block_x_text, block_y_text) = match.groups()
+        pixels_count = int(pixels)
+        mean_error = float(mean_text)
+        p95_error = int(p95_text)
+        outlier_percent = float(outlier_text)
+        maximum_block_error = float(block_text)
+        quality = (mean_error, float(p95_error), maximum_block_error,
+                   outlier_percent, int(block_x_text), int(block_y_text))
+        within_limits = (
+            pixels_count >= 180_000 and mean_error <= 20.0 and
+            p95_error <= 96 and outlier_percent <= 10.0 and
+            maximum_block_error <= 50.0)
+        if not within_limits:
+            return False, quality
+        quality_score = max(
+            mean_error / 20.0, p95_error / 96.0,
+            outlier_percent / 10.0, maximum_block_error / 50.0)
+        if quality_score > worst_quality_score:
+            dump_result = popup_probe_command(
+                probe, f"dump-last {passing_frame_path}", 5.0)
+            if dump_result != b"DUMPED_LAST\n":
+                fail(
+                    f"could not retain a passing popup frame at cycle={cycle}: "
+                    f"{dump_result!r}")
+            worst_quality_score = quality_score
+            worst_quality = quality
+        return True, quality
+
+    def popup_frame_is_complete(
+            frame: tuple[int, int, int, int, int, int, int, int],
+            expected_generation: int) -> bool:
+        (_timestamp, generation, anchors, title_pixels, label_pixels,
+         stripe_transitions, stripe_contrast, application_text_mask) = frame
+        return (generation == expected_generation and anchors == 31 and
+                title_pixels >= 30 and label_pixels >= 60 and
+                stripe_transitions >= 9 and stripe_contrast >= 70 and
+                application_text_mask == 63)
+
+    def require_complete_menu(frame: tuple[int, int, int, int, int, int, int, int],
+                              expected_generation: int, cycle: int) -> None:
+        if not popup_frame_is_complete(frame, expected_generation):
+            (_timestamp, generation, anchors, title_pixels, label_pixels,
+             stripe_transitions, stripe_contrast, application_text_mask) = frame
+            fail(
+                "popup UI was incomplete, corrupted, or lacked edge/text "
+                f"detail at cycle={cycle}: generation={generation} "
+                f"expected={expected_generation} anchors=0x{anchors:02x} "
+                f"title_pixels={title_pixels} label_pixels={label_pixels} "
+                f"stripe_transitions={stripe_transitions} "
+                f"minimum_stripe_contrast={stripe_contrast} "
+                f"application_text_mask=0x{application_text_mask:02x}")
+
+    try:
+        for cycle in range(1, cycles + 1):
+            invocation_line = popup_probe_command(
+                probe, f"click {click_x} {click_y}", 2.0)
+            invocation_fields = invocation_line.split()
+            if len(invocation_fields) != 2 or invocation_fields[0] != b"INPUT":
+                fail(f"RDP taskbar click was not injected: {invocation_line!r}")
+            try:
+                invocation_ns = int(invocation_fields[1])
+            except ValueError:
+                fail(f"invalid launcher invocation timestamp: {invocation_line!r}")
+
+            remaining = max(
+                0.0, (invocation_ns + int(freshness_budget_ms * 1_000_000) -
+                      time.monotonic_ns()) / 1_000_000_000)
+            try:
+                source_event = read_line(
+                    stimulus.stdout, min(remaining, 1.0)).decode(
+                        "ascii", errors="replace").strip()
+            except (AssertionError, TimeoutError) as error:
+                fail(
+                    f"source launcher did not open a popup within the "
+                    f"freshness budget at cycle={cycle}: {error}")
+            source_events.append(source_event)
+            match = re.fullmatch(
+                r"POPUP OPEN generation=(\d+) source=pointer "
+                r"event_ns=(\d+) draw_done_ns=(\d+)", source_event)
+            if match is None:
+                fail(f"unexpected source popup event at cycle={cycle}: {source_event!r}")
+            generation, source_event_ns, source_draw_ns = (
+                int(match.group(index)) for index in (1, 2, 3))
+            expected_generation = (cycle - 1) % 255 + 1
+            if generation != expected_generation:
+                fail(
+                    f"source popup generation advanced unexpectedly at "
+                    f"cycle={cycle}: {source_event!r}")
+            if source_event_ns < invocation_ns or source_draw_ns < source_event_ns:
+                fail(f"popup source timestamps are not monotonic: {source_event!r}")
+
+            deadline_ns = invocation_ns + int(freshness_budget_ms * 1_000_000)
+            visible_frame = None
+            last_candidate_frame = None
+            last_reference_quality = None
+            while time.monotonic_ns() < deadline_ns:
+                remaining_seconds = max(
+                    0.01, (deadline_ns - time.monotonic_ns()) / 1_000_000_000)
+                frame = sample(min(0.75, remaining_seconds))
+                if frame[1] == expected_generation:
+                    last_candidate_frame = frame
+                if popup_frame_is_complete(frame, expected_generation):
+                    quality_complete, quality = check_reference_quality(cycle)
+                    last_reference_quality = quality
+                    if quality_complete:
+                        visible_frame = frame
+                        break
+            if visible_frame is None:
+                elapsed = (time.monotonic_ns() - invocation_ns) / 1_000_000
+                fail(
+                    f"popup generation {expected_generation} was not fully "
+                    f"visible within {freshness_budget_ms:.0f} ms at "
+                    f"cycle={cycle}; elapsed={elapsed:.1f} ms; "
+            f"last matching generation sample={last_candidate_frame}; "
+                    f"last source-reference quality="
+                    f"{last_reference_quality}")
+
+            visible_ns = visible_frame[0]
+            latency_ms = (visible_ns - invocation_ns) / 1_000_000
+            if latency_ms < 0 or latency_ms > freshness_budget_ms:
+                fail(
+                    f"popup visibility latency exceeded budget at "
+                    f"cycle={cycle}: {latency_ms:.1f} ms > "
+                    f"{freshness_budget_ms:.0f} ms")
+            latencies_ms.append(latency_ms)
+            minimum_observed_contrast = min(
+                minimum_observed_contrast, visible_frame[6])
+
+            # Keep the menu stationary while the background continues to
+            # animate. Every sample checks its generation, structure and text.
+            stable_deadline = time.monotonic() + 0.25
+            stable_samples = 0
+            while time.monotonic() < stable_deadline:
+                frame = sample(0.5)
+                require_complete_menu(frame, expected_generation, cycle)
+                stable_samples += 1
+                time.sleep(0.015)
+            if stable_samples < 4:
+                fail(
+                    f"popup stayed valid for too few client samples at "
+                    f"cycle={cycle}: {stable_samples}")
+            stable_samples_total += stable_samples
+            stable_quality, stable_quality_values = check_reference_quality(
+                cycle)
+            if not stable_quality:
+                fail(
+                    "popup pixels became inconsistent with the source "
+                    f"reference during the stability window at cycle={cycle}: "
+                    f"{stable_quality_values}")
+
+            close_line = popup_probe_command(
+                probe, f"click {click_x} {click_y}", 2.0)
+            close_fields = close_line.split()
+            if len(close_fields) != 2 or close_fields[0] != b"INPUT":
+                fail(f"RDP taskbar close click was not injected: {close_line!r}")
+            try:
+                close_ns = int(close_fields[1])
+            except ValueError:
+                fail(f"invalid launcher close timestamp: {close_line!r}")
+            try:
+                close_event = read_line(stimulus.stdout, 1.0).decode(
+                    "ascii", errors="replace").strip()
+            except (AssertionError, TimeoutError) as error:
+                fail(f"source launcher did not close popup: {error}")
+            source_events.append(close_event)
+            close_match = re.fullmatch(
+                r"POPUP CLOSED source=pointer event_ns=(\d+) "
+                r"draw_done_ns=(\d+)", close_event)
+            if close_match is None:
+                fail(f"unexpected popup close event: {close_event!r}")
+            close_event_ns, close_draw_ns = (
+                int(close_match.group(index)) for index in (1, 2))
+            if close_event_ns < close_ns or close_draw_ns < close_event_ns:
+                fail(f"popup close timestamps are not monotonic: {close_event!r}")
+
+            close_deadline = close_ns + 1_000_000_000
+            consecutive_hidden_samples = 0
+            hidden_since_ns: int | None = None
+            while time.monotonic_ns() < close_deadline:
+                frame = sample(min(
+                    0.75, max(0.01,
+                              (close_deadline - time.monotonic_ns()) /
+                              1_000_000_000)))
+                if (frame[1] != expected_generation or frame[2] != 31 or
+                        frame[3] < 30 or frame[4] < 60 or frame[5] < 9 or
+                        frame[6] < 70 or frame[7] != 63):
+                    if consecutive_hidden_samples == 0:
+                        hidden_since_ns = frame[0]
+                    consecutive_hidden_samples += 1
+                else:
+                    consecutive_hidden_samples = 0
+                    hidden_since_ns = None
+                if (consecutive_hidden_samples >= 2 and hidden_since_ns is not None and
+                        frame[0] - hidden_since_ns >= 50_000_000):
+                    break
+            else:
+                fail(
+                    f"closed popup remained visible for one second at "
+                    f"cycle={cycle}")
+
+            if client.poll() is not None:
+                fail(f"FreeRDP disconnected during popup stress at cycle={cycle}")
+
+        ordered = sorted(latencies_ms)
+        p95 = ordered[min(len(ordered) - 1,
+                          (95 * len(ordered) + 99) // 100 - 1)]
+        maximum = max(latencies_ms)
+        print(
+            "XRDP_CONSOLE_POPUP_UI_STRESS "
+            f"cycles={cycles} source=1920x1080 "
+            f"presentation={client_width}x{client_height} "
+            f"background_fps=20 cpu_contention=1 "
+            f"latency_p50_ms={statistics.median(latencies_ms):.1f} "
+            f"latency_p95_ms={p95:.1f} latency_max_ms={maximum:.1f} "
+            f"budget_ms={freshness_budget_ms:.0f} "
+            f"stable_samples={stable_samples_total} "
+            f"minimum_edge_contrast={minimum_observed_contrast} "
+            f"reference_mean_abs_rgb={worst_quality[0]:.3f} "
+            f"reference_p95_max_channel={worst_quality[1]:.0f} "
+            f"reference_max_block_mean_abs_rgb={worst_quality[2]:.3f} "
+            f"reference_outlier_pct={worst_quality[3]:.3f} "
+            f"passing_frame={passing_frame_path}")
+        summary = artifact_dir / "popup-ui-stress-summary.txt"
+        summary.write_text(
+            "XRDP_CONSOLE_POPUP_UI_STRESS\n"
+            f"cycles={cycles}\n"
+            "source=1920x1080\n"
+            f"presentation={client_width}x{client_height}\n"
+            "background_fps=20\n"
+            "cpu_contention=1\n"
+            f"latency_p50_ms={statistics.median(latencies_ms):.1f}\n"
+            f"latency_p95_ms={p95:.1f}\n"
+            f"latency_max_ms={maximum:.1f}\n"
+            f"freshness_budget_ms={freshness_budget_ms:.0f}\n"
+            f"stable_samples={stable_samples_total}\n"
+            f"minimum_edge_contrast={minimum_observed_contrast}\n"
+            f"worst_reference_mean_abs_rgb={worst_quality[0]:.3f}\n"
+            f"worst_reference_p95_max_channel={worst_quality[1]:.0f}\n"
+            f"worst_reference_max_block_mean_abs_rgb="
+            f"{worst_quality[2]:.3f}\n"
+            f"worst_reference_outlier_pct={worst_quality[3]:.3f}\n"
+            f"passing_frame={passing_frame_path}\n"
+            f"reference_frame={reference_path}\n"
+            "failed_quality_samples=0\n",
+            encoding="utf-8")
+        assert_client_stays_connected(
+            client, client_display, window_title, client_log_path,
+            log_path, stdout_path)
+    finally:
+        if probe.stdin is not None:
+            try:
+                probe.stdin.write(b"quit\n")
+                probe.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+        stop_process(probe)
+
+
 def set_single_cpu_affinity() -> None:
     """Pin this test and its children to one CPU for repeatable contention."""
     if not hasattr(os, "sched_getaffinity") or not hasattr(os, "sched_setaffinity"):
@@ -4971,6 +5453,7 @@ def main() -> int:
     coherence_mode = False
     fullhd_source_mode = False
     narrow_source_mode = False
+    popup_ui_stress_mode = False
     randr_resize_mode = False
     randr_resize_dynamic_resolution = False
     cpu_contention = False
@@ -5107,6 +5590,7 @@ def main() -> int:
         "--gfx-planar", "--gfx-h264",
         "--gfx-h264-coherence", "--gfx-h264-fullhd",
         "--gfx-h264-narrow-source",
+        "--gfx-h264-popup-ui-stress",
         "--gfx-h264-randr-resize",
         "--gfx-h264-randr-resize-no-dynamic-resolution")
                     if option in arguments]
@@ -5122,8 +5606,11 @@ def main() -> int:
         gfx_h264_mode = selected_mode in (
             "--gfx-h264", "--gfx-h264-coherence", "--gfx-h264-fullhd",
             "--gfx-h264-narrow-source",
+            "--gfx-h264-popup-ui-stress",
             "--gfx-h264-randr-resize",
             "--gfx-h264-randr-resize-no-dynamic-resolution")
+        popup_ui_stress_mode = (
+            selected_mode == "--gfx-h264-popup-ui-stress")
         coherence_mode = selected_mode == "--gfx-h264-coherence"
         fullhd_source_mode = selected_mode in (
             "--rfx-fullhd", "--classic-fullhd-source",
@@ -5141,12 +5628,13 @@ def main() -> int:
         arguments.remove("--cpu-contention")
         cpu_contention = True
     if cpu_contention and not (
-            coherence_mode or narrow_source_mode or fullhd_source_mode):
+            coherence_mode or narrow_source_mode or fullhd_source_mode or
+            popup_ui_stress_mode):
         raise SystemExit(
             "--cpu-contention requires an H.264 coherence, Full HD, or "
-            "narrow-source test")
+            "narrow-source or popup UI stress test")
     full_screen_update_mode = narrow_source_mode or (
-        cpu_contention and fullhd_source_mode)
+        cpu_contention and (fullhd_source_mode or popup_ui_stress_mode))
 
     if clipboard_enabled:
         expected_argument_count = 8 if clipboard_peer_mode else 7
@@ -5237,10 +5725,12 @@ def main() -> int:
                 file=sys.stderr)
             return 1
     source_width = (
+        1920 if popup_ui_stress_mode else
         COHERENCE_SOURCE_WIDTH if coherence_mode else
         1366 if narrow_source_mode else
         1920 if fullhd_source_mode else 1024)
     source_height = (
+        1080 if popup_ui_stress_mode else
         COHERENCE_SOURCE_HEIGHT if coherence_mode else
         768 if narrow_source_mode else
         1080 if fullhd_source_mode else 768)
@@ -5350,12 +5840,29 @@ password=smoke
             # Create/map the source window before the module connects and
             # installs root XDamage. This excludes map/expose churn from the
             # sparse-rectangle acceptance assertion.
-            stimulus = start_stimulus(
-                stimulus_path, source_display, os.environ.copy(),
-                coherence_mode=coherence_mode,
-                full_screen_size=(source_width, source_height)
-                if full_screen_update_mode else None)
-            if cpu_contention and fullhd_source_mode:
+            if popup_ui_stress_mode:
+                popup_artifact_dir = Path(os.environ.get(
+                    "XRDP_CONSOLE_TEST_ARTIFACT_DIR",
+                    str(Path.cwd() / "test-artifacts" / "popup-ui-stress")))
+                popup_artifact_dir.mkdir(parents=True, exist_ok=True)
+                for stale_name in (
+                        "popup-ui-reference.ppm", "popup-ui-passing-frame.ppm",
+                        "popup-ui-stress-summary.txt"):
+                    stale_path = popup_artifact_dir / stale_name
+                    if stale_path.exists():
+                        stale_path.unlink()
+                popup_environment = os.environ.copy()
+                popup_environment["XRDP_CONSOLE_POPUP_REFERENCE"] = str(
+                    popup_artifact_dir / "popup-ui-reference.ppm")
+                stimulus = start_popup_ui_stimulus(
+                    stimulus_path, source_display, popup_environment)
+            else:
+                stimulus = start_stimulus(
+                    stimulus_path, source_display, os.environ.copy(),
+                    coherence_mode=coherence_mode,
+                    full_screen_size=(source_width, source_height)
+                    if full_screen_update_mode else None)
+            if cpu_contention and (fullhd_source_mode or popup_ui_stress_mode):
                 startup_cpu_spinner = subprocess.Popen(
                     [sys.executable, "-c", "while True: pass"],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -5615,6 +6122,11 @@ password=smoke
                                 server, log_path,
                                 "source=1920x1080 presentation=1512x949",
                                 4.0, stdout_path, client_log_path)
+                        if popup_ui_stress_mode:
+                            wait_for_log(
+                                server, log_path,
+                                "source=1920x1080 presentation=1512x949",
+                                4.0, stdout_path, client_log_path)
                         if narrow_source_mode:
                             wait_for_log(
                                 server, log_path,
@@ -5625,6 +6137,16 @@ password=smoke
                             client, client_log_path, "PEER_CONNECTED", 10.0)
                         assert_peer_initialization_sequence(
                             client, client_log_path, 10.0)
+                    elif popup_ui_stress_mode:
+                        assert_popup_ui_stress_session(
+                            client, os.environ["DISPLAY"], window_title,
+                            pixel_probe, stimulus, client_log_path, log_path,
+                            stdout_path,
+                            Path(os.environ.get(
+                                "XRDP_CONSOLE_TEST_ARTIFACT_DIR",
+                                str(Path.cwd() / "test-artifacts" /
+                                    "popup-ui-stress"))),
+                            presentation_width, presentation_height)
                     elif coherence_mode:
                         assert_client_frame_coherence(
                             os.environ["DISPLAY"], stimulus, window_title,

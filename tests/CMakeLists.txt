@@ -802,6 +802,7 @@ if(TARGET xrdp-console)
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(TEST_X11 REQUIRED IMPORTED_TARGET x11)
         pkg_check_modules(TEST_PNG REQUIRED IMPORTED_TARGET libpng)
+        pkg_check_modules(TEST_XTEST REQUIRED IMPORTED_TARGET xtst)
 
         get_filename_component(FREERDP_TEST_BIN_DIR
             "${XRDP_CONSOLE_FREERDP_EXECUTABLE}" DIRECTORY)
@@ -825,6 +826,24 @@ if(TARGET xrdp-console)
             PkgConfig::TEST_X11)
         target_compile_options(x11-frame-coherence-probe PRIVATE
             -Wall -Wextra -Wpedantic -Werror)
+
+        add_executable(x11-popup-menu-stress
+            helpers/x11_popup_menu_stress.c)
+        target_include_directories(x11-popup-menu-stress PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/helpers)
+        target_link_libraries(x11-popup-menu-stress PRIVATE
+            PkgConfig::TEST_X11)
+        target_compile_options(x11-popup-menu-stress PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror)
+
+        add_executable(x11-popup-ui-probe
+            helpers/x11_popup_ui_probe.c)
+        target_include_directories(x11-popup-ui-probe PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/helpers)
+        target_link_libraries(x11-popup-ui-probe PRIVATE
+            PkgConfig::TEST_X11 PkgConfig::TEST_XTEST)
+        target_compile_options(x11-popup-ui-probe PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror)
 
         add_executable(clipboard-x11-session-peer
             helpers/clipboard_x11_session_peer.c)
@@ -1525,6 +1544,23 @@ if(TARGET xrdp-console)
             RESOURCE_LOCK xrdp_console_loader_display
             RUN_SERIAL TRUE
             LABELS "h264;latency;integration")
+        add_test(NAME xrdp-loader-gfx-h264-popup-ui-stress
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-popup-ui-probe>
+            $<TARGET_FILE:x11-popup-menu-stress>
+            1512 949 --cpu-contention --gfx-h264-popup-ui-stress)
+        set_tests_properties(xrdp-loader-gfx-h264-popup-ui-stress PROPERTIES
+            ENVIRONMENT
+                "PYTHONDONTWRITEBYTECODE=1;XRDP_CONSOLE_PROFILE=1;XRDP_CONSOLE_TEST_ARTIFACT_DIR=${CMAKE_BINARY_DIR}/test-artifacts/xrdp-loader-gfx-h264-popup-ui-stress"
+            TIMEOUT 240
+            RESOURCE_LOCK xrdp_console_loader_display
+            RUN_SERIAL TRUE
+            LABELS "h264;latency;integration;stress")
         add_test(NAME xrdp-loader-gfx-h264-narrow-source-smoke
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
