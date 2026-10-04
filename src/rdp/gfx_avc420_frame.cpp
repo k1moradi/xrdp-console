@@ -98,11 +98,17 @@ convertFourBgraPixelsSsse3(const std::uint8_t *source) noexcept
         _mm_setr_epi8(2, -1, 6, -1, 10, -1, 14, -1,
                       -1, -1, -1, -1, -1, -1, -1, -1));
 
-    __m128i y = _mm_add_epi16(
-        _mm_add_epi16(_mm_mullo_epi16(red16, _mm_set1_epi16(54)),
-                      _mm_mullo_epi16(green16, _mm_set1_epi16(183))),
-        _mm_mullo_epi16(blue16, _mm_set1_epi16(18)));
-    y = _mm_srli_epi16(y, 8);
+    // 54R + 183G + 18B = 256G + 54R - 73G + 18B. The signed
+    // intermediate stays in int16 range, so SSSE3 pairwise multiply-add and
+    // arithmetic shift preserve the scalar floor division, including for
+    // negative intermediates.
+    const __m128i lumaCoefficients =
+        _mm_setr_epi8(18, -73, 54, 0, 18, -73, 54, 0,
+                      18, -73, 54, 0, 18, -73, 54, 0);
+    const __m128i lumaPairSums =
+        _mm_maddubs_epi16(pixels, lumaCoefficients);
+    const __m128i lumaTerms = _mm_hadd_epi16(lumaPairSums, zero);
+    __m128i y = _mm_add_epi16(_mm_srai_epi16(lumaTerms, 8), green16);
 
     __m128i u = _mm_add_epi16(
         _mm_add_epi16(_mm_mullo_epi16(red16, _mm_set1_epi16(-29)),
