@@ -274,6 +274,10 @@ def wait_for_owner_marker(owner: subprocess.Popen[bytes], marker: str,
                           timeout: float, owner_log_path: Path) -> str:
     if owner.stdout is None:
         raise AssertionError("clipboard owner stdout was not created")
+    observed_lines = getattr(owner, "_xrdp_clipboard_owner_lines", None)
+    if observed_lines is None:
+        observed_lines = []
+        setattr(owner, "_xrdp_clipboard_owner_lines", observed_lines)
     deadline = time.monotonic() + timeout
     observed: list[str] = []
     while time.monotonic() < deadline:
@@ -284,11 +288,57 @@ def wait_for_owner_marker(owner: subprocess.Popen[bytes], marker: str,
             continue
         decoded = line.decode("utf-8", errors="replace").strip()
         observed.append(decoded)
+        observed_lines.append(decoded)
         if marker in decoded:
             return decoded
     raise AssertionError(
         f"clipboard owner did not report {marker!r}; observed={observed}:\n"
         f"{read_text(owner_log_path)}")
+
+
+def wait_for_owner_marker_occurrence(owner: subprocess.Popen[bytes],
+                                     marker: str, occurrence: int,
+                                     timeout: float,
+                                     owner_log_path: Path) -> str:
+    if occurrence < 1:
+        raise ValueError("owner marker occurrence must be positive")
+    if owner.stdout is None:
+        raise AssertionError("clipboard owner stdout was not created")
+    observed_lines = getattr(owner, "_xrdp_clipboard_owner_lines", None)
+    if observed_lines is None:
+        observed_lines = []
+        setattr(owner, "_xrdp_clipboard_owner_lines", observed_lines)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        matches = [line for line in observed_lines if marker in line]
+        if len(matches) >= occurrence:
+            return matches[occurrence - 1]
+        if owner.poll() is not None:
+            break
+        line = read_line(owner.stdout, min(0.1, deadline - time.monotonic()))
+        if line:
+            observed_lines.append(line.decode("utf-8", errors="replace").strip())
+    raise AssertionError(
+        f"clipboard owner did not report {marker!r} occurrence {occurrence}; "
+        f"observed={[line for line in observed_lines if marker in line]}\n"
+        f"{read_text(owner_log_path)}")
+
+
+def wait_for_log_pattern_occurrence(
+        process: subprocess.Popen[object], log_path: Path, pattern: str,
+        occurrence: int, timeout: float, boundary: str) -> str:
+    deadline = time.monotonic() + timeout
+    expression = re.compile(pattern, re.MULTILINE)
+    while time.monotonic() < deadline:
+        text = read_text(log_path)
+        if len(expression.findall(text)) >= occurrence:
+            return text
+        if process.poll() is not None:
+            break
+        time.sleep(0.025)
+    raise AssertionError(
+        f"clipboard protocol boundary missing: {boundary}; expected "
+        f"occurrence {occurrence} of {pattern!r}\n{read_text(log_path)}")
 
 
 def start_clipboard_requestor(helper: Path, display: str, target: str,
@@ -508,21 +558,72 @@ def assert_clipboard_image_session(
     if owner.stdin is None:
         raise AssertionError("clipboard owner stdin was not created")
 
+    # Drain all owner-side X requests that were already queued before testing
+    # this deliberate owner transition. The marker is emitted only after the
+    # helper has flushed its X connection and serviced the resulting events.
+    owner.stdin.write(b"barrier\n")
+    owner.stdin.flush()
+    wait_for_owner_marker(owner, "OWNER_BARRIER", 5.0, owner_log_path)
+
+    owner_lines = getattr(owner, "_xrdp_clipboard_owner_lines", [])
+    targets_responses_before = sum(
+        line.startswith("TARGETS_RESPONSE_SENT") for line in owner_lines)
+    client_targets_notifies_before = len(re.findall(
+        r"got event SelectionNotify \[selection CLIPBOARD, target TARGETS,",
+        read_text(client_log_path)))
+    client_dib_lists_before = len(re.findall(
+        r"\[\d+\]: id=0x00000008 \[CF_DIB\|",
+        read_text(client_log_path)))
+    vc_format_lists_before = len(re.findall(
+        r"event=cliprdr-first-fragment "
+        r"direction=client-to-server [^\n]*msg_type=2",
+        read_text(log_path)))
     formats_before_reannounce = clipboard_format_list_count(chansrv_logs)
+    chansrv_lines_before_reannounce = len(
+        chansrv_log_text(chansrv_logs).splitlines())
     owner.stdin.write(b"reannounce-image\n")
     owner.stdin.flush()
+    wait_for_owner_marker(owner, "OWNER_REANNOUNCE_STEP step=clear", 5.0,
+                          owner_log_path)
+    wait_for_owner_marker(owner, "OWNER_REANNOUNCE_STEP step=image", 5.0,
+                          owner_log_path)
     wait_for_owner_marker(owner, "IMAGE_OWNER_REANNOUNCED", 5.0,
                           owner_log_path)
+
+    # Follow the clipboard transition boundary by boundary. In particular,
+    # the owner marker proves only that the X11 helper changed the owner; a
+    # subsequent TARGETS response proves that FreeRDP noticed and queried it.
+    wait_for_owner_marker_occurrence(
+        owner, "TARGETS_RESPONSE_SENT", targets_responses_before + 1,
+        10.0, owner_log_path)
+    wait_for_log_pattern_occurrence(
+        client, client_log_path,
+        r"got event SelectionNotify \[selection CLIPBOARD, target TARGETS,",
+        client_targets_notifies_before + 1, 10.0,
+        "FreeRDP received the owner's TARGETS SelectionNotify")
+    wait_for_log_pattern_occurrence(
+        client, client_log_path,
+        r"\[\d+\]: id=0x00000008 \[CF_DIB\|",
+        client_dib_lists_before + 1, 10.0,
+        "FreeRDP constructed a client Format List containing CF_DIB")
+    wait_for_log_pattern_occurrence(
+        client, log_path,
+        r"event=cliprdr-first-fragment "
+        r"direction=client-to-server [^\n]*msg_type=2",
+        vc_format_lists_before + 1, 10.0,
+        "xrdp received client-to-server CB_FORMAT_LIST (msgType=2)")
     wait_for_chansrv_marker(
         chansrv_logs, "event=format-list", formats_before_reannounce + 1,
         10.0, chansrv_process, chansrv_stdout)
     try:
-        first_list = wait_for_chansrv_pattern(
-            chansrv_logs, r"event=format-list[^\n]*dib_format_id=8", 10.0,
-            chansrv_process, chansrv_stdout)
+        first_list = wait_for_chansrv_pattern_after_lines(
+            chansrv_logs, r"event=format-list[^\n]*dib_format_id=8",
+            chansrv_lines_before_reannounce,
+            10.0, chansrv_process, chansrv_stdout)
     except AssertionError as error:
         raise AssertionError(
-            "FreeRDP did not advertise the synthetic CF_DIB clipboard image:\n"
+            "chansrv received the client Format List but did not parse the "
+            "synthetic CF_DIB offer:\n"
             f"{chansrv_log_text(chansrv_logs)}\n"
             f"[FreeRDP client]\n{read_text(client_log_path)}") from error
 
@@ -4103,6 +4204,13 @@ password=smoke
                     "/timeout:5000",
                     "/log-level:WARN",
                 ]
+                if clipboard_stress_mode:
+                    # Keep diagnostics narrow enough for CTest artifacts while
+                    # exposing FreeRDP's X11 selection handoff and the exact
+                    # CLIPRDR Format List it builds from TARGETS.
+                    client_command.append(
+                        "/log-filters:com.freerdp.client.x11.cliprdr:TRACE,"
+                        "com.freerdp.channels.cliprdr.client:DEBUG")
                 client_command.append(
                     "+clipboard" if clipboard_enabled else "-clipboard")
                 if rfx_mode:

@@ -640,7 +640,8 @@ handle_selection_request(Display *display,
                          const unsigned char *bitmap,
                          size_t bitmap_length,
                          struct image_transfer *transfer,
-                         int text_generation)
+                         int text_generation,
+                         unsigned int owner_generation)
 {
     Atom property = request->property == None ? request->target :
                     request->property;
@@ -677,6 +678,13 @@ handle_selection_request(Display *display,
         XChangeProperty(display, request->requestor, property, XA_ATOM, 32,
                         PropModeReplace, (unsigned char *)supported, count);
         send_selection_notify(display, request, property);
+        printf("TARGETS_RESPONSE_SENT requestor=0x%lx owner=0x%lx "
+               "owner_generation=%u text_generation=%d count=%d "
+               "offers_image=%d\n",
+               request->requestor, request->owner,
+               owner_generation, text_generation, count,
+               request->owner == image_owner && !text_generation);
+        fflush(stdout);
         return;
     }
 
@@ -757,6 +765,7 @@ run_owner(const char *named_png_path)
     const int named_png_mode = named_png_path != NULL;
     struct image_transfer transfer = {0};
     int text_generation = 0;
+    unsigned int owner_generation = 1U;
     int x_fd;
 
     if (display == NULL)
@@ -843,6 +852,7 @@ run_owner(const char *named_png_path)
     {
         struct pollfd descriptors[2];
         int poll_result;
+        int emit_barrier = 0;
 
         descriptors[0].fd = x_fd;
         descriptors[0].events = POLLIN;
@@ -870,13 +880,38 @@ run_owner(const char *named_png_path)
             if (strncmp(command, "reannounce-image", 16) == 0 &&
                 !text_generation)
             {
+                const Window old_owner = XGetSelectionOwner(display, clipboard);
                 XSetSelectionOwner(display, clipboard, None, CurrentTime);
                 XSync(display, False);
+                const Window empty_owner = XGetSelectionOwner(display, clipboard);
+                printf("OWNER_REANNOUNCE_STEP step=clear old=0x%lx observed=0x%lx\n",
+                       old_owner, empty_owner);
+                fflush(stdout);
+                if (old_owner != image_owner || empty_owner != None)
+                {
+                    fputs("OWNER_REANNOUNCE_FAILED step=clear\n", stderr);
+                    return 1;
+                }
                 XSetSelectionOwner(display, clipboard, image_owner,
                                    CurrentTime);
                 XSync(display, False);
+                const Window new_owner = XGetSelectionOwner(display, clipboard);
+                printf("OWNER_REANNOUNCE_STEP step=image expected=0x%lx "
+                       "observed=0x%lx\n", image_owner, new_owner);
+                fflush(stdout);
+                if (new_owner != image_owner)
+                {
+                    fputs("OWNER_REANNOUNCE_FAILED step=image\n", stderr);
+                    return 1;
+                }
+                ++owner_generation;
                 puts("IMAGE_OWNER_REANNOUNCED");
                 fflush(stdout);
+            }
+            else if (strncmp(command, "barrier", 7) == 0)
+            {
+                XSync(display, False);
+                emit_barrier = 1;
             }
             else if (strncmp(command, "switch-text", 11) == 0 && !text_generation)
             {
@@ -923,7 +958,7 @@ run_owner(const char *named_png_path)
                         display, &event.xselectionrequest, image_owner,
                         text_owner, clipboard, targets, utf8, image_bmp,
                         image_png, incr, bitmap, bitmap_length, &transfer,
-                        text_generation);
+                        text_generation, owner_generation);
                 }
             }
             else if (event.type == PropertyNotify && transfer.active &&
@@ -977,6 +1012,12 @@ run_owner(const char *named_png_path)
                     XFlush(display);
                 }
             }
+        }
+
+        if (emit_barrier)
+        {
+            puts("OWNER_BARRIER");
+            fflush(stdout);
         }
     }
 
