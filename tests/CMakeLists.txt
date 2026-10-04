@@ -825,6 +825,33 @@ if(TARGET xrdp-console)
         set_tests_properties(clipboard-png-validator-unit PROPERTIES
             LABELS "clipboard;unit")
 
+        find_program(XVFB_EXECUTABLE NAMES Xvfb)
+        if(XVFB_EXECUTABLE)
+            list(APPEND PYTHON_SOURCES
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_clipboard_x11_owner_delay.py)
+            add_test(NAME clipboard-png-owner-prenotify-delay
+                COMMAND ${Python3_EXECUTABLE} -B
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_clipboard_x11_owner_delay.py
+                $<TARGET_FILE:clipboard-x11-session-peer>
+                "${XVFB_EXECUTABLE}")
+            set_tests_properties(clipboard-png-owner-prenotify-delay
+                PROPERTIES
+                ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+                TIMEOUT 20
+                LABELS "clipboard;integration")
+            add_test(NAME clipboard-png-owner-firstchunk-delay
+                COMMAND ${Python3_EXECUTABLE} -B
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_clipboard_x11_owner_delay.py
+                $<TARGET_FILE:clipboard-x11-session-peer>
+                "${XVFB_EXECUTABLE}"
+                - 500 after-notify)
+            set_tests_properties(clipboard-png-owner-firstchunk-delay
+                PROPERTIES
+                ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+                TIMEOUT 20
+                LABELS "clipboard;integration")
+        endif()
+
         if(TARGET freerdp-client)
             add_executable(freerdp-cliprdr-overlap-peer
                 helpers/freerdp_cliprdr_overlap_peer.cpp)

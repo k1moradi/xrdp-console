@@ -48,14 +48,6 @@ index 70b0b94..516697b 100644
              }
              else
              {
-@@ -81,6 +106,7 @@ static void clipboard_drain_image_waiters(void);
-         g_image_incr_terminator_pending = 0;
-         g_image_incr_terminator_window = 0;
-         g_image_incr_terminator_property = None;
-+        g_image_incr_terminator_generation = 0;
-         XSelectInput(xevent->xproperty.display, xevent->xproperty.window,
-                      NoEventMask);
-         clipboard_drain_image_waiters();
 diff --git a/sesman/chansrv/clipboard_image_waiters.h b/sesman/chansrv/clipboard_image_waiters.h
 index 5e8d546..8492e60 100644
 --- a/sesman/chansrv/clipboard_image_waiters.h

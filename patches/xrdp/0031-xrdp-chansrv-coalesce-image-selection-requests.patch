@@ -62,7 +62,7 @@ index c399134..99faed4 100644
      if (g_wnd != 0)
      {
          XDestroyWindow(g_display, g_wnd);
-@@ -988,6 +1014,142 @@ clipboard_refuse_selection(XSelectionRequestEvent *req)
+@@ -988,6 +1014,162 @@ clipboard_refuse_selection(XSelectionRequestEvent *req)
      return 0;
  }
  
@@ -81,6 +81,22 @@ index c399134..99faed4 100644
 +}
 +
 +static void
++clipboard_release_image_requestor_events(Window requestor)
++{
++    if (requestor == None ||
++            (g_clip_c2s.incr_in_progress &&
++             g_clip_c2s.window == requestor) ||
++            (g_image_incr_terminator_pending &&
++             g_image_incr_terminator_window == requestor) ||
++            clipboard_image_waiters_contains_requestor(&g_image_waiters,
++                                                        requestor))
++    {
++        return;
++    }
++    XSelectInput(g_display, requestor, NoEventMask);
++}
++
++static void
 +clipboard_refuse_image_waiters(void)
 +{
 +    XSelectionRequestEvent event;
@@ -88,6 +104,7 @@ index c399134..99faed4 100644
 +    while (clipboard_image_waiters_take(&g_image_waiters, &event))
 +    {
 +        clipboard_refuse_selection(&event);
++        clipboard_release_image_requestor_events(event.requestor);
 +    }
 +}
 +
@@ -101,6 +118,8 @@ index c399134..99faed4 100644
 +                                         format_generation);
 +    if (result == CLIPBOARD_IMAGE_WAITER_ADDED)
 +    {
++        XSelectInput(g_display, event->requestor,
++                     PropertyChangeMask | StructureNotifyMask);
 +        LOG(LOG_LEVEL_INFO,
 +            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=request-coalesced target=%s "
 +            "waiters=%u",
@@ -162,6 +181,7 @@ index c399134..99faed4 100644
 +            clipboard_image_target_name(event.target),
 +            (unsigned int)g_image_waiters.count);
 +        clipboard_provide_selection_c2s(&event, event.target);
++        clipboard_release_image_requestor_events(event.requestor);
 +    }
 +}
 +
@@ -535,8 +555,8 @@ index c399134..99faed4 100644
 +        g_image_incr_terminator_pending = 0;
 +        g_image_incr_terminator_window = 0;
 +        g_image_incr_terminator_property = None;
-+        XSelectInput(xevent->xproperty.display, xevent->xproperty.window,
-+                     NoEventMask);
++        clipboard_release_image_requestor_events(
++            xevent->xproperty.window);
 +        clipboard_drain_image_waiters();
 +    }
      if (g_clip_s2c.incr_in_progress &&
@@ -547,7 +567,7 @@ new file mode 100644
 index 0000000..110c0f5
 --- /dev/null
 +++ b/sesman/chansrv/clipboard_image_waiters.h
-@@ -0,0 +1,116 @@
+@@ -0,0 +1,171 @@
 +/* Bounded storage for duplicate X11 image selection requests. */
 +
 +#ifndef CLIPBOARD_IMAGE_WAITERS_H
@@ -661,6 +681,61 @@ index 0000000..110c0f5
 +        clipboard_image_waiters_clear(waiters);
 +    }
 +    return 1;
++}
++
++static inline int
++clipboard_image_waiters_contains_requestor(
++    const struct clipboard_image_waiters *waiters, Window requestor)
++{
++    size_t index;
++
++    if (waiters == NULL || requestor == None)
++    {
++        return 0;
++    }
++    for (index = 0; index < waiters->count; ++index)
++    {
++        if (waiters->events[index].requestor == requestor)
++        {
++            return 1;
++        }
++    }
++    return 0;
++}
++
++static inline size_t
++clipboard_image_waiters_remove_requestor(
++    struct clipboard_image_waiters *waiters, Window requestor)
++{
++    size_t read_index;
++    size_t write_index = 0;
++    size_t removed = 0;
++
++    if (waiters == NULL || requestor == None)
++    {
++        return 0;
++    }
++    for (read_index = 0; read_index < waiters->count; ++read_index)
++    {
++        if (waiters->events[read_index].requestor == requestor)
++        {
++            ++removed;
++        }
++        else
++        {
++            if (write_index != read_index)
++            {
++                waiters->events[write_index] = waiters->events[read_index];
++            }
++            ++write_index;
++        }
++    }
++    waiters->count = write_index;
++    if (write_index == 0)
++    {
++        clipboard_image_waiters_clear(waiters);
++    }
++    return removed;
 +}
 +
 +#endif /* CLIPBOARD_IMAGE_WAITERS_H */

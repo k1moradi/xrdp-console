@@ -250,6 +250,26 @@ def wait_for_chansrv_pattern(log_directory: Path, pattern: str,
         f"[chansrv stdout]\n{read_text(stdout_path)}")
 
 
+def wait_for_chansrv_pattern_after_lines(
+        log_directory: Path, pattern: str, first_new_line: int,
+        timeout: float, process: subprocess.Popen[object],
+        stdout_path: Path) -> str:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        lines = chansrv_log_text(log_directory).splitlines()
+        new_text = "\n".join(lines[first_new_line:])
+        if re.search(pattern, new_text, re.MULTILINE) is not None:
+            return new_text
+        if process.poll() is not None:
+            break
+        time.sleep(0.025)
+    lines = chansrv_log_text(log_directory).splitlines()
+    new_text = "\n".join(lines[first_new_line:])
+    raise AssertionError(
+        f"xrdp-chansrv did not log a new line matching {pattern!r}:\n"
+        f"{new_text}\n[chansrv stdout]\n{read_text(stdout_path)}")
+
+
 def wait_for_owner_marker(owner: subprocess.Popen[bytes], marker: str,
                           timeout: float, owner_log_path: Path) -> str:
     if owner.stdout is None:
@@ -315,6 +335,22 @@ def clipboard_selection_owner(helper: Path, display: str) -> str:
     if match is None:
         raise AssertionError(f"invalid selection-owner result: {result.stdout!r}")
     return match.group(1).lower()
+
+
+def clipboard_window_exists(helper: Path, display: str, window_id: str) -> bool:
+    environment = os.environ.copy()
+    environment["DISPLAY"] = display
+    result = subprocess.run(
+        [str(helper), "window-exists", window_id], env=environment,
+        capture_output=True, check=False, timeout=3.0, text=True)
+    if result.returncode != 0:
+        raise AssertionError(
+            "could not query X11 requestor window: "
+            f"{result.stdout}{result.stderr}")
+    match = re.search(r"WINDOW_EXISTS=([01]) error_code=(\d+)", result.stdout)
+    if match is None:
+        raise AssertionError(f"invalid X11 window query: {result.stdout!r}")
+    return match.group(1) == "1"
 
 
 def finish_clipboard_requestor(process: subprocess.Popen[bytes],
@@ -2486,11 +2522,167 @@ def assert_clipboard_named_png_session(
         raise AssertionError(
             "warm PNG paste caused another remote CLIPRDR fetch:\n"
             f"{warm_log}")
+
+    # Firefox can issue another X11 conversion while a previous INCR is
+    # active. A timed-out conversion's requestor window may disappear before
+    # chansrv drains its FIFO waiter list. Make sure that dead waiter cannot
+    # prevent a later live conversion from receiving the cached image.
+    active_log_before = chansrv_log_text(chansrv_logs)
+    active_log_start_line = len(active_log_before.splitlines())
+    requestors_before_waiter_test = len(re.findall(
+        r"event=x11-request target=image/png requestor=0x[0-9a-fA-F]+",
+        active_log_before))
+    coalesced_before_waiter_test = active_log_before.count(
+        "event=request-coalesced target=image/png")
+    active_png = start_clipboard_requestor(
+        helper, source_display, "image/png", allow_refusal=True,
+        delay_ms=500, validate_png=True)
+    wait_for_chansrv_marker(
+        chansrv_logs, "event=x11-request target=image/png requestor=",
+        requestors_before_waiter_test + 1, 10.0,
+        chansrv_process, chansrv_stdout)
+    active_log = chansrv_log_text(chansrv_logs)
+    active_new_lines = "\n".join(
+        active_log.splitlines()[active_log_start_line:])
+    active_requests = re.findall(
+        r"event=x11-request target=image/png requestor=(0x[0-9a-fA-F]+)",
+        active_new_lines)
+    if len(active_requests) != 1:
+        raise AssertionError(
+            "could not isolate the active PNG request from newly written log "
+            f"lines:\n{active_new_lines}")
+    active_requestor = active_requests[0].lower()
+    wait_for_chansrv_pattern_after_lines(
+        chansrv_logs,
+        rf"event=x11-delivery-issued path=incr target=image/png "
+        rf"requestor={re.escape(active_requestor)} ",
+        active_log_start_line, 10.0, chansrv_process, chansrv_stdout)
+    wait_for_chansrv_pattern_after_lines(
+        chansrv_logs,
+        rf"event=x11-incr-chunk-issued requestor="
+        rf"{re.escape(active_requestor)} .*chunk=1 ",
+        active_log_start_line, 10.0, chansrv_process, chansrv_stdout)
+
+    abandoned_waiter = start_clipboard_requestor(
+        helper, source_display, "image/png", allow_refusal=True,
+        validate_png=True)
+    wait_for_chansrv_marker(
+        chansrv_logs,
+        "event=request-coalesced target=image/png waiters=",
+        coalesced_before_waiter_test + 1, 10.0,
+        chansrv_process, chansrv_stdout)
+    surviving_waiter = start_clipboard_requestor(
+        helper, source_display, "image/png", allow_refusal=True,
+        validate_png=True)
+    wait_for_chansrv_marker(
+        chansrv_logs,
+        "event=request-coalesced target=image/png waiters=",
+        coalesced_before_waiter_test + 2, 10.0,
+        chansrv_process, chansrv_stdout)
+
+    held_log = chansrv_log_text(chansrv_logs)
+    held_new_lines = "\n".join(
+        held_log.splitlines()[active_log_start_line:])
+    if active_png.poll() is not None:
+        raise AssertionError(
+            "active PNG requestor exited before its queued waiters were "
+            f"destroyed:\n{held_new_lines}")
+    if re.search(
+            rf"event=x11-incr-terminator-ack requestor="
+            rf"{re.escape(active_requestor)} ", held_new_lines):
+        raise AssertionError(
+            "active PNG INCR completed before the queued-waiter lifetime "
+            f"check:\n{held_new_lines}")
+
+    waiter_requestors = re.findall(
+        r"event=x11-request target=image/png requestor=(0x[0-9a-fA-F]+)",
+        held_new_lines)
+    if len(waiter_requestors) != 3:
+        raise AssertionError(
+            "could not identify active, abandoned and surviving PNG requestors:\n"
+            f"{held_new_lines}")
+    if waiter_requestors[0].lower() != active_requestor:
+        raise AssertionError(
+            "the first request in the new log section was not the held "
+            f"requestor: {waiter_requestors!r}")
+    abandoned_requestor = waiter_requestors[1].lower()
+    surviving_requestor = waiter_requestors[2].lower()
+    if len({active_requestor, abandoned_requestor, surviving_requestor}) != 3:
+        raise AssertionError(
+            "the three queued PNG conversions did not use distinct X11 "
+            f"requestor windows: {waiter_requestors[-3:]!r}")
+
+    stop_process(abandoned_waiter)
+    if abandoned_waiter.poll() is None:
+        raise AssertionError("abandoned PNG waiter process did not exit")
+    if clipboard_window_exists(helper, source_display, abandoned_requestor):
+        raise AssertionError(
+            "the terminated PNG waiter still owns a live X11 requestor window: "
+            f"{abandoned_requestor}")
+    wait_for_chansrv_pattern_after_lines(
+        chansrv_logs,
+        rf"event=waiter-discarded reason=requestor-destroyed "
+        rf"requestor={re.escape(abandoned_requestor)} removed=1",
+        active_log_start_line, 5.0, chansrv_process, chansrv_stdout)
+
+    active_result = finish_clipboard_requestor(
+        active_png, 20.0, chansrv_logs)
+    if not re.search(
+            rf"RESULT target=image/png bytes={expected_png_bytes} "
+            r"signature=valid decode=valid ", active_result):
+        raise AssertionError(
+            "active cached PNG INCR did not finish before draining its waiters: "
+            f"{active_result!r}")
+
+    surviving_result = finish_clipboard_requestor(
+        surviving_waiter, 20.0, chansrv_logs)
+    if not re.search(
+            rf"RESULT target=image/png bytes={expected_png_bytes} "
+            r"signature=valid decode=valid ", surviving_result):
+        raise AssertionError(
+            "surviving PNG waiter did not receive the cached image after an "
+            f"older requestor disappeared: {surviving_result!r}\n"
+            f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
+
+    lifetime_log = chansrv_log_text(chansrv_logs)
+    lifetime_new_lines = "\n".join(
+        lifetime_log.splitlines()[active_log_start_line:])
+    if re.search(
+            rf"event=x11-delivery-issued [^\n]*requestor="
+            rf"{re.escape(abandoned_requestor)} ", lifetime_new_lines):
+        raise AssertionError(
+            "chansrv attempted to start an X11 transfer for the destroyed "
+            f"queued requestor {abandoned_requestor}:\n{lifetime_new_lines}")
+    surviving_delivery = re.search(
+        rf"event=x11-delivery-issued path=incr target=image/png "
+        rf"requestor={re.escape(surviving_requestor)} "
+        rf"property=0x[0-9a-fA-F]+ bytes={expected_png_bytes} "
+        rf"generation={x11_generation} cache_generation={x11_generation}",
+        lifetime_new_lines)
+    surviving_ack = re.search(
+        rf"event=x11-incr-terminator-ack requestor="
+        rf"{re.escape(surviving_requestor)} "
+        rf"property=0x[0-9a-fA-F]+ "
+        rf"terminator_generation={x11_generation} "
+        rf"current_generation={x11_generation}",
+        lifetime_new_lines)
+    if surviving_delivery is None or surviving_ack is None:
+        raise AssertionError(
+            "the surviving waiter did not complete a same-generation cached "
+            f"PNG INCR:\n{lifetime_new_lines}")
+    if len(re.findall(
+            rf"event=request format_id={NAMED_PNG_FORMAT_ID} "
+            r"target=image/png attempt=1", lifetime_log)) != 1:
+        raise AssertionError(
+            "retry waiters generated another remote PNG request instead of "
+            f"sharing the cached generation:\n{lifetime_new_lines}")
+
     print(
         "PNG same-generation cold/warm regression: "
         f"cold fetch count=1, warm fetch count=0, "
         f"warm SelectionNotify={request_to_notify:.3f}s, "
-        f"full INCR={second_elapsed:.3f}s "
+        f"full INCR={second_elapsed:.3f}s, "
+        "destroyed queued requestor did not block the surviving waiter "
         f"(modeled local selection budget="
         f"{modeled_selection_idle_budget_seconds:.1f}s)")
 

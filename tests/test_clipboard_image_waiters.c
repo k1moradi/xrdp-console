@@ -193,6 +193,56 @@ test_target_and_capacity(void)
 }
 
 static int
+test_remove_destroyed_requestor_preserves_fifo(void)
+{
+    struct clipboard_image_waiters waiters = {0};
+    XSelectionRequestEvent first = make_request(60, 70, 101, 701);
+    XSelectionRequestEvent abandoned = make_request(61, 71, 101, 702);
+    XSelectionRequestEvent survivor = make_request(62, 72, 101, 703);
+    XSelectionRequestEvent duplicate_abandoned =
+        make_request(63, 71, 101, 704);
+    XSelectionRequestEvent taken;
+    size_t removed;
+    int success = 1;
+
+    success &= check(clipboard_image_waiters_add(&waiters, &first, 101, 16) ==
+                         CLIPBOARD_IMAGE_WAITER_ADDED &&
+                     clipboard_image_waiters_add(&waiters, &abandoned, 101, 16) ==
+                         CLIPBOARD_IMAGE_WAITER_ADDED &&
+                     clipboard_image_waiters_add(&waiters, &survivor, 101, 16) ==
+                         CLIPBOARD_IMAGE_WAITER_ADDED &&
+                     clipboard_image_waiters_add(&waiters,
+                         &duplicate_abandoned, 101, 16) ==
+                         CLIPBOARD_IMAGE_WAITER_ADDED,
+                     "requestor-removal setup did not queue all requests");
+    success &= check(clipboard_image_waiters_contains_requestor(&waiters, 71),
+                     "queued requestor was not found before removal");
+
+    removed = clipboard_image_waiters_remove_requestor(&waiters, 71);
+    success &= check(removed == 2 && waiters.count == 2,
+                     "removal did not discard every request from dead requestor");
+    success &= check(!clipboard_image_waiters_contains_requestor(&waiters, 71) &&
+                     clipboard_image_waiters_contains_requestor(&waiters, 70) &&
+                     clipboard_image_waiters_contains_requestor(&waiters, 72),
+                     "requestor lookup is incorrect after removal");
+    success &= check(clipboard_image_waiters_take(&waiters, &taken) &&
+                     same_request(&taken, &first) &&
+                     clipboard_image_waiters_take(&waiters, &taken) &&
+                     same_request(&taken, &survivor) &&
+                     !clipboard_image_waiters_take(&waiters, &taken),
+                     "removal failed to preserve the remaining FIFO order");
+    success &= check(waiters.count == 0 && waiters.target == None &&
+                     waiters.format_generation == 0,
+                     "empty queue retained stale generation metadata");
+    success &= check(clipboard_image_waiters_remove_requestor(&waiters, 71) == 0,
+                     "removing an absent requestor reported a removal");
+    success &= check(clipboard_image_waiters_remove_requestor(NULL, 71) == 0 &&
+                     clipboard_image_waiters_remove_requestor(&waiters, None) == 0,
+                     "invalid requestor removal was not harmless");
+    return success;
+}
+
+static int
 test_cached_image_and_invalid_events(void)
 {
     XSelectionRequestEvent request = make_request(50, 60, 101, 601);
@@ -236,6 +286,7 @@ main(void)
     success &= test_success_and_retry_coalescing();
     success &= test_terminal_failure_and_new_generation();
     success &= test_target_and_capacity();
+    success &= test_remove_destroyed_requestor_preserves_fifo();
     success &= test_cached_image_and_invalid_events();
     return success ? 0 : 1;
 }

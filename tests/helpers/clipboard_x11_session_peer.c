@@ -28,6 +28,7 @@
 #define MAX_NAMED_PNG_BYTES (8U * 1024U * 1024U)
 #define CF_DIB_FORMAT_ID 8U
 #define NAMED_PNG_FORMAT_ID 40005U
+#define MAX_PENDING_DELAYED_PNG_REQUESTS 8U
 
 static const unsigned char kPngFixture[] = {
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
@@ -45,6 +46,7 @@ struct image_transfer
 {
     int active;
     int terminator_waiting;
+    int first_chunk_delay_pending;
     Window requestor;
     Atom property;
     Atom type;
@@ -52,9 +54,18 @@ struct image_transfer
     size_t data_length;
     size_t offset;
     unsigned int first_chunk_delay_ms;
+    struct timespec first_chunk_deadline;
+    unsigned long first_chunk_delete_time;
     int first_chunk_reported;
     const char *first_chunk_marker;
     const char *done_marker;
+};
+
+struct delayed_png_request
+{
+    XSelectionRequestEvent request;
+    struct timespec deadline;
+    unsigned int first_chunk_delay_ms;
 };
 
 static void
@@ -459,7 +470,7 @@ start_incr_transfer(Display *display,
     if (!xrdp_event_order)
     {
         select_result = XSelectInput(display, request->requestor,
-                                     PropertyChangeMask);
+                                     PropertyChangeMask | StructureNotifyMask);
     }
     change_result = XChangeProperty(display, request->requestor, property,
                                     incr, 32, PropModeReplace,
@@ -467,7 +478,7 @@ start_incr_transfer(Display *display,
     if (xrdp_event_order)
     {
         select_result = XSelectInput(display, request->requestor,
-                                     PropertyChangeMask);
+                                     PropertyChangeMask | StructureNotifyMask);
     }
     type_name = XGetAtomName(display, type);
     printf("X11_OWNER_INCR_ANNOUNCEMENT requestor=0x%lx owner=0x%lx "
@@ -485,6 +496,65 @@ start_incr_transfer(Display *display,
     }
     fflush(stdout);
     send_selection_notify(display, request, property);
+    return 0;
+}
+
+static void
+send_png_incr_chunk(Display *display, struct image_transfer *transfer,
+                    int xrdp_chunks, size_t chunk_limit,
+                    size_t *chunk_count,
+                    unsigned long trigger_delete_time)
+{
+    const size_t chunk_offset = transfer->offset;
+    size_t chunk_bytes = transfer->data_length - transfer->offset;
+    int property_result;
+
+    if (chunk_bytes > chunk_limit)
+    {
+        chunk_bytes = chunk_limit;
+    }
+    property_result = XChangeProperty(
+        display, transfer->requestor, transfer->property,
+        transfer->type, 8, PropModeReplace,
+        transfer->data + transfer->offset, (int)chunk_bytes);
+    transfer->offset += chunk_bytes;
+    ++*chunk_count;
+    XFlush(display);
+    if (xrdp_chunks)
+    {
+        printf("PNG_FILE_OWNER_INCR_CHUNK index=%zu "
+               "requestor=0x%lx property=0x%lx "
+               "type=image/png format=8 offset=%zu "
+               "bytes=%zu end_offset=%zu change_result=%d "
+               "trigger_delete_time=%lu\n", *chunk_count,
+               transfer->requestor, transfer->property,
+               chunk_offset, chunk_bytes, transfer->offset,
+               property_result, trigger_delete_time);
+        fflush(stdout);
+    }
+    if (!transfer->first_chunk_reported)
+    {
+        transfer->first_chunk_reported = 1;
+        puts(transfer->first_chunk_marker != NULL ?
+             transfer->first_chunk_marker : "INCR_FIRST_CHUNK");
+        fflush(stdout);
+    }
+}
+
+static int
+timespec_add_milliseconds(struct timespec *value, unsigned int milliseconds)
+{
+    if (value == NULL)
+    {
+        return -1;
+    }
+    value->tv_sec += (time_t)(milliseconds / 1000U);
+    value->tv_nsec += (long)(milliseconds % 1000U) * 1000000L;
+    if (value->tv_nsec >= 1000000000L)
+    {
+        value->tv_sec += 1;
+        value->tv_nsec -= 1000000000L;
+    }
     return 0;
 }
 
@@ -1113,6 +1183,53 @@ print_selection_owner(void)
     return 0;
 }
 
+static int g_window_query_error;
+
+static int
+capture_window_query_error(Display *display, XErrorEvent *event)
+{
+    (void)display;
+    g_window_query_error = event->error_code;
+    return 0;
+}
+
+static int
+print_window_exists(const char *window_text)
+{
+    char *end = NULL;
+    unsigned long window_id;
+    Display *display;
+    XWindowAttributes attributes;
+    XErrorHandler previous_handler;
+    Status status;
+
+    errno = 0;
+    window_id = strtoul(window_text, &end, 0);
+    if (errno != 0 || end == window_text || *end != '\0' || window_id == 0)
+    {
+        fputs("invalid X11 window ID\n", stderr);
+        return 2;
+    }
+
+    display = XOpenDisplay(NULL);
+    if (display == NULL)
+    {
+        fputs("cannot open X display for window query\n", stderr);
+        return 1;
+    }
+
+    g_window_query_error = 0;
+    previous_handler = XSetErrorHandler(capture_window_query_error);
+    status = XGetWindowAttributes(display, (Window)window_id, &attributes);
+    XSync(display, False);
+    XSetErrorHandler(previous_handler);
+    printf("WINDOW_EXISTS=%d error_code=%d\n",
+           status != 0 && g_window_query_error == 0,
+           g_window_query_error);
+    XCloseDisplay(display);
+    return 0;
+}
+
 static int
 clear_selection_owner(void)
 {
@@ -1693,7 +1810,8 @@ done:
 
 static int
 run_png_file_owner(const char *png_path, int force_incr, int xrdp_chunks,
-                   int xrdp_targets, unsigned int first_chunk_delay_ms)
+                   int xrdp_targets, unsigned int first_chunk_delay_ms,
+                   unsigned int pre_notify_delay_ms)
 {
     Display *display = XOpenDisplay(NULL);
     Window owner;
@@ -1718,6 +1836,9 @@ run_png_file_owner(const char *png_path, int force_incr, int xrdp_chunks,
     int direct_property;
     int x_fd;
     struct image_transfer transfer = {0};
+    struct delayed_png_request delayed_requests[
+        MAX_PENDING_DELAYED_PNG_REQUESTS] = {0};
+    size_t delayed_request_count = 0;
 
     if (display == NULL)
     {
@@ -1804,22 +1925,139 @@ run_png_file_owner(const char *png_path, int force_incr, int xrdp_chunks,
     x_fd = ConnectionNumber(display);
     printf("PNG_FILE_OWNER_READY owner=0x%lx current_owner=0x%lx "
            "bytes=%zu width=%u height=%u selection_time=%lu "
-           "delivery=%s chunk_limit=%zu first_chunk_delay_ms=%u\n",
+           "delivery=%s chunk_limit=%zu first_chunk_delay_ms=%u "
+           "pre_notify_delay_ms=%u\n",
            owner, XGetSelectionOwner(display, clipboard), png_length,
            (unsigned)width, (unsigned)height, selection_time,
            direct_property ? "direct" : "incr", chunk_limit,
-           first_chunk_delay_ms);
+           first_chunk_delay_ms, pre_notify_delay_ms);
     fflush(stdout);
 
     for (;;)
     {
         struct pollfd descriptor;
+        int poll_timeout = -1;
         int poll_result;
+
+        if (transfer.active && transfer.first_chunk_delay_pending)
+        {
+            struct timespec now;
+            long long remaining_ns;
+
+            if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+            {
+                perror("PNG owner monotonic clock failed");
+                transfer.first_chunk_delay_pending = 0;
+                transfer.first_chunk_delay_ms = 0;
+                send_png_incr_chunk(
+                    display, &transfer, xrdp_chunks, chunk_limit,
+                    &chunk_count, transfer.first_chunk_delete_time);
+                continue;
+            }
+            remaining_ns =
+                ((long long)transfer.first_chunk_deadline.tv_sec -
+                 (long long)now.tv_sec) * 1000000000LL +
+                ((long long)transfer.first_chunk_deadline.tv_nsec -
+                 (long long)now.tv_nsec);
+            if (remaining_ns <= 0)
+            {
+                const unsigned int completed_delay =
+                    transfer.first_chunk_delay_ms;
+                transfer.first_chunk_delay_pending = 0;
+                transfer.first_chunk_delay_ms = 0;
+                printf("PNG_FILE_OWNER_INCR_FIRST_CHUNK_DELAY_DONE "
+                       "delay_ms=%u requestor=0x%lx property=0x%lx\n",
+                       completed_delay, transfer.requestor,
+                       transfer.property);
+                fflush(stdout);
+                send_png_incr_chunk(
+                    display, &transfer, xrdp_chunks, chunk_limit,
+                    &chunk_count, transfer.first_chunk_delete_time);
+                continue;
+            }
+            remaining_ns = (remaining_ns + 999999LL) / 1000000LL;
+            poll_timeout = remaining_ns > (long long)INT_MAX ? INT_MAX :
+                           (int)remaining_ns;
+        }
+
+        if (delayed_request_count != 0 && !transfer.active)
+        {
+            struct timespec now;
+            long long remaining_ns;
+
+            if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
+            {
+                perror("PNG owner monotonic clock failed");
+                break;
+            }
+            remaining_ns =
+                ((long long)delayed_requests[0].deadline.tv_sec -
+                 (long long)now.tv_sec) * 1000000000LL +
+                ((long long)delayed_requests[0].deadline.tv_nsec -
+                 (long long)now.tv_nsec);
+            if (remaining_ns <= 0)
+            {
+                XSelectionRequestEvent request =
+                    delayed_requests[0].request;
+                unsigned int request_first_chunk_delay_ms =
+                    delayed_requests[0].first_chunk_delay_ms;
+                size_t index;
+
+                for (index = 1; index < delayed_request_count; ++index)
+                {
+                    delayed_requests[index - 1] = delayed_requests[index];
+                }
+                --delayed_request_count;
+                memset(&delayed_requests[delayed_request_count], 0,
+                       sizeof(delayed_requests[delayed_request_count]));
+
+                printf("PNG_FILE_OWNER_PRE_NOTIFY_DELAY_DONE delay_ms=%u "
+                       "requestor=0x%lx property=0x%lx remaining=%zu\n",
+                       pre_notify_delay_ms, request.requestor,
+                       request.property, delayed_request_count);
+                fflush(stdout);
+                if (direct_property)
+                {
+                    const int change_result = XChangeProperty(
+                        display, request.requestor, request.property,
+                        image_png, 8, PropModeReplace,
+                        png_data, (int)png_length);
+                    send_selection_notify(display, &request, request.property);
+                    printf("PNG_FILE_OWNER_DIRECT_SENT requestor=0x%lx "
+                           "property=0x%lx bytes=%zu change_result=%d\n",
+                           request.requestor, request.property, png_length,
+                           change_result);
+                    fflush(stdout);
+                }
+                else if (start_incr_transfer(
+                             display, &request, request.property, image_png,
+                             incr, png_data, png_length, &transfer,
+                             xrdp_chunks, request_first_chunk_delay_ms,
+                             "PNG_FILE_OWNER_INCR_FIRST_CHUNK",
+                             "PNG_FILE_OWNER_INCR_DONE") == 0)
+                {
+                    printf("PNG_FILE_OWNER_INCR_STARTED bytes=%zu\n",
+                           png_length);
+                    fflush(stdout);
+                }
+                continue;
+            }
+            remaining_ns = (remaining_ns + 999999LL) / 1000000LL;
+            {
+                const int delayed_timeout =
+                    remaining_ns > (long long)INT_MAX ? INT_MAX :
+                    (int)remaining_ns;
+                if (poll_timeout < 0 || delayed_timeout < poll_timeout)
+                {
+                    poll_timeout = delayed_timeout;
+                }
+            }
+        }
 
         descriptor.fd = x_fd;
         descriptor.events = POLLIN;
         descriptor.revents = 0;
-        poll_result = poll(&descriptor, 1, -1);
+        poll_result = poll(&descriptor, 1, poll_timeout);
         if (poll_result < 0)
         {
             if (errno == EINTR)
@@ -1828,6 +2066,10 @@ run_png_file_owner(const char *png_path, int force_incr, int xrdp_chunks,
             }
             perror("PNG owner poll failed");
             break;
+        }
+        if (poll_result == 0)
+        {
+            continue;
         }
 
         while (XPending(display) > 0)
@@ -1915,6 +2157,68 @@ run_png_file_owner(const char *png_path, int force_incr, int xrdp_chunks,
                            selection_time, property_result);
                     send_selection_notify(display, request, property);
                 }
+                else if (request->target == image_png &&
+                         request->property != None &&
+                         (pre_notify_delay_ms != 0U || transfer.active ||
+                          delayed_request_count != 0))
+                {
+                    if (delayed_request_count >=
+                            MAX_PENDING_DELAYED_PNG_REQUESTS)
+                    {
+                        puts("PNG_FILE_OWNER_REQUEST_QUEUE_FULL");
+                        fflush(stdout);
+                        send_selection_notify(display, request, None);
+                    }
+                    else
+                    {
+                        const int is_initial_pre_notify =
+                            !transfer.active && delayed_request_count == 0 &&
+                            pre_notify_delay_ms != 0U;
+                        struct delayed_png_request *pending =
+                            &delayed_requests[delayed_request_count];
+                        if (!transfer.active ||
+                                request->requestor != transfer.requestor)
+                        {
+                            (void)XSelectInput(display, request->requestor,
+                                               StructureNotifyMask);
+                        }
+                        if (clock_gettime(CLOCK_MONOTONIC,
+                                          &pending->deadline) != 0 ||
+                                timespec_add_milliseconds(
+                                    &pending->deadline,
+                                    is_initial_pre_notify ?
+                                    pre_notify_delay_ms : 0U) != 0)
+                        {
+                            send_selection_notify(display, request, None);
+                        }
+                        else
+                        {
+                            pending->request = *request;
+                            pending->first_chunk_delay_ms =
+                                is_initial_pre_notify ?
+                                first_chunk_delay_ms : 0U;
+                            ++delayed_request_count;
+                            if (is_initial_pre_notify)
+                            {
+                                printf("PNG_FILE_OWNER_PRE_NOTIFY_DELAY_STARTED "
+                                       "delay_ms=%u requestor=0x%lx "
+                                       "property=0x%lx pending=%zu\n",
+                                       pre_notify_delay_ms,
+                                       request->requestor, property,
+                                       delayed_request_count);
+                            }
+                            else
+                            {
+                                printf("PNG_FILE_OWNER_REQUEST_WAITER_QUEUED "
+                                       "requestor=0x%lx property=0x%lx "
+                                       "pending=%zu active_transfer=%d\n",
+                                       request->requestor, property,
+                                       delayed_request_count, transfer.active);
+                            }
+                            fflush(stdout);
+                        }
+                    }
+                }
                 else if (request->target == image_png && !transfer.active)
                 {
                     if (request->property == None)
@@ -1970,15 +2274,13 @@ run_png_file_owner(const char *png_path, int force_incr, int xrdp_chunks,
                 }
                 if (transfer.terminator_waiting)
                 {
-                    const int select_result = XSelectInput(
-                        display, transfer.requestor, NoEventMask);
                     if (xrdp_chunks)
                     {
                         printf("PNG_FILE_OWNER_INCR_TERMINATOR_ACK requestor=0x%lx "
                                "property=0x%lx type=image/png format=8 items=0 "
-                               "time=%lu select_result=%d\n",
+                               "time=%lu\n",
                                event.xproperty.window, event.xproperty.atom,
-                               event.xproperty.time, select_result);
+                               event.xproperty.time);
                         fflush(stdout);
                     }
                     memset(&transfer, 0, sizeof(transfer));
@@ -1987,62 +2289,39 @@ run_png_file_owner(const char *png_path, int force_incr, int xrdp_chunks,
                 }
                 else if (transfer.offset < transfer.data_length)
                 {
-                    const size_t chunk_offset = transfer.offset;
-                    size_t chunk_bytes = transfer.data_length - transfer.offset;
-                    int property_result;
-                    if (chunk_offset == 0 &&
-                            transfer.first_chunk_delay_ms != 0)
+                    if (transfer.offset == 0 &&
+                            transfer.first_chunk_delay_ms != 0 &&
+                            !transfer.first_chunk_delay_pending)
                     {
-                        struct timespec delay;
-                        delay.tv_sec =
-                            (time_t)(transfer.first_chunk_delay_ms / 1000U);
-                        delay.tv_nsec =
-                            (long)(transfer.first_chunk_delay_ms % 1000U) *
-                            1000000L;
-                        printf("PNG_FILE_OWNER_INCR_FIRST_CHUNK_DELAY_STARTED "
-                               "delay_ms=%u requestor=0x%lx property=0x%lx\n",
-                               transfer.first_chunk_delay_ms,
-                               transfer.requestor, transfer.property);
-                        fflush(stdout);
-                        while (nanosleep(&delay, &delay) != 0 && errno == EINTR)
+                        if (clock_gettime(CLOCK_MONOTONIC,
+                                          &transfer.first_chunk_deadline) != 0 ||
+                                timespec_add_milliseconds(
+                                    &transfer.first_chunk_deadline,
+                                    transfer.first_chunk_delay_ms) != 0)
                         {
-                            /* Resume the requested delay after a signal. */
+                            perror("PNG owner monotonic deadline failed");
+                            transfer.first_chunk_delay_ms = 0;
+                            send_png_incr_chunk(
+                                display, &transfer, xrdp_chunks, chunk_limit,
+                                &chunk_count, event.xproperty.time);
                         }
-                        printf("PNG_FILE_OWNER_INCR_FIRST_CHUNK_DELAY_DONE "
-                               "delay_ms=%u requestor=0x%lx property=0x%lx\n",
-                               transfer.first_chunk_delay_ms,
-                               transfer.requestor, transfer.property);
-                        fflush(stdout);
-                        transfer.first_chunk_delay_ms = 0;
+                        else
+                        {
+                            transfer.first_chunk_delay_pending = 1;
+                            transfer.first_chunk_delete_time =
+                                event.xproperty.time;
+                            printf("PNG_FILE_OWNER_INCR_FIRST_CHUNK_DELAY_STARTED "
+                                   "delay_ms=%u requestor=0x%lx property=0x%lx\n",
+                                   transfer.first_chunk_delay_ms,
+                                   transfer.requestor, transfer.property);
+                            fflush(stdout);
+                        }
                     }
-                    if (chunk_bytes > chunk_limit)
+                    else if (!transfer.first_chunk_delay_pending)
                     {
-                        chunk_bytes = chunk_limit;
-                    }
-                    property_result = XChangeProperty(
-                        display, transfer.requestor, transfer.property,
-                        transfer.type, 8, PropModeReplace,
-                        transfer.data + transfer.offset, (int)chunk_bytes);
-                    transfer.offset += chunk_bytes;
-                    ++chunk_count;
-                    XFlush(display);
-                    if (xrdp_chunks)
-                    {
-                        printf("PNG_FILE_OWNER_INCR_CHUNK index=%zu "
-                               "requestor=0x%lx property=0x%lx "
-                               "type=image/png format=8 offset=%zu "
-                               "bytes=%zu end_offset=%zu change_result=%d "
-                               "trigger_delete_time=%lu\n", chunk_count,
-                               transfer.requestor, transfer.property,
-                               chunk_offset, chunk_bytes, transfer.offset,
-                               property_result, event.xproperty.time);
-                        fflush(stdout);
-                    }
-                    if (!transfer.first_chunk_reported)
-                    {
-                        transfer.first_chunk_reported = 1;
-                        puts("PNG_FILE_OWNER_INCR_FIRST_CHUNK");
-                        fflush(stdout);
+                        send_png_incr_chunk(
+                            display, &transfer, xrdp_chunks, chunk_limit,
+                            &chunk_count, event.xproperty.time);
                     }
                 }
                 else
@@ -2066,6 +2345,43 @@ run_png_file_owner(const char *png_path, int force_incr, int xrdp_chunks,
                         }
                     }
                     XFlush(display);
+                }
+            }
+            else if (event.type == DestroyNotify)
+            {
+                const Window destroyed = event.xdestroywindow.window;
+                size_t index = 0;
+
+                while (index < delayed_request_count)
+                {
+                    if (delayed_requests[index].request.requestor == destroyed)
+                    {
+                        size_t move_index;
+                        printf("PNG_FILE_OWNER_PENDING_REQUESTOR_DESTROYED "
+                               "requestor=0x%lx property=0x%lx\n",
+                               destroyed,
+                               delayed_requests[index].request.property);
+                        for (move_index = index + 1;
+                             move_index < delayed_request_count;
+                             ++move_index)
+                        {
+                            delayed_requests[move_index - 1] =
+                                delayed_requests[move_index];
+                        }
+                        --delayed_request_count;
+                        memset(&delayed_requests[delayed_request_count], 0,
+                               sizeof(delayed_requests[delayed_request_count]));
+                        continue;
+                    }
+                    ++index;
+                }
+                if (transfer.active && transfer.requestor == destroyed)
+                {
+                    printf("PNG_FILE_OWNER_INCR_REQUESTOR_DESTROYED "
+                           "requestor=0x%lx property=0x%lx offset=%zu\n",
+                           destroyed, transfer.property, transfer.offset);
+                    fflush(stdout);
+                    memset(&transfer, 0, sizeof(transfer));
                 }
             }
             else if (event.type == SelectionClear &&
@@ -2102,20 +2418,20 @@ main(int argc, char **argv)
     }
     if (argc == 3 && strcmp(argv[1], "owner-png-file") == 0)
     {
-        return run_png_file_owner(argv[2], 0, 0, 0, 0);
+        return run_png_file_owner(argv[2], 0, 0, 0, 0, 0);
     }
     if (argc == 3 && strcmp(argv[1], "owner-png-file-incr") == 0)
     {
-        return run_png_file_owner(argv[2], 1, 0, 0, 0);
+        return run_png_file_owner(argv[2], 1, 0, 0, 0, 0);
     }
     if (argc == 3 && strcmp(argv[1], "owner-png-file-incr-xrdp") == 0)
     {
-        return run_png_file_owner(argv[2], 1, 1, 0, 0);
+        return run_png_file_owner(argv[2], 1, 1, 0, 0, 0);
     }
     if (argc == 3 &&
             strcmp(argv[1], "owner-png-file-incr-xrdp-targets") == 0)
     {
-        return run_png_file_owner(argv[2], 1, 1, 1, 0);
+        return run_png_file_owner(argv[2], 1, 1, 1, 0, 0);
     }
     if (argc == 4 && strcmp(argv[1],
                             "owner-png-file-incr-xrdp-targets-delay") == 0)
@@ -2132,6 +2448,42 @@ main(int argc, char **argv)
             return 2;
         }
         return run_png_file_owner(argv[2], 1, 1, 1,
+                                  (unsigned int)delay_ms, 0);
+    }
+    if (argc == 4 && strcmp(
+            argv[1],
+            "owner-png-file-incr-xrdp-targets-prenotify-delay") == 0)
+    {
+        char *end = NULL;
+        unsigned long delay_ms;
+        errno = 0;
+        delay_ms = strtoul(argv[3], &end, 10);
+        if (errno != 0 || end == argv[3] || *end != '\0' ||
+                delay_ms > 60000UL)
+        {
+            fputs("invalid pre-notify delay (expected 0..60000 ms)\n",
+                  stderr);
+            return 2;
+        }
+        return run_png_file_owner(argv[2], 1, 1, 1, 0,
+                                  (unsigned int)delay_ms);
+    }
+    if (argc == 4 && strcmp(
+            argv[1],
+            "owner-png-file-direct-xrdp-targets-prenotify-delay") == 0)
+    {
+        char *end = NULL;
+        unsigned long delay_ms;
+        errno = 0;
+        delay_ms = strtoul(argv[3], &end, 10);
+        if (errno != 0 || end == argv[3] || *end != '\0' ||
+                delay_ms > 60000UL)
+        {
+            fputs("invalid direct pre-notify delay (expected 0..60000 ms)\n",
+                  stderr);
+            return 2;
+        }
+        return run_png_file_owner(argv[2], 0, 1, 1, 0,
                                   (unsigned int)delay_ms);
     }
     if (argc == 2 && strcmp(argv[1], "stealer") == 0)
@@ -2146,6 +2498,10 @@ main(int argc, char **argv)
     {
         return print_selection_owner();
     }
+    if (argc == 3 && strcmp(argv[1], "window-exists") == 0)
+    {
+        return print_window_exists(argv[2]);
+    }
     if (argc == 2 && strcmp(argv[1], "selection-clear") == 0)
     {
         return clear_selection_owner();
@@ -2159,7 +2515,10 @@ main(int argc, char **argv)
           "owner-png-file-incr-xrdp PNG_FILE | "
           "owner-png-file-incr-xrdp-targets PNG_FILE | "
           "owner-png-file-incr-xrdp-targets-delay PNG_FILE DELAY_MS | "
+          "owner-png-file-incr-xrdp-targets-prenotify-delay PNG_FILE DELAY_MS | "
+          "owner-png-file-direct-xrdp-targets-prenotify-delay PNG_FILE DELAY_MS | "
           "stealer | stealer-stale-targets-retry | selection-owner | "
+          "window-exists WINDOW_ID | "
           "requestor TARGET [delay_ms]\n",
           stderr);
     return 2;

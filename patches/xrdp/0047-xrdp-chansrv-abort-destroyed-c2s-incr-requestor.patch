@@ -140,7 +140,7 @@
          if (clipboard_set_selection_owner() != 0)
          {
              LOG_DEVEL(LOG_LEVEL_ERROR, "clipboard_process_format_announce: "
-@@ -4242,6 +4271,90 @@
+@@ -4242,6 +4271,100 @@
  }
  
  /*****************************************************************************/
@@ -149,7 +149,17 @@
 +{
 +    int c2s_match;
 +    int terminator_match;
++    size_t removed_waiters;
 +
++    removed_waiters = clipboard_image_waiters_remove_requestor(
++                          &g_image_waiters, event->window);
++    if (removed_waiters > 0)
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=waiter-discarded "
++            "reason=requestor-destroyed requestor=0x%lx removed=%lu",
++            event->window, (unsigned long)removed_waiters);
++    }
 +    c2s_match = g_clip_c2s.incr_in_progress &&
 +                event->window == g_clip_c2s.window;
 +    terminator_match = g_image_incr_terminator_pending &&
