@@ -1,0 +1,79 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] xrdp: ignore unavailable graphics queue depth
+
+Treat RDPGFX queueDepth=0 as unavailable feedback. Do not infer an empty
+client queue or recover out of backpressure without a valid queue sample.
+Reset sample history so later valid reports begin a new comparison window.
+
+diff --git a/xrdp/xrdp_mm.c b/xrdp/xrdp_mm.c
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -1349,6 +1349,15 @@
+     }
+ 
+     queue_depth = telemetry->latest_queue_depth;
++    if (queue_depth == 0U)
++    {
++        /* RDPGFX defines zero as QUEUE_DEPTH_UNAVAILABLE, not an empty
++         * client queue. Retain the current pacing level and break the sample
++         * history so a later valid ACK cannot be compared with stale data. */
++        pacing->previous_queue_valid = 0;
++        pacing->recovery_acknowledgement_count = 0;
++        return;
++    }
+     target = xrdp_mm_console_gfx_pacing_level_for_queue(queue_depth);
+ 
+     if (pacing->previous_queue_valid &&
+diff --git a/tests/xrdp/test_xrdp_region.c b/tests/xrdp/test_xrdp_region.c
+--- a/tests/xrdp/test_xrdp_region.c
++++ b/tests/xrdp/test_xrdp_region.c
+@@ -669,6 +669,40 @@
+ }
+ 
+ static void
++test_console_gfx_adaptive_pacing_ignores_unavailable_queue_depth(
++    void **state)
++{
++    struct xrdp_console_gfx_ack_telemetry telemetry = {0};
++    struct xrdp_console_gfx_pacing_state pacing = {
++        .level = XRDP_CONSOLE_GFX_PACING_SEVERE
++    };
++    unsigned int index;
++    UNUSED(state);
++
++    /* RDPGFX queueDepth=0 means unavailable, not an empty client queue. */
++    for (index = 0; index < XRDP_CONSOLE_GFX_PACING_RECOVERY_ACKNOWLEDGEMENTS;
++         ++index)
++    {
++        ++telemetry.acknowledgement_count;
++        telemetry.latest_queue_depth = 0;
++        xrdp_mm_console_update_gfx_pacing(&pacing, &telemetry);
++        assert_int_equal(XRDP_CONSOLE_GFX_PACING_SEVERE, pacing.level);
++    }
++    assert_int_equal(0, pacing.previous_queue_valid);
++    assert_int_equal(0, pacing.recovery_acknowledgement_count);
++
++    /* Real low queue samples still allow the existing hysteresis to recover. */
++    for (index = 0; index < XRDP_CONSOLE_GFX_PACING_RECOVERY_ACKNOWLEDGEMENTS;
++         ++index)
++    {
++        ++telemetry.acknowledgement_count;
++        telemetry.latest_queue_depth = 100U * 1024U;
++        xrdp_mm_console_update_gfx_pacing(&pacing, &telemetry);
++    }
++    assert_int_equal(XRDP_CONSOLE_GFX_PACING_CONGESTED, pacing.level);
++}
++
++static void
+ test_console_dirty_gfx_is_held_during_resize(void **state)
+ {
+     UNUSED(state);
+@@ -815,6 +849,8 @@
+             test_console_gfx_adaptive_pacing_recovers_with_hysteresis),
+         cmocka_unit_test(
+             test_console_gfx_adaptive_pacing_handles_rise_suspend_and_duplicates),
++        cmocka_unit_test(
++            test_console_gfx_adaptive_pacing_ignores_unavailable_queue_depth),
+     };
+ 
+     ck_assert_int_eq(cmocka_run_group_tests(tests, NULL, NULL), 0);

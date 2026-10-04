@@ -22,6 +22,10 @@ set(stale_targets_retry_patch
     "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0046-xrdp-chansrv-cancel-stale-local-targets.patch")
 set(abandoned_incr_patch
     "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0047-xrdp-chansrv-abort-destroyed-c2s-incr-requestor.patch")
+set(serialized_clipboard_data_patch
+    "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0048-xrdp-chansrv-serialize-format-data-generations.patch")
+set(unavailable_queue_depth_patch
+    "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0049-xrdp-console-ignore-unavailable-gfx-queue-depth.patch")
 
 foreach(required IN ITEMS "${series_file}" "${h264_patch}" "${pacing_patch}"
         "${image_retry_patch}" "${image_waiters_patch}"
@@ -37,7 +41,9 @@ foreach(required IN ITEMS "${series_file}" "${h264_patch}" "${pacing_patch}"
         "${vc_chunk_size_patch}"
         "${chansrv_vc_buffer_patch}"
         "${stale_targets_retry_patch}"
-        "${abandoned_incr_patch}")
+        "${abandoned_incr_patch}"
+        "${serialized_clipboard_data_patch}"
+        "${unavailable_queue_depth_patch}")
     if(NOT EXISTS "${required}")
         message(FATAL_ERROR "required optimization patch input is missing: ${required}")
     endif()
@@ -87,13 +93,20 @@ list(FIND series_lines
 list(FIND series_lines
     "0047-xrdp-chansrv-abort-destroyed-c2s-incr-requestor.patch"
     abandoned_incr_index)
+list(FIND series_lines
+    "0048-xrdp-chansrv-serialize-format-data-generations.patch"
+    serialized_clipboard_data_index)
+list(FIND series_lines
+    "0049-xrdp-console-ignore-unavailable-gfx-queue-depth.patch"
+    unavailable_queue_depth_index)
 if(image_retire_terminator_index LESS 0 OR channel_containment_index LESS 0 OR
         png_priority_index LESS 0 OR image_x11_diagnostics_index LESS 0 OR
         image_deferred_owner_index LESS 0 OR image_targets_response_index LESS 0 OR
         wait_object_failure_source_index LESS 0 OR png_x11_transaction_index LESS 0 OR
         rdp_vc_diagnostics_index LESS 0 OR vc_chunk_size_index LESS 0 OR
         chansrv_vc_buffer_index LESS 0 OR stale_targets_retry_index LESS 0 OR
-        abandoned_incr_index LESS 0 OR
+        abandoned_incr_index LESS 0 OR serialized_clipboard_data_index LESS 0 OR
+        unavailable_queue_depth_index LESS 0 OR
         png_prefetch_index GREATER -1)
     message(FATAL_ERROR "xrdp clipboard diagnostics must be in series and experimental PNG prefetch must remain inactive")
 endif()
@@ -109,6 +122,8 @@ math(EXPR expected_vc_chunk_size_index "${rdp_vc_diagnostics_index} + 1")
 math(EXPR expected_chansrv_vc_buffer_index "${vc_chunk_size_index} + 1")
 math(EXPR expected_stale_targets_retry_index "${chansrv_vc_buffer_index} + 1")
 math(EXPR expected_abandoned_incr_index "${stale_targets_retry_index} + 1")
+math(EXPR expected_serialized_clipboard_data_index "${abandoned_incr_index} + 1")
+math(EXPR expected_unavailable_queue_depth_index "${serialized_clipboard_data_index} + 1")
 if(NOT channel_containment_index EQUAL expected_channel_containment_index OR
         NOT png_priority_index EQUAL expected_png_priority_index OR
         NOT image_x11_diagnostics_index EQUAL expected_image_x11_diagnostics_index OR
@@ -120,7 +135,9 @@ if(NOT channel_containment_index EQUAL expected_channel_containment_index OR
         NOT vc_chunk_size_index EQUAL expected_vc_chunk_size_index OR
         NOT chansrv_vc_buffer_index EQUAL expected_chansrv_vc_buffer_index OR
         NOT stale_targets_retry_index EQUAL expected_stale_targets_retry_index OR
-        NOT abandoned_incr_index EQUAL expected_abandoned_incr_index)
+        NOT abandoned_incr_index EQUAL expected_abandoned_incr_index OR
+        NOT serialized_clipboard_data_index EQUAL expected_serialized_clipboard_data_index OR
+        NOT unavailable_queue_depth_index EQUAL expected_unavailable_queue_depth_index)
     message(FATAL_ERROR "channel containment, PNG-priority, and xrdp diagnostics patches must follow clipboard fixes in order")
 endif()
 
@@ -150,6 +167,20 @@ foreach(marker IN ITEMS
     if(marker_index LESS 0)
         message(FATAL_ERROR
             "abandoned C2S INCR patch is missing marker: ${marker}")
+    endif()
+endforeach()
+
+file(READ "${unavailable_queue_depth_patch}" unavailable_queue_depth_text)
+foreach(marker IN ITEMS
+        "queue_depth == 0U"
+        "QUEUE_DEPTH_UNAVAILABLE"
+        "test_console_gfx_adaptive_pacing_ignores_unavailable_queue_depth"
+        "previous_queue_valid = 0"
+        "recovery_acknowledgement_count = 0")
+    string(FIND "${unavailable_queue_depth_text}" "${marker}" marker_index)
+    if(marker_index LESS 0)
+        message(FATAL_ERROR
+            "unavailable GFX queue-depth patch is missing marker: ${marker}")
     endif()
 endforeach()
 
