@@ -45,6 +45,7 @@ using xrdp_console::benchmark::summarizeDurations;
 using xrdp_console::rdp::GfxAvc420Command;
 using xrdp_console::rdp::H264PresentationPlan;
 using xrdp_console::rdp::ExactScrollCopyRun;
+using xrdp_console::rdp::ScaledNv12UpdateResult;
 using xrdp_console::rdp::ScrollMotionObserver;
 using xrdp_console::rdp::buildGfxAvc420Command;
 using xrdp_console::rdp::classifyExactVerticalScrollReuse;
@@ -53,6 +54,7 @@ using xrdp_console::rdp::gfxAvc420CommandBytes;
 using xrdp_console::rdp::makeH264PresentationPlan;
 using xrdp_console::rdp::nv12FrameBytes;
 using xrdp_console::rdp::updateNv12RectangleFromBgraRegion_709FullRange;
+using xrdp_console::rdp::updateNv12RectangleFromFastDiagonalScaler_709FullRange;
 using xrdp_console::rdp::updateNv12Rectangle_709FullRange;
 
 struct X264Deleter final
@@ -485,6 +487,43 @@ scaleAndConvert(PresentationScaler &scaler, FramebufferView source,
 }
 
 [[nodiscard]] bool
+scaleAndConvertDirect(PresentationScaler &scaler, FramebufferView source,
+                      Rectangle sourceRectangle,
+                      Rectangle destinationRectangle,
+                      PixelSize frameGeometry,
+                      std::span<std::byte> nv12,
+                      std::uint64_t &checksum) noexcept
+{
+    std::uint32_t row = 0;
+    const std::uint32_t maximumRows =
+        scaler.maximumRowsForWidth(destinationRectangle.widthPixels) & ~1U;
+    if (maximumRows == 0)
+    {
+        return false;
+    }
+    while (row < destinationRectangle.heightPixels)
+    {
+        const std::uint32_t rows = std::min(
+            maximumRows, destinationRectangle.heightPixels - row);
+        if ((rows & 1U) != 0U)
+        {
+            return false;
+        }
+        const ScaledNv12UpdateResult result =
+            updateNv12RectangleFromFastDiagonalScaler_709FullRange(
+                scaler, source, sourceRectangle, destinationRectangle,
+                frameGeometry, nv12, row, rows);
+        if (result != ScaledNv12UpdateResult::Updated)
+        {
+            return false;
+        }
+        checksum += std::to_integer<std::uint8_t>(nv12.front());
+        row += rows;
+    }
+    return true;
+}
+
+[[nodiscard]] bool
 initializeX264(const std::vector<std::byte> &inputNv12,
                PixelSize geometry, x264_t *&encoder,
                x264_param_t &parameters, std::vector<std::byte> &padded)
@@ -910,8 +949,55 @@ runBenchmark(const Options &options)
         std::fputs("fused scale-plus-NV12 measurement failed\n", stderr);
         return false;
     }
+    // Both implementations read the scaler's two BGRA samples and write Y+UV.
+    // The staged path's larger scaler scratch and the direct path's 1 KiB
+    // stack tile are cache traffic, so exclude them from this external estimate.
     reportStage("fused_scale_then_nv12", samples, outputPixels,
-                outputPixels * 4U, outputPixels * 1U + outputPixels / 2U);
+                outputPixels * 2U * kBytesPerBgraPixel,
+                outputPixels * 1U + outputPixels / 2U);
+
+    std::vector<std::byte> directPresentationNv12(
+        presentationNv12Bytes, std::byte{});
+    std::fill(directPresentationNv12.begin() +
+                  static_cast<std::ptrdiff_t>(presentationLumaBytes),
+              directPresentationNv12.end(), std::byte{128});
+    const ScaledNv12UpdateResult directSupport =
+        updateNv12RectangleFromFastDiagonalScaler_709FullRange(
+            fusedScaler, source, fullSource, outputRectangle, frameGeometry,
+            directPresentationNv12, 0, 2);
+    if (directSupport == ScaledNv12UpdateResult::Unsupported)
+    {
+        std::puts("stage=fused_scale_direct_nv12 supported=0 reason=filter-mode");
+    }
+    else if (directSupport != ScaledNv12UpdateResult::Updated)
+    {
+        std::fputs("direct fused scale-plus-NV12 validation failed\n", stderr);
+        return false;
+    }
+    else
+    {
+        if (!measure(samples, options.samples, noPreparation,
+                     [&](std::size_t, std::uint64_t &) {
+                         return scaleAndConvertDirect(
+                             fusedScaler, source, fullSource, outputRectangle,
+                             frameGeometry, directPresentationNv12, checksum);
+                     }))
+        {
+            std::fputs(
+                "direct fused scale-plus-NV12 measurement failed\n", stderr);
+            return false;
+        }
+        if (directPresentationNv12 != presentationNv12)
+        {
+            std::fputs(
+                "direct fused NV12 output differs from staged pipeline\n",
+                stderr);
+            return false;
+        }
+        reportStage("fused_scale_direct_nv12", samples, outputPixels,
+                    outputPixels * 2U * kBytesPerBgraPixel,
+                    outputPixels * 1U + outputPixels / 2U);
+    }
 
     const std::size_t patchStride =
         static_cast<std::size_t>(kRectUpdateWidthPixels) *

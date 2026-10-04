@@ -10,6 +10,8 @@
 #include "../core/geometry.h"
 #include "../core/rectangle.h"
 
+class PresentationScaler;
+
 namespace xrdp_console::rdp
 {
 
@@ -59,6 +61,26 @@ struct GfxSolidFillCommand final
     FramebufferView source, Rectangle sourceRectangle,
     Rectangle destinationRectangle, PixelSize frameGeometry,
     std::span<std::byte> destinationFrame) noexcept;
+
+enum class ScaledNv12UpdateResult : std::uint8_t
+{
+    Updated,
+    Unsupported,
+    InvalidInput,
+};
+
+// Fuse the scaler's two-sample diagonal downscale with AVC420 conversion.
+// The source rectangle must include the complete filter footprint and the
+// destination must be even-aligned. Row chunks permit bounded service work.
+// Unsupported means the scaler uses a different filter and the caller should
+// use the ordinary scaleRows()+NV12 path instead.
+[[nodiscard]] ScaledNv12UpdateResult
+updateNv12RectangleFromFastDiagonalScaler_709FullRange(
+    const PresentationScaler &scaler, FramebufferView source,
+    Rectangle sourceRectangle, Rectangle destinationRectangle,
+    PixelSize frameGeometry, std::span<std::byte> destinationFrame,
+    std::uint32_t firstPresentationRow,
+    std::uint32_t presentationRowCount) noexcept;
 
 // H.264 4:2:0 rectangles must start and end on even coordinates. This helper
 // expands damage to even edges while staying within the largest even

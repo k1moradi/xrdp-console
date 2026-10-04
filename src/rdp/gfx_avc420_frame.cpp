@@ -2,7 +2,10 @@
 
 #include "gfx_avc420_frame.h"
 
+#include "../core/presentation_scaler.h"
+
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <limits>
 
@@ -55,6 +58,20 @@ bgraToYuv709FullRange(std::uint8_t blue, std::uint8_t green,
         clampByte(divideBy256Floor(-29 * r - 99 * g + 128 * b) + 128),
         clampByte(divideBy256Floor(128 * r - 116 * g - 12 * b) + 128),
     };
+}
+
+[[nodiscard]] std::uint32_t
+averageBgraPixel(std::uint32_t first, std::uint32_t second) noexcept
+{
+#if defined(__SSE2__)
+    return static_cast<std::uint32_t>(_mm_cvtsi128_si32(_mm_avg_epu8(
+        _mm_cvtsi32_si128(static_cast<int>(first)),
+        _mm_cvtsi32_si128(static_cast<int>(second)) )));
+#else
+    const std::uint32_t difference = first ^ second;
+    return (first & second) + ((difference & 0xfefefefeU) >> 1U) +
+           (difference & 0x01010101U);
+#endif
 }
 
 #if XRDP_CONSOLE_CAN_TARGET_SSSE3
@@ -205,6 +222,50 @@ convertBgraRowPairSsse3_709FullRange(
 
 #endif
 
+void
+convertBgraRowPair_709FullRange(const std::uint8_t *top,
+                                const std::uint8_t *bottom,
+                                std::uint8_t *yTop,
+                                std::uint8_t *yBottom, std::uint8_t *uv,
+                                std::uint32_t widthPixels,
+                                bool useSsse3) noexcept
+{
+#if XRDP_CONSOLE_CAN_TARGET_SSSE3
+    if (useSsse3)
+    {
+        convertBgraRowPairSsse3_709FullRange(
+            top, bottom, yTop, yBottom, uv, widthPixels);
+        return;
+    }
+#else
+    (void)useSsse3;
+#endif
+
+    for (std::uint32_t x = 0; x < widthPixels; x += 2U)
+    {
+        const std::size_t byteOffset = static_cast<std::size_t>(x) * 4U;
+        const Yuv topLeft = bgraToYuv709FullRange(
+            top[byteOffset], top[byteOffset + 1U], top[byteOffset + 2U]);
+        const Yuv topRight = bgraToYuv709FullRange(
+            top[byteOffset + 4U], top[byteOffset + 5U],
+            top[byteOffset + 6U]);
+        const Yuv bottomLeft = bgraToYuv709FullRange(
+            bottom[byteOffset], bottom[byteOffset + 1U],
+            bottom[byteOffset + 2U]);
+        const Yuv bottomRight = bgraToYuv709FullRange(
+            bottom[byteOffset + 4U], bottom[byteOffset + 5U],
+            bottom[byteOffset + 6U]);
+        yTop[x] = static_cast<std::uint8_t>(topLeft.y);
+        yTop[x + 1U] = static_cast<std::uint8_t>(topRight.y);
+        yBottom[x] = static_cast<std::uint8_t>(bottomLeft.y);
+        yBottom[x + 1U] = static_cast<std::uint8_t>(bottomRight.y);
+        uv[x] = static_cast<std::uint8_t>(
+            (topLeft.u + topRight.u + bottomLeft.u + bottomRight.u + 2) / 4);
+        uv[x + 1U] = static_cast<std::uint8_t>(
+            (topLeft.v + topRight.v + bottomLeft.v + bottomRight.v + 2) / 4);
+    }
+}
+
 [[nodiscard]] bool
 rectangleFitsFrame(Rectangle rectangle, PixelSize frame) noexcept
 {
@@ -277,6 +338,211 @@ private:
 };
 
 } // namespace
+
+class PresentationScalerNv12Converter final
+{
+public:
+    [[nodiscard]] static ScaledNv12UpdateResult update(
+        const PresentationScaler &scaler, FramebufferView source,
+        Rectangle sourceRectangle, Rectangle destinationRectangle,
+        PixelSize frameGeometry, std::span<std::byte> destinationFrame,
+        std::uint32_t firstPresentationRow,
+        std::uint32_t presentationRowCount) noexcept
+    {
+        if (!scaler.valid())
+        {
+            return ScaledNv12UpdateResult::InvalidInput;
+        }
+        if (!scaler.fastDiagonalFilter_)
+        {
+            return ScaledNv12UpdateResult::Unsupported;
+        }
+
+        const std::size_t requiredBytes = nv12FrameBytes(frameGeometry);
+        if (!source.valid() || requiredBytes == 0 ||
+            destinationFrame.size() < requiredBytes ||
+            sourceRectangle.x < 0 || sourceRectangle.y < 0 ||
+            sourceRectangle.widthPixels == 0 ||
+            sourceRectangle.heightPixels == 0 ||
+            sourceRectangle.widthPixels != source.widthPixels ||
+            sourceRectangle.heightPixels != source.heightPixels ||
+            destinationRectangle.x < 0 || destinationRectangle.y < 0 ||
+            destinationRectangle.widthPixels == 0 ||
+            destinationRectangle.heightPixels == 0 ||
+            (destinationRectangle.x & 1) != 0 ||
+            (destinationRectangle.y & 1) != 0 ||
+            (destinationRectangle.widthPixels & 1U) != 0 ||
+            (destinationRectangle.heightPixels & 1U) != 0 ||
+            presentationRowCount == 0 ||
+            (firstPresentationRow & 1U) != 0 ||
+            (presentationRowCount & 1U) != 0 ||
+            static_cast<std::uint64_t>(firstPresentationRow) +
+                    presentationRowCount >
+                destinationRectangle.heightPixels ||
+            static_cast<std::uint64_t>(source.widthPixels) *
+                    source.heightPixels >
+                std::numeric_limits<std::size_t>::max() / 4U ||
+            source.strideBytes < static_cast<std::size_t>(source.widthPixels) *
+                                     4U)
+        {
+            return ScaledNv12UpdateResult::InvalidInput;
+        }
+
+        const std::uint64_t sourceRight =
+            static_cast<std::uint64_t>(sourceRectangle.x) +
+            sourceRectangle.widthPixels;
+        const std::uint64_t sourceBottom =
+            static_cast<std::uint64_t>(sourceRectangle.y) +
+            sourceRectangle.heightPixels;
+        const std::uint64_t destinationRight =
+            static_cast<std::uint64_t>(destinationRectangle.x) +
+            destinationRectangle.widthPixels;
+        const std::uint64_t destinationBottom =
+            static_cast<std::uint64_t>(destinationRectangle.y) +
+            destinationRectangle.heightPixels;
+        if (sourceRight > scaler.sourceGeometry_.widthPixels ||
+            sourceBottom > scaler.sourceGeometry_.heightPixels ||
+            destinationRight > frameGeometry.widthPixels ||
+            destinationBottom > frameGeometry.heightPixels ||
+            destinationRectangle.x < scaler.viewport_.x ||
+            destinationRectangle.y < scaler.viewport_.y ||
+            destinationRight >
+                static_cast<std::uint64_t>(scaler.viewport_.x) +
+                    scaler.viewport_.widthPixels ||
+            destinationBottom >
+                static_cast<std::uint64_t>(scaler.viewport_.y) +
+                    scaler.viewport_.heightPixels)
+        {
+            return ScaledNv12UpdateResult::InvalidInput;
+        }
+
+        const Rectangle chunkRectangle{
+            destinationRectangle.x,
+            destinationRectangle.y +
+                static_cast<std::int32_t>(firstPresentationRow),
+            destinationRectangle.widthPixels, presentationRowCount};
+        Rectangle requiredSource{};
+        if (!scaler.sourceCoverageForPresentationRectangle(
+                chunkRectangle, requiredSource) ||
+            requiredSource.x < sourceRectangle.x ||
+            requiredSource.y < sourceRectangle.y ||
+            static_cast<std::uint64_t>(requiredSource.x) +
+                    requiredSource.widthPixels >
+                sourceRight ||
+            static_cast<std::uint64_t>(requiredSource.y) +
+                    requiredSource.heightPixels >
+                sourceBottom)
+        {
+            return ScaledNv12UpdateResult::InvalidInput;
+        }
+
+        constexpr std::uint32_t kBlockWidthPixels = 128U;
+        std::array<std::uint32_t, kBlockWidthPixels> topPixels;
+        std::array<std::uint32_t, kBlockWidthPixels> bottomPixels;
+        const auto *sourceBytes = reinterpret_cast<const std::uint8_t *>(
+            source.pixels.data());
+        const std::uint32_t sourceLeft =
+            static_cast<std::uint32_t>(sourceRectangle.x);
+        const std::uint32_t sourceTop =
+            static_cast<std::uint32_t>(sourceRectangle.y);
+        const std::uint32_t viewportLocalLeft = static_cast<std::uint32_t>(
+            destinationRectangle.x - scaler.viewport_.x);
+        const std::uint32_t viewportLocalTop = static_cast<std::uint32_t>(
+            destinationRectangle.y - scaler.viewport_.y);
+        const std::size_t frameWidth = frameGeometry.widthPixels;
+        const std::size_t yPlaneBytes =
+            frameWidth * static_cast<std::size_t>(frameGeometry.heightPixels);
+        auto *yPlane = reinterpret_cast<std::uint8_t *>(
+            destinationFrame.data());
+        auto *uvPlane = yPlane + yPlaneBytes;
+        const std::size_t destinationX =
+            static_cast<std::size_t>(destinationRectangle.x);
+        const std::size_t destinationY =
+            static_cast<std::size_t>(destinationRectangle.y);
+        const std::uint32_t diagonalOffsetX =
+            static_cast<std::uint32_t>(scaler.areaFilterX_);
+        const std::uint32_t diagonalOffsetY =
+            static_cast<std::uint32_t>(scaler.areaFilterY_);
+#if XRDP_CONSOLE_CAN_TARGET_SSSE3
+        const bool useSsse3 = destinationRectangle.widthPixels >= 4U &&
+                              ssse3ConversionAvailable();
+#else
+        constexpr bool useSsse3 = false;
+#endif
+
+        for (std::uint32_t row = firstPresentationRow;
+             row < firstPresentationRow + presentationRowCount; row += 2U)
+        {
+            const std::uint32_t viewportY0 = viewportLocalTop + row;
+            const std::uint32_t viewportY1 = viewportY0 + 1U;
+            const std::uint32_t sourceY00 =
+                scaler.verticalSpans_[viewportY0].firstSourcePixel;
+            const std::uint32_t sourceY01 = sourceY00 + diagonalOffsetY;
+            const std::uint32_t sourceY10 =
+                scaler.verticalSpans_[viewportY1].firstSourcePixel;
+            const std::uint32_t sourceY11 = sourceY10 + diagonalOffsetY;
+            const auto *sourceRow00 = reinterpret_cast<const std::uint32_t *>(
+                sourceBytes + static_cast<std::size_t>(sourceY00 - sourceTop) *
+                                  source.strideBytes);
+            const auto *sourceRow01 = reinterpret_cast<const std::uint32_t *>(
+                sourceBytes + static_cast<std::size_t>(sourceY01 - sourceTop) *
+                                  source.strideBytes);
+            const auto *sourceRow10 = reinterpret_cast<const std::uint32_t *>(
+                sourceBytes + static_cast<std::size_t>(sourceY10 - sourceTop) *
+                                  source.strideBytes);
+            const auto *sourceRow11 = reinterpret_cast<const std::uint32_t *>(
+                sourceBytes + static_cast<std::size_t>(sourceY11 - sourceTop) *
+                                  source.strideBytes);
+
+            const std::size_t outputY = destinationY + row;
+            auto *yTop = yPlane + outputY * frameWidth + destinationX;
+            auto *yBottom = yTop + frameWidth;
+            auto *uv = uvPlane + (outputY / 2U) * frameWidth + destinationX;
+            for (std::uint32_t x = 0; x < destinationRectangle.widthPixels;)
+            {
+                const std::uint32_t blockWidth = std::min(
+                    kBlockWidthPixels, destinationRectangle.widthPixels - x);
+                for (std::uint32_t pixel = 0; pixel < blockWidth; ++pixel)
+                {
+                    const std::uint32_t sourceX =
+                        scaler.horizontalFastSourcePixels_[
+                            viewportLocalLeft + x + pixel];
+                    const std::uint32_t sourceX2 = sourceX + diagonalOffsetX;
+                    const std::uint32_t localSourceX = sourceX - sourceLeft;
+                    const std::uint32_t localSourceX2 =
+                        sourceX2 - sourceLeft;
+                    topPixels[pixel] = averageBgraPixel(
+                        sourceRow00[localSourceX],
+                        sourceRow01[localSourceX2]);
+                    bottomPixels[pixel] = averageBgraPixel(
+                        sourceRow10[localSourceX],
+                        sourceRow11[localSourceX2]);
+                }
+
+                convertBgraRowPair_709FullRange(
+                    reinterpret_cast<const std::uint8_t *>(topPixels.data()),
+                    reinterpret_cast<const std::uint8_t *>(
+                        bottomPixels.data()),
+                    yTop + x, yBottom + x, uv + x, blockWidth, useSsse3);
+                x += blockWidth;
+            }
+        }
+        return ScaledNv12UpdateResult::Updated;
+    }
+};
+
+ScaledNv12UpdateResult
+updateNv12RectangleFromFastDiagonalScaler_709FullRange(
+    const PresentationScaler &scaler, FramebufferView source,
+    Rectangle sourceRectangle, Rectangle destinationRectangle,
+    PixelSize frameGeometry, std::span<std::byte> destinationFrame,
+    std::uint32_t firstPresentationRow,
+    std::uint32_t presentationRowCount) noexcept
+{
+    return PresentationScalerNv12Converter::update(
+        scaler, source, sourceRectangle, destinationRectangle, frameGeometry,
+        destinationFrame, firstPresentationRow, presentationRowCount);
+}
 
 std::size_t
 nv12FrameBytes(PixelSize geometry) noexcept
@@ -371,9 +637,10 @@ updateNv12RectangleFromBgraRegion_709FullRange(
         static_cast<std::size_t>(destinationRectangle.y);
 #if XRDP_CONSOLE_CAN_TARGET_SSSE3
     const bool useSsse3 = sourceRectangle.widthPixels >= 4U &&
-                           ssse3ConversionAvailable();
+                          ssse3ConversionAvailable();
+#else
+    constexpr bool useSsse3 = false;
 #endif
-
     for (std::uint32_t y = 0; y < sourceRectangle.heightPixels; y += 2U)
     {
         const std::uint8_t *top = sourceBytes +
@@ -384,42 +651,9 @@ updateNv12RectangleFromBgraRegion_709FullRange(
         std::uint8_t *yBottom = yTop + frameWidth;
         std::uint8_t *uv = uvPlane +
             ((destinationY + y) / 2U) * frameWidth + destinationX;
-#if XRDP_CONSOLE_CAN_TARGET_SSSE3
-        if (useSsse3)
-        {
-            convertBgraRowPairSsse3_709FullRange(
-                top, bottomRow, yTop, yBottom, uv,
-                sourceRectangle.widthPixels);
-            continue;
-        }
-#endif
-
-        const std::uint8_t *topPixel = top;
-        const std::uint8_t *bottomPixel = bottomRow;
-        for (std::uint32_t x = 0; x < sourceRectangle.widthPixels;
-             x += 2U, topPixel += 8U, bottomPixel += 8U,
-             yTop += 2U, yBottom += 2U, uv += 2U)
-        {
-            const Yuv topLeft = bgraToYuv709FullRange(
-                topPixel[0], topPixel[1], topPixel[2]);
-            const Yuv topRight = bgraToYuv709FullRange(
-                topPixel[4], topPixel[5], topPixel[6]);
-            const Yuv bottomLeft = bgraToYuv709FullRange(
-                bottomPixel[0], bottomPixel[1], bottomPixel[2]);
-            const Yuv bottomRight = bgraToYuv709FullRange(
-                bottomPixel[4], bottomPixel[5], bottomPixel[6]);
-
-            yTop[0] = static_cast<std::uint8_t>(topLeft.y);
-            yTop[1] = static_cast<std::uint8_t>(topRight.y);
-            yBottom[0] = static_cast<std::uint8_t>(bottomLeft.y);
-            yBottom[1] = static_cast<std::uint8_t>(bottomRight.y);
-            uv[0] = static_cast<std::uint8_t>(
-                (topLeft.u + topRight.u + bottomLeft.u + bottomRight.u + 2) /
-                4);
-            uv[1] = static_cast<std::uint8_t>(
-                (topLeft.v + topRight.v + bottomLeft.v + bottomRight.v + 2) /
-                4);
-        }
+        convertBgraRowPair_709FullRange(
+            top, bottomRow, yTop, yBottom, uv,
+            sourceRectangle.widthPixels, useSsse3);
     }
     return true;
 }

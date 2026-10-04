@@ -3,6 +3,7 @@
 #include "rdp/h264_latest_frame.h"
 #include "rdp/h264_capture_policy.h"
 #include "rdp/h264_interaction_scheduler.h"
+#include "rdp/gfx_avc420_frame.h"
 #include "core/presentation_scaler.h"
 
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <iostream>
 #include <span>
 #include <utility>
+#include <vector>
 
 namespace
 {
@@ -24,6 +26,145 @@ bool check(bool condition, const char *message)
     {
         std::cerr << message << '\n';
         return false;
+    }
+    return true;
+}
+
+constexpr PixelSize kFullHdSource{1920, 1080};
+constexpr PixelSize kFullHdPresentation{1512, 949};
+constexpr PixelSize kFullHdFrame{1512, 948};
+constexpr Rectangle kFullHdViewport{0, 50, 1512, 850};
+
+[[nodiscard]] std::vector<std::uint32_t>
+makeFullHdTextPattern()
+{
+    std::vector<std::uint32_t> pixels(
+        static_cast<std::size_t>(kFullHdSource.widthPixels) *
+        kFullHdSource.heightPixels);
+    for (std::uint32_t y = 0; y < kFullHdSource.heightPixels; ++y)
+    {
+        for (std::uint32_t x = 0; x < kFullHdSource.widthPixels; ++x)
+        {
+            // One-pixel vertical strokes stress the downscale filter. Sparse
+            // horizontal strokes make the pattern resemble small UI text.
+            const std::uint8_t gray =
+                ((x & 1U) != 0U || (y % 17U) == 0U) ? 240U : 16U;
+            pixels[static_cast<std::size_t>(y) *
+                       kFullHdSource.widthPixels +
+                   x] = 0xff000000U |
+                        (static_cast<std::uint32_t>(gray) << 16U) |
+                        (static_cast<std::uint32_t>(gray) << 8U) | gray;
+        }
+    }
+    return pixels;
+}
+
+[[nodiscard]] FramebufferView
+fullHdView(const std::vector<std::uint32_t> &pixels) noexcept
+{
+    return {std::as_bytes(std::span<const std::uint32_t>(pixels)),
+            kFullHdSource.widthPixels, kFullHdSource.heightPixels,
+            static_cast<std::size_t>(kFullHdSource.widthPixels) * 4U};
+}
+
+[[nodiscard]] bool
+cropFullHdPixels(const std::vector<std::uint32_t> &pixels,
+                 Rectangle rectangle,
+                 std::vector<std::uint32_t> &cropped)
+{
+    if (rectangle.x < 0 || rectangle.y < 0 ||
+        static_cast<std::uint64_t>(rectangle.x) + rectangle.widthPixels >
+            kFullHdSource.widthPixels ||
+        static_cast<std::uint64_t>(rectangle.y) + rectangle.heightPixels >
+            kFullHdSource.heightPixels)
+    {
+        return false;
+    }
+    cropped.resize(static_cast<std::size_t>(rectangle.widthPixels) *
+                   rectangle.heightPixels);
+    for (std::uint32_t row = 0; row < rectangle.heightPixels; ++row)
+    {
+        const auto source = pixels.begin() +
+            static_cast<std::ptrdiff_t>(rectangle.y +
+                                        static_cast<std::int32_t>(row)) *
+                kFullHdSource.widthPixels +
+            rectangle.x;
+        std::copy_n(source, rectangle.widthPixels,
+                    cropped.begin() +
+                        static_cast<std::ptrdiff_t>(row) *
+                            rectangle.widthPixels);
+    }
+    return true;
+}
+
+[[nodiscard]] bool
+scaleAndConvertStaged(PresentationScaler &scaler, FramebufferView source,
+                      Rectangle sourceRectangle,
+                      Rectangle destinationRectangle,
+                      std::span<std::byte> nv12,
+                      std::uint32_t chunkRows) noexcept
+{
+    if (chunkRows == 0 || (chunkRows & 1U) != 0)
+    {
+        return false;
+    }
+    for (std::uint32_t row = 0; row < destinationRectangle.heightPixels;)
+    {
+        const std::uint32_t rows = std::min(
+            chunkRows, destinationRectangle.heightPixels - row);
+        const FramebufferView scaled = scaler.scaleRows(
+            source, sourceRectangle, destinationRectangle, row, rows);
+        if (!scaled.valid())
+        {
+            std::cerr << "staged scaleRows rejected output rows " << row
+                      << ".." << row + rows << " of rectangle at "
+                      << destinationRectangle.x << ',' << destinationRectangle.y
+                      << " size " << destinationRectangle.widthPixels << 'x'
+                      << destinationRectangle.heightPixels << '\n';
+            return false;
+        }
+        const Rectangle output{
+            destinationRectangle.x,
+            destinationRectangle.y + static_cast<std::int32_t>(row),
+            destinationRectangle.widthPixels, rows};
+        if (!updateNv12Rectangle_709FullRange(
+                scaled, output, kFullHdFrame, nv12))
+        {
+            std::cerr << "staged NV12 update rejected output rows " << row
+                      << ".." << row + rows << " of rectangle at "
+                      << destinationRectangle.x << ',' << destinationRectangle.y
+                      << " size " << destinationRectangle.widthPixels << 'x'
+                      << destinationRectangle.heightPixels << '\n';
+            return false;
+        }
+        row += rows;
+    }
+    return true;
+}
+
+[[nodiscard]] bool
+scaleAndConvertDirect(PresentationScaler &scaler, FramebufferView source,
+                      Rectangle sourceRectangle,
+                      Rectangle destinationRectangle,
+                      std::span<std::byte> nv12,
+                      std::uint32_t chunkRows) noexcept
+{
+    if (chunkRows == 0 || (chunkRows & 1U) != 0)
+    {
+        return false;
+    }
+    for (std::uint32_t row = 0; row < destinationRectangle.heightPixels;)
+    {
+        const std::uint32_t rows = std::min(
+            chunkRows, destinationRectangle.heightPixels - row);
+        if (updateNv12RectangleFromFastDiagonalScaler_709FullRange(
+                scaler, source, sourceRectangle, destinationRectangle,
+                kFullHdFrame, nv12, row, rows) !=
+            ScaledNv12UpdateResult::Updated)
+        {
+            return false;
+        }
+        row += rows;
     }
     return true;
 }
@@ -1359,6 +1500,176 @@ bool downscaled_filter_coverage_includes_unselected_source_pixels()
     return success;
 }
 
+bool full_hd_scaled_nv12_fusion_matches_staged_and_partial_updates()
+{
+    PresentationScaler scaler;
+    bool success = check(
+        scaler.configure(kFullHdSource, kFullHdPresentation,
+                         kFullHdViewport),
+        "Full HD fused scaler setup failed");
+    if (!success)
+    {
+        return false;
+    }
+
+    std::vector<std::uint32_t> sourcePixels = makeFullHdTextPattern();
+    const FramebufferView source = fullHdView(sourcePixels);
+    const Rectangle sourceRectangle{
+        0, 0, kFullHdSource.widthPixels, kFullHdSource.heightPixels};
+    const std::size_t frameBytes = nv12FrameBytes(kFullHdFrame);
+    std::vector<std::byte> staged(frameBytes);
+    std::vector<std::byte> direct(frameBytes);
+    std::vector<std::byte> fullReference(frameBytes);
+
+    success &= check(scaleAndConvertStaged(
+                         scaler, source, sourceRectangle, kFullHdViewport,
+                         staged, 42),
+                     "Full HD staged conversion failed across row chunks");
+    success &= check(scaleAndConvertDirect(
+                         scaler, source, sourceRectangle, kFullHdViewport,
+                         direct, 34),
+                     "Full HD fused conversion failed across row chunks");
+    success &= check(direct == staged,
+                     "fused Full HD NV12 differs from staged output");
+
+    const FramebufferView firstScaledRows = scaler.scaleRows(
+        source, sourceRectangle, kFullHdViewport, 0, 2);
+    bool observedFilteredEdge = false;
+    if (firstScaledRows.valid())
+    {
+        const auto *pixels = reinterpret_cast<const std::uint8_t *>(
+            firstScaledRows.pixels.data());
+        for (std::size_t pixel = 0;
+             pixel < static_cast<std::size_t>(kFullHdViewport.widthPixels) * 2U;
+             ++pixel)
+        {
+            observedFilteredEdge |= pixels[pixel * 4U] > 100U &&
+                                    pixels[pixel * 4U] < 150U;
+        }
+    }
+    success &= check(observedFilteredEdge,
+                     "Full HD filter did not blend fine text-like edges");
+
+    std::vector<std::byte> stagedPartial = staged;
+    std::vector<std::byte> directPartial = direct;
+    H264LatestFrameState frameState;
+    success &= check(frameState.configure(
+                         kFullHdSource, kFullHdPresentation, kFullHdFrame,
+                         kFullHdViewport),
+                     "Full HD partial capture state setup failed");
+    constexpr std::array<std::pair<std::uint32_t, std::uint32_t>, 5>
+        damagePoints{{{0, 0}, {959, 539}, {1919, 1079}, {713, 527},
+                      {1500, 840}}};
+    for (const auto &[sourceX, sourceY] : damagePoints)
+    {
+        const std::size_t pixelIndex =
+            static_cast<std::size_t>(sourceY) *
+                kFullHdSource.widthPixels +
+            sourceX;
+        sourcePixels[pixelIndex] ^= 0x00ffffffU;
+        constexpr std::uint32_t tileWidth =
+            GenerationTileMap::kTileWidthPixels;
+        const std::uint32_t tileX = (sourceX / tileWidth) * tileWidth;
+        const std::uint32_t tileY = (sourceY / tileWidth) * tileWidth;
+        const Rectangle sourceTile{
+            static_cast<std::int32_t>(tileX),
+            static_cast<std::int32_t>(tileY),
+            std::min(tileWidth, kFullHdSource.widthPixels - tileX),
+            std::min(tileWidth, kFullHdSource.heightPixels - tileY)};
+        Rectangle mapped{};
+        success &= check(frameState.mapSourceRectangle(sourceTile, mapped),
+                         "Full HD source tile did not map to presentation");
+        if (mapped.widthPixels == 0 || mapped.heightPixels == 0)
+        {
+            continue;
+        }
+        const Rectangle destination =
+            alignAvc420Rectangle(mapped, kFullHdFrame);
+        success &= check(destination.widthPixels != 0 &&
+                             destination.heightPixels != 0,
+                         "Full HD partial damage became empty after AVC420 alignment");
+        if (destination.widthPixels == 0 || destination.heightPixels == 0)
+        {
+            continue;
+        }
+
+        Rectangle sourceForOutput{};
+        success &= check(frameState.sourceCaptureForFrameRectangle(
+                             destination, sourceForOutput) &&
+                             sourceForOutput.widthPixels != 0 &&
+                             sourceForOutput.heightPixels != 0,
+                         "Full HD partial output had no source capture coverage");
+        if (sourceForOutput.widthPixels == 0 ||
+            sourceForOutput.heightPixels == 0)
+        {
+            continue;
+        }
+        const std::int64_t captureLeft = std::min<std::int64_t>(
+            sourceTile.x, sourceForOutput.x);
+        const std::int64_t captureTop = std::min<std::int64_t>(
+            sourceTile.y, sourceForOutput.y);
+        const std::int64_t captureRight = std::max<std::int64_t>(
+            static_cast<std::int64_t>(sourceTile.x) +
+                sourceTile.widthPixels,
+            static_cast<std::int64_t>(sourceForOutput.x) +
+                sourceForOutput.widthPixels);
+        const std::int64_t captureBottom = std::max<std::int64_t>(
+            static_cast<std::int64_t>(sourceTile.y) +
+                sourceTile.heightPixels,
+            static_cast<std::int64_t>(sourceForOutput.y) +
+                sourceForOutput.heightPixels);
+        const Rectangle captureRectangle{
+            static_cast<std::int32_t>(captureLeft),
+            static_cast<std::int32_t>(captureTop),
+            static_cast<std::uint32_t>(captureRight - captureLeft),
+            static_cast<std::uint32_t>(captureBottom - captureTop)};
+        std::vector<std::uint32_t> croppedPixels;
+        success &= check(cropFullHdPixels(
+                             sourcePixels, captureRectangle, croppedPixels),
+                         "Full HD source capture crop was out of bounds");
+        const FramebufferView captured{
+            std::as_bytes(std::span<const std::uint32_t>(croppedPixels)),
+            captureRectangle.widthPixels, captureRectangle.heightPixels,
+            static_cast<std::size_t>(captureRectangle.widthPixels) * 4U};
+
+        success &= check(scaleAndConvertStaged(
+                             scaler, captured, captureRectangle,
+                             destination, stagedPartial, 22),
+                         "staged Full HD partial update failed");
+        success &= check(scaleAndConvertDirect(
+                             scaler, captured, captureRectangle,
+                             destination, directPartial, 18),
+                         "fused Full HD partial update failed");
+
+        std::fill(fullReference.begin(), fullReference.end(), std::byte{});
+        success &= check(scaleAndConvertStaged(
+                             scaler, fullHdView(sourcePixels), sourceRectangle,
+                             kFullHdViewport, fullReference, 42),
+                         "Full HD partial-update reference conversion failed");
+        success &= check(stagedPartial == fullReference,
+                         "staged partial update left stale filter coverage");
+        success &= check(directPartial == fullReference,
+                         "fused partial update left stale filter coverage");
+    }
+
+    PresentationScaler identityScaler;
+    success &= check(identityScaler.configure({4, 4}, {4, 4}, {0, 0, 4, 4}),
+                     "identity scaler setup for fused fallback failed");
+    std::array<std::uint32_t, 16> identityPixels{};
+    const FramebufferView identitySource{
+        std::as_bytes(std::span<const std::uint32_t>(identityPixels)),
+        4, 4, 4U * sizeof(std::uint32_t)};
+    std::array<std::byte, 24> identityNv12{};
+    success &= check(
+        updateNv12RectangleFromFastDiagonalScaler_709FullRange(
+            identityScaler, identitySource, {0, 0, 4, 4}, {0, 0, 4, 4},
+            {4, 4}, identityNv12, 0, 4) ==
+            ScaledNv12UpdateResult::Unsupported,
+        "identity scaler did not select the staged fallback");
+
+    return success;
+}
+
 bool oversized_nv12_frame_is_rejected_before_allocation()
 {
     H264LatestFrameState state;
@@ -1505,6 +1816,7 @@ int main()
     success &= native_resolution_keeps_identity_h264_geometry();
     success &= scaled_capture_maps_to_global_nv12_pixels();
     success &= downscaled_filter_coverage_includes_unselected_source_pixels();
+    success &= full_hd_scaled_nv12_fusion_matches_staged_and_partial_updates();
     success &= oversized_nv12_frame_is_rejected_before_allocation();
     success &= scaled_newer_source_damage_blocks_stale_frame_tile();
     success &= coherent_snapshot_capture_budget_is_bounded();

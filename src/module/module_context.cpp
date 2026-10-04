@@ -3164,8 +3164,10 @@ ModuleContext::check_h264_gfx() noexcept
     using xrdp_console::rdp::buildGfxAvc420CommandSharedRectangles;
     using xrdp_console::rdp::buildGfxSolidFillCommand;
     using xrdp_console::rdp::buildGfxSurfaceToSurfaceCommand;
+    using xrdp_console::rdp::ScaledNv12UpdateResult;
     using xrdp_console::rdp::updateNv12Rectangle_709FullRange;
     using xrdp_console::rdp::updateNv12RectangleFromBgraRegion_709FullRange;
+    using xrdp_console::rdp::updateNv12RectangleFromFastDiagonalScaler_709FullRange;
 
     // Until xrdp accepts a new asynchronous submission, any failure in this
     // service pass can safely abandon direct H.264 and repaint via GFX Planar.
@@ -3583,15 +3585,29 @@ ModuleContext::check_h264_gfx() noexcept
         }
         else
         {
-            const FramebufferView scaled =
-                impl_->presentationScaler.scaleRows(
-                    pending.sourcePixels, pending.captureRectangle,
-                    pending.frameRectangle, pending.nextFrameRow, rows);
-            converted =
-                scaled.valid() && updateNv12Rectangle_709FullRange(
-                                      scaled, destination,
-                                      impl_->h264Frame.geometry(),
-                                      impl_->h264Frame.frameBytes());
+            const ScaledNv12UpdateResult direct =
+                updateNv12RectangleFromFastDiagonalScaler_709FullRange(
+                    impl_->presentationScaler, pending.sourcePixels,
+                    pending.captureRectangle, pending.frameRectangle,
+                    impl_->h264Frame.geometry(),
+                    impl_->h264Frame.frameBytes(),
+                    pending.nextFrameRow, rows);
+            if (direct == ScaledNv12UpdateResult::Updated)
+            {
+                converted = true;
+            }
+            else if (direct == ScaledNv12UpdateResult::Unsupported)
+            {
+                const FramebufferView scaled =
+                    impl_->presentationScaler.scaleRows(
+                        pending.sourcePixels, pending.captureRectangle,
+                        pending.frameRectangle, pending.nextFrameRow, rows);
+                converted =
+                    scaled.valid() && updateNv12Rectangle_709FullRange(
+                                          scaled, destination,
+                                          impl_->h264Frame.geometry(),
+                                          impl_->h264Frame.frameBytes());
+            }
         }
         if (profileH264Timing)
         {

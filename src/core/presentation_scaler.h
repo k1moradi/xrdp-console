@@ -11,6 +11,11 @@
 #include "presentation_transform.h"
 #include "rectangle.h"
 
+namespace xrdp_console::rdp
+{
+class PresentationScalerNv12Converter;
+}
+
 struct PresentationAxisSpan
 {
     std::uint32_t firstSourcePixel{};
@@ -52,6 +57,7 @@ public:
         std::uint32_t presentationRowCount) noexcept;
 
 private:
+    friend class xrdp_console::rdp::PresentationScalerNv12Converter;
     friend struct PresentationScalerTestPeer;
 
     [[nodiscard]] bool sourceCoverageForPresentationRectangle(
