@@ -85,3 +85,33 @@ client-perceived latency. Keep LTO and PGO opt-in until a representative RDP
 workload shows a repeatable end-to-end win. Build directories, CMake caches,
 CTest logs, profile data, and benchmark output are retained under
 `/home/keivan/checkpoints/xrdp-console/2026-10-03/build-optimization/`.
+
+## Scroll-observer snapshot allocation
+
+The scroll observer keeps two contiguous BGRA history buffers. Before this
+change, `configure()` value-initialized both buffers. At 1920x1080 that writes
+16,588,800 bytes before the observer has received a frame. The buffers now use
+`std::make_unique_for_overwrite<std::byte[]>`. A first full-frame capture
+overwrites its entire working buffer; a first partial capture still explicitly
+clears the working buffer in `beginEpisode()`. The previous buffer is first
+read only after it has been swapped with a fully initialized working buffer.
+The allocation remains bounded by the existing 16 MiB snapshot limit.
+
+The new `scroll_observer_configure` stage was measured with 100 samples per
+run, one warmup, the live 1920x1080 X11 source, GCC Release with
+`-O3 -march=native -mtune=native`, and one benchmark process pinned to CPU 0.
+The stage includes observer destruction. The table reports each run's wall
+p50 in microseconds:
+
+| Configuration | Run 1 | Run 2 | Run 3 | Median |
+| --- | ---: | ---: | ---: | ---: |
+| Value-initialized buffers | 4086.984 | 4206.776 | 4126.591 | 4126.591 |
+| Overwrite allocation | 1.670 | 1.670 | 1.635 | 1.670 |
+
+The measured setup cost fell by about 4.1 ms and no longer touches the two
+frame-sized buffers during configuration. The sub-2-microsecond result is
+close to the benchmark's clock and allocation overhead, so it should be read
+as “eager frame clearing removed,” not as a precise allocation-only cost.
+This measures observer setup, not end-to-end RDP latency or later capture and
+scroll-processing costs. Raw runs are retained under
+`/home/keivan/checkpoints/xrdp-console/2026-10-04/runtime-optimization/`.

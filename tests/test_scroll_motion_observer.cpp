@@ -11,6 +11,26 @@
 #include <span>
 #include <vector>
 
+namespace xrdp_console::rdp
+{
+struct ScrollMotionObserverTestPeer final
+{
+    static bool poisonBuffers(ScrollMotionObserver &observer) noexcept
+    {
+        if (!observer.valid())
+        {
+            return false;
+        }
+        const std::size_t bytes =
+            static_cast<std::size_t>(observer.geometry_.widthPixels) *
+            observer.geometry_.heightPixels * sizeof(std::uint32_t);
+        std::fill_n(observer.previous_.get(), bytes, std::byte{0x5a});
+        std::fill_n(observer.working_.get(), bytes, std::byte{0xa5});
+        return true;
+    }
+};
+} // namespace xrdp_console::rdp
+
 namespace
 {
 using namespace xrdp_console::rdp;
@@ -155,6 +175,45 @@ bool baseline_then_scroll_is_observed()
     success &= check(observer.stats().verified == 1 &&
                          observer.stats().discoveryAttempts == 1,
                      "observer stats did not record verification");
+    return success;
+}
+
+bool partial_initial_baseline_clears_uncaptured_pixels()
+{
+    constexpr std::uint32_t width = 128;
+    constexpr std::uint32_t height = 128;
+    constexpr std::uint32_t capturedHeight = 80;
+    constexpr std::int32_t displacement = -8;
+    constexpr Rectangle full{0, 0, width, height};
+    const auto captured = makeTextured(width, capturedHeight);
+    std::vector<std::byte> expected(
+        static_cast<std::size_t>(width) * height * 4U, std::byte{});
+    std::copy(captured.begin(), captured.end(), expected.begin());
+
+    ScrollMotionObserver observer;
+    ScrollMotionObserverConfig config{};
+    config.minimumEpisodePixels = 1U;
+    config.minimumEpisodePercent = 1U;
+    bool success = check(observer.configure({width, height}, config),
+                         "partial-first observer configure failed");
+    success &= check(ScrollMotionObserverTestPeer::poisonBuffers(observer),
+                     "partial-first buffers could not be poisoned");
+    success &= check(observer.stageCapture(
+                         view(captured, width, capturedHeight),
+                         {0, 0, width, capturedHeight}),
+                     "partial initial baseline stage failed");
+    const auto baseline = observer.completeEpisode(full);
+    success &= check(
+        baseline.kind == ScrollMotionObservationKind::BaselineSeeded,
+                     "partial initial frame did not seed a baseline");
+
+    const auto current = scroll(expected, width, height, displacement);
+    success &= check(observer.stageCapture(view(current, width, height), full),
+                     "scroll after partial initial baseline failed to stage");
+    const auto observed = observer.completeEpisode(full);
+    success &= check(observed.verified() &&
+                         observed.displacementY == displacement,
+                     "uncaptured initial pixels were not zero-initialized");
     return success;
 }
 
@@ -603,6 +662,7 @@ int main()
 {
     bool success = true;
     success &= baseline_then_scroll_is_observed();
+    success &= partial_initial_baseline_clears_uncaptured_pixels();
     success &= small_episode_is_not_searched();
     success &= sparse_episodes_commit_without_copying_the_full_baseline();
     success &= discovery_materializes_only_uncaptured_baseline_regions();

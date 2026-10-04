@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -102,6 +103,8 @@ public:
     [[nodiscard]] const ScrollMotionObserverStats &stats() const noexcept;
 
 private:
+    friend struct ScrollMotionObserverTestPeer;
+
     struct HorizontalSpan final
     {
         std::uint32_t begin{};
@@ -117,8 +120,8 @@ private:
 
     PixelSize geometry_{};
     ScrollMotionObserverConfig config_{};
-    std::vector<std::byte> previous_{};
-    std::vector<std::byte> working_{};
+    std::unique_ptr<std::byte[]> previous_{};
+    std::unique_ptr<std::byte[]> working_{};
     std::vector<Rectangle> stagedRectangles_{};
     std::vector<HorizontalSpan> stagedIntervals_{};
     std::vector<std::uint8_t> stagedFullTiles_{};

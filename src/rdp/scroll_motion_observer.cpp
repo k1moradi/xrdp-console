@@ -96,8 +96,12 @@ ScrollMotionObserver::configure(PixelSize geometry,
 
     try
     {
-        std::vector<std::byte> previous(bytes, std::byte{});
-        std::vector<std::byte> working(bytes, std::byte{});
+        // First partial captures clear working_ in beginEpisode(), while a
+        // full capture overwrites it. previous_ only becomes readable after
+        // swapping with a fully initialized working image. Avoid eagerly
+        // touching both full-frame buffers during configuration.
+        auto previous = std::make_unique_for_overwrite<std::byte[]>(bytes);
+        auto working = std::make_unique_for_overwrite<std::byte[]>(bytes);
         std::vector<Rectangle> stagedRectangles;
         std::vector<HorizontalSpan> stagedIntervals;
         std::vector<std::uint8_t> stagedFullTiles(tileCount, 0U);
@@ -136,8 +140,8 @@ ScrollMotionObserver::reset() noexcept
 {
     geometry_ = {};
     config_ = {};
-    std::vector<std::byte>{}.swap(previous_);
-    std::vector<std::byte>{}.swap(working_);
+    previous_.reset();
+    working_.reset();
     std::vector<Rectangle>{}.swap(stagedRectangles_);
     std::vector<HorizontalSpan>{}.swap(stagedIntervals_);
     std::vector<std::uint8_t>{}.swap(stagedFullTiles_);
@@ -188,7 +192,7 @@ ScrollMotionObserver::valid() const noexcept
         return false;
     }
     const std::size_t bytes = stride * geometry_.heightPixels;
-    return bytes != 0 && previous_.size() == bytes && working_.size() == bytes;
+    return bytes != 0 && previous_ != nullptr && working_ != nullptr;
 }
 
 bool
@@ -243,7 +247,10 @@ ScrollMotionObserver::beginEpisode() noexcept
     }
     else
     {
-        std::fill(working_.begin(), working_.end(), std::byte{});
+        const std::size_t bytes =
+            static_cast<std::size_t>(geometry_.widthPixels) *
+            geometry_.heightPixels * kBytesPerPixel;
+        std::fill_n(working_.get(), bytes, std::byte{});
         stagedRectangles_.clear();
     }
     std::fill(stagedFullTiles_.begin(), stagedFullTiles_.end(), 0U);
@@ -328,8 +335,8 @@ ScrollMotionObserver::materializeWorkingFromPrevious() noexcept
                 const std::size_t bytes =
                     static_cast<std::size_t>(span.begin - copiedThrough) *
                     kBytesPerPixel;
-                std::memcpy(working_.data() + offset,
-                            previous_.data() + offset, bytes);
+                std::memcpy(working_.get() + offset,
+                            previous_.get() + offset, bytes);
                 copiedBytes += bytes;
             }
             copiedThrough = std::max(copiedThrough, span.end);
@@ -342,8 +349,8 @@ ScrollMotionObserver::materializeWorkingFromPrevious() noexcept
             const std::size_t bytes =
                 static_cast<std::size_t>(width - copiedThrough) *
                 kBytesPerPixel;
-            std::memcpy(working_.data() + offset,
-                        previous_.data() + offset, bytes);
+            std::memcpy(working_.get() + offset,
+                        previous_.get() + offset, bytes);
             copiedBytes += bytes;
         }
     }
@@ -379,7 +386,7 @@ ScrollMotionObserver::commitStagedToPrevious() noexcept
         {
             const std::size_t offset = firstRow +
                                        static_cast<std::size_t>(row) * stride;
-            std::memcpy(previous_.data() + offset, working_.data() + offset,
+            std::memcpy(previous_.get() + offset, working_.get() + offset,
                         rowBytes);
         }
     }
@@ -455,7 +462,7 @@ ScrollMotionObserver::stageCapture(FramebufferView capture,
         destinationStride == rowBytes)
     {
         std::memcpy(
-            working_.data() + destinationY * destinationStride,
+            working_.get() + destinationY * destinationStride,
             capture.pixels.data(),
             rowBytes * static_cast<std::size_t>(capture.heightPixels));
     }
@@ -467,7 +474,7 @@ ScrollMotionObserver::stageCapture(FramebufferView capture,
                 capture.pixels.data() + static_cast<std::size_t>(row) *
                                             capture.strideBytes;
             std::byte *target =
-                working_.data() + (destinationY + row) * destinationStride +
+                working_.get() + (destinationY + row) * destinationStride +
                 destinationX;
             std::memcpy(target, source, rowBytes);
         }
@@ -565,17 +572,21 @@ ScrollMotionObserver::stageCapture(FramebufferView capture,
 FramebufferView
 ScrollMotionObserver::previousView() const noexcept
 {
-    return {
-        previous_, geometry_.widthPixels, geometry_.heightPixels,
-        static_cast<std::size_t>(geometry_.widthPixels) * kBytesPerPixel};
+    const std::size_t bytes = static_cast<std::size_t>(geometry_.widthPixels) *
+                              geometry_.heightPixels * kBytesPerPixel;
+    return {std::span<const std::byte>(previous_.get(), bytes),
+            geometry_.widthPixels, geometry_.heightPixels,
+            static_cast<std::size_t>(geometry_.widthPixels) * kBytesPerPixel};
 }
 
 FramebufferView
 ScrollMotionObserver::workingView() const noexcept
 {
-    return {
-        working_, geometry_.widthPixels, geometry_.heightPixels,
-        static_cast<std::size_t>(geometry_.widthPixels) * kBytesPerPixel};
+    const std::size_t bytes = static_cast<std::size_t>(geometry_.widthPixels) *
+                              geometry_.heightPixels * kBytesPerPixel;
+    return {std::span<const std::byte>(working_.get(), bytes),
+            geometry_.widthPixels, geometry_.heightPixels,
+            static_cast<std::size_t>(geometry_.widthPixels) * kBytesPerPixel};
 }
 
 ScrollMotionObservation

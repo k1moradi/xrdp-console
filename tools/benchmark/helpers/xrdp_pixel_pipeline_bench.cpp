@@ -1264,6 +1264,25 @@ runBenchmark(const Options &options)
                     observerPatch.heightPixels,
                 observerEpisodeBytes, observerEpisodeBytes);
 
+    if (!measure(samples, options.samples, noPreparation,
+                 [&](std::size_t, std::uint64_t &outputBytes) {
+                     ScrollMotionObserver configured{};
+                     if (!configured.configure(sourceGeometry) ||
+                         !configured.valid())
+                     {
+                         return false;
+                     }
+                     outputBytes = 0;
+                     checksum += configured.geometry().widthPixels;
+                     return true;
+                 }))
+    {
+        std::fputs("scroll-observer configuration measurement failed\n",
+                   stderr);
+        return false;
+    }
+    reportStage("scroll_observer_configure", samples, sourcePixels, 0U, 0U);
+
     struct ScrollTileCapture final
     {
         Rectangle rectangle{};
