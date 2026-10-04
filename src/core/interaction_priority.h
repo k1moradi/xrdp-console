@@ -8,8 +8,10 @@
 #include "geometry.h"
 #include "rectangle.h"
 
-constexpr std::uint32_t kInteractionPriorityWidthPixels = 384;
-constexpr std::uint32_t kInteractionPriorityHeightPixels = 256;
+// Pointer-triggered menus commonly open above and to the side of the click.
+// Cover a realistic popup while keeping prioritized work bounded.
+constexpr std::uint32_t kInteractionPriorityWidthPixels = 640;
+constexpr std::uint32_t kInteractionPriorityHeightPixels = 768;
 
 struct InteractionPriorityState
 {

@@ -1014,7 +1014,7 @@ initializeFrameForScrollPriorityTest(H264LatestFrameState &state,
 
 struct FirstScrollQuantum final
 {
-    std::array<bool, 48> clientTilesNew{};
+    std::array<bool, 256> clientTilesNew{};
     Rectangle capturedTile{};
     bool moreDamagePending{};
 };
@@ -1023,7 +1023,7 @@ bool
 runFirstScrollQuantum(bool applyScrollPriorityPolicy,
                       FirstScrollQuantum &result)
 {
-    constexpr PixelSize kGeometry{512, 384};
+    constexpr PixelSize kGeometry{1024, 1024};
     constexpr std::uint32_t kTileDimension = 64;
     H264LatestFrameState state;
     if (!initializeFrameForScrollPriorityTest(state, kGeometry))
@@ -1033,10 +1033,10 @@ runFirstScrollQuantum(bool applyScrollPriorityPolicy,
 
     state.markDamage({0, 0, kGeometry.widthPixels, kGeometry.heightPixels});
     InteractionPriorityState interaction{};
-    noteInteractionPointer(interaction, 256, 192, kGeometry, true);
+    noteInteractionPointer(interaction, 512, 512, kGeometry, true);
     if (applyScrollPriorityPolicy)
     {
-        noteInteractionScroll(interaction, 256, 192);
+        noteInteractionScroll(interaction, 512, 512);
     }
 
     std::array<GenerationTileMap::Selection, 64> selections{};
@@ -1092,7 +1092,7 @@ runFirstScrollQuantum(bool applyScrollPriorityPolicy,
                  column < endColumn; ++column)
             {
                 const std::size_t tileIndex =
-                    static_cast<std::size_t>(row) * 8U + column;
+                    static_cast<std::size_t>(row) * 16U + column;
                 if (tileIndex >= result.clientTilesNew.size())
                 {
                     return false;
@@ -1115,9 +1115,9 @@ scroll_priority_creates_and_then_avoids_mouse_local_mixed_age_update()
 
     success &= check(runFirstScrollQuantum(false, oldScheduling),
                      "old scroll-priority quantum did not make progress");
-    success &= check(oldScheduling.capturedTile == Rectangle{64, 64, 64, 64},
+    success &= check(oldScheduling.capturedTile == Rectangle{192, 128, 64, 64},
                      "old scheduler did not capture inside the pointer region first");
-    success &= check(oldScheduling.clientTilesNew[9] &&
+    success &= check(oldScheduling.clientTilesNew[35] &&
                          !oldScheduling.clientTilesNew[0] &&
                          oldScheduling.moreDamagePending,
                      "expected mixed-age surface was not reproduced: the mouse-local "
@@ -1128,7 +1128,7 @@ scroll_priority_creates_and_then_avoids_mouse_local_mixed_age_update()
     success &= check(scrollScheduling.capturedTile == Rectangle{0, 0, 64, 64},
                      "scroll damage still bypassed the normal page-wide order");
     success &= check(scrollScheduling.clientTilesNew[0] &&
-                         !scrollScheduling.clientTilesNew[9] &&
+                         !scrollScheduling.clientTilesNew[35] &&
                          scrollScheduling.moreDamagePending,
                      "scroll still advanced the mouse-local tile ahead of the "
                      "page-wide update");
