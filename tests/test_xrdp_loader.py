@@ -3058,10 +3058,17 @@ def resize_source_x11_display(display: str, width: int, height: int) -> None:
 
 def start_stimulus(stimulus_path: Path, display: str,
                    environment: dict[str, str],
-                   coherence_mode: bool = False) -> subprocess.Popen[bytes]:
+                   coherence_mode: bool = False,
+                   full_screen_size: tuple[int, int] | None = None
+                   ) -> subprocess.Popen[bytes]:
     command = [str(stimulus_path), display]
     expected_ready = b"READY 160 100\n"
-    if coherence_mode:
+    if full_screen_size is not None:
+        command.append("--fullscreen")
+        expected_ready = (
+            f"READY {full_screen_size[0]} {full_screen_size[1]}\n"
+        ).encode("ascii")
+    elif coherence_mode:
         command.extend((str(COHERENCE_SOURCE_WIDTH),
                         str(COHERENCE_SOURCE_HEIGHT)))
         expected_ready = (
@@ -3302,7 +3309,10 @@ def assert_client_pixel(client_display: str,
                         presentation_width: int = 1024,
                         presentation_height: int = 768,
                         client_log_path: Path | None = None,
-                        source_display: str | None = None) -> None:
+                        source_display: str | None = None,
+                        full_screen_damage_burst: bool = False,
+                        cpu_contention: bool = False,
+                        maximum_pixel_latency_ms: int | None = None) -> None:
     """Draw a known source color and require it in the FreeRDP framebuffer."""
     try:
         window = find_window(client_display, window_title, 8.0)
@@ -3314,6 +3324,7 @@ def assert_client_pixel(client_display: str,
             f"{read_text(client_log_path) if client_log_path else ''}"
         ) from error
     probe: subprocess.Popen[object] | None = None
+    cpu_spinner: subprocess.Popen[bytes] | None = None
     try:
         probe = subprocess.Popen(
             [str(pixel_probe), client_display, window,
@@ -3327,6 +3338,11 @@ def assert_client_pixel(client_display: str,
             raise AssertionError("pixel assertion pipes were not created")
         if not read_line(probe.stdout, 5.0).startswith(b"READY "):
             raise AssertionError("pixel probe did not become ready")
+        if cpu_contention:
+            cpu_spinner = subprocess.Popen(
+                [sys.executable, "-c", "while True: pass"],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True)
 
         batch_lines = [
             line for line in read_text(log_path).splitlines()
@@ -3339,6 +3355,16 @@ def assert_client_pixel(client_display: str,
         ]
         prior_batch_number = max(prior_batch_numbers, default=0)
 
+        if full_screen_damage_burst:
+            for burst_index in range(8):
+                stimulus.stdin.write(b"frame\n")
+                stimulus.stdin.flush()
+                burst_line = read_line(stimulus.stdout, 5.0)
+                if len(burst_line.split()) < 3:
+                    raise AssertionError(
+                        "full-screen damage burst stopped at update "
+                        f"{burst_index}: {burst_line!r}")
+
         stimulus.stdin.write(b"frame\n")
         stimulus.stdin.flush()
         source_line = read_line(stimulus.stdout, 5.0)
@@ -3346,6 +3372,12 @@ def assert_client_pixel(client_display: str,
         if len(fields) < 3:
             raise AssertionError(f"source stimulus did not draw a frame: {source_line!r}")
         state = int(fields[2])
+        try:
+            draw_done_ns = int(fields[1])
+        except ValueError as error:
+            raise AssertionError(
+                f"source stimulus returned an invalid monotonic timestamp: "
+                f"{source_line!r}") from error
         expected_red = state == 0
         source_pixel_sample = None
         if source_display is not None:
@@ -3378,7 +3410,10 @@ def assert_client_pixel(client_display: str,
                     f"pixel after resize: sample={source_pixel_sample!r} "
                     f"expected_red={expected_red}")
 
+        client_visible_ns: int | None = None
+
         def wait_for_pixel(expected_red: bool) -> bytes:
+            nonlocal client_visible_ns
             deadline = time.monotonic() + 8.0
             last_pixel = b""
             while time.monotonic() < deadline:
@@ -3410,6 +3445,7 @@ def assert_client_pixel(client_display: str,
                     blue > 200 and red < 80 and green < 80
                 )
                 if matches:
+                    client_visible_ns = time.monotonic_ns()
                     return last_pixel
             raise AssertionError(
                 "known source pixel did not reach the FreeRDP framebuffer: "
@@ -3428,6 +3464,16 @@ def assert_client_pixel(client_display: str,
             raise AssertionError(
                 f"{error}\n[source display pixel sample] "
                 f"{source_pixel_sample!r}") from error
+        if maximum_pixel_latency_ms is not None:
+            if client_visible_ns is None:
+                raise AssertionError(
+                    "client-visible pixel was not timestamped")
+            latency_ms = (client_visible_ns - draw_done_ns) / 1_000_000
+            if latency_ms > maximum_pixel_latency_ms:
+                raise AssertionError(
+                    "latest full-screen update exceeded the freshness budget: "
+                    f"{latency_ms:.1f} ms > {maximum_pixel_latency_ms} ms\n"
+                    f"{xrdp_log_excerpt(log_path)}")
         if assert_sparse_planar_batch:
             # A client-visible pixel may precede the next xrdp GFX dirty
             # flush. Wait for the baseline draw's own completed Planar batch,
@@ -3546,6 +3592,8 @@ def assert_client_pixel(client_display: str,
                     f"{damage_debug}\n"
                     f"{xrdp_log_excerpt(log_path)}")
     finally:
+        if cpu_spinner is not None:
+            stop_process(cpu_spinner)
         stop_process(probe)
 
 
@@ -3771,8 +3819,9 @@ def main() -> int:
             raise SystemExit("--cpu-contention may be specified only once")
         arguments.remove("--cpu-contention")
         cpu_contention = True
-    if cpu_contention and not coherence_mode:
-        raise SystemExit("--cpu-contention requires --gfx-h264-coherence")
+    if cpu_contention and not (coherence_mode or narrow_source_mode):
+        raise SystemExit(
+            "--cpu-contention requires an H.264 coherence or narrow-source test")
 
     if clipboard_enabled:
         expected_argument_count = 8 if clipboard_peer_mode else 7
@@ -3969,7 +4018,9 @@ password=smoke
             # sparse-rectangle acceptance assertion.
             stimulus = start_stimulus(
                 stimulus_path, source_display, os.environ.copy(),
-                coherence_mode=coherence_mode)
+                coherence_mode=coherence_mode,
+                full_screen_size=(source_width, source_height)
+                if narrow_source_mode else None)
             if clipboard_enabled:
                 chansrv_path = install_root / "sbin" / "xrdp-chansrv"
                 if not chansrv_path.is_file():
@@ -4207,7 +4258,12 @@ password=smoke
                             presentation_width=presentation_width,
                             presentation_height=presentation_height,
                             client_log_path=client_log_path,
-                            source_display=source_display)
+                            source_display=source_display,
+                            full_screen_damage_burst=narrow_source_mode,
+                            cpu_contention=cpu_contention,
+                            maximum_pixel_latency_ms=(
+                                1000 if cpu_contention and narrow_source_mode
+                                else None))
                         if fullhd_source_mode:
                             assert_client_stays_connected(
                                 client, os.environ["DISPLAY"], window_title,

@@ -37,9 +37,16 @@ int main(int argc, char **argv)
 {
     const char *display_name = argc > 1 ? argv[1] : NULL;
     const int key_mode = argc > 2 && strcmp(argv[2], "--key") == 0;
+    const int full_screen_mode =
+        argc > 2 && strcmp(argv[2], "--fullscreen") == 0;
     int x = 20;
     int y = 20;
 
+    if (key_mode && full_screen_mode)
+    {
+        fprintf(stderr, "--key and --fullscreen cannot be combined\n");
+        return 2;
+    }
     if (key_mode && argc != 3 &&
         (argc != 5 || !parse_coordinate(argv[3], &x) ||
          !parse_coordinate(argv[4], &y)))
@@ -47,7 +54,12 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: %s [DISPLAY] [--key [X Y]]\n", argv[0]);
         return 2;
     }
-    if (!key_mode && argc != 1 && argc != 2 &&
+    if (full_screen_mode && argc != 3)
+    {
+        fprintf(stderr, "usage: %s [DISPLAY] --fullscreen\n", argv[0]);
+        return 2;
+    }
+    if (!key_mode && !full_screen_mode && argc != 1 && argc != 2 &&
         (argc != 4 || !parse_coordinate(argv[2], &x) ||
          !parse_coordinate(argv[3], &y)))
     {
@@ -61,8 +73,17 @@ int main(int argc, char **argv)
     }
     int screen = DefaultScreen(display);
     Window root = RootWindow(display, screen);
-    const unsigned int width = 160;
-    const unsigned int height = 100;
+    const unsigned int width = full_screen_mode
+                                   ? (unsigned int)DisplayWidth(display, screen)
+                                   : 160U;
+    const unsigned int height = full_screen_mode
+                                    ? (unsigned int)DisplayHeight(display, screen)
+                                    : 100U;
+    if (full_screen_mode)
+    {
+        x = 0;
+        y = 0;
+    }
     Window window = XCreateSimpleWindow(display, root, x, y, width, height, 0,
                                         BlackPixel(display, screen),
                                         WhitePixel(display, screen));

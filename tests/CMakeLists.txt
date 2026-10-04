@@ -1195,6 +1195,23 @@ if(TARGET xrdp-console)
             LABELS "h264;integration"
             RESOURCE_LOCK xrdp_console_loader_display
             RUN_SERIAL TRUE)
+        add_test(NAME xrdp-loader-gfx-h264-narrow-source-cpu-contention
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11-latency-stimulus>
+            --cpu-contention --gfx-h264-narrow-source)
+        set_tests_properties(xrdp-loader-gfx-h264-narrow-source-cpu-contention
+            PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 60
+            LABELS "h264;integration;latency"
+            RESOURCE_LOCK xrdp_console_loader_display
+            RUN_SERIAL TRUE)
         add_test(NAME xrdp-loader-gfx-h264-randr-resize
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
@@ -1341,6 +1358,7 @@ if(TARGET xrdp-console)
             xrdp-loader-gfx-h264-odd-scaled-smoke
             xrdp-loader-gfx-h264-fullhd-source-smoke
             xrdp-loader-gfx-h264-narrow-source-smoke
+            xrdp-loader-gfx-h264-narrow-source-cpu-contention
             xrdp-loader-gfx-h264-randr-resize
             xrdp-loader-rfx-smoke
             xrdp-loader-rfx-scaled-smoke
