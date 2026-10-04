@@ -342,6 +342,198 @@ bool small_episode_is_not_searched()
     return success;
 }
 
+bool sparse_episodes_commit_without_copying_the_full_baseline()
+{
+    constexpr std::uint32_t width = 320;
+    constexpr std::uint32_t height = 240;
+    constexpr Rectangle full{0, 0, width, height};
+    ScrollMotionObserver observer;
+    auto expectedBaseline = makeTextured(width, height);
+    bool success = check(observer.configure({width, height}),
+                         "observer configure failed");
+    success &= check(observer.stageCapture(
+                         view(expectedBaseline, width, height), full),
+                     "initial baseline stage failed");
+    const auto seeded = observer.completeEpisode(full);
+    success &= check(seeded.kind == ScrollMotionObservationKind::BaselineSeeded,
+                     "initial full-frame capture did not seed the baseline");
+
+    const Rectangle firstRectangle{10, 10, 16, 16};
+    const Rectangle secondRectangle{18, 18, 16, 16};
+    std::vector<std::byte> firstPatch(
+        firstRectangle.widthPixels * firstRectangle.heightPixels * 4U,
+        std::byte{0x44});
+    std::vector<std::byte> secondPatch(
+        secondRectangle.widthPixels * secondRectangle.heightPixels * 4U,
+        std::byte{0x99});
+    success &= check(observer.stageCapture(
+                         {firstPatch, firstRectangle.widthPixels,
+                          firstRectangle.heightPixels,
+                          firstRectangle.widthPixels * 4U},
+                         firstRectangle),
+                     "first sparse patch stage failed");
+    success &= check(observer.stageCapture(
+                         {secondPatch, secondRectangle.widthPixels,
+                          secondRectangle.heightPixels,
+                          secondRectangle.widthPixels * 4U},
+                         secondRectangle),
+                     "overlapping sparse patch stage failed");
+    const auto sparseEpisode = observer.completeEpisode(full);
+    success &= check(sparseEpisode.kind ==
+                         ScrollMotionObservationKind::InsufficientDamage,
+                     "small patches unexpectedly ran motion discovery");
+    success &= check(observer.stats().baselineBytesCopied == 0,
+                     "sparse episode copied the full baseline snapshot");
+
+    const auto applyPatch = [&](const std::vector<std::byte> &patch,
+                                Rectangle rectangle) {
+        const std::size_t rowBytes =
+            static_cast<std::size_t>(rectangle.widthPixels) * 4U;
+        const std::size_t targetStride =
+            static_cast<std::size_t>(width) * 4U;
+        for (std::uint32_t row = 0; row < rectangle.heightPixels; ++row)
+        {
+            std::copy_n(
+                patch.data() + static_cast<std::size_t>(row) * rowBytes,
+                rowBytes,
+                expectedBaseline.data() +
+                    static_cast<std::size_t>(rectangle.y +
+                                             static_cast<std::int32_t>(row)) *
+                        targetStride +
+                    static_cast<std::size_t>(rectangle.x) * 4U);
+        }
+    };
+    applyPatch(firstPatch, firstRectangle);
+    applyPatch(secondPatch, secondRectangle);
+
+    constexpr std::int32_t displacement = -37;
+    const auto scrolled = scroll(expectedBaseline, width, height, displacement);
+    success &= check(observer.stageCapture(view(scrolled, width, height), full),
+                     "full-frame follow-up scroll stage failed");
+    const auto observed = observer.completeEpisode(full);
+    success &= check(observed.verified() &&
+                         observed.displacementY == displacement,
+                     "sparse baseline updates corrupted later scroll detection");
+    return success;
+}
+
+bool discovery_materializes_only_uncaptured_baseline_regions()
+{
+    constexpr std::uint32_t width = 320;
+    constexpr std::uint32_t height = 240;
+    constexpr Rectangle full{0, 0, width, height};
+    constexpr Rectangle patchRectangle{10, 10, 16, 16};
+    ScrollMotionObserverConfig config{};
+    config.minimumEpisodePixels = 128;
+    config.minimumEpisodePercent = 0;
+    ScrollMotionObserver observer;
+    auto expectedBaseline = makeTextured(width, height);
+    bool success = check(observer.configure({width, height}, config),
+                         "observer configure failed");
+    success &= check(observer.stageCapture(
+                         view(expectedBaseline, width, height), full),
+                     "initial baseline stage failed");
+    static_cast<void>(observer.completeEpisode(full));
+
+    std::vector<std::byte> patch(
+        patchRectangle.widthPixels * patchRectangle.heightPixels * 4U,
+        std::byte{0x55});
+    success &= check(observer.stageCapture(
+                         {patch, patchRectangle.widthPixels,
+                          patchRectangle.heightPixels,
+                          patchRectangle.widthPixels * 4U},
+                         patchRectangle),
+                     "discovery patch stage failed");
+    const auto observed = observer.completeEpisode(full);
+    success &= check(observed.kind == ScrollMotionObservationKind::NoMotion,
+                     "isolated patch was classified as vertical motion");
+    const std::uint64_t expectedCopyBytes =
+        static_cast<std::uint64_t>(width) * height * 4U -
+        static_cast<std::uint64_t>(patchRectangle.widthPixels) *
+            patchRectangle.heightPixels * 4U;
+    success &= check(observer.stats().baselineBytesCopied == expectedCopyBytes,
+                     "materialization recopied captured pixels or missed gaps");
+
+    const std::size_t rowBytes =
+        static_cast<std::size_t>(patchRectangle.widthPixels) * 4U;
+    const std::size_t targetStride = static_cast<std::size_t>(width) * 4U;
+    for (std::uint32_t row = 0; row < patchRectangle.heightPixels; ++row)
+    {
+        std::copy_n(
+            patch.data() + static_cast<std::size_t>(row) * rowBytes,
+            rowBytes,
+            expectedBaseline.data() +
+                static_cast<std::size_t>(patchRectangle.y +
+                                         static_cast<std::int32_t>(row)) *
+                    targetStride +
+                static_cast<std::size_t>(patchRectangle.x) * 4U);
+    }
+    constexpr std::int32_t displacement = 29;
+    const auto current = scroll(expectedBaseline, width, height, displacement);
+    success &= check(observer.stageCapture(view(current, width, height), full),
+                     "follow-up scroll stage failed");
+    const auto followUp = observer.completeEpisode(full);
+    success &= check(followUp.verified() &&
+                         followUp.displacementY == displacement,
+                     "materialized frame was not a coherent new baseline");
+    return success;
+}
+
+bool tiled_scroll_episodes_preserve_complete_frame_materialization()
+{
+    constexpr std::uint32_t width = 320;
+    constexpr std::uint32_t height = 240;
+    constexpr Rectangle full{0, 0, width, height};
+    constexpr std::uint32_t tileSize = 64;
+    constexpr std::int32_t displacement = -37;
+    const auto previous = makeTextured(width, height);
+    const auto current = scroll(previous, width, height, displacement);
+    ScrollMotionObserver observer;
+    bool success = check(observer.configure({width, height}),
+                         "observer configure failed");
+    success &= check(observer.stageCapture(view(previous, width, height), full),
+                     "tiled-scroll baseline stage failed");
+    static_cast<void>(observer.completeEpisode(full));
+
+    const std::size_t stride = static_cast<std::size_t>(width) * 4U;
+    for (std::uint32_t y = 0; y < height; y += tileSize)
+    {
+        const std::uint32_t tileHeight = std::min(tileSize, height - y);
+        for (std::uint32_t x = 0; x < width; x += tileSize)
+        {
+            const std::uint32_t tileWidth = std::min(tileSize, width - x);
+            const Rectangle tile{static_cast<std::int32_t>(x),
+                                 static_cast<std::int32_t>(y), tileWidth,
+                                 tileHeight};
+            const std::size_t tileStride =
+                static_cast<std::size_t>(tileWidth) * 4U;
+            std::vector<std::byte> tilePixels(
+                tileStride * tileHeight);
+            for (std::uint32_t row = 0; row < tileHeight; ++row)
+            {
+                const std::size_t sourceOffset =
+                    static_cast<std::size_t>(y + row) * stride +
+                    static_cast<std::size_t>(x) * 4U;
+                std::copy_n(current.data() + sourceOffset, tileStride,
+                            tilePixels.data() +
+                                static_cast<std::size_t>(row) * tileStride);
+            }
+            const FramebufferView tileView{tilePixels, tileWidth, tileHeight,
+                                           tileStride};
+            success &= check(observer.stageCapture(tileView, tile),
+                             "tiled scroll capture failed");
+        }
+    }
+
+    const auto observed = observer.completeEpisode(full);
+    success &= check(observed.verified() &&
+                         observed.displacementY == displacement,
+                     "row-major tile captures did not form a coherent frame");
+    success &= check(observer.stats().baselineBytesCopied == 0,
+                     "complete tiled capture recopied baseline pixels");
+    return success;
+}
+
 bool invalidation_forgets_motion_history()
 {
     constexpr std::uint32_t width = 256;
@@ -412,6 +604,9 @@ int main()
     bool success = true;
     success &= baseline_then_scroll_is_observed();
     success &= small_episode_is_not_searched();
+    success &= sparse_episodes_commit_without_copying_the_full_baseline();
+    success &= discovery_materializes_only_uncaptured_baseline_regions();
+    success &= tiled_scroll_episodes_preserve_complete_frame_materialization();
     success &= invalidation_forgets_motion_history();
     success &= snapshot_memory_is_bounded();
     success &= invalid_capture_does_not_start_an_episode();

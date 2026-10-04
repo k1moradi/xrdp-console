@@ -62,15 +62,17 @@ struct ScrollMotionObserverStats final
     std::uint64_t verified{};
     std::uint64_t ambiguous{};
     std::uint64_t reusablePixels{};
+    std::uint64_t baselineBytesCopied{};
 };
 
 /**
  * Observation-only source-frame history for future scroll acceleration.
  *
- * Captures are staged into a working BGRA/XRGB shadow. At the beginning of an
- * incremental episode the working shadow is copied from the last complete
- * source frame, so unchanged areas remain coherent. Runtime code must call
- * completeEpisode() only after all generation-tagged capture work is drained.
+ * Captures are staged sparsely into a working BGRA/XRGB shadow. Small episodes
+ * update only their captured regions in the baseline; larger episodes fill
+ * unchanged regions from the previous frame before motion detection. Runtime
+ * code must call completeEpisode() only after all generation-tagged capture
+ * work is drained.
  *
  * The class never emits RDP commands and never changes H.264 state.
  */
@@ -100,7 +102,16 @@ public:
     [[nodiscard]] const ScrollMotionObserverStats &stats() const noexcept;
 
 private:
+    struct HorizontalSpan final
+    {
+        std::uint32_t begin{};
+        std::uint32_t end{};
+    };
+
     [[nodiscard]] bool beginEpisode() noexcept;
+    [[nodiscard]] bool materializeWorkingFromPrevious() noexcept;
+    [[nodiscard]] bool commitStagedToPrevious() noexcept;
+    [[nodiscard]] bool addStagedRectangle(Rectangle rectangle) noexcept;
     [[nodiscard]] FramebufferView previousView() const noexcept;
     [[nodiscard]] FramebufferView workingView() const noexcept;
 
@@ -108,11 +119,20 @@ private:
     ScrollMotionObserverConfig config_{};
     std::vector<std::byte> previous_{};
     std::vector<std::byte> working_{};
+    std::vector<Rectangle> stagedRectangles_{};
+    std::vector<HorizontalSpan> stagedIntervals_{};
+    std::vector<std::uint8_t> stagedFullTiles_{};
+    std::size_t maximumStagedRectangles_{};
+    std::size_t stagedFullTileCount_{};
+    std::uint32_t tileColumns_{};
+    std::uint32_t tileRows_{};
     std::uint64_t capturedPixels_{};
     std::uint64_t baselineSequence_{};
     bool baselinePresented_{};
     bool baselineValid_{};
     bool episodeActive_{};
+    bool workingComplete_{};
+    bool stagedRectanglesAreFullTiles_{true};
     ScrollMotionObserverStats stats_{};
 };
 

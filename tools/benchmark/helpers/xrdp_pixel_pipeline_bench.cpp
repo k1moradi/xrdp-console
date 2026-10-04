@@ -947,6 +947,45 @@ runBenchmark(const Options &options)
     reportStage("persistent_nv12_rectangle_update", samples, patchPixels,
                 patchPixels * 4U, patchPixels * 3U / 2U);
 
+    // The scroll observer benchmark needs a uniquely textured source even on
+    // an empty Xvfb root. Keep that deterministic stimulus local to the
+    // observer stages; the earlier pipeline measurements still use the
+    // captured desktop pixels.
+    for (std::uint32_t y = 0; y < sourceGeometry.heightPixels; ++y)
+    {
+        std::byte *row = sourceStorage.data() +
+                         static_cast<std::size_t>(y) * sourceStride;
+        for (std::uint32_t x = 0; x < sourceGeometry.widthPixels; ++x)
+        {
+            const std::uint32_t value =
+                ((x * 37U + y * 101U + (x ^ (y * 13U))) *
+                 2654435761U) & 0x00ffffffU;
+            std::byte *pixel = row +
+                              static_cast<std::size_t>(x) *
+                                  kBytesPerBgraPixel;
+            pixel[0] = std::byte{static_cast<std::uint8_t>(value)};
+            pixel[1] = std::byte{static_cast<std::uint8_t>(value >> 8U)};
+            pixel[2] = std::byte{static_cast<std::uint8_t>(value >> 16U)};
+            pixel[3] = std::byte{0xff};
+        }
+    }
+    for (std::uint32_t row = 0;
+         row + scrollOffset < sourceGeometry.heightPixels; ++row)
+    {
+        std::memcpy(
+            scrolledStorage.data() + static_cast<std::size_t>(row) *
+                                         sourceStride,
+            source.pixels.data() + static_cast<std::size_t>(row + scrollOffset) *
+                                      sourceStride,
+            sourceStride);
+    }
+    std::fill(scrolledStorage.begin() +
+                  static_cast<std::ptrdiff_t>(exposedTop * sourceStride),
+              scrolledStorage.end(), std::byte{0x5a});
+    sourceStorage.resize(sourceStorage.size() + sourceStride, std::byte{});
+    source = {sourceStorage, sourceGeometry.widthPixels,
+              sourceGeometry.heightPixels, sourceStride};
+
     ScrollMotionObserver observer{};
     if (!observer.configure(sourceGeometry) ||
         !observer.stageCapture(source, fullSource))
@@ -982,17 +1021,131 @@ runBenchmark(const Options &options)
                      return true;
                  },
                  [&](std::size_t, std::uint64_t &) {
-                     return observer.stageCapture(observerPatchView,
-                                                  observerPatch);
+                     if (!observer.stageCapture(observerPatchView,
+                                                observerPatch))
+                     {
+                         return false;
+                     }
+                     const auto observation =
+                         observer.completeEpisode(fullSource);
+                     return observation.kind ==
+                                xrdp_console::rdp::
+                                    ScrollMotionObservationKind::InsufficientDamage &&
+                            observation.capturedPixels ==
+                                static_cast<std::uint64_t>(
+                                    observerPatch.widthPixels) *
+                                    observerPatch.heightPixels;
                  }))
     {
-        std::fputs("scroll-observer source-shadow copy failed\n", stderr);
+        std::fputs("scroll-observer sparse episode update failed\n", stderr);
         return false;
     }
-    const std::uint64_t observerCopyBytes = sourceBgraBytes * 2U +
-                                            observerPatchBytes * 2U;
-    reportStage("observer_episode_shadow_copy", samples, sourcePixels,
-                observerCopyBytes / 2U, observerCopyBytes / 2U);
+    const std::uint64_t observerEpisodeBytes = observerPatchBytes * 2U;
+    reportStage("observer_sparse_episode_update", samples,
+                static_cast<std::uint64_t>(observerPatch.widthPixels) *
+                    observerPatch.heightPixels,
+                observerEpisodeBytes, observerEpisodeBytes);
+
+    struct ScrollTileCapture final
+    {
+        Rectangle rectangle{};
+        std::vector<std::byte> pixels{};
+        FramebufferView view{};
+        FramebufferView reverseView{};
+    };
+    const std::uint32_t tileColumns =
+        (sourceGeometry.widthPixels + kFingerprintTilePixels - 1U) /
+        kFingerprintTilePixels;
+    const std::uint32_t tileRows =
+        (sourceGeometry.heightPixels + kFingerprintTilePixels - 1U) /
+        kFingerprintTilePixels;
+    std::vector<ScrollTileCapture> scrollTiles{};
+    scrollTiles.reserve(static_cast<std::size_t>(tileColumns) * tileRows);
+    for (std::uint32_t tileY = 0; tileY < sourceGeometry.heightPixels;
+         tileY += kFingerprintTilePixels)
+    {
+        const std::uint32_t tileHeight = std::min(
+            kFingerprintTilePixels, sourceGeometry.heightPixels - tileY);
+        for (std::uint32_t tileX = 0; tileX < sourceGeometry.widthPixels;
+             tileX += kFingerprintTilePixels)
+        {
+            const std::uint32_t tileWidth = std::min(
+                kFingerprintTilePixels, sourceGeometry.widthPixels - tileX);
+            ScrollTileCapture capture{};
+            capture.rectangle = {static_cast<std::int32_t>(tileX),
+                                 static_cast<std::int32_t>(tileY), tileWidth,
+                                 tileHeight};
+            const std::size_t tileStride =
+                static_cast<std::size_t>(tileWidth) * kBytesPerBgraPixel;
+            capture.pixels.resize(tileStride * tileHeight);
+            for (std::uint32_t row = 0; row < tileHeight; ++row)
+            {
+                const std::size_t sourceOffset =
+                    static_cast<std::size_t>(tileY + row) * sourceStride +
+                    static_cast<std::size_t>(tileX) * kBytesPerBgraPixel;
+                std::memcpy(capture.pixels.data() +
+                                static_cast<std::size_t>(row) * tileStride,
+                            scrolled.pixels.data() + sourceOffset, tileStride);
+            }
+            capture.view = {capture.pixels, tileWidth, tileHeight, tileStride};
+            const std::size_t sourceOffset =
+                static_cast<std::size_t>(tileY) * sourceStride +
+                static_cast<std::size_t>(tileX) * kBytesPerBgraPixel;
+            capture.reverseView = {
+                source.pixels.subspan(
+                    sourceOffset,
+                    sourceStride * static_cast<std::size_t>(tileHeight)),
+                tileWidth, tileHeight, sourceStride};
+            scrollTiles.push_back(std::move(capture));
+        }
+    }
+
+    ScrollMotionObserver tiledObserver{};
+    if (!tiledObserver.configure(sourceGeometry) ||
+        !tiledObserver.stageCapture(source, fullSource))
+    {
+        std::fputs("tiled scroll-observer setup failed\n", stderr);
+        return false;
+    }
+    const auto tiledSeeded = tiledObserver.completeEpisode(fullSource);
+    if (tiledSeeded.kind !=
+            xrdp_console::rdp::ScrollMotionObservationKind::BaselineSeeded ||
+        !tiledObserver.valid())
+    {
+        std::fputs("tiled scroll-observer baseline did not seed\n", stderr);
+        return false;
+    }
+    if (!measure(samples, options.samples, noPreparation,
+                 [&](std::size_t operationIndex,
+                     std::uint64_t &outputBytes) {
+                     const bool reverse = (operationIndex & 1U) != 0;
+                     for (const ScrollTileCapture &tile : scrollTiles)
+                     {
+                         if (!tiledObserver.stageCapture(
+                                 reverse ? tile.reverseView : tile.view,
+                                                         tile.rectangle))
+                         {
+                             return false;
+                         }
+                     }
+                     const auto observation =
+                         tiledObserver.completeEpisode(fullSource);
+                     checksum += observation.capturedPixels +
+                                 observation.reusablePixels;
+                     outputBytes = observation.capturedPixels *
+                                   kBytesPerBgraPixel;
+                     return observation.verified() &&
+                            observation.displacementY ==
+                                (reverse ? -scrollDisplacement
+                                         : scrollDisplacement) &&
+                            observation.capturedPixels == sourcePixels;
+                 }))
+    {
+        std::fputs("tiled scroll-observer episode update failed\n", stderr);
+        return false;
+    }
+    reportStage("observer_tiled_scroll_episode_update", samples,
+                sourcePixels, sourceBgraBytes, sourceBgraBytes);
 
     const std::size_t snapshotBytes = presentationNv12Bytes;
     if (!measure(samples, options.samples, noPreparation,

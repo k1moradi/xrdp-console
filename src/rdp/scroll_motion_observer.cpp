@@ -7,11 +7,15 @@
 #include <limits>
 #include <utility>
 
+#include "../core/generation_tile_map.h"
+
 namespace xrdp_console::rdp
 {
 namespace
 {
 constexpr std::size_t kBytesPerPixel = 4U;
+constexpr std::size_t kMaximumStagedRectangles = 4096U;
+constexpr std::size_t kMinimumStagedRectangles = 32U;
 
 [[nodiscard]] std::uint64_t
 nextSequence(std::uint64_t current) noexcept
@@ -42,6 +46,16 @@ pixelCount(Rectangle rectangle) noexcept
     return static_cast<std::uint64_t>(rectangle.widthPixels) *
            rectangle.heightPixels;
 }
+
+[[nodiscard]] bool
+containsRectangle(Rectangle outer, Rectangle inner) noexcept
+{
+    return outer.x <= inner.x && outer.y <= inner.y &&
+           static_cast<std::int64_t>(outer.x) + outer.widthPixels >=
+               static_cast<std::int64_t>(inner.x) + inner.widthPixels &&
+           static_cast<std::int64_t>(outer.y) + outer.heightPixels >=
+               static_cast<std::int64_t>(inner.y) + inner.heightPixels;
+}
 } // namespace
 
 bool
@@ -69,12 +83,31 @@ ScrollMotionObserver::configure(PixelSize geometry,
         return false;
     }
 
+    const std::size_t tileColumns =
+        geometry.widthPixels / 64U +
+        static_cast<std::size_t>(geometry.widthPixels % 64U != 0);
+    const std::size_t tileRows =
+        geometry.heightPixels / 64U +
+        static_cast<std::size_t>(geometry.heightPixels % 64U != 0);
+    const std::size_t tileCount = tileColumns * tileRows;
+    const std::size_t stagedLimit = std::max(
+        kMinimumStagedRectangles,
+        std::min(kMaximumStagedRectangles, tileCount * 2U));
+
     try
     {
         std::vector<std::byte> previous(bytes, std::byte{});
         std::vector<std::byte> working(bytes, std::byte{});
+        std::vector<Rectangle> stagedRectangles;
+        std::vector<HorizontalSpan> stagedIntervals;
+        std::vector<std::uint8_t> stagedFullTiles(tileCount, 0U);
+        stagedRectangles.reserve(stagedLimit);
+        stagedIntervals.reserve(stagedLimit);
         previous_.swap(previous);
         working_.swap(working);
+        stagedRectangles_.swap(stagedRectangles);
+        stagedIntervals_.swap(stagedIntervals);
+        stagedFullTiles_.swap(stagedFullTiles);
     }
     catch (...)
     {
@@ -83,11 +116,17 @@ ScrollMotionObserver::configure(PixelSize geometry,
 
     geometry_ = geometry;
     config_ = config;
+    maximumStagedRectangles_ = stagedLimit;
+    stagedFullTileCount_ = 0;
+    tileColumns_ = static_cast<std::uint32_t>(tileColumns);
+    tileRows_ = static_cast<std::uint32_t>(tileRows);
     capturedPixels_ = 0;
     baselineSequence_ = 0;
     baselinePresented_ = false;
     baselineValid_ = false;
     episodeActive_ = false;
+    workingComplete_ = false;
+    stagedRectanglesAreFullTiles_ = true;
     stats_ = {};
     return true;
 }
@@ -99,11 +138,20 @@ ScrollMotionObserver::reset() noexcept
     config_ = {};
     std::vector<std::byte>{}.swap(previous_);
     std::vector<std::byte>{}.swap(working_);
+    std::vector<Rectangle>{}.swap(stagedRectangles_);
+    std::vector<HorizontalSpan>{}.swap(stagedIntervals_);
+    std::vector<std::uint8_t>{}.swap(stagedFullTiles_);
+    maximumStagedRectangles_ = 0;
+    stagedFullTileCount_ = 0;
+    tileColumns_ = 0;
+    tileRows_ = 0;
     capturedPixels_ = 0;
     baselineSequence_ = 0;
     baselinePresented_ = false;
     baselineValid_ = false;
     episodeActive_ = false;
+    workingComplete_ = false;
+    stagedRectanglesAreFullTiles_ = true;
     stats_ = {};
 }
 
@@ -114,6 +162,11 @@ ScrollMotionObserver::invalidateBaseline() noexcept
     baselineSequence_ = 0;
     baselinePresented_ = false;
     episodeActive_ = false;
+    workingComplete_ = false;
+    stagedRectangles_.clear();
+    std::fill(stagedFullTiles_.begin(), stagedFullTiles_.end(), 0U);
+    stagedFullTileCount_ = 0;
+    stagedRectanglesAreFullTiles_ = true;
     capturedPixels_ = 0;
 }
 
@@ -186,14 +239,151 @@ ScrollMotionObserver::beginEpisode() noexcept
     }
     if (baselineValid_)
     {
-        std::copy(previous_.begin(), previous_.end(), working_.begin());
+        stagedRectangles_.clear();
     }
     else
     {
         std::fill(working_.begin(), working_.end(), std::byte{});
+        stagedRectangles_.clear();
     }
+    std::fill(stagedFullTiles_.begin(), stagedFullTiles_.end(), 0U);
+    stagedFullTileCount_ = 0;
+    stagedRectanglesAreFullTiles_ = true;
     capturedPixels_ = 0;
+    workingComplete_ = false;
     episodeActive_ = true;
+    return true;
+}
+
+bool
+ScrollMotionObserver::addStagedRectangle(Rectangle rectangle) noexcept
+{
+    for (auto iterator = stagedRectangles_.begin();
+         iterator != stagedRectangles_.end();)
+    {
+        if (containsRectangle(*iterator, rectangle))
+        {
+            return true;
+        }
+        if (containsRectangle(rectangle, *iterator))
+        {
+            iterator = stagedRectangles_.erase(iterator);
+        }
+        else
+        {
+            ++iterator;
+        }
+    }
+    if (stagedRectangles_.size() >= maximumStagedRectangles_)
+    {
+        return false;
+    }
+    stagedRectangles_.push_back(rectangle);
+    return true;
+}
+
+bool
+ScrollMotionObserver::materializeWorkingFromPrevious() noexcept
+{
+    if (!baselineValid_ || workingComplete_ ||
+        stagedRectangles_.size() > stagedIntervals_.capacity())
+    {
+        return false;
+    }
+
+    const std::uint32_t width = geometry_.widthPixels;
+    const std::uint32_t height = geometry_.heightPixels;
+    const std::size_t stride = static_cast<std::size_t>(width) * kBytesPerPixel;
+    std::uint64_t copiedBytes = 0;
+    for (std::uint32_t y = 0; y < height; ++y)
+    {
+        stagedIntervals_.clear();
+        for (const Rectangle rectangle : stagedRectangles_)
+        {
+            const std::uint32_t top = static_cast<std::uint32_t>(rectangle.y);
+            if (y >= top && y - top < rectangle.heightPixels)
+            {
+                const std::uint32_t left =
+                    static_cast<std::uint32_t>(rectangle.x);
+                stagedIntervals_.push_back(
+                    {left, left + rectangle.widthPixels});
+            }
+        }
+        std::sort(stagedIntervals_.begin(), stagedIntervals_.end(),
+                  [](HorizontalSpan left, HorizontalSpan right) {
+                      return left.begin < right.begin ||
+                             (left.begin == right.begin &&
+                              left.end < right.end);
+                  });
+
+        const std::size_t rowOffset = static_cast<std::size_t>(y) * stride;
+        std::uint32_t copiedThrough = 0;
+        for (const HorizontalSpan span : stagedIntervals_)
+        {
+            if (span.begin > copiedThrough)
+            {
+                const std::size_t offset =
+                    rowOffset + static_cast<std::size_t>(copiedThrough) *
+                                    kBytesPerPixel;
+                const std::size_t bytes =
+                    static_cast<std::size_t>(span.begin - copiedThrough) *
+                    kBytesPerPixel;
+                std::memcpy(working_.data() + offset,
+                            previous_.data() + offset, bytes);
+                copiedBytes += bytes;
+            }
+            copiedThrough = std::max(copiedThrough, span.end);
+        }
+        if (copiedThrough < width)
+        {
+            const std::size_t offset =
+                rowOffset + static_cast<std::size_t>(copiedThrough) *
+                                kBytesPerPixel;
+            const std::size_t bytes =
+                static_cast<std::size_t>(width - copiedThrough) *
+                kBytesPerPixel;
+            std::memcpy(working_.data() + offset,
+                        previous_.data() + offset, bytes);
+            copiedBytes += bytes;
+        }
+    }
+    stats_.baselineBytesCopied += copiedBytes;
+    stagedRectangles_.clear();
+    workingComplete_ = true;
+    return true;
+}
+
+bool
+ScrollMotionObserver::commitStagedToPrevious() noexcept
+{
+    if (workingComplete_)
+    {
+        return true;
+    }
+    if (stagedRectangles_.size() > maximumStagedRectangles_)
+    {
+        return false;
+    }
+
+    const std::size_t stride =
+        static_cast<std::size_t>(geometry_.widthPixels) * kBytesPerPixel;
+    for (const Rectangle rectangle : stagedRectangles_)
+    {
+        const std::size_t rowBytes =
+            static_cast<std::size_t>(rectangle.widthPixels) * kBytesPerPixel;
+        const std::size_t xOffset =
+            static_cast<std::size_t>(rectangle.x) * kBytesPerPixel;
+        const std::size_t firstRow =
+            static_cast<std::size_t>(rectangle.y) * stride + xOffset;
+        for (std::uint32_t row = 0; row < rectangle.heightPixels; ++row)
+        {
+            const std::size_t offset = firstRow +
+                                       static_cast<std::size_t>(row) * stride;
+            std::memcpy(previous_.data() + offset, working_.data() + offset,
+                        rowBytes);
+        }
+    }
+    stagedRectangles_.clear();
     return true;
 }
 
@@ -226,10 +416,32 @@ ScrollMotionObserver::stageCapture(FramebufferView capture,
         // baseline (or clearing the first one) only to replace it immediately.
         capturedPixels_ = 0;
         episodeActive_ = true;
+        workingComplete_ = false;
+        stagedRectangles_.clear();
+        std::fill(stagedFullTiles_.begin(), stagedFullTiles_.end(), 0U);
+        stagedFullTileCount_ = 0;
+        stagedRectanglesAreFullTiles_ = true;
     }
     else if (!beginEpisode())
     {
         return false;
+    }
+
+    if (!fullFrameCapture && !workingComplete_ &&
+        stagedRectangles_.size() >= maximumStagedRectangles_)
+    {
+        if (baselineValid_)
+        {
+            if (!materializeWorkingFromPrevious())
+            {
+                return false;
+            }
+        }
+        else
+        {
+            stagedRectangles_.clear();
+            workingComplete_ = true;
+        }
     }
 
     const std::size_t rowBytes =
@@ -258,6 +470,86 @@ ScrollMotionObserver::stageCapture(FramebufferView capture,
                 working_.data() + (destinationY + row) * destinationStride +
                 destinationX;
             std::memcpy(target, source, rowBytes);
+        }
+    }
+
+    if (fullFrameCapture)
+    {
+        stagedRectangles_.clear();
+        workingComplete_ = true;
+        stagedFullTileCount_ = 0;
+        stagedRectanglesAreFullTiles_ = true;
+    }
+    else if (!workingComplete_)
+    {
+        const std::uint32_t x = static_cast<std::uint32_t>(destination.x);
+        const std::uint32_t y = static_cast<std::uint32_t>(destination.y);
+        const bool tileAligned = x % GenerationTileMap::kTileWidthPixels == 0 &&
+                                 y % GenerationTileMap::kTileHeightPixels == 0;
+        const std::uint32_t tileColumn =
+            x / GenerationTileMap::kTileWidthPixels;
+        const std::uint32_t tileRow =
+            y / GenerationTileMap::kTileHeightPixels;
+        const bool withinTileGrid = tileAligned &&
+                                    tileColumn < tileColumns_ &&
+                                    tileRow < tileRows_;
+        const std::uint32_t expectedTileWidth =
+            withinTileGrid
+                ? std::min(GenerationTileMap::kTileWidthPixels,
+                           geometry_.widthPixels - x)
+                : 0U;
+        const std::uint32_t expectedTileHeight =
+            withinTileGrid
+                ? std::min(GenerationTileMap::kTileHeightPixels,
+                           geometry_.heightPixels - y)
+                : 0U;
+        const bool fullTile = withinTileGrid &&
+                              destination.widthPixels == expectedTileWidth &&
+                              destination.heightPixels == expectedTileHeight;
+
+        if (fullTile)
+        {
+            const std::size_t tileIndex =
+                static_cast<std::size_t>(tileRow) * tileColumns_ + tileColumn;
+            const bool newlyCovered = stagedFullTiles_[tileIndex] == 0U;
+            stagedFullTiles_[tileIndex] = 1U;
+            if (newlyCovered)
+            {
+                ++stagedFullTileCount_;
+            }
+
+            if (stagedRectanglesAreFullTiles_)
+            {
+                if (newlyCovered)
+                {
+                    if (stagedRectangles_.size() >= maximumStagedRectangles_)
+                    {
+                        return false;
+                    }
+                    stagedRectangles_.push_back(destination);
+                }
+            }
+            else if (!addStagedRectangle(destination))
+            {
+                return false;
+            }
+
+            if (stagedFullTileCount_ == stagedFullTiles_.size())
+            {
+                // Every framebuffer tile has been captured in full. The
+                // working image is already complete, so a baseline fill pass
+                // would copy bytes that were just overwritten.
+                stagedRectangles_.clear();
+                workingComplete_ = true;
+            }
+        }
+        else
+        {
+            stagedRectanglesAreFullTiles_ = false;
+            if (!addStagedRectangle(destination))
+            {
+                return false;
+            }
         }
     }
 
@@ -310,6 +602,10 @@ ScrollMotionObserver::completeEpisode(
         baselinePresented_ = false;
         observation.baselineSequence = baselineSequence_;
         episodeActive_ = false;
+        workingComplete_ = false;
+        stagedRectangles_.clear();
+        stagedFullTileCount_ = 0;
+        stagedRectanglesAreFullTiles_ = true;
         capturedPixels_ = 0;
         observation.kind = ScrollMotionObservationKind::BaselineSeeded;
         return observation;
@@ -322,13 +618,29 @@ ScrollMotionObserver::completeEpisode(
         config_.minimumEpisodePixels, percentageThreshold);
     if (capturedPixels_ < minimumPixels)
     {
-        std::swap(previous_, working_);
+        if (workingComplete_)
+        {
+            std::swap(previous_, working_);
+        }
+        else if (!commitStagedToPrevious())
+        {
+            return observation;
+        }
         baselineSequence_ = nextSequence(baselineSequence_);
         baselinePresented_ = false;
         observation.baselineSequence = baselineSequence_;
         episodeActive_ = false;
+        workingComplete_ = false;
+        stagedRectangles_.clear();
+        stagedFullTileCount_ = 0;
+        stagedRectanglesAreFullTiles_ = true;
         capturedPixels_ = 0;
         observation.kind = ScrollMotionObservationKind::InsufficientDamage;
+        return observation;
+    }
+
+    if (!workingComplete_ && !materializeWorkingFromPrevious())
+    {
         return observation;
     }
 
@@ -382,6 +694,10 @@ ScrollMotionObserver::completeEpisode(
     baselinePresented_ = false;
     observation.baselineSequence = baselineSequence_;
     episodeActive_ = false;
+    workingComplete_ = false;
+    stagedRectangles_.clear();
+    stagedFullTileCount_ = 0;
+    stagedRectanglesAreFullTiles_ = true;
     capturedPixels_ = 0;
     return observation;
 }
