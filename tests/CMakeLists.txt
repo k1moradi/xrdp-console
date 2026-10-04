@@ -276,7 +276,9 @@ if(TARGET xrdp-console)
 
     add_executable(paint-quantum-unit
         test_paint_quantum.cpp
-        ${CMAKE_SOURCE_DIR}/src/core/damage_region.cpp)
+        ${CMAKE_SOURCE_DIR}/src/core/damage_region.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/presentation_scaler.cpp
+        ${CMAKE_SOURCE_DIR}/src/core/presentation_transform.cpp)
     set_target_properties(paint-quantum-unit PROPERTIES
         CXX_STANDARD 23
         CXX_STANDARD_REQUIRED ON
@@ -1126,6 +1128,22 @@ if(TARGET xrdp-console)
         set_tests_properties(xrdp-loader-downscaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 30)
+        add_test(NAME xrdp-loader-classic-fullhd-source-smoke
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11-latency-stimulus>
+            1512 949 --classic-fullhd-source)
+        set_tests_properties(xrdp-loader-classic-fullhd-source-smoke PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 60
+            RESOURCE_LOCK xrdp_console_loader_display
+            RUN_SERIAL TRUE
+            LABELS "integration;latency")
         add_test(NAME xrdp-loader-gfx-planar-smoke
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
@@ -1304,6 +1322,22 @@ if(TARGET xrdp-console)
         set_tests_properties(xrdp-loader-rfx-downscaled-smoke PROPERTIES
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 30)
+        add_test(NAME xrdp-loader-rfx-fullhd-source-smoke
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11-latency-stimulus>
+            1512 949 --rfx-fullhd)
+        set_tests_properties(xrdp-loader-rfx-fullhd-source-smoke PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 60
+            RESOURCE_LOCK xrdp_console_loader_display
+            RUN_SERIAL TRUE
+            LABELS "integration;latency;rfx")
 
         set(coherence_loader_arguments
             ${Python3_EXECUTABLE} -B

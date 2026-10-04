@@ -64,6 +64,12 @@ class DirectPresentationGeometryTests(unittest.TestCase):
             "required-planar",
         )
 
+    def test_h264_is_reported_as_required(self):
+        self.assertEqual(
+            module.effective_gfx_state("direct-x11", "h264", False),
+            "required-h264",
+        )
+
     def test_non_gfx_direct_transport_is_reported_disabled(self):
         self.assertEqual(
             module.effective_gfx_state("direct-x11", "rfx", False),

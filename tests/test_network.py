@@ -159,6 +159,13 @@ class SyntheticNetworkTests(unittest.TestCase):
 
     def test_direct_graphics_transport_requests_are_explicit(self):
         self.assertEqual(
+            module.direct_graphics_request("h264"),
+            module.DirectGraphicsRequest(
+                client_options=("/gfx:AVC420:on", "/network:lan"),
+                expected_negotiation="GFX_H264",
+            ),
+        )
+        self.assertEqual(
             module.direct_graphics_request("rfx"),
             module.DirectGraphicsRequest(
                 client_options=("+rfx", "-gfx", "/network:lan"),

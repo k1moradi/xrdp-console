@@ -33,6 +33,11 @@ DPMS (Display Power Management Signaling):
   Monitor is On
 """
 
+DPMS_EXTENSION_UNAVAILABLE = """\
+DPMS (Display Power Management Signaling):
+  Server does not have the DPMS Extension
+"""
+
 
 def render_state(state: module.X11DisplayPowerState) -> str:
     output = (
@@ -150,9 +155,12 @@ class DisplayPowerParserTests(unittest.TestCase):
 
     def test_dpms_extension_unavailable(self):
         state = module.parse_xset_power_state(
-            SCREEN_SAVER + "DPMS extension not supported\n")
+            SCREEN_SAVER + DPMS_EXTENSION_UNAVAILABLE)
         self.assertFalse(state.dpms_supported)
         self.assertFalse(state.dpms_enabled)
+        self.assertIsNone(state.dpms_standby_seconds)
+        self.assertIsNone(state.dpms_suspend_seconds)
+        self.assertIsNone(state.dpms_off_seconds)
         self.assertIsNone(state.monitor_on)
 
     def test_zero_saver_timeout(self):

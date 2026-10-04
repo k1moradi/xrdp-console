@@ -14,8 +14,9 @@ pipeline for historical reproduction only.
     swap and polls the corresponding pixel in the FreeRDP window.
     ``--backend vnc`` remains a deprecated, opt-in historical comparison.
     ``--direct-graphics-transport`` selects RemoteFX (the default), classic
-    bitmap, or GFX Planar output. Input-roundtrip mode sends the same RDP key
-    stimulus through the module's XTest controller.  ``--transport rfb`` instead
+    bitmap, GFX Planar, or GFX H.264 AVC420 output. Input-roundtrip mode sends
+    the same RDP key stimulus through the module's XTest controller.
+    ``--transport rfb`` instead
     starts a private no-password x11vnc and timestamps the same marker in RAW
     RFB bytes on the loopback socket.  ``--transport vnc-viewer`` puts an
     actual TigerVNC viewer between that private server and a private Xvfb
@@ -196,6 +197,15 @@ class DirectGraphicsRequest:
 
 
 def direct_graphics_request(transport: str) -> DirectGraphicsRequest:
+    if transport == "h264":
+        return DirectGraphicsRequest(
+            client_options=(
+                "/gfx:AVC420:on",
+                "/network:lan",
+            ),
+            expected_negotiation="GFX_H264",
+        )
+
     if transport == "gfx-planar":
         return DirectGraphicsRequest(
             client_options=(
@@ -241,8 +251,11 @@ def resolve_direct_presentation_geometry(
 def effective_gfx_state(backend: str, direct_transport: str,
                         disable_gfx_for_vnc: bool) -> str:
     if backend == "direct-x11":
-        return ("required-planar"
-                if direct_transport == "gfx-planar" else "disabled")
+        if direct_transport == "h264":
+            return "required-h264"
+        if direct_transport == "gfx-planar":
+            return "required-planar"
+        return "disabled"
     return "disabled" if disable_gfx_for_vnc else "requested"
 
 
@@ -1585,6 +1598,21 @@ def parse_xset_power_state(output: str) -> X11DisplayPowerState:
         _xset_section(output, dpms_header.group(0).rstrip())
     )
     if dpms is None:
+        return X11DisplayPowerState(
+            saver_timeout_seconds=saver_timeout,
+            saver_cycle_seconds=saver_cycle,
+            prefer_blanking=prefer_blanking,
+            allow_exposures=allow_exposures,
+            dpms_supported=False,
+            dpms_enabled=False,
+            dpms_standby_seconds=None,
+            dpms_suspend_seconds=None,
+            dpms_off_seconds=None,
+            monitor_on=None,
+        )
+
+    if re.search(
+            r"(?m)^\s*Server does not have the DPMS Extension\s*$", dpms):
         return X11DisplayPowerState(
             saver_timeout_seconds=saver_timeout,
             saver_cycle_seconds=saver_cycle,
@@ -3498,7 +3526,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                 config, xrdp_port, xrdp_log, cert, key, module_name,
                 args.display, network.host_ip, args.bitmap_compression,
                 args.bulk_compression, args.direct_dynamic_resizing,
-                args.direct_graphics_transport == "gfx-planar")
+                args.direct_graphics_transport in ("gfx-planar", "h264"))
         else:
             rewrite_xrdp_config(
                 Path("/etc/xrdp/xrdp.ini"), config, xrdp_port, vnc_port,
@@ -3618,6 +3646,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             [str(FREERDP), f"/v:{network.host_ip}:{xrdp_port}", "/u:na", "/p:na",
              "/cert:ignore",
              f"/size:{args.client_width}x{args.client_height}",
+             "-compression", "-clipboard", "/timeout:5000",
              *pipeline_options, *dynamic_resolution_option,
              "/t:xrdp-gpu-bench", "-decorations", "/window-position:0x0",
              "/log-level:WARN"], env_client,
@@ -3635,6 +3664,8 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
                 negotiated = "RFX"
             elif "actual_output=legacy-bitmap" in log_text:
                 negotiated = "CLASSIC_BITMAP"
+            elif "actual_output=gfx-h264-avc420" in log_text:
+                negotiated = "GFX_H264"
             elif "actual_output=gfx-planar" in log_text:
                 negotiated = "GFX_PLANAR"
             elif "actual_output=gfx-progressive-rfx" in log_text:
@@ -3935,10 +3966,10 @@ def main() -> int:
               "and retained only as an opt-in historical comparison"))
     parser.add_argument(
         "--direct-graphics-transport",
-        choices=("rfx", "classic", "gfx-planar"),
+        choices=("rfx", "classic", "gfx-planar", "h264"),
         default="rfx",
         help=("graphics transport to require for direct-X11 "
-              "(rfx, classic bitmap, or negotiated GFX Planar fallback; "
+              "(rfx, classic bitmap, GFX Planar, or GFX H.264 AVC420; "
               "default: rfx)"))
     parser.add_argument("--input-hz", type=float, default=5.0,
                         help="key pulses per second in input-roundtrip mode")

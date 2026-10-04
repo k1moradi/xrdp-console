@@ -1076,6 +1076,7 @@ struct ModuleContext::Impl
     // until its acknowledgement releases the producer slot.
     bool h264FallbackPending{false};
     const char *h264ServiceFailureReason{};
+    const char *remoteFxServiceFailureReason{};
     // A non-owning sourcePixels view pins the XShm arena until all bounded
     // scaled output rows for this source tile have been written to NV12.
     PendingH264Tile pendingH264Tile{};
@@ -2841,10 +2842,21 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
 int
 ModuleContext::check_remote_fx() noexcept
 {
-    if (!valid() || impl_->rfxEncoder == nullptr ||
-        !impl_->rfxEncoder->valid() || !impl_->rfxSurfaceSink.available())
+    if (!valid())
     {
         return 1;
+    }
+
+    impl_->remoteFxServiceFailureReason = nullptr;
+    const auto fail = [this](const char *reason) noexcept {
+        impl_->remoteFxServiceFailureReason = reason;
+        return 1;
+    };
+
+    if (impl_->rfxEncoder == nullptr || !impl_->rfxEncoder->valid() ||
+        !impl_->rfxSurfaceSink.available())
+    {
+        return fail("invalid-rfx-service-state");
     }
 
     const auto finish = [this](bool immediateContinuation) noexcept {
@@ -2937,7 +2949,7 @@ ModuleContext::check_remote_fx() noexcept
                 fill.regions.rectangles[fill.regionIndex];
             if (fill.nextRow >= fillRectangle.heightPixels)
             {
-                return 1;
+                return fail("letterbox-fill-row-state-invalid");
             }
 
             const std::uint32_t widthPixels = fillRectangle.widthPixels;
@@ -2959,7 +2971,7 @@ ModuleContext::check_remote_fx() noexcept
                 {scratchRows, budgetRows, remainingRows});
             if (rows == 0)
             {
-                return 1;
+                return fail("letterbox-fill-budget-exhausted");
             }
 
             const std::size_t bytes =
@@ -2977,7 +2989,7 @@ ModuleContext::check_remote_fx() noexcept
                 impl_->rfxEncoder->tileCount(fillPixels);
             if (tileCount == 0)
             {
-                return 1;
+                return fail("letterbox-fill-has-no-rfx-tiles");
             }
             impl_->pendingRfx = {
                 {fillRectangle.x,
@@ -2997,49 +3009,51 @@ ModuleContext::check_remote_fx() noexcept
                 return finish(false);
             }
 
-            const PaintStripeDecision stripe = choosePaintStripe(
-                sourceRectangle.widthPixels, sourceRectangle.heightPixels,
-                kMaximumPaintPixelsPerService, false);
-            if (stripe.heightPixels == 0)
+            const MappedPaintStripeDecision stripe =
+                mapPaintStripeWithinCaptureBudget(
+                    sourceRectangle, kMaximumPaintPixelsPerService,
+                    kMaximumPaintPixelsPerService, false,
+                    [this](Rectangle damageRectangle,
+                           Rectangle &presentationRectangle,
+                           Rectangle &samplingRectangle) noexcept {
+                        return impl_->presentationScaler.mapSourceRectangle(
+                            damageRectangle, presentationRectangle,
+                            samplingRectangle);
+                    });
+            if (!stripe.valid)
             {
-                return 1;
+                return fail(stripe.mapping == RectangleMapResult::Invalid
+                                ? "source-to-presentation-map-invalid"
+                                : "source-stripe-capture-budget-exhausted");
             }
-
-            Rectangle captureRectangle = sourceRectangle;
-            if (stripe.heightPixels < captureRectangle.heightPixels)
+            if (stripe.mapping == RectangleMapResult::Empty)
             {
-                captureRectangle.heightPixels = stripe.heightPixels;
-            }
-
-            Rectangle presentationRectangle{};
-            Rectangle samplingRectangle{};
-            const RectangleMapResult mapping =
-                impl_->presentationScaler.mapSourceRectangle(
-                    captureRectangle, presentationRectangle, samplingRectangle);
-            if (mapping == RectangleMapResult::Invalid)
-            {
-                return 1;
-            }
-            if (mapping == RectangleMapResult::Empty)
-            {
-                if (!impl_->damageRegion.consume_front(captureRectangle))
+                if (!impl_->damageRegion.consume_front(
+                        stripe.damageRectangle))
                 {
-                    return 1;
+                    return fail("empty-stripe-damage-consume-failed");
                 }
                 return finish(true);
             }
 
             const FramebufferView sourcePixels =
-                impl_->sharedMemoryCapture->capture(samplingRectangle);
+                impl_->sharedMemoryCapture->capture(
+                    stripe.samplingRectangle);
             if (!sourcePixels.valid())
             {
-                return 1;
+                const char *captureFailure =
+                    impl_->sharedMemoryCapture->failureReason();
+                return fail(captureFailure != nullptr
+                                ? captureFailure
+                                : "source-capture-invalid");
             }
-            impl_->profile.noteCapture(samplingRectangle);
-            impl_->pendingPresentation.sourceRectangle = samplingRectangle;
-            impl_->pendingPresentation.damageRectangle = captureRectangle;
+            impl_->profile.noteCapture(stripe.samplingRectangle);
+            impl_->pendingPresentation.sourceRectangle =
+                stripe.samplingRectangle;
+            impl_->pendingPresentation.damageRectangle =
+                stripe.damageRectangle;
             impl_->pendingPresentation.presentationRectangle =
-                presentationRectangle;
+                stripe.presentationRectangle;
             impl_->pendingPresentation.sourcePixels = sourcePixels;
             impl_->pendingPresentation.nextPresentationRow = 0;
         }
@@ -3070,7 +3084,7 @@ ModuleContext::check_remote_fx() noexcept
                 {maximumScratchRows, rowsFromBudget, remainingRows});
             if (rows == 0)
             {
-                return 1;
+                return fail("presentation-row-budget-exhausted");
             }
 
             const FramebufferView outputPixels =
@@ -3080,7 +3094,7 @@ ModuleContext::check_remote_fx() noexcept
                     pending.nextPresentationRow, rows);
             if (!outputPixels.valid())
             {
-                return 1;
+                return fail("scaled-presentation-chunk-invalid");
             }
 
             const Rectangle destination{
@@ -3094,7 +3108,7 @@ ModuleContext::check_remote_fx() noexcept
                 impl_->rfxEncoder->tileCount(outputPixels);
             if (tileCount == 0)
             {
-                return 1;
+                return fail("presentation-chunk-has-no-rfx-tiles");
             }
             impl_->pendingRfx = {
                 destination,
@@ -3113,7 +3127,8 @@ ModuleContext::check_remote_fx() noexcept
     if (!batch.valid() ||
         !impl_->rfxSurfaceSink.send(pending.destinationRectangle, batch))
     {
-        return 1;
+        return fail(batch.valid() ? "rfx-surface-send-failed"
+                                 : "rfx-encode-batch-invalid");
     }
 
     pending.nextTile += batch.tilesEncoded;
@@ -4687,9 +4702,14 @@ ModuleContext::check_wait_objs() noexcept
         const int remoteFxResult = check_remote_fx();
         if (remoteFxResult != 0)
         {
+            const char *failureReason =
+                impl_->remoteFxServiceFailureReason != nullptr
+                    ? impl_->remoteFxServiceFailureReason
+                    : "unspecified";
             log_message(LOG_LEVEL_ERROR,
                         "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
-                        "source=remote-fx result=%d", remoteFxResult);
+                        "source=remote-fx result=%d failure_reason=%s",
+                        remoteFxResult, failureReason);
         }
         return remoteFxResult;
     }
@@ -4904,77 +4924,85 @@ ModuleContext::check_wait_objs() noexcept
                 break;
             }
 
-            const std::uint64_t rectanglePixels =
-                static_cast<std::uint64_t>(sourceRectangle.widthPixels) *
-                sourceRectangle.heightPixels;
-            Rectangle captureRectangle = sourceRectangle;
             const std::uint64_t remainingSourceBudget =
                 processedSourcePixels < kMaximumPaintPixelsPerService
                     ? kMaximumPaintPixelsPerService - processedSourcePixels
                     : 0;
-            if (rectanglePixels > remainingSourceBudget)
+            const MappedPaintStripeDecision stripe =
+                mapPaintStripeWithinCaptureBudget(
+                    sourceRectangle, remainingSourceBudget,
+                    kMaximumPaintPixelsPerService, paintCallCount != 0,
+                    [this](Rectangle damageRectangle,
+                           Rectangle &presentationRectangle,
+                           Rectangle &samplingRectangle) noexcept {
+                        return impl_->presentationScaler.mapSourceRectangle(
+                            damageRectangle, presentationRectangle,
+                            samplingRectangle);
+                    });
+            if (stripe.yield)
             {
-                const PaintStripeDecision stripe = choosePaintStripe(
-                    sourceRectangle.widthPixels,
-                    sourceRectangle.heightPixels,
-                    remainingSourceBudget, paintCallCount != 0);
-                if (stripe.yield)
-                {
-                    // This batch already made progress. Retain the current
-                    // DamageRegion front for the next service quantum.
-                    break;
-                }
-                if (stripe.heightPixels == 0)
-                {
-                    success = false;
-                    break;
-                }
-                captureRectangle.heightPixels = stripe.heightPixels;
+                // This batch already made progress. Retain the current
+                // DamageRegion front for the next service quantum.
+                break;
             }
-
-            Rectangle presentationRectangle{};
-            Rectangle samplingRectangle{};
-            const RectangleMapResult mapping =
-                impl_->presentationScaler.mapSourceRectangle(
-                    captureRectangle, presentationRectangle,
-                    samplingRectangle);
-            if (mapping == RectangleMapResult::Invalid)
+            if (!stripe.valid)
             {
+                if (stripe.mapping == RectangleMapResult::Invalid)
+                {
+                    log_message(
+                        LOG_LEVEL_ERROR,
+                        "XRDP_CONSOLE_MODULE_EXIT "
+                        "event=wait-object-failure "
+                        "source=classic-rectangle-map");
+                }
                 success = false;
                 break;
             }
 
-            if (mapping == RectangleMapResult::Empty)
+            if (stripe.mapping == RectangleMapResult::Empty)
             {
                 // A source stripe can have no representative pixel after a
                 // downscale. It is still valid to consume that source damage;
                 // there is simply nothing visible to send for this interval.
-                if (!impl_->damageRegion.consume_front(captureRectangle))
+                if (!impl_->damageRegion.consume_front(
+                        stripe.damageRectangle))
                 {
                     success = false;
                     break;
                 }
                 processedSourcePixels +=
-                    static_cast<std::uint64_t>(captureRectangle.widthPixels) *
-                    captureRectangle.heightPixels;
+                    static_cast<std::uint64_t>(
+                        stripe.damageRectangle.widthPixels) *
+                    stripe.damageRectangle.heightPixels;
                 continue;
             }
 
             const FramebufferView pixels =
-                impl_->sharedMemoryCapture->capture(samplingRectangle);
+                impl_->sharedMemoryCapture->capture(
+                    stripe.samplingRectangle);
             if (!pixels.valid())
             {
+                const char *captureFailure =
+                    impl_->sharedMemoryCapture->failureReason();
+                log_message(
+                    LOG_LEVEL_ERROR,
+                    "XRDP_CONSOLE_MODULE_EXIT event=wait-object-failure "
+                    "source=classic-capture failure_reason=%s",
+                    captureFailure != nullptr ? captureFailure : "unknown");
                 success = false;
                 break;
             }
-            impl_->profile.noteCapture(samplingRectangle);
+            impl_->profile.noteCapture(stripe.samplingRectangle);
             processedSourcePixels +=
-                static_cast<std::uint64_t>(captureRectangle.widthPixels) *
-                captureRectangle.heightPixels;
-            impl_->pendingPresentation.sourceRectangle = samplingRectangle;
-            impl_->pendingPresentation.damageRectangle = captureRectangle;
+                static_cast<std::uint64_t>(
+                    stripe.damageRectangle.widthPixels) *
+                stripe.damageRectangle.heightPixels;
+            impl_->pendingPresentation.sourceRectangle =
+                stripe.samplingRectangle;
+            impl_->pendingPresentation.damageRectangle =
+                stripe.damageRectangle;
             impl_->pendingPresentation.presentationRectangle =
-                presentationRectangle;
+                stripe.presentationRectangle;
             impl_->pendingPresentation.sourcePixels = pixels;
             impl_->pendingPresentation.nextPresentationRow = 0;
         }

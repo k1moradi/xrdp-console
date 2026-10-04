@@ -3886,7 +3886,8 @@ def main() -> int:
         clipboard_inflight_mode or clipboard_png_prefetch_mode or
         clipboard_no_server_copy_reconnect_mode)
     mode_options = [option for option in (
-        "--rfx", "--gfx-planar", "--gfx-h264",
+        "--rfx", "--rfx-fullhd", "--classic-fullhd-source",
+        "--gfx-planar", "--gfx-h264",
         "--gfx-h264-coherence", "--gfx-h264-fullhd",
         "--gfx-h264-narrow-source",
         "--gfx-h264-randr-resize",
@@ -3899,7 +3900,7 @@ def main() -> int:
                 "the graphics mode must be the final, "
                 "sole loader-smoke option")
         selected_mode = arguments.pop()
-        rfx_mode = selected_mode == "--rfx"
+        rfx_mode = selected_mode in ("--rfx", "--rfx-fullhd")
         gfx_planar_mode = selected_mode == "--gfx-planar"
         gfx_h264_mode = selected_mode in (
             "--gfx-h264", "--gfx-h264-coherence", "--gfx-h264-fullhd",
@@ -3907,7 +3908,9 @@ def main() -> int:
             "--gfx-h264-randr-resize",
             "--gfx-h264-randr-resize-no-dynamic-resolution")
         coherence_mode = selected_mode == "--gfx-h264-coherence"
-        fullhd_source_mode = selected_mode == "--gfx-h264-fullhd"
+        fullhd_source_mode = selected_mode in (
+            "--rfx-fullhd", "--classic-fullhd-source",
+            "--gfx-h264-fullhd")
         narrow_source_mode = selected_mode == "--gfx-h264-narrow-source"
         randr_resize_mode = selected_mode in (
             "--gfx-h264-randr-resize",
@@ -3939,7 +3942,8 @@ def main() -> int:
             f"usage: {sys.argv[0]} MODULE XRDP INSTALL_ROOT FREERDP "
             "PIXEL_OR_FRAME_PROBE STIMULUS "
             "[PRESENTATION_WIDTH PRESENTATION_HEIGHT] "
-            "[--rfx|--gfx-planar|--gfx-h264|--gfx-h264-coherence|"
+            "[--rfx|--rfx-fullhd|--classic-fullhd-source|"
+            "--gfx-planar|--gfx-h264|--gfx-h264-coherence|"
             "--gfx-h264-fullhd|--gfx-h264-narrow-source|"
             "--gfx-h264-randr-resize|"
             "--gfx-h264-randr-resize-no-dynamic-resolution] "

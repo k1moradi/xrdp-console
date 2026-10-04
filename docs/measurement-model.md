@@ -33,6 +33,16 @@ injected until the previous event has either completed or timed out; the
 configured input rate is therefore a target cadence rather than a guarantee
 when a path stalls.
 
+For interactive use, the freshness objective is that the latest visible update
+arrive within one second of its source draw completing. Updates observed later
+count as misses because their content is already stale. This is an end-to-end
+client-visible service objective; the server cannot retract bytes that have
+already entered TCP's ordered stream. It can avoid spending more work on
+superseded, unsent display state, and the loader's CPU-contention test applies
+the one-second bound to the latest full-screen H.264 update. That test proves
+pixel arrival for its stimulus, not that every pixel of a full video frame was
+presented atomically by every client.
+
 Graphics runs also support `--transport rfb`. This mode starts an isolated
 loopback `x11vnc -nopw`, requests RAW RFB rectangles, and records **T2_rfb**
 when the marker pixel's bytes arrive at the benchmark socket:
@@ -54,12 +64,14 @@ Graphics and input-roundtrip runs default to `--backend direct-x11 --transport
 rdp`. This mode does not start x11vnc or the RFB relay. It loads the first-party
 XCB/XDamage/XShm module into the private xrdp build and uses module code `21`.
 The direct benchmark's default graphics request is standard RemoteFX
-(`--direct-graphics-transport rfx`); `classic` and `gfx-planar` are explicit
-alternatives. This controlled benchmark does not exercise the production
-H.264/AVC420 path. By default, its client window is set to the physical X11
-geometry. `--direct-allow-scaled-presentation` allows a different initial
-presentation size, while `--direct-dynamic-resizing` exercises client monitor
-resize requests:
+(`--direct-graphics-transport rfx`); `classic`, `gfx-planar`, and H.264 AVC420
+are explicit alternatives. H.264 benchmarking requires a FreeRDP build that
+supports `/gfx:AVC420:on`; set `XRDP_CONSOLE_FREERDP` to that executable when
+the benchmark's default FreeRDP does not support AVC420. By default, its
+client window is set to the physical X11 geometry.
+`--direct-allow-scaled-presentation` allows a different initial presentation
+size, while `--direct-dynamic-resizing` exercises client monitor resize
+requests:
 
 ```text
 GL swap-complete -> T2   direct XCB/XDamage/XShm -> requested RDP graphics path -> FreeRDP presentation
