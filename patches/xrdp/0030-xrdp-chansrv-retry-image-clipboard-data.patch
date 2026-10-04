@@ -204,8 +204,8 @@
 +    g_image_retry.retry_timeout_pending = 0;
 +    LOG(LOG_LEVEL_INFO,
 +        "XRDP_CONSOLE_CLIPBOARD_IMAGE event=request format_id=%d target=%s "
-+        "attempt=1",
-+        format_id, get_atom_text(g_clip_c2s.type));
++        "attempt=1 mono_ns=%llu",
++        format_id, get_atom_text(g_clip_c2s.type), clipboard_monotonic_time_ns());
 +    rv = clipboard_send_data_request(format_id);
 +    if (rv != 0)
 +    {
@@ -253,9 +253,9 @@
 +    {
 +        LOG(LOG_LEVEL_INFO,
 +            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=response status=0x%x "
-+            "bytes=%d format_id=%d attempt=%u",
++            "bytes=%d format_id=%d attempt=%u mono_ns=%llu",
 +            clip_msg_status, clip_msg_len, g_image_retry.format_id,
-+            g_image_retry.policy.attempt);
++            g_image_retry.policy.attempt, clipboard_monotonic_time_ns());
 +    }
  
      if ((clip_msg_status & CB_RESPONSE_FAIL) != 0)

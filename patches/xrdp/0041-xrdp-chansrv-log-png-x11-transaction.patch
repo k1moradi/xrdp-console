@@ -1,11 +1,12 @@
 diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 --- a/sesman/chansrv/clipboard.c
 +++ b/sesman/chansrv/clipboard.c
-@@ -167,6 +167,7 @@
+@@ -167,6 +167,8 @@
  #include <X11/Xatom.h>
  #include <X11/extensions/Xfixes.h>
  #include <limits.h>
 +#include <openssl/evp.h>
++#include <time.h>
  #include "arch.h"
  #include "parse.h"
  #include "os_calls.h"
@@ -30,7 +31,7 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
  /* default version and flags */
  static int g_cliprdr_version = CB_CAPS_VERSION_2;
  static int g_cliprdr_flags = CB_USE_LONG_FORMAT_NAMES |
-@@ -255,6 +270,106 @@
+@@ -255,6 +270,118 @@
  
  static char g_last_atom_name[256] = "";
  
@@ -134,6 +135,18 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +        (unsigned long long)g_clipboard_format_generation);
 +}
 +
++static unsigned long long
++clipboard_monotonic_time_ns(void)
++{
++    struct timespec now;
++
++    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0)
++    {
++        return 0;
++    }
++    return (unsigned long long)now.tv_sec * 1000000000ULL +
++           (unsigned long long)now.tv_nsec;
++}
  struct clipboard_selection_retry
  {
      struct clipboard_retry_policy policy;
@@ -248,10 +261,10 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +                "path=direct requestor=0x%lx owner=0x%lx selection=0x%lx "
 +                "target=image/png property=0x%lx request_time=%lu "
 +                "selection_notify_event_time=%lu propagation=0 event_mask=0x0 "
-+                "change_result=%d send_result=%d current_owner=0x%lx",
++                "change_result=%d send_result=%d current_owner=0x%lx mono_ns=%llu",
 +                req->requestor, req->owner, req->selection, req->property,
 +                req->time, xev.xselection.time, change_result, send_result,
-+                XGetSelectionOwner(g_display, req->selection));
++                XGetSelectionOwner(g_display, req->selection), clipboard_monotonic_time_ns());
 +            clipboard_png_digest_reset();
 +        }
      }
@@ -318,10 +331,10 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +                "path=incr requestor=0x%lx owner=0x%lx selection=0x%lx "
 +                "target=image/png property=0x%lx request_time=%lu "
 +                "selection_notify_event_time=%lu propagation=0 event_mask=0x0 "
-+                "send_result=%d current_owner=0x%lx",
++                "send_result=%d current_owner=0x%lx mono_ns=%llu",
 +                req->requestor, req->owner, req->selection, req->property,
 +                req->time, xev.xselection.time, send_result,
-+                XGetSelectionOwner(g_display, req->selection));
++                XGetSelectionOwner(g_display, req->selection), clipboard_monotonic_time_ns());
 +        }
      }
      return 0;
@@ -496,7 +509,7 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +                    "type=image/png format=8 chunk=%u offset=%llu bytes=%d "
 +                    "end_offset=%llu change_result=%d "
 +                    "trigger_delete_time=%lu state_match=%d "
-+                    "start_generation=%llu current_generation=%llu",
++                    "start_generation=%llu current_generation=%llu mono_ns=%llu",
 +                    xevent->xproperty.window, xevent->xproperty.atom,
 +                    g_png_x11_chunk_count,
 +                    (unsigned long long)chunk_offset, data_bytes,
@@ -504,7 +517,7 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +                    change_result, xevent->xproperty.time,
 +                    diagnostic_state_match,
 +                    (unsigned long long)g_png_x11_start_generation,
-+                    (unsigned long long)g_clipboard_format_generation);
++                    (unsigned long long)g_clipboard_format_generation, clipboard_monotonic_time_ns());
 +            }
 +            else
 +            {
@@ -558,7 +571,7 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
              "requestor=0x%lx property=0x%lx terminator_generation=%llu "
 -            "current_generation=%llu",
 +            "current_generation=%llu target=%s time=%lu "
-+            "current_owner=0x%lx state_match=%d start_generation=%llu",
++            "current_owner=0x%lx state_match=%d start_generation=%llu mono_ns=%llu",
              xevent->xproperty.window, xevent->xproperty.atom,
              (unsigned long long)g_image_incr_terminator_generation,
 -            (unsigned long long)g_clipboard_format_generation);
@@ -566,7 +579,7 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +            get_atom_text(g_clip_c2s.type), xevent->xproperty.time,
 +            XGetSelectionOwner(g_display, g_clipboard_atom),
 +            diagnostic_state_match,
-+            (unsigned long long)g_png_x11_start_generation);
++            (unsigned long long)g_png_x11_start_generation, clipboard_monotonic_time_ns());
 +        if (g_png_x11_transaction_active && !diagnostic_state_match)
 +        {
 +            LOG(LOG_LEVEL_WARNING,

@@ -76,10 +76,10 @@
 +        LOG(LOG_LEVEL_INFO,
 +            "XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-request "
 +            "target=%s requestor=0x%lx owner=0x%lx selection=0x%lx property=0x%lx "
-+            "time=%lu generation=%llu",
++            "time=%lu generation=%llu mono_ns=%llu",
 +            get_atom_text(lxev->target), lxev->requestor, lxev->owner,
 +            lxev->selection, lxev->property, lxev->time,
-+            (unsigned long long)g_clipboard_format_generation);
++            (unsigned long long)g_clipboard_format_generation, clipboard_monotonic_time_ns());
 +    }
  
      if (g_image_retry.retry_timeout_pending &&

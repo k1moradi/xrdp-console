@@ -2826,11 +2826,11 @@ def assert_clipboard_png_prefetch_stale_image_session(
         raise AssertionError("RDP graphics did not continue after stale PNG overlap")
 
 
-def _chansrv_event_time(line: str) -> datetime:
-    match = re.match(r"^\[([^\]]+)\]", line)
+def _chansrv_event_monotonic_ns(line: str) -> int:
+    match = re.search(r"\bmono_ns=(\d+)\b", line)
     if match is None:
-        raise AssertionError(f"clipboard event lacks a timestamp: {line}")
-    return datetime.fromisoformat(match.group(1))
+        raise AssertionError(f"clipboard event lacks mono_ns: {line}")
+    return int(match.group(1))
 
 
 def assert_clipboard_delayed_png_response_session(
@@ -3021,10 +3021,10 @@ def assert_clipboard_delayed_png_response_session(
         event_lines[name] = matches[0]
 
     event_order = list(event_lines)
-    event_times = [_chansrv_event_time(event_lines[name])
+    event_times = [_chansrv_event_monotonic_ns(event_lines[name])
                    for name in event_order]
     intervals_ms = [
-        (event_times[index + 1] - event_times[index]).total_seconds() * 1000.0
+        (event_times[index + 1] - event_times[index]) / 1_000_000.0
         for index in range(len(event_times) - 1)]
     if any(interval < 0.0 for interval in intervals_ms):
         raise AssertionError(

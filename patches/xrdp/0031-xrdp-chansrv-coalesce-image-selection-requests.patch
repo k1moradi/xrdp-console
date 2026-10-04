@@ -283,7 +283,7 @@ index c399134..99faed4 100644
 +    g_clip_c2s.converted = 0;
      LOG(LOG_LEVEL_INFO,
          "XRDP_CONSOLE_CLIPBOARD_IMAGE event=request format_id=%d target=%s "
-         "attempt=1",
+         "attempt=1 mono_ns=%llu",
 @@ -1264,11 +1437,17 @@ clipboard_cancel_pending_image_retry(const char *reason)
          "XRDP_CONSOLE_CLIPBOARD_IMAGE event=retry-cancelled reason=%s "
          "format_id=%d",
@@ -304,7 +304,7 @@ index c399134..99faed4 100644
  
  static void
 @@ -1856,12 +2035,30 @@ clipboard_process_data_response(struct stream *s, int clip_msg_status,
-             g_image_retry.policy.attempt);
+             g_image_retry.policy.attempt, clipboard_monotonic_time_ns());
      }
  
 +    if (is_image &&
