@@ -18,6 +18,7 @@
 
 #include <cerrno>
 #include <charconv>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -25,9 +26,12 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <poll.h>
+#include <span>
 #include <time.h>
 #include <unistd.h>
+#include <vector>
 
 namespace
 {
@@ -116,6 +120,180 @@ struct PeerContext
     char controlBuffer[256];
     std::size_t controlBufferSize;
 };
+
+struct ParsedGeneralCapabilities
+{
+    UINT32 version{kSpecPeerCapabilityVersion};
+    UINT32 flags{0U};
+    bool present{false};
+};
+
+std::optional<ParsedGeneralCapabilities> parse_capability_sets(
+    std::span<const std::byte> bytes, UINT32 setCount)
+{
+    ParsedGeneralCapabilities result{};
+    for (UINT32 index = 0U; index < setCount; ++index)
+    {
+        if (bytes.size() < sizeof(CLIPRDR_CAPABILITY_SET))
+        {
+            return std::nullopt;
+        }
+
+        CLIPRDR_CAPABILITY_SET header{};
+        std::memcpy(&header, bytes.data(), sizeof(header));
+        const std::size_t setLength = header.capabilitySetLength;
+        if (setLength < sizeof(header) || setLength > bytes.size())
+        {
+            return std::nullopt;
+        }
+
+        if (header.capabilitySetType == CB_CAPSTYPE_GENERAL)
+        {
+            if (result.present ||
+                setLength < sizeof(CLIPRDR_GENERAL_CAPABILITY_SET))
+            {
+                return std::nullopt;
+            }
+
+            CLIPRDR_GENERAL_CAPABILITY_SET general{};
+            std::memcpy(&general, bytes.data(), sizeof(general));
+            result.version = general.version;
+            result.flags = general.generalFlags;
+            result.present = true;
+        }
+
+        bytes = bytes.subspan(setLength);
+    }
+
+    if (!bytes.empty())
+    {
+        return std::nullopt;
+    }
+    return result;
+}
+
+void append_capability_set(std::vector<std::byte>* bytes, UINT16 type,
+                           std::span<const std::byte> body)
+{
+    const std::size_t totalLength = sizeof(CLIPRDR_CAPABILITY_SET) + body.size();
+    if (bytes == nullptr || totalLength > std::numeric_limits<UINT16>::max())
+    {
+        return;
+    }
+
+    const CLIPRDR_CAPABILITY_SET header{
+        type, static_cast<UINT16>(totalLength)};
+    const std::size_t oldSize = bytes->size();
+    bytes->resize(oldSize + totalLength);
+    std::memcpy(bytes->data() + oldSize, &header, sizeof(header));
+    if (!body.empty())
+    {
+        std::memcpy(bytes->data() + oldSize + sizeof(header), body.data(),
+                    body.size());
+    }
+}
+
+bool run_capability_parser_self_test()
+{
+    const auto valid = [](const std::vector<std::byte>& bytes, UINT32 count,
+                          bool expectedPresent, UINT32 expectedVersion,
+                          UINT32 expectedFlags)
+    {
+        const auto parsed = parse_capability_sets(bytes, count);
+        return parsed.has_value() && parsed->present == expectedPresent &&
+               parsed->version == expectedVersion &&
+               parsed->flags == expectedFlags;
+    };
+    const auto invalid = [](const std::vector<std::byte>& bytes, UINT32 count)
+    {
+        return !parse_capability_sets(bytes, count).has_value();
+    };
+
+    if (!valid({}, 0U, false, kSpecPeerCapabilityVersion, 0U))
+    {
+        return false;
+    }
+
+    const std::array<std::byte, 3U> unknownBody{
+        std::byte{0x11}, std::byte{0x22}, std::byte{0x33}};
+    std::vector<std::byte> unknownOnly;
+    append_capability_set(&unknownOnly, 0x7fffU, unknownBody);
+    if (!valid(unknownOnly, 1U, false, kSpecPeerCapabilityVersion, 0U))
+    {
+        return false;
+    }
+
+    CLIPRDR_GENERAL_CAPABILITY_SET general{};
+    general.capabilitySetType = CB_CAPSTYPE_GENERAL;
+    general.capabilitySetLength = CB_CAPSTYPE_GENERAL_LEN;
+    general.version = CB_CAPS_VERSION_2;
+    general.generalFlags = CB_USE_LONG_FORMAT_NAMES;
+    const auto generalBytes = std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(&general), sizeof(general));
+
+    std::vector<std::byte> generalOnly;
+    append_capability_set(&generalOnly, CB_CAPSTYPE_GENERAL,
+                          generalBytes.subspan(sizeof(CLIPRDR_CAPABILITY_SET)));
+    if (!valid(generalOnly, 1U, true, general.version, general.generalFlags))
+    {
+        return false;
+    }
+
+    std::vector<std::byte> unknownThenGeneral;
+    append_capability_set(&unknownThenGeneral, 0x7fffU, unknownBody);
+    append_capability_set(&unknownThenGeneral, CB_CAPSTYPE_GENERAL,
+                          generalBytes.subspan(sizeof(CLIPRDR_CAPABILITY_SET)));
+    if (!valid(unknownThenGeneral, 2U, true, general.version,
+               general.generalFlags))
+    {
+        return false;
+    }
+
+    std::vector<std::byte> generalThenUnknown;
+    append_capability_set(&generalThenUnknown, CB_CAPSTYPE_GENERAL,
+                          generalBytes.subspan(sizeof(CLIPRDR_CAPABILITY_SET)));
+    append_capability_set(&generalThenUnknown, 0x7fffU, unknownBody);
+    if (!valid(generalThenUnknown, 2U, true, general.version,
+               general.generalFlags))
+    {
+        return false;
+    }
+
+    std::vector<std::byte> truncatedHeader(sizeof(CLIPRDR_CAPABILITY_SET) - 1U);
+    if (!invalid(truncatedHeader, 1U))
+    {
+        return false;
+    }
+
+    std::vector<std::byte> undersized(sizeof(CLIPRDR_CAPABILITY_SET));
+    CLIPRDR_CAPABILITY_SET badHeader{0x7fffU, 2U};
+    std::memcpy(undersized.data(), &badHeader, sizeof(badHeader));
+    if (!invalid(undersized, 1U))
+    {
+        return false;
+    }
+
+    std::vector<std::byte> oversized(sizeof(CLIPRDR_CAPABILITY_SET));
+    badHeader.capabilitySetLength = 20U;
+    std::memcpy(oversized.data(), &badHeader, sizeof(badHeader));
+    if (!invalid(oversized, 1U))
+    {
+        return false;
+    }
+
+    std::vector<std::byte> shortGeneral(sizeof(CLIPRDR_CAPABILITY_SET) + 4U);
+    badHeader = {CB_CAPSTYPE_GENERAL,
+                 static_cast<UINT16>(shortGeneral.size())};
+    std::memcpy(shortGeneral.data(), &badHeader, sizeof(badHeader));
+    if (!invalid(shortGeneral, 1U))
+    {
+        return false;
+    }
+
+    std::vector<std::byte> trailing = unknownOnly;
+    trailing.push_back(std::byte{0x44});
+    return invalid(trailing, 1U) && invalid(unknownOnly, 0U);
+}
 
 bool parse_format_id(const char* value, UINT32* parsed)
 {
@@ -507,49 +685,52 @@ UINT on_server_capabilities(CliprdrClientContext* cliprdr,
         return CHANNEL_RC_BAD_CHANNEL_HANDLE;
     }
 
-    UINT32 generalVersion = kSpecPeerCapabilityVersion;
-    UINT32 generalFlags = 0U;
-    std::size_t offset = 0U;
-    const auto* capabilityBytes = reinterpret_cast<const BYTE*>(
-        capabilities->capabilitySets);
-    for (UINT32 index = 0U; index < capabilities->cCapabilitiesSets; ++index)
+    /*
+     * FreeRDP's client callback normalizes CB_CLIP_CAPS and currently passes
+     * either no sets or one stack-backed General set. It does not expose the
+     * raw PDU length here. The pure parser below is tested with a real bounded
+     * span; this adapter must not invent a length from untrusted set contents.
+     */
+    if (capabilities->cCapabilitiesSets > 1U ||
+        (capabilities->cCapabilitiesSets == 1U &&
+         capabilities->capabilitySets == nullptr))
+    {
+        peer->failed = true;
+        peer->cliprdrInitState = CliprdrInitState::Failed;
+        return CHANNEL_RC_BAD_PROC;
+    }
+
+    std::optional<ParsedGeneralCapabilities> parsed;
+    if (capabilities->cCapabilitiesSets == 0U)
+    {
+        parsed = parse_capability_sets({}, 0U);
+    }
+    else
     {
         CLIPRDR_CAPABILITY_SET header{};
-        if (offset > SIZE_MAX - sizeof(header))
+        std::memcpy(&header, capabilities->capabilitySets, sizeof(header));
+        if (header.capabilitySetType != CB_CAPSTYPE_GENERAL)
         {
             peer->failed = true;
             peer->cliprdrInitState = CliprdrInitState::Failed;
             return CHANNEL_RC_BAD_PROC;
         }
-        std::memcpy(&header, capabilityBytes + offset, sizeof(header));
-        const std::size_t setLength = header.capabilitySetLength;
-        if (setLength < sizeof(header) || offset > SIZE_MAX - setLength)
-        {
-            peer->failed = true;
-            peer->cliprdrInitState = CliprdrInitState::Failed;
-            return CHANNEL_RC_BAD_PROC;
-        }
-        if (header.capabilitySetType == CB_CAPSTYPE_GENERAL)
-        {
-            if (setLength < sizeof(CLIPRDR_GENERAL_CAPABILITY_SET))
-            {
-                peer->failed = true;
-                peer->cliprdrInitState = CliprdrInitState::Failed;
-                return CHANNEL_RC_BAD_PROC;
-            }
-            CLIPRDR_GENERAL_CAPABILITY_SET general{};
-            std::memcpy(&general, capabilityBytes + offset,
-                        sizeof(general));
-            generalVersion = general.version;
-            generalFlags = general.generalFlags;
-        }
-        /* Unknown sets are legal and are ignored by this minimal peer. */
-        offset += setLength;
+        const auto normalizedGeneral = std::span<const std::byte>(
+            reinterpret_cast<const std::byte*>(capabilities->capabilitySets),
+            sizeof(CLIPRDR_GENERAL_CAPABILITY_SET));
+        parsed = parse_capability_sets(normalizedGeneral, 1U);
+    }
+
+    if (!parsed.has_value())
+    {
+        peer->failed = true;
+        peer->cliprdrInitState = CliprdrInitState::Failed;
+        return CHANNEL_RC_BAD_PROC;
     }
 
     peer->serverCapabilitiesReceived = true;
-    peer->serverGeneralCapabilityVersion = generalVersion;
-    peer->serverGeneralCapabilityFlags = generalFlags;
+    peer->serverGeneralCapabilityVersion = parsed->version;
+    peer->serverGeneralCapabilityFlags = parsed->flags;
     std::printf("PEER_RX_SERVER_CLIP_CAPS version=%u general_flags=0x%08x\n",
                 peer->serverGeneralCapabilityVersion,
                 peer->serverGeneralCapabilityFlags);
@@ -1637,6 +1818,17 @@ int entry_points(RDP_CLIENT_ENTRY_POINTS* points)
 
 int main(int argc, char** argv)
 {
+    if (argc == 2 && std::strcmp(argv[1], "--capabilities-self-test") == 0)
+    {
+        if (run_capability_parser_self_test())
+        {
+            std::puts("capability parser cases passed");
+            return 0;
+        }
+        std::fputs("capability parser self-test failed\n", stderr);
+        return 1;
+    }
+
     RDP_CLIENT_ENTRY_POINTS points{};
     if (entry_points(&points) != 0)
     {

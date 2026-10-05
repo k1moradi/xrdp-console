@@ -1,0 +1,15 @@
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -1100,6 +1100,12 @@ clipboard_set_selection_owner(void)
+     XSetSelectionOwner(g_display, g_clipboard_atom, g_wnd, g_selection_time);
+     owner = XGetSelectionOwner(g_display, g_clipboard_atom);
+     g_clipboard_owner_update_time_valid = 0;
++    LOG(LOG_LEVEL_INFO,
++        "XRDP_CONSOLE_CLIPBOARD_IMAGE event=selection-owner-install "
++        "generation=%llu owner=0x%lx chansrv_window=0x%lx "
++        "selection_time=%lu result=%s",
++        (unsigned long long)g_clipboard_format_generation, owner, g_wnd,
++        g_selection_time, owner == g_wnd ? "installed" : "declined");
+ 
+     if (owner != g_wnd)
+     {

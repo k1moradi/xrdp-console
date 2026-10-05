@@ -736,7 +736,8 @@ handle_selection_request(Display *display,
 }
 
 static int
-run_owner(const char *named_png_path, int delayed_activation)
+run_owner(const char *named_png_path, int delayed_activation,
+          int include_file_format)
 {
     Display *display = XOpenDisplay(NULL);
     Window image_owner;
@@ -751,7 +752,7 @@ run_owner(const char *named_png_path, int delayed_activation)
     Atom raw_format_list;
     Atom raw_target;
     Atom raw_id_property;
-    unsigned char raw_format_list_data[23];
+    unsigned char raw_format_list_data[64];
     size_t raw_format_list_length = 0;
     unsigned long raw_transfer_enabled = 1;
     unsigned char *bitmap = NULL;
@@ -812,7 +813,8 @@ run_owner(const char *named_png_path, int delayed_activation)
     if (named_png_mode)
     {
         size_t offset = 0;
-        put_u32_le(raw_format_list_data, offset, 2U);
+        put_u32_le(raw_format_list_data, offset,
+                   include_file_format ? 3U : 2U);
         offset += 4U;
         put_u32_le(raw_format_list_data, offset, CF_DIB_FORMAT_ID);
         offset += 4U;
@@ -822,6 +824,15 @@ run_owner(const char *named_png_path, int delayed_activation)
         offset += 4U;
         memcpy(raw_format_list_data + offset, "PNG", 4U);
         offset += 4U;
+        if (include_file_format)
+        {
+            static const char file_format[] = "FileGroupDescriptorW";
+            put_u32_le(raw_format_list_data, offset, 0xc001U);
+            offset += 4U;
+            memcpy(raw_format_list_data + offset, file_format,
+                   sizeof(file_format));
+            offset += sizeof(file_format);
+        }
         raw_format_list_length = offset;
         XChangeProperty(display, image_owner, raw_transfer, XA_INTEGER, 32,
                         PropModeReplace,
@@ -840,9 +851,9 @@ run_owner(const char *named_png_path, int delayed_activation)
     if (named_png_mode)
     {
         printf("DUAL_IMAGE_OWNER_READY image_bytes=%zu dib_format_id=%u "
-               "png_format_id=%u formats=%zu\n",
+               "png_format_id=%u formats=%zu file_format=%d\n",
                named_png_length, CF_DIB_FORMAT_ID, NAMED_PNG_FORMAT_ID,
-               raw_format_list_length);
+               raw_format_list_length, include_file_format);
     }
     else
     {
@@ -2602,15 +2613,20 @@ main(int argc, char **argv)
     }
     if (argc == 2 && strcmp(argv[1], "owner") == 0)
     {
-        return run_owner(NULL, 0);
+        return run_owner(NULL, 0, 0);
     }
     if (argc == 2 && strcmp(argv[1], "owner-delayed") == 0)
     {
-        return run_owner(NULL, 1);
+        return run_owner(NULL, 1, 0);
     }
     if (argc == 3 && strcmp(argv[1], "owner-named-png") == 0)
     {
-        return run_owner(argv[2], 0);
+        return run_owner(argv[2], 0, 0);
+    }
+    if (argc == 3 &&
+            strcmp(argv[1], "owner-named-png-with-file-format") == 0)
+    {
+        return run_owner(argv[2], 0, 1);
     }
     if (argc == 3 && strcmp(argv[1], "owner-png-file") == 0)
     {
@@ -2708,6 +2724,7 @@ main(int argc, char **argv)
     }
     fputs("usage: clipboard_x11_session_peer owner | owner-delayed | "
           "owner-named-png PNG_FILE | "
+          "owner-named-png-with-file-format PNG_FILE | "
           "owner-png-file PNG_FILE | owner-png-file-incr PNG_FILE | "
           "owner-png-file-incr-xrdp PNG_FILE | "
           "owner-png-file-incr-xrdp-targets PNG_FILE | "

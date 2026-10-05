@@ -430,7 +430,7 @@ write_last_roi_ppm(Probe *probe, const char *path)
 }
 
 static int
-compare_reference(Probe *probe, const char *path)
+compare_reference(Probe *probe, const char *path, int skip_dynamic_marker)
 {
     FILE *input = fopen(path, "rb");
     unsigned char header[64];
@@ -543,7 +543,8 @@ compare_reference(Probe *probe, const char *path)
             {
                 continue;
             }
-            if (coverage_x_begin < marker_x_end &&
+            if (skip_dynamic_marker &&
+                coverage_x_begin < marker_x_end &&
                 coverage_x_end > marker_x_begin &&
                 coverage_y_begin < marker_y_end &&
                 coverage_y_end > marker_y_begin)
@@ -853,9 +854,17 @@ main(int argc, char **argv)
         }
         else if (strncmp(command, "compare ", 8) == 0)
         {
-            if (!compare_reference(&probe, command + 8))
+            if (!compare_reference(&probe, command + 8, 1))
             {
                 puts("ERROR reference-comparison");
+                fflush(stdout);
+            }
+        }
+        else if (strncmp(command, "compare-closed ", 15) == 0)
+        {
+            if (!compare_reference(&probe, command + 15, 0))
+            {
+                puts("ERROR closed-reference-comparison");
                 fflush(stdout);
             }
         }

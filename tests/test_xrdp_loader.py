@@ -294,6 +294,24 @@ def wait_for_chansrv_pattern_after_lines(
         f"{new_text}\n[chansrv stdout]\n{read_text(stdout_path)}")
 
 
+def wait_for_chansrv_selection_owner_install(
+        log_directory: Path, generation: int, timeout: float,
+        process: subprocess.Popen[object], stdout_path: Path) -> str:
+    """Wait until chansrv has synchronously verified X11 ownership."""
+    pattern = (
+        rf"event=selection-owner-install generation={generation} "
+        r"owner=(0x[0-9a-fA-F]+) chansrv_window=(0x[0-9a-fA-F]+) "
+        r"selection_time=\d+ result=installed")
+    text = wait_for_chansrv_pattern(
+        log_directory, pattern, timeout, process, stdout_path)
+    match = re.search(pattern, text)
+    if match is None or match.group(1).lower() != match.group(2).lower():
+        raise AssertionError(
+            "chansrv reported clipboard ownership without owning the X11 "
+            f"CLIPBOARD selection for generation {generation}:\n{text}")
+    return text
+
+
 def wait_for_owner_marker(owner: subprocess.Popen[bytes], marker: str,
                           timeout: float, owner_log_path: Path) -> str:
     if owner.stdout is None:
@@ -432,10 +450,16 @@ def start_clipboard_requestor(helper: Path, display: str, target: str,
 
 def start_clipboard_owner(
         helper: Path, root: Path, log_path: Path, *, delayed: bool = False,
-        named_png_path: Path | None = None) -> subprocess.Popen[bytes]:
+        named_png_path: Path | None = None,
+        include_file_format: bool = False) -> subprocess.Popen[bytes]:
     if delayed and named_png_path is not None:
         raise ValueError("delayed and named-PNG clipboard owners are separate")
+    if include_file_format and named_png_path is None:
+        raise ValueError("the test file format requires a named-PNG owner")
     command = ([str(helper), "owner-delayed"] if delayed else
+               [str(helper), "owner-named-png-with-file-format",
+                str(named_png_path)]
+               if include_file_format else
                [str(helper), "owner-named-png", str(named_png_path)]
                if named_png_path is not None else
                [str(helper), "owner"])
@@ -499,6 +523,58 @@ def clipboard_window_exists(helper: Path, display: str, window_id: str) -> bool:
     if match is None:
         raise AssertionError(f"invalid X11 window query: {result.stdout!r}")
     return match.group(1) == "1"
+
+
+def start_x11_damage_counter(executable: Path, display: str,
+                             window_id: str) -> subprocess.Popen[bytes]:
+    process = subprocess.Popen(
+        [str(executable), display, window_id], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+        start_new_session=True)
+    if process.stdin is None or process.stdout is None:
+        stop_process(process)
+        raise AssertionError("XDamage counter pipes were not created")
+    ready = read_line(process.stdout, 5.0)
+    if not ready.startswith(b"READY DAMAGE_COUNT="):
+        stderr = process.stderr.read() if process.stderr is not None else b""
+        stop_process(process)
+        raise AssertionError(
+            "XDamage counter failed to initialize: "
+            f"stdout={ready!r} stderr={stderr.decode(errors='replace')}")
+    return process
+
+
+def _parse_x11_damage_reply(line: bytes) -> tuple[int, int]:
+    decoded = line.decode("ascii", errors="replace").strip()
+    match = re.fullmatch(
+        r"DAMAGE_COUNT count=(\d+) monotonic_ns=(-?\d+)", decoded)
+    if match is None:
+        raise AssertionError(f"invalid XDamage counter reply: {decoded!r}")
+    return int(match.group(1)), int(match.group(2))
+
+
+def query_x11_damage_count(process: subprocess.Popen[bytes]) -> tuple[int, int]:
+    if process.stdin is None or process.stdout is None:
+        raise AssertionError("XDamage counter pipes are unavailable")
+    process.stdin.write(b"count\n")
+    process.stdin.flush()
+    return _parse_x11_damage_reply(read_line(process.stdout, 5.0))
+
+
+def wait_for_x11_damage_after(process: subprocess.Popen[bytes],
+                              previous: int, timeout_ms: int
+                              ) -> tuple[int, int]:
+    if process.stdin is None or process.stdout is None:
+        raise AssertionError("XDamage counter pipes are unavailable")
+    process.stdin.write(f"wait-after {previous} {timeout_ms}\n".encode("ascii"))
+    process.stdin.flush()
+    count, timestamp = _parse_x11_damage_reply(
+        read_line(process.stdout, timeout_ms / 1000.0 + 2.0))
+    if count <= previous:
+        raise AssertionError(
+            "client window did not produce strictly newer XDamage after "
+            f"the graphics update: previous={previous} count={count}")
+    return count, timestamp
 
 
 def finish_clipboard_requestor(process: subprocess.Popen[bytes],
@@ -673,7 +749,7 @@ def assert_clipboard_image_session(
         read_text(client_log_path)))
     client_core_sends_before_activation = len(re.findall(
         r"XRDP_CONSOLE_TEST_CLIPRDR event=core-format-list-send "
-        r"status=0 formats=[1-9]\d*\b",
+        r"[^\n]*sent_formats=[1-9]\d* send_status=0\b",
         read_text(client_log_path)))
     vc_format_lists_before = len(re.findall(
         r"event=cliprdr-first-fragment "
@@ -728,7 +804,7 @@ def assert_clipboard_image_session(
     wait_for_log_pattern_occurrence(
         client, client_log_path,
         r"XRDP_CONSOLE_TEST_CLIPRDR event=core-format-list-send "
-        r"status=0 formats=[1-9]\d*\b",
+        r"[^\n]*sent_formats=[1-9]\d* send_status=0\b",
         client_core_sends_before_activation + 1, 10.0,
         "FreeRDP did not successfully send its non-empty CLIPRDR Format List")
     wait_for_log_pattern_occurrence(
@@ -753,6 +829,13 @@ def assert_clipboard_image_session(
             f"{chansrv_log_text(chansrv_logs)}\n"
             f"[FreeRDP client]\n{read_text(client_log_path)}") from error
 
+    first_generation_match = re.search(r"generation=(\d+)", first_list)
+    if first_generation_match is None:
+        raise AssertionError(f"format-list lacked a generation: {first_list}")
+    wait_for_chansrv_selection_owner_install(
+        chansrv_logs, int(first_generation_match.group(1)), 10.0,
+        chansrv_process, chansrv_stdout)
+
     png_format_match = re.search(
         r"event=format-list[^\n]*png_format_id=(\d+)", first_list)
     # Ask the actual chansrv selection owner for its advertised targets even
@@ -769,6 +852,8 @@ def assert_clipboard_image_session(
         raise AssertionError(
             f"invalid X11 TARGETS result: {targets_result!r}\n"
             f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
+
+
     target_requestor = targets_match.group(1).lower()
     target_count = int(targets_match.group(2))
     png_index = int(targets_match.group(3))
@@ -841,7 +926,19 @@ def assert_clipboard_image_session(
                 f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
 
     text_request = start_clipboard_requestor(helper, source_display, "UTF8_STRING")
-    initial_text = finish_clipboard_requestor(text_request, 15.0, chansrv_logs)
+    try:
+        initial_text = finish_clipboard_requestor(
+            text_request, 15.0, chansrv_logs)
+    except AssertionError as error:
+        raise AssertionError(
+            "initial text delayed-rendering transition failed after the "
+            "image offer; first missing boundary details follow:\n"
+            "[synthetic X11 owner stdout]\n" +
+            "\n".join(getattr(
+                owner, "_xrdp_clipboard_owner_lines", [])) + "\n"
+            f"[synthetic X11 owner stderr]\n{read_text(owner_log_path)}\n"
+            f"[FreeRDP client]\n{read_text(client_log_path)}\n"
+            f"[xrdp]\n{xrdp_log_excerpt(log_path)}") from error
     if "initial clipboard text" not in initial_text:
         raise AssertionError(f"initial text clipboard control failed: {initial_text!r}")
 
@@ -1342,28 +1439,48 @@ def assert_clipboard_image_session(
         helper, source_display, "image/bmp", allow_refusal=True)
     wait_for_owner_marker(owner, "IMAGE_REQUEST", 10.0, owner_log_path)
     wait_for_owner_marker(owner, "IMAGE_INCR_DONE", 30.0, owner_log_path)
-    os.kill(chansrv_process.pid, signal.SIGSTOP)
-    # The response is >23 MiB while the Unix socket's send queue is small. Let
-    # xrdp forward enough 1600-byte CLIPRDR fragments to fill that queue before
-    # closing the stopped peer, forcing trans_force_write() to observe EPIPE.
-    time.sleep(0.5)
-    if chansrv_process.poll() is not None:
-        raise AssertionError("chansrv exited before the synchronous failure injection")
-    os.kill(chansrv_process.pid, signal.SIGKILL)
-    chansrv_process.wait(timeout=5.0)
-    wait_for_log(
-        client, log_path,
-        "XRDP_CONSOLE_CHANNEL event=chansrv-write-failed",
-        15.0, stdout_path, client_log_path)
+    damage_counter_name = os.environ.get(
+        "XRDP_CONSOLE_TEST_DAMAGE_COUNTER")
+    if not damage_counter_name:
+        raise AssertionError(
+            "clipboard-session requires its client-window XDamage counter")
+    client_window = find_window(client_display, window_title, 8.0)
+    damage_counter = start_x11_damage_counter(
+        Path(damage_counter_name), client_display, client_window)
     try:
+        pre_termination_damage_count, pre_termination_damage_ns = (
+            query_x11_damage_count(damage_counter))
+        os.kill(chansrv_process.pid, signal.SIGSTOP)
+        # This bounded interval is fault-injection setup, not evidence of a
+        # successful graphics update. The response is larger than 23 MiB and
+        # fills the stopped peer's small Unix socket queue before it is killed.
+        time.sleep(0.5)
+        if chansrv_process.poll() is not None:
+            raise AssertionError(
+                "chansrv exited before the synchronous failure injection")
+        os.kill(chansrv_process.pid, signal.SIGKILL)
+        chansrv_process.wait(timeout=5.0)
+        wait_for_log(
+            client, log_path,
+            "XRDP_CONSOLE_CHANNEL event=chansrv-write-failed",
+            15.0, stdout_path, client_log_path)
+        post_failure_damage_count, _ = query_x11_damage_count(damage_counter)
+        print(
+            "XRDP_CONSOLE_CLIPBOARD_TERMINATION_BASELINE "
+            f"pre_termination_count={pre_termination_damage_count} "
+            f"pre_termination_ns={pre_termination_damage_ns} "
+            f"post_failure_count={post_failure_damage_count}")
         assert_client_stays_connected(
             client, client_display, window_title, client_log_path,
             log_path, stdout_path)
         assert_client_pixel(
             client_display, stimulus, window_title, pixel_probe,
             log_path, stdout_path, probe_x, probe_y,
-            client_log_path=client_log_path)
+            client_log_path=client_log_path,
+            client_damage_counter=damage_counter,
+            client_damage_after_count=post_failure_damage_count)
     finally:
+        stop_process(damage_counter)
         stop_process(failing_image_request)
 
     assert_client_stays_connected(
@@ -1374,6 +1491,101 @@ def assert_clipboard_image_session(
             "xrdp logged a fatal session-loop exit during clipboard stress:\n"
             f"{xrdp_log_excerpt(log_path)}\n"
             f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
+
+
+def assert_clipboard_filtered_format_list_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, log_path: Path,
+        chansrv_process: subprocess.Popen[object], chansrv_logs: Path,
+        chansrv_stdout: Path, source_display: str) -> None:
+    """Verify filtering counts and the resulting server-side offer."""
+    wait_for_log_pattern_occurrence(
+        client, client_log_path,
+        r"XRDP_CONSOLE_TEST_CLIPRDR event=x11-format id=0x[0-9a-fA-F]+ "
+        r"name=FileGroupDescriptorW",
+        1, 10.0,
+        "synthetic raw offer did not include FileGroupDescriptorW")
+    wait_for_log_pattern_occurrence(
+        client, client_log_path,
+        r"XRDP_CONSOLE_TEST_CLIPRDR event=core-format-list "
+        r"input_formats=3 filtered_formats=2 initial=\d+",
+        1, 10.0,
+        "FreeRDP did not filter one file format from the input offer")
+    wait_for_log_pattern_occurrence(
+        client, client_log_path,
+        r"XRDP_CONSOLE_TEST_CLIPRDR event=core-format-list-send "
+        r"input_formats=3 filtered_formats=2 sent_formats=2 send_status=0",
+        1, 10.0,
+        "FreeRDP did not report the actual filtered list count sent")
+    wait_for_log_pattern_occurrence(
+        client, log_path,
+        r"event=cliprdr-first-fragment "
+        r"direction=client-to-server [^\n]*msg_type=2",
+        1, 10.0,
+        "xrdp did not receive a client-to-server CB_FORMAT_LIST")
+    format_log = wait_for_chansrv_pattern(
+        chansrv_logs,
+        rf"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        rf"png_format_id={NAMED_PNG_FORMAT_ID} generation=\d+",
+        10.0, chansrv_process, chansrv_stdout)
+    generation_match = re.search(r"generation=(\d+)", format_log)
+    if generation_match is None:
+        raise AssertionError(f"filtered Format List lacked generation: {format_log}")
+    wait_for_chansrv_selection_owner_install(
+        chansrv_logs, int(generation_match.group(1)), 10.0,
+        chansrv_process, chansrv_stdout)
+    if "FileGroupDescriptorW" in format_log:
+        raise AssertionError(
+            "filtered file format leaked into chansrv's stored offer:\n"
+            f"{format_log}")
+
+    targets_request = start_clipboard_requestor(
+        helper, source_display, "TARGETS")
+    targets_result = finish_clipboard_requestor(
+        targets_request, 10.0, chansrv_logs)
+    targets_match = re.search(
+        r"RESULT target=TARGETS requestor=(0x[0-9a-fA-F]+) count=(\d+) "
+        r"png_index=(-?\d+) bmp_index=(-?\d+) targets=([^\s]+)",
+        targets_result)
+    if targets_match is None:
+        raise AssertionError(
+            f"invalid X11 TARGETS result: {targets_result!r}\n"
+            f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
+    requestor = targets_match.group(1).lower()
+    target_count = int(targets_match.group(2))
+    png_index = int(targets_match.group(3))
+    bmp_index = int(targets_match.group(4))
+    target_names = targets_match.group(5).split(",")
+    if (target_count != len(target_names) or png_index < 0 or bmp_index < 0 or
+            png_index >= bmp_index or "FileGroupDescriptorW" in target_names or
+            "image/png" not in target_names or "image/bmp" not in target_names):
+        raise AssertionError(
+            "X11 TARGETS did not expose exactly the filtered image offer: "
+            f"{targets_result!r}")
+
+    request_pattern = (
+        rf"event=x11-request target=TARGETS requestor={re.escape(requestor)}"
+        rf"[^\n]*generation=(\d+)")
+    request_log = wait_for_chansrv_pattern(
+        chansrv_logs, request_pattern, 10.0, chansrv_process, chansrv_stdout)
+    request_match = re.search(request_pattern, request_log)
+    if request_match is None:
+        raise AssertionError(
+            "chansrv did not attribute TARGETS to the requestor:\n"
+            f"{request_log}")
+    generation = int(request_match.group(1))
+    response_pattern = (
+        rf"event=targets-response-issued requestor={re.escape(requestor)} "
+        rf"generation={generation} target_count={target_count} "
+        r"targets=([^\s]+) truncated=0 result=0")
+    response_log = wait_for_chansrv_pattern(
+        chansrv_logs, response_pattern, 10.0,
+        chansrv_process, chansrv_stdout)
+    response_match = re.search(response_pattern, response_log)
+    if response_match is None or response_match.group(1).split(",") != target_names:
+        raise AssertionError(
+            "X11 TARGETS bytes differ from chansrv's generation-bound offer "
+            f"diagnostic: bytes={target_names!r}\n{response_log}")
 
 
 def assert_clipboard_inflight_format_list_session(
@@ -1543,6 +1755,12 @@ def assert_clipboard_stale_text_generation_session(
             r"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
             r"png_format_id=\d+",
             10.0, chansrv_process, chansrv_stdout)
+        generation_match = re.search(r"generation=(\d+)", new_list)
+        if generation_match is None:
+            raise AssertionError(f"replacement Format List lacked generation: {new_list}")
+        wait_for_chansrv_selection_owner_install(
+            chansrv_logs, int(generation_match.group(1)), 10.0,
+            chansrv_process, chansrv_stdout)
         if clipboard_format_list_count(chansrv_logs) <= format_lists_before:
             raise AssertionError("replacement Format List did not advance")
 
@@ -1591,10 +1809,13 @@ def assert_clipboard_stale_text_generation_session(
         final_targets = finish_clipboard_requestor(
             start_clipboard_requestor(helper, source_display, "TARGETS"),
             5.0, chansrv_logs)
-        if final_targets != targets:
+        targets_content = re.search(r"targets=([^\s]+)", targets)
+        final_targets_content = re.search(r"targets=([^\s]+)", final_targets)
+        if (targets_content is None or final_targets_content is None or
+                final_targets_content.group(1) != targets_content.group(1)):
             raise AssertionError(
                 "late old-text response changed the current X11 offer: "
-                f"before={targets!r} after={final_targets!r}\n"
+                f"before={targets_content!r} after={final_targets_content!r}\n"
                 f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
         if "stored_formats=1 dib_format_id=-1 png_format_id=-1" not in initial_list:
             raise AssertionError(f"initial offer was not text-only: {initial_list}")
@@ -3921,6 +4142,15 @@ def assert_clipboard_named_png_session(
             f"older requestor disappeared: {surviving_result!r}\n"
             f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
 
+    wait_for_chansrv_pattern_after_lines(
+        chansrv_logs,
+        rf"event=x11-incr-terminator-ack requestor="
+        rf"{re.escape(surviving_requestor)} "
+        rf"property=0x[0-9a-fA-F]+ "
+        rf"terminator_generation={x11_generation} "
+        rf"current_generation={x11_generation}",
+        active_log_start_line, 5.0, chansrv_process, chansrv_stdout)
+
     lifetime_log = chansrv_log_text(chansrv_logs)
     lifetime_new_lines = "\n".join(
         lifetime_log.splitlines()[active_log_start_line:])
@@ -4436,6 +4666,36 @@ def popup_probe_command(probe: subprocess.Popen[bytes], command: str,
     return line
 
 
+def popup_h264_profile_metrics(log_path: Path) -> list[str]:
+    summed_fields = (
+        "damage_wakeups", "reported_damage_pixels", "captured_pixels",
+        "presentation_batches", "h264_capture_calls", "h264_capture_us",
+        "h264_conversion_calls", "h264_conversion_us",
+        "h264_converted_pixels", "h264_submit_calls", "h264_submit_us",
+        "h264_ack_calls", "h264_ack_wait_us")
+    maximum_fields = (
+        "h264_capture_max_us", "h264_conversion_max_us",
+        "h264_submit_max_us", "h264_ack_wait_max_us")
+    totals = {field: 0 for field in summed_fields}
+    maxima = {field: 0 for field in maximum_fields}
+    profile_windows = 0
+    for line in read_text(log_path).splitlines():
+        marker = line.find("XRDP_CONSOLE_PROFILE ")
+        if marker < 0:
+            continue
+        profile_windows += 1
+        fields = dict(re.findall(r"([a-z0-9_]+)=(\d+)", line[marker:]))
+        for field in summed_fields:
+            totals[field] += int(fields.get(field, "0"))
+        for field in maximum_fields:
+            maxima[field] = max(maxima[field], int(fields.get(field, "0")))
+    return [
+        f"profile_windows={profile_windows}",
+        *(f"profile_{field}={value}" for field, value in totals.items()),
+        *(f"profile_{field}={value}" for field, value in maxima.items()),
+    ]
+
+
 def assert_popup_ui_stress_session(
         client: subprocess.Popen[object], client_display: str,
         window_title: str, probe_path: Path,
@@ -4444,6 +4704,17 @@ def assert_popup_ui_stress_session(
         client_width: int, client_height: int, cycles: int = 20,
         freshness_budget_ms: float = 1000.0) -> None:
     """Stress launcher-popup presentation and quality through H.264 RDP."""
+    configured_cycles = os.environ.get("XRDP_CONSOLE_POPUP_STRESS_CYCLES")
+    if configured_cycles is not None:
+        try:
+            cycles = int(configured_cycles)
+        except ValueError as error:
+            raise AssertionError(
+                "XRDP_CONSOLE_POPUP_STRESS_CYCLES must be an integer") from error
+        if not 1 <= cycles <= 20:
+            raise AssertionError(
+                "XRDP_CONSOLE_POPUP_STRESS_CYCLES must be between 1 and 20")
+
     window = find_window(client_display, window_title, 8.0)
     probe = subprocess.Popen(
         [str(probe_path), client_display, window, "1920", "1080"],
@@ -4468,10 +4739,13 @@ def assert_popup_ui_stress_session(
     click_x, click_y = map_source_point_to_client(
         40, 1056, 1920, 1080, client_width, client_height)
     latencies_ms: list[float] = []
+    close_latencies_ms: list[float] = []
+    cycle_metrics: list[str] = []
     stable_samples_total = 0
     minimum_observed_contrast = 255
     failure_artifact = artifact_dir / f"popup-ui-failure-{os.getpid()}.ppm"
     reference_path = artifact_dir / "popup-ui-reference.ppm"
+    closed_reference_path = artifact_dir / "popup-ui-closed-reference.ppm"
     passing_frame_path = artifact_dir / "popup-ui-passing-frame.ppm"
     summary_path = artifact_dir / "popup-ui-stress-summary.txt"
     worst_quality = (-1.0, -1.0, -1.0, -1.0, -1, -1)
@@ -4494,11 +4768,15 @@ def assert_popup_ui_stress_session(
             f"completed_cycles={len(latencies_ms)}",
             "latencies_ms=" + ",".join(
             f"{value:.1f}" for value in latencies_ms),
+            "close_latencies_ms=" + ",".join(
+                f"{value:.1f}" for value in close_latencies_ms),
+            "cycle_metrics=" + ";".join(cycle_metrics),
             f"last_quality={worst_quality}",
             f"failure_frame={failure_artifact}",
             f"failure_roi={failure_roi_artifact}",
             "source_events=" + " | ".join(source_events),
         ]
+        summary_lines.extend(popup_h264_profile_metrics(log_path))
         try:
             summary_path.write_text(
                 "\n".join(summary_lines) + "\n", encoding="utf-8")
@@ -4577,12 +4855,11 @@ def assert_popup_ui_stress_session(
             fail(f"popup quality probe returned malformed frame: {line!r}")
         return parsed
 
-    def check_reference_quality(
-            cycle: int
+    def compare_source_reference(
+            cycle: int, reference: Path, command: str
             ) -> tuple[bool, tuple[float, float, float, float, int, int]]:
-        nonlocal worst_quality, worst_quality_score
         result = popup_probe_command(
-            probe, f"compare {reference_path}", 2.0)
+            probe, f"{command} {reference}", 2.0)
         match = re.fullmatch(
             rb"QUALITY pixels=(\d+) mean_abs_rgb=([0-9.]+) "
             rb"p95_max_channel=(\d+) outlier_pct=([0-9.]+) "
@@ -4607,9 +4884,19 @@ def assert_popup_ui_stress_session(
             maximum_block_error <= 50.0)
         if not within_limits:
             return False, quality
+        return True, quality
+
+    def check_reference_quality(
+            cycle: int
+            ) -> tuple[bool, tuple[float, float, float, float, int, int]]:
+        nonlocal worst_quality, worst_quality_score
+        within_limits, quality = compare_source_reference(
+            cycle, reference_path, "compare")
+        if not within_limits:
+            return False, quality
         quality_score = max(
-            mean_error / 20.0, p95_error / 96.0,
-            outlier_percent / 10.0, maximum_block_error / 50.0)
+            quality[0] / 20.0, quality[1] / 96.0,
+            quality[3] / 10.0, quality[2] / 50.0)
         if quality_score > worst_quality_score:
             dump_result = popup_probe_command(
                 probe, f"dump-last {passing_frame_path}", 5.0)
@@ -4760,41 +5047,95 @@ def assert_popup_ui_stress_session(
             source_events.append(close_event)
             close_match = re.fullmatch(
                 r"POPUP CLOSED source=pointer event_ns=(\d+) "
-                r"draw_done_ns=(\d+)", close_event)
+                r"draw_done_ns=(\d+) reference=written", close_event)
             if close_match is None:
                 fail(f"unexpected popup close event: {close_event!r}")
             close_event_ns, close_draw_ns = (
                 int(close_match.group(index)) for index in (1, 2))
             if close_event_ns < close_ns or close_draw_ns < close_event_ns:
                 fail(f"popup close timestamps are not monotonic: {close_event!r}")
+            if not closed_reference_path.is_file():
+                fail(
+                    "source fixture did not preserve the closed-state "
+                    f"reference at cycle={cycle}: {closed_reference_path}")
 
             close_deadline = close_ns + 1_000_000_000
-            consecutive_hidden_samples = 0
-            hidden_since_ns: int | None = None
+            closed_frame = None
+            last_closed_quality = None
             while time.monotonic_ns() < close_deadline:
                 frame = sample(min(
                     0.75, max(0.01,
                               (close_deadline - time.monotonic_ns()) /
                               1_000_000_000)))
-                if (frame[1] != expected_generation or frame[2] != 31 or
-                        frame[3] < 30 or frame[4] < 60 or frame[5] < 9 or
-                        frame[6] < 70 or frame[7] != 63):
-                    if consecutive_hidden_samples == 0:
-                        hidden_since_ns = frame[0]
-                    consecutive_hidden_samples += 1
-                else:
-                    consecutive_hidden_samples = 0
-                    hidden_since_ns = None
-                if (consecutive_hidden_samples >= 2 and hidden_since_ns is not None and
-                        frame[0] - hidden_since_ns >= 50_000_000):
+                closed_ok, last_closed_quality = compare_source_reference(
+                    cycle, closed_reference_path, "compare-closed")
+                if closed_ok:
+                    closed_frame = frame
                     break
-            else:
+            if closed_frame is None:
                 fail(
-                    f"closed popup remained visible for one second at "
-                    f"cycle={cycle}")
+                    "closed popup region did not converge to the captured "
+                    f"source background within one second at cycle={cycle}; "
+                    f"last closed-reference quality={last_closed_quality}")
+
+            close_latency_ms = (closed_frame[0] - close_ns) / 1_000_000
+            if close_latency_ms < 0 or close_latency_ms > freshness_budget_ms:
+                fail(
+                    f"closed-region convergence exceeded budget at "
+                    f"cycle={cycle}: {close_latency_ms:.1f} ms > "
+                    f"{freshness_budget_ms:.0f} ms")
+            close_latencies_ms.append(close_latency_ms)
+
+            # Keep the source underlay fixed while collecting passing client
+            # captures spanning at least 250 ms. The pixel comparison itself
+            # is relatively expensive, so bound collection by one second and
+            # measure the actual capture timestamps rather than sleeping.
+            closed_stable_deadline_ns = time.monotonic_ns() + 1_000_000_000
+            closed_stable_samples = 0
+            first_closed_sample_ns = None
+            last_closed_sample_ns = None
+            while (time.monotonic_ns() < closed_stable_deadline_ns and
+                   (closed_stable_samples < 2 or
+                    first_closed_sample_ns is None or
+                    last_closed_sample_ns - first_closed_sample_ns <
+                        250_000_000)):
+                remaining = max(
+                    0.01,
+                    (closed_stable_deadline_ns - time.monotonic_ns()) /
+                    1_000_000_000)
+                frame = sample(min(0.5, remaining))
+                closed_ok, last_closed_quality = compare_source_reference(
+                    cycle, closed_reference_path, "compare-closed")
+                if not closed_ok:
+                    fail(
+                        "stale popup pixels reappeared after closed-state "
+                        f"convergence at cycle={cycle}: "
+                        f"quality={last_closed_quality}")
+                closed_stable_samples += 1
+                if first_closed_sample_ns is None:
+                    first_closed_sample_ns = frame[0]
+                last_closed_sample_ns = frame[0]
+            if (closed_stable_samples < 2 or
+                    first_closed_sample_ns is None or
+                    last_closed_sample_ns is None or
+                    last_closed_sample_ns - first_closed_sample_ns <
+                        250_000_000):
+                fail(
+                    "closed source state did not remain verifiably current "
+                    "for 250 ms at "
+                    f"cycle={cycle}: samples={closed_stable_samples} "
+                    f"span_ms={0.0 if first_closed_sample_ns is None or last_closed_sample_ns is None else (last_closed_sample_ns - first_closed_sample_ns) / 1_000_000:.1f}")
 
             if client.poll() is not None:
                 fail(f"FreeRDP disconnected during popup stress at cycle={cycle}")
+
+            if last_reference_quality is None or last_closed_quality is None:
+                fail(f"cycle {cycle} lacks source-reference quality results")
+            cycle_metrics.append(
+                f"{cycle}:open_ms={latency_ms:.1f},close_ms="
+                f"{close_latency_ms:.1f},open_quality="
+                f"{last_reference_quality},closed_quality="
+                f"{last_closed_quality}")
 
         ordered = sorted(latencies_ms)
         p95 = ordered[min(len(ordered) - 1,
@@ -4807,6 +5148,8 @@ def assert_popup_ui_stress_session(
             f"background_fps=20 cpu_contention=1 "
             f"latency_p50_ms={statistics.median(latencies_ms):.1f} "
             f"latency_p95_ms={p95:.1f} latency_max_ms={maximum:.1f} "
+            f"close_latency_p50_ms={statistics.median(close_latencies_ms):.1f} "
+            f"close_latency_max_ms={max(close_latencies_ms):.1f} "
             f"budget_ms={freshness_budget_ms:.0f} "
             f"stable_samples={stable_samples_total} "
             f"minimum_edge_contrast={minimum_observed_contrast} "
@@ -4814,10 +5157,13 @@ def assert_popup_ui_stress_session(
             f"reference_p95_max_channel={worst_quality[1]:.0f} "
             f"reference_max_block_mean_abs_rgb={worst_quality[2]:.3f} "
             f"reference_outlier_pct={worst_quality[3]:.3f} "
+            f"profile={' '.join(popup_h264_profile_metrics(log_path))} "
+            f"cycles_detail={';'.join(cycle_metrics)} "
             f"passing_frame={passing_frame_path}")
         summary = artifact_dir / "popup-ui-stress-summary.txt"
         summary.write_text(
             "XRDP_CONSOLE_POPUP_UI_STRESS\n"
+            "status=PASS\n"
             f"cycles={cycles}\n"
             "source=1920x1080\n"
             f"presentation={client_width}x{client_height}\n"
@@ -4826,6 +5172,13 @@ def assert_popup_ui_stress_session(
             f"latency_p50_ms={statistics.median(latencies_ms):.1f}\n"
             f"latency_p95_ms={p95:.1f}\n"
             f"latency_max_ms={maximum:.1f}\n"
+            "latencies_ms=" + ",".join(
+                f"{value:.1f}" for value in latencies_ms) + "\n"
+            f"close_latency_p50_ms={statistics.median(close_latencies_ms):.1f}\n"
+            f"close_latency_max_ms={max(close_latencies_ms):.1f}\n"
+            "close_latencies_ms=" + ",".join(
+                f"{value:.1f}" for value in close_latencies_ms) + "\n"
+            "cycle_metrics=" + ";".join(cycle_metrics) + "\n"
             f"freshness_budget_ms={freshness_budget_ms:.0f}\n"
             f"stable_samples={stable_samples_total}\n"
             f"minimum_edge_contrast={minimum_observed_contrast}\n"
@@ -4836,8 +5189,12 @@ def assert_popup_ui_stress_session(
             f"worst_reference_outlier_pct={worst_quality[3]:.3f}\n"
             f"passing_frame={passing_frame_path}\n"
             f"reference_frame={reference_path}\n"
+            f"closed_reference_frame={closed_reference_path}\n"
             "failed_quality_samples=0\n",
             encoding="utf-8")
+        with summary.open("a", encoding="utf-8") as output:
+            output.write("\n".join(popup_h264_profile_metrics(log_path)))
+            output.write("\n")
         assert_client_stays_connected(
             client, client_display, window_title, client_log_path,
             log_path, stdout_path)
@@ -5071,7 +5428,9 @@ def assert_client_pixel(client_display: str,
                         full_screen_damage_burst: bool = False,
                         cpu_contention: bool = False,
                         maximum_pixel_latency_ms: int | None = None,
-                        prestarted_cpu_spinner: subprocess.Popen[bytes] | None = None
+                        prestarted_cpu_spinner: subprocess.Popen[bytes] | None = None,
+                        client_damage_counter: subprocess.Popen[bytes] | None = None,
+                        client_damage_after_count: int | None = None
                         ) -> None:
     """Draw a known source color and require it in the FreeRDP framebuffer."""
     try:
@@ -5139,6 +5498,22 @@ def assert_client_pixel(client_display: str,
                 f"source stimulus returned an invalid monotonic timestamp: "
                 f"{source_line!r}") from error
         expected_red = state == 0
+        if client_damage_counter is not None:
+            if client_damage_after_count is None:
+                raise AssertionError(
+                    "client damage counter requires a pre-update baseline")
+            damage_count, damage_ns = wait_for_x11_damage_after(
+                client_damage_counter, client_damage_after_count, 8000)
+            latency_ms = (damage_ns - draw_done_ns) / 1_000_000
+            if latency_ms < 0:
+                raise AssertionError(
+                    "client-window XDamage predates source draw completion: "
+                    f"draw_done_ns={draw_done_ns} damage_ns={damage_ns}")
+            print(
+                "XRDP_CONSOLE_CLIPBOARD_TERMINATION_FRAME "
+                f"source_draw_ns={draw_done_ns} client_damage_ns={damage_ns} "
+                f"client_damage_count={damage_count} "
+                f"source_to_client_damage_ms={latency_ms:.3f}")
         source_pixel_sample = None
         if source_display is not None:
             source_sample = subprocess.run(
@@ -5487,6 +5862,7 @@ def main() -> int:
     cpu_contention = False
     clipboard_stress_mode = False
     clipboard_named_png_mode = False
+    clipboard_filtered_format_list_mode = False
     clipboard_no_server_copy_reconnect_mode = False
     clipboard_inflight_format_list_mode = False
     clipboard_abandoned_incr_mode = False
@@ -5511,6 +5887,7 @@ def main() -> int:
     overlap_client: Path | None = None
     clipboard_options = [option for option in (
         "--clipboard-stress", "--clipboard-named-png",
+        "--clipboard-filtered-format-list",
         "--clipboard-no-server-copy-reconnect",
         "--clipboard-inflight-format-list",
         "--clipboard-abandoned-incr",
@@ -5539,6 +5916,8 @@ def main() -> int:
         arguments.pop()
         clipboard_stress_mode = selected_clipboard_mode == "--clipboard-stress"
         clipboard_named_png_mode = selected_clipboard_mode == "--clipboard-named-png"
+        clipboard_filtered_format_list_mode = (
+            selected_clipboard_mode == "--clipboard-filtered-format-list")
         clipboard_no_server_copy_reconnect_mode = (
             selected_clipboard_mode == "--clipboard-no-server-copy-reconnect")
         clipboard_inflight_format_list_mode = (
@@ -5606,6 +5985,7 @@ def main() -> int:
         clipboard_data_response_oracle_mode or clipboard_no_png_offer_mode)
     clipboard_enabled = (
         clipboard_stress_mode or clipboard_named_png_mode or
+        clipboard_filtered_format_list_mode or
         clipboard_inflight_mode or clipboard_png_prefetch_mode or
         clipboard_no_server_copy_reconnect_mode or
         clipboard_delayed_png_response_mode or
@@ -5779,7 +6159,8 @@ def main() -> int:
         named_png_fixture_path = root / "peer-named.png"
         named_png_fixture_info = (
             write_named_png_fixture(named_png_fixture_path)
-            if (clipboard_named_png_mode or clipboard_png_prefetch_mode or
+            if (clipboard_named_png_mode or clipboard_filtered_format_list_mode or
+                    clipboard_png_prefetch_mode or
                 clipboard_inflight_png_format_list_mode or
                 clipboard_delayed_png_response_mode or
                 clipboard_delayed_png_cancel_mode or
@@ -5875,6 +6256,7 @@ password=smoke
                 popup_artifact_dir.mkdir(parents=True, exist_ok=True)
                 for stale_name in (
                         "popup-ui-reference.ppm", "popup-ui-passing-frame.ppm",
+                        "popup-ui-closed-reference.ppm",
                         "popup-ui-stress-summary.txt"):
                     stale_path = popup_artifact_dir / stale_name
                     if stale_path.exists():
@@ -5882,6 +6264,8 @@ password=smoke
                 popup_environment = os.environ.copy()
                 popup_environment["XRDP_CONSOLE_POPUP_REFERENCE"] = str(
                     popup_artifact_dir / "popup-ui-reference.ppm")
+                popup_environment["XRDP_CONSOLE_POPUP_CLOSED_REFERENCE"] = str(
+                    popup_artifact_dir / "popup-ui-closed-reference.ppm")
                 stimulus = start_popup_ui_stimulus(
                     stimulus_path, source_display, popup_environment)
             else:
@@ -5932,7 +6316,10 @@ password=smoke
                     clipboard_owner = start_clipboard_owner(
                         clipboard_helper, root, clipboard_owner_log_path,
                         named_png_path=(named_png_fixture_path
-                                        if clipboard_named_png_mode else None))
+                                        if (clipboard_named_png_mode or
+                                            clipboard_filtered_format_list_mode)
+                                        else None),
+                        include_file_format=clipboard_filtered_format_list_mode)
             with stdout_path.open("w", encoding="utf-8") as server_stdout:
                 server = subprocess.Popen(
                     [
@@ -6052,6 +6439,9 @@ password=smoke
                     if clipboard_no_png_offer_mode:
                         client_environment[
                             "XRDP_CONSOLE_TEST_NO_PNG"] = "1"
+                    if clipboard_filtered_format_list_mode:
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_CLIPRDR_FILES_TO_OFF"] = "1"
                     if clipboard_png_prefetch_fail_mode:
                         client_environment[
                             "XRDP_CONSOLE_TEST_PNG_PREFETCH_FAIL"] = "1"
@@ -6269,6 +6659,11 @@ password=smoke
                                     clipboard_helper, client, client_log_path,
                                     log_path, stdout_path, source_display,
                                     server, root, client_command))
+                        elif clipboard_filtered_format_list_mode:
+                            assert_clipboard_filtered_format_list_session(
+                                clipboard_helper, client, client_log_path,
+                                log_path, chansrv_process, chansrv_logs_path,
+                                chansrv_stdout_path, source_display)
                         elif clipboard_inflight_format_list_mode:
                             assert_clipboard_inflight_format_list_session(
                                 clipboard_helper, client, client_log_path,

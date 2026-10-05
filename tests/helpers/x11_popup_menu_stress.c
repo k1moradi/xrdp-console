@@ -30,9 +30,12 @@ typedef struct
     unsigned int generation;
     unsigned int background_phase;
     int popup_open;
+    int background_paused;
+    const char *closed_reference_path;
 } Scene;
 
 static int write_drawable_ppm(Scene *scene, Drawable drawable,
+                              int source_x, int source_y,
                               unsigned int width, unsigned int height,
                               const char *path);
 
@@ -260,13 +263,14 @@ visual_component(unsigned long pixel, unsigned long mask)
 }
 
 static int
-write_drawable_ppm(Scene *scene, Drawable drawable, unsigned int width,
-                   unsigned int height, const char *path)
+write_drawable_ppm(Scene *scene, Drawable drawable, int source_x,
+                   int source_y, unsigned int width, unsigned int height,
+                   const char *path)
 {
     const Visual *visual = DefaultVisual(scene->display,
                                          DefaultScreen(scene->display));
-    XImage *image = XGetImage(scene->display, drawable, 0, 0, width, height,
-                              AllPlanes, ZPixmap);
+    XImage *image = XGetImage(scene->display, drawable, source_x, source_y,
+                              width, height, AllPlanes, ZPixmap);
     FILE *output;
     unsigned char rgb[3];
 
@@ -325,13 +329,13 @@ write_reference_image(Scene *scene, const char *path)
     scene->generation = 0U;
     draw_popup(scene);
     scene->popup = popup;
-    result = write_drawable_ppm(scene, reference, POPUP_PANEL_WIDTH,
+    result = write_drawable_ppm(scene, reference, 0, 0, POPUP_PANEL_WIDTH,
                                 POPUP_PANEL_HEIGHT, path);
     XFreePixmap(scene->display, reference);
     return result;
 }
 
-static void
+static int
 toggle_popup(Scene *scene, const char *source, int64_t event_time)
 {
     int64_t draw_done;
@@ -341,15 +345,31 @@ toggle_popup(Scene *scene, const char *source, int64_t event_time)
         XUnmapWindow(scene->display, scene->popup);
         XSync(scene->display, False);
         scene->popup_open = 0;
+        scene->background_paused = 1;
+        if (scene->closed_reference_path != NULL &&
+            scene->closed_reference_path[0] != '\0' &&
+            !write_drawable_ppm(
+                scene, scene->background, POPUP_PANEL_X, scene->panel_y,
+                POPUP_PANEL_WIDTH, POPUP_PANEL_HEIGHT,
+                scene->closed_reference_path))
+        {
+            fprintf(stderr, "could not write closed popup reference: %s\n",
+                    scene->closed_reference_path);
+            return 0;
+        }
         draw_done = monotonic_nanoseconds();
         printf("POPUP CLOSED source=%s event_ns=%" PRId64
-               " draw_done_ns=%" PRId64 "\n",
-               source, event_time, draw_done);
+               " draw_done_ns=%" PRId64 " reference=%s\n",
+               source, event_time, draw_done,
+               scene->closed_reference_path != NULL &&
+                       scene->closed_reference_path[0] != '\0' ?
+                   "written" : "disabled");
         fflush(stdout);
-        return;
+        return 1;
     }
 
     scene->generation = scene->generation % 255U + 1U;
+    scene->background_paused = 0;
     XMapRaised(scene->display, scene->popup);
     scene->popup_open = 1;
     draw_popup(scene);
@@ -358,6 +378,7 @@ toggle_popup(Scene *scene, const char *source, int64_t event_time)
            " draw_done_ns=%" PRId64 "\n",
            scene->generation, source, event_time, draw_done);
     fflush(stdout);
+    return 1;
 }
 
 int
@@ -442,6 +463,8 @@ main(int argc, char **argv)
     }
     XSetFont(display, scene.popup_gc, scene.font->fid);
     reference_path = getenv("XRDP_CONSOLE_POPUP_REFERENCE");
+    scene.closed_reference_path =
+        getenv("XRDP_CONSOLE_POPUP_CLOSED_REFERENCE");
     if (reference_path != NULL && reference_path[0] != '\0' &&
         !write_reference_image(&scene, reference_path))
     {
@@ -481,16 +504,27 @@ main(int argc, char **argv)
             if (event.type == KeyPress &&
                 XLookupKeysym(&event.xkey, 0) == XK_Super_L)
             {
-                toggle_popup(&scene, "keyboard", monotonic_nanoseconds());
+                if (!toggle_popup(&scene, "keyboard",
+                                  monotonic_nanoseconds()))
+                {
+                    goto cleanup;
+                }
             }
             else if (event.type == ButtonPress &&
                      event.xbutton.x >= 0 && event.xbutton.x < 82 &&
                      event.xbutton.y >= POPUP_SOURCE_HEIGHT - 48)
             {
-                toggle_popup(&scene, "pointer", monotonic_nanoseconds());
+                if (!toggle_popup(&scene, "pointer",
+                                  monotonic_nanoseconds()))
+                {
+                    goto cleanup;
+                }
             }
         }
-        draw_background(&scene);
+        if (!scene.background_paused)
+        {
+            draw_background(&scene);
+        }
     }
 
     result = EXIT_SUCCESS;

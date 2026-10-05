@@ -108,6 +108,7 @@ cmake -S "$source_root" -B "$freerdp_build_root" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$install_root" \
     -DCMAKE_INSTALL_LIBDIR=lib \
+    -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
     "-DCMAKE_INSTALL_RPATH=$install_root/lib" \
     -DWITH_CLIENT=ON \
     -DWITH_CLIENT_SDL=OFF \
