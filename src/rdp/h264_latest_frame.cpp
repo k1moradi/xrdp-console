@@ -346,7 +346,8 @@ H264LatestFrameState::mapSourceRectangle(
                                         std::uint32_t destinationPixels,
                                         std::uint32_t sourcePixels) noexcept {
         const std::uint64_t numerator = coordinate * destinationPixels;
-        return sourcePixels > destinationPixels
+        return presentationAxisUsesAreaFilter(sourcePixels,
+                                              destinationPixels)
                    ? numerator / sourcePixels
                    : ceilDivide(numerator, sourcePixels);
     };

@@ -6,6 +6,10 @@
 #include <iostream>
 
 using xrdp_console::module::h264CapturePassesPerService;
+using xrdp_console::module::h264ServiceSliceExpired;
+using xrdp_console::module::kMaximumH264ServiceSlice;
+using xrdp_console::module::kMaximumScaledH264PassesPerService;
+using xrdp_console::module::H264ServiceClock;
 
 namespace
 {
@@ -22,14 +26,11 @@ check(bool condition, const char *message)
 }
 
 bool
-scaled_initial_baseline_uses_the_service_pixel_budget()
+scaled_h264_uses_a_configured_hard_pass_cap()
 {
     constexpr std::uint64_t maximumPixels = 128U * 1024U;
     constexpr PixelSize source{1920, 1080};
     constexpr PixelSize downscaledFrames[] = {{1512, 850}, {1512, 948}};
-    constexpr std::uint64_t maximumMappedTileSide = 68U;
-    constexpr std::uint64_t maximumMappedTilePixels =
-        maximumMappedTileSide * maximumMappedTileSide;
 
     bool success = true;
     for (const PixelSize frame : downscaledFrames)
@@ -37,16 +38,8 @@ scaled_initial_baseline_uses_the_service_pixel_budget()
         const std::size_t passes = h264CapturePassesPerService(
             source, frame, maximumPixels);
         success &= check(
-            passes > 1,
-            "downscaled H.264 baseline must drain multiple tiles per service turn");
-        success &= check(
-            static_cast<std::uint64_t>(passes) * maximumMappedTilePixels <=
-                maximumPixels,
-            "scaled H.264 passes must remain inside the presentation pixel budget");
-        success &= check(
-            static_cast<std::uint64_t>(passes + 1U) * maximumMappedTilePixels >
-                maximumPixels,
-            "scaled H.264 pass count must use the largest safe budget");
+            passes == kMaximumScaledH264PassesPerService,
+            "scaled H.264 must obey its configured hard pass cap");
     }
     return success;
 }
@@ -73,13 +66,33 @@ identity_and_upscaled_paths_keep_their_budgets()
     return success;
 }
 
+bool
+h264_service_slice_uses_a_monotonic_deadline()
+{
+    const auto started = H264ServiceClock::time_point{
+        std::chrono::seconds{1}};
+    bool success = true;
+    success &= check(!h264ServiceSliceExpired(
+                         started, started + kMaximumH264ServiceSlice -
+                                      std::chrono::microseconds{1}),
+                     "H264 service slice expired before its deadline");
+    success &= check(h264ServiceSliceExpired(
+                         started, started + kMaximumH264ServiceSlice),
+                     "H264 service slice did not expire at its deadline");
+    success &= check(!h264ServiceSliceExpired(
+                         started, started - std::chrono::milliseconds{1}),
+                     "H264 service slice treated a backward clock as expired");
+    return success;
+}
+
 } // namespace
 
 int
 main()
 {
-    return scaled_initial_baseline_uses_the_service_pixel_budget() &&
-                   identity_and_upscaled_paths_keep_their_budgets()
+    return scaled_h264_uses_a_configured_hard_pass_cap() &&
+                   identity_and_upscaled_paths_keep_their_budgets() &&
+                   h264_service_slice_uses_a_monotonic_deadline()
                ? 0
                : 1;
 }

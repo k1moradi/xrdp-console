@@ -1858,7 +1858,8 @@ run_requestor(int argc, char **argv)
                     goto done;
                 }
                 if (!stall_after_first_chunk ||
-                        strcmp(command, "continue\n") != 0)
+                        (strcmp(command, "continue\n") != 0 &&
+                         strcmp(command, "continue-and-stall-next\n") != 0))
                 {
                     fputs("ERROR expected abandon or continue command\n",
                           stderr);
@@ -1869,7 +1870,10 @@ run_requestor(int argc, char **argv)
                 printf("REQUESTOR_STALL_RELEASED target=%s requestor=0x%lx\n",
                        argv[2], window);
                 fflush(stdout);
-                stall_after_first_chunk = 0;
+                if (strcmp(command, "continue\n") == 0)
+                {
+                    stall_after_first_chunk = 0;
+                }
             }
             if (append_bytes(&result, &result_bytes, &result_capacity,
                              chunk, chunk_bytes) != 0)

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import binascii
 import hashlib
+import math
 import os
 import random
 import re
@@ -1829,7 +1830,9 @@ def assert_clipboard_abandoned_incr_session(
         chansrv_process: subprocess.Popen[object], chansrv_logs: Path,
         chansrv_stdout: Path, source_display: str,
         abandon_after_terminator: bool = False,
-        local_owner_wins: bool = False) -> None:
+        local_owner_wins: bool = False,
+        stalled_requestor_timeout: bool = False,
+        stalled_requestor_progress_reset: bool = False) -> None:
     """Require a new remote generation to recover after its X11 reader dies."""
     initial_list = wait_for_chansrv_pattern(
         chansrv_logs,
@@ -1841,8 +1844,12 @@ def assert_clipboard_abandoned_incr_session(
 
     requestor = start_clipboard_requestor(
         helper, source_display, "image/bmp", allow_refusal=True,
-        abandon_after_first_chunk=not abandon_after_terminator,
-        abandon_after_terminator=abandon_after_terminator)
+        abandon_after_first_chunk=(not abandon_after_terminator and
+                                   not stalled_requestor_timeout and
+                                   not stalled_requestor_progress_reset),
+        abandon_after_terminator=abandon_after_terminator,
+        stall_after_first_chunk=(stalled_requestor_timeout or
+                                 stalled_requestor_progress_reset))
     local_owner: subprocess.Popen[bytes] | None = None
     try:
         wait_for_chansrv_pattern(
@@ -2026,6 +2033,170 @@ def assert_clipboard_abandoned_incr_session(
                 chansrv_logs,
                 rf"event=x11-owner-change owner={re.escape(local_owner_id)} ",
                 5.0, chansrv_process, chansrv_stdout)
+
+        if stalled_requestor_progress_reset:
+            if requestor.stdin is None:
+                raise AssertionError("stalled requestor control pipe is missing")
+            first_stall = wait_for_clipboard_requestor_marker(
+                requestor, "REQUESTOR_STALLED", 2.0)
+            if stalled_requestor_id not in first_stall:
+                raise AssertionError(
+                    "first stalled marker belongs to another requestor: "
+                    f"{first_stall!r}")
+
+            # The deferred-offer marker was emitted immediately after the
+            # progress deadline started. Advance close to its original expiry,
+            # then permit exactly one INCR PropertyDelete and stall again.
+            # select() uses the monotonic remaining time, so this wait tests
+            # deadline behavior without using a fixed sleep as an assertion.
+            deferred_observed_at = time.monotonic()
+            progress_at = deferred_observed_at + 8.0
+            while time.monotonic() < progress_at:
+                select.select([], [], [],
+                              min(0.05, progress_at - time.monotonic()))
+                if requestor.poll() is not None:
+                    raise AssertionError(
+                        "requestor exited before the scheduled INCR progress")
+
+            requestor.stdin.write(b"continue-and-stall-next\n")
+            requestor.stdin.flush()
+            next_chunk = wait_for_clipboard_requestor_marker(
+                requestor, "REQUESTOR_FIRST_CHUNK_READY", 5.0)
+            if stalled_requestor_id not in next_chunk:
+                raise AssertionError(
+                    "next chunk marker belongs to another requestor: "
+                    f"{next_chunk!r}")
+            second_stall = wait_for_clipboard_requestor_marker(
+                requestor, "REQUESTOR_STALLED", 2.0)
+            if stalled_requestor_id not in second_stall:
+                raise AssertionError(
+                    "second stalled marker belongs to another requestor: "
+                    f"{second_stall!r}")
+
+            beyond_original_deadline = deferred_observed_at + 10.5
+            while time.monotonic() < beyond_original_deadline:
+                select.select(
+                    [], [], [],
+                    min(0.05,
+                        beyond_original_deadline - time.monotonic()))
+                if requestor.poll() is not None:
+                    raise AssertionError(
+                        "requestor exited after making progress but before "
+                        "the reset deadline")
+            progress_log = chansrv_log_text(chansrv_logs)
+            if (f"event=c2s-incr-aborted "
+                    f"reason=deferred-owner-progress-timeout "
+                    f"requestor={stalled_requestor_id} " in progress_log):
+                raise AssertionError(
+                    "deferred INCR timeout was not reset by the accepted "
+                    f"PropertyDelete progress:\n{progress_log}")
+            if not clipboard_window_exists(
+                    helper, source_display, stalled_requestor_id):
+                raise AssertionError(
+                    "requestor window disappeared after making INCR progress")
+
+            requestor.stdin.write(b"continue\n")
+            requestor.stdin.flush()
+            completed = finish_clipboard_requestor(
+                requestor, 15.0, chansrv_logs)
+            if ("REQUESTOR_STALL_RELEASED" not in completed or
+                    "RESULT target=image/bmp" not in completed):
+                raise AssertionError(
+                    "requestor did not finish the resumed INCR transfer: "
+                    f"{completed!r}")
+            restored = wait_for_chansrv_pattern(
+                chansrv_logs,
+                rf"event=selection-owner-restored "
+                rf"reason=deferred-format-list "
+                rf"generation={deferred_generation} owner=0x[0-9a-f]+",
+                10.0, chansrv_process, chansrv_stdout)
+            chansrv_owner = re.search(r"owner=(0x[0-9a-f]+)", restored)
+            if (chansrv_owner is None or
+                    clipboard_selection_owner(helper, source_display) !=
+                    chansrv_owner.group(1)):
+                raise AssertionError(
+                    "completed INCR did not install the deferred generation:\n"
+                    f"{restored}")
+            targets = finish_clipboard_requestor(
+                start_clipboard_requestor(helper, source_display, "TARGETS"),
+                10.0, chansrv_logs)
+            if ("UTF8_STRING" not in targets or "image/png" in targets or
+                    "image/bmp" in targets):
+                raise AssertionError(
+                    "deferred generation targets are wrong after resumed INCR: "
+                    f"{targets!r}")
+            return
+
+        if stalled_requestor_timeout:
+            if (requestor.poll() is not None or
+                    not clipboard_window_exists(
+                        helper, source_display, stalled_requestor_id)):
+                raise AssertionError(
+                    "progress timeout did not recover while the stalled X11 "
+                    "requestor remained alive")
+            full_log = chansrv_log_text(chansrv_logs)
+            if local_owner_wins:
+                current_owner = clipboard_selection_owner(helper, source_display)
+                if current_owner != local_owner_id:
+                    raise AssertionError(
+                        "stalled-requestor timeout stole CLIPBOARD from the "
+                        f"newer local owner: expected={local_owner_id} "
+                        f"actual={current_owner}\n[chansrv]\n{full_log}")
+                if (f"event=selection-owner-restored "
+                        f"reason=deferred-format-list generation="
+                        f"{deferred_generation} " in full_log):
+                    raise AssertionError(
+                        "stalled-requestor timeout restored chansrv ownership "
+                        f"over a newer local owner:\n{full_log}")
+                local_text = finish_clipboard_requestor(
+                    start_clipboard_requestor(
+                        helper, source_display, "UTF8_STRING"),
+                    10.0, chansrv_logs)
+                if "initial clipboard text" not in local_text:
+                    raise AssertionError(
+                        "newer local clipboard owner stopped serving text "
+                        f"after stalled-INCR recovery: {local_text!r}")
+            else:
+                wait_for_chansrv_pattern(
+                    chansrv_logs,
+                    rf"event=c2s-incr-aborted "
+                    rf"reason=deferred-owner-progress-timeout "
+                    rf"requestor={re.escape(stalled_requestor_id)} ",
+                    15.0, chansrv_process, chansrv_stdout)
+                restored = wait_for_chansrv_pattern(
+                    chansrv_logs,
+                    rf"event=selection-owner-restored "
+                    rf"reason=deferred-format-list "
+                    rf"generation={deferred_generation} owner=0x[0-9a-f]+",
+                    5.0, chansrv_process, chansrv_stdout)
+                chansrv_owner = re.search(r"owner=(0x[0-9a-f]+)", restored)
+                if (chansrv_owner is None or
+                        clipboard_selection_owner(helper, source_display) !=
+                        chansrv_owner.group(1)):
+                    raise AssertionError(
+                        "stalled-requestor recovery did not install the newer "
+                        f"remote offer:\n{restored}")
+                targets = finish_clipboard_requestor(
+                    start_clipboard_requestor(
+                        helper, source_display, "TARGETS"),
+                    10.0, chansrv_logs)
+                if ("UTF8_STRING" not in targets or "image/png" in targets or
+                        "image/bmp" in targets):
+                    raise AssertionError(
+                        "stalled-INCR recovery exposed stale image targets: "
+                        f"{targets!r}")
+                remote_text = finish_clipboard_requestor(
+                    start_clipboard_requestor(
+                        helper, source_display, "UTF8_STRING"),
+                    15.0, chansrv_logs)
+                if "overlap recovered" not in remote_text:
+                    raise AssertionError(
+                        "new remote text was not usable after stalled-INCR "
+                        f"recovery: {remote_text!r}")
+            if client.poll() is not None or chansrv_process.poll() is not None:
+                raise AssertionError(
+                    "RDP or chansrv exited after stalled-INCR timeout")
+            return
 
         requestor.stdin.write(b"abandon\n")
         requestor.stdin.flush()
@@ -4566,14 +4737,17 @@ def resize_source_x11_display(display: str, width: int, height: int) -> None:
 def start_stimulus(stimulus_path: Path, display: str,
                    environment: dict[str, str],
                    coherence_mode: bool = False,
-                   full_screen_size: tuple[int, int] | None = None
+                   full_screen_size: tuple[int, int] | None = None,
+                   continuous_damage: bool = False
                    ) -> subprocess.Popen[bytes]:
     command = [str(stimulus_path), display]
     expected_ready = b"READY 160 100\n"
     if full_screen_size is not None:
-        command.append("--fullscreen")
+        command.append("--fullscreen-20hz" if continuous_damage
+                       else "--fullscreen")
         expected_ready = (
-            f"READY {full_screen_size[0]} {full_screen_size[1]}\n"
+            f"READY {full_screen_size[0]} {full_screen_size[1]}" +
+            (" continuous_fps=20" if continuous_damage else "") + "\n"
         ).encode("ascii")
     elif coherence_mode:
         command.extend((str(COHERENCE_SOURCE_WIDTH),
@@ -4600,8 +4774,47 @@ def start_stimulus(stimulus_path: Path, display: str,
     return process
 
 
+def start_generation_stimulus(stimulus_path: Path, display: str,
+                              environment: dict[str, str],
+                              width: int, height: int
+                              ) -> subprocess.Popen[bytes]:
+    """Prepare a known newer full-screen generation before RDP connects."""
+    process = subprocess.Popen(
+        [str(stimulus_path), display, str(width), str(height)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=environment, bufsize=0, start_new_session=True)
+    if process.stdin is None or process.stdout is None:
+        stop_process(process)
+        raise AssertionError("startup-state stimulus pipes were not created")
+
+    columns = (width + 63) // 64
+    rows = (height + 63) // 64
+    expected_ready = (
+        f"READY {width} {height} columns={columns} rows={rows} bits=8\n"
+    ).encode("ascii")
+    ready = read_line(process.stdout, 5.0)
+    if ready != expected_ready:
+        stop_process(process)
+        details = (process.stderr.read().decode(errors="replace")
+                   if process.stderr is not None else "")
+        raise AssertionError(
+            f"generation stimulus did not become ready: {ready!r} {details}")
+
+    for step in range(rows):
+        process.stdin.write(b"step\n")
+        process.stdin.flush()
+        response = read_line(process.stdout, 3.0)
+        if response != b"STEPPED\n":
+            stop_process(process)
+            raise AssertionError(
+                f"could not publish startup generation row {step + 1}: "
+                f"{response!r}")
+    return process
+
+
 def start_popup_ui_stimulus(stimulus_path: Path, display: str,
-                            environment: dict[str, str]
+                            environment: dict[str, str],
+                            source_width: int, source_height: int
                             ) -> subprocess.Popen[bytes]:
     process = subprocess.Popen(
         [str(stimulus_path), display], stdin=subprocess.DEVNULL,
@@ -4611,7 +4824,10 @@ def start_popup_ui_stimulus(stimulus_path: Path, display: str,
         stop_process(process)
         raise AssertionError("popup stress stimulus stdout was not created")
     ready = read_line(process.stdout, 5.0)
-    if ready != b"READY source=1920x1080 trigger=taskbar-button background_fps=20\n":
+    expected_ready = (
+        f"READY source={source_width}x{source_height} "
+        "trigger=taskbar-button background_fps=20\n").encode("ascii")
+    if ready != expected_ready:
         stop_process(process)
         details = process.stderr.read().decode(errors="replace") if process.stderr else ""
         raise AssertionError(
@@ -4696,13 +4912,22 @@ def popup_h264_profile_metrics(log_path: Path) -> list[str]:
     ]
 
 
+def popup_interaction_trace_metrics(log_path: Path) -> list[str]:
+    return [
+        line[line.find("XRDP_CONSOLE_INTERACTION_TRACE "):].strip()
+        for line in read_text(log_path).splitlines()
+        if "XRDP_CONSOLE_INTERACTION_TRACE " in line
+    ]
+
+
 def assert_popup_ui_stress_session(
         client: subprocess.Popen[object], client_display: str,
         window_title: str, probe_path: Path,
         stimulus: subprocess.Popen[bytes], client_log_path: Path,
         log_path: Path, stdout_path: Path, artifact_dir: Path,
         client_width: int, client_height: int, cycles: int = 20,
-        freshness_budget_ms: float = 1000.0) -> None:
+        freshness_budget_ms: float = 1000.0,
+        source_width: int = 1920, source_height: int = 1080) -> None:
     """Stress launcher-popup presentation and quality through H.264 RDP."""
     configured_cycles = os.environ.get("XRDP_CONSOLE_POPUP_STRESS_CYCLES")
     if configured_cycles is not None:
@@ -4717,7 +4942,8 @@ def assert_popup_ui_stress_session(
 
     window = find_window(client_display, window_title, 8.0)
     probe = subprocess.Popen(
-        [str(probe_path), client_display, window, "1920", "1080"],
+        [str(probe_path), client_display, window,
+         str(source_width), str(source_height)],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, env=os.environ.copy(), bufsize=0,
         start_new_session=True)
@@ -4737,7 +4963,8 @@ def assert_popup_ui_stress_session(
         raise AssertionError("popup stress stimulus stdout is unavailable")
 
     click_x, click_y = map_source_point_to_client(
-        40, 1056, 1920, 1080, client_width, client_height)
+        40, source_height - 24, source_width, source_height,
+        client_width, client_height)
     latencies_ms: list[float] = []
     close_latencies_ms: list[float] = []
     cycle_metrics: list[str] = []
@@ -4760,7 +4987,7 @@ def assert_popup_ui_stress_session(
             "XRDP_CONSOLE_POPUP_UI_STRESS",
             "status=FAIL",
             f"reason={single_line_message}",
-            f"source=1920x1080",
+            f"source={source_width}x{source_height}",
             f"presentation={client_width}x{client_height}",
             "background_fps=20",
             "cpu_contention=1",
@@ -4777,6 +5004,7 @@ def assert_popup_ui_stress_session(
             "source_events=" + " | ".join(source_events),
         ]
         summary_lines.extend(popup_h264_profile_metrics(log_path))
+        summary_lines.extend(popup_interaction_trace_metrics(log_path))
         try:
             summary_path.write_text(
                 "\n".join(summary_lines) + "\n", encoding="utf-8")
@@ -5132,7 +5360,12 @@ def assert_popup_ui_stress_session(
             if last_reference_quality is None or last_closed_quality is None:
                 fail(f"cycle {cycle} lacks source-reference quality results")
             cycle_metrics.append(
-                f"{cycle}:open_ms={latency_ms:.1f},close_ms="
+                f"{cycle}:input_ns={invocation_ns},source_event_ns="
+                f"{source_event_ns},draw_done_ns={source_draw_ns},"
+                f"open_oracle_ns={visible_ns},open_ms={latency_ms:.1f},"
+                f"close_input_ns={close_ns},close_event_ns="
+                f"{close_event_ns},close_draw_done_ns={close_draw_ns},"
+                f"close_oracle_ns={closed_frame[0]},close_ms="
                 f"{close_latency_ms:.1f},open_quality="
                 f"{last_reference_quality},closed_quality="
                 f"{last_closed_quality}")
@@ -5143,7 +5376,7 @@ def assert_popup_ui_stress_session(
         maximum = max(latencies_ms)
         print(
             "XRDP_CONSOLE_POPUP_UI_STRESS "
-            f"cycles={cycles} source=1920x1080 "
+            f"cycles={cycles} source={source_width}x{source_height} "
             f"presentation={client_width}x{client_height} "
             f"background_fps=20 cpu_contention=1 "
             f"latency_p50_ms={statistics.median(latencies_ms):.1f} "
@@ -5165,7 +5398,7 @@ def assert_popup_ui_stress_session(
             "XRDP_CONSOLE_POPUP_UI_STRESS\n"
             "status=PASS\n"
             f"cycles={cycles}\n"
-            "source=1920x1080\n"
+            f"source={source_width}x{source_height}\n"
             f"presentation={client_width}x{client_height}\n"
             "background_fps=20\n"
             "cpu_contention=1\n"
@@ -5194,6 +5427,9 @@ def assert_popup_ui_stress_session(
             encoding="utf-8")
         with summary.open("a", encoding="utf-8") as output:
             output.write("\n".join(popup_h264_profile_metrics(log_path)))
+            output.write("\n")
+            output.write("\n".join(
+                popup_interaction_trace_metrics(log_path)))
             output.write("\n")
         assert_client_stays_connected(
             client, client_display, window_title, client_log_path,
@@ -5412,6 +5648,414 @@ def assert_client_frame_coherence(
             except (BrokenPipeError, OSError):
                 pass
         stop_process(probe)
+
+
+def h264_viewport(source_width: int, source_height: int,
+                  client_width: int, client_height: int
+                  ) -> tuple[int, int, int, int]:
+    frame_width = client_width & ~1
+    frame_height = client_height & ~1
+    if frame_width * source_height <= frame_height * source_width:
+        viewport_width = frame_width
+        viewport_height = (frame_width * source_height // source_width) & ~1
+    else:
+        viewport_height = frame_height
+        viewport_width = (frame_height * source_width // source_height) & ~1
+    viewport_x = ((frame_width - viewport_width) // 2 + 1) & ~1
+    viewport_y = ((frame_height - viewport_height) // 2 + 1) & ~1
+    if viewport_x + viewport_width > frame_width:
+        viewport_width -= 2
+        viewport_x = ((frame_width - viewport_width) // 2 + 1) & ~1
+    if viewport_y + viewport_height > frame_height:
+        viewport_height -= 2
+        viewport_y = ((frame_height - viewport_height) // 2 + 1) & ~1
+    return viewport_x, viewport_y, viewport_width, viewport_height
+
+
+def map_client_point_to_source(client_x: int, client_y: int,
+                              source_width: int, source_height: int,
+                              client_width: int,
+                              client_height: int) -> tuple[int, int]:
+    viewport_x, viewport_y, viewport_width, viewport_height = h264_viewport(
+        source_width, source_height, client_width, client_height)
+    local_x = client_x - viewport_x
+    local_y = client_y - viewport_y
+    if not (0 <= local_x < viewport_width and
+            0 <= local_y < viewport_height):
+        raise AssertionError(
+            f"pointer point ({client_x},{client_y}) is outside H.264 viewport")
+    return (min(source_width - 1, local_x * source_width // viewport_width),
+            min(source_height - 1, local_y * source_height // viewport_height))
+
+
+def assert_client_startup_current_state(
+        client_display: str, window_title: str, probe_path: Path,
+        source_width: int, source_height: int, client_width: int,
+        client_height: int, client_connected_at_ns: int,
+        artifact_directory: Path, client_log_path: Path,
+        xrdp_log_path: Path, stdout_path: Path) -> float:
+    """Require the first client image to contain only the current source."""
+    window = find_window(client_display, window_title, 8.0)
+    if client_width == source_width and client_height == source_height:
+        viewport_x, viewport_y = 0, 0
+        viewport_width, viewport_height = client_width, client_height
+    else:
+        (viewport_x, viewport_y, viewport_width,
+         viewport_height) = h264_viewport(
+             source_width, source_height, client_width, client_height)
+
+    artifact_directory.mkdir(parents=True, exist_ok=True)
+    summary_path = artifact_directory / "startup-current-state-summary.txt"
+    bad_frame_path = artifact_directory / "first-bad-startup-frame.ppm"
+    for stale_path in (summary_path, bad_frame_path):
+        if stale_path.exists():
+            stale_path.unlink()
+
+    probe = subprocess.Popen(
+        [str(probe_path), client_display, window, str(source_width),
+         str(source_height), str(viewport_x), str(viewport_y),
+         str(viewport_width), str(viewport_height)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=os.environ.copy(), bufsize=0, start_new_session=True)
+    if probe.stdin is None or probe.stdout is None:
+        stop_process(probe)
+        raise AssertionError("startup-state probe pipes were not created")
+
+    complete_columns = source_width // 64
+    rows = (source_height + 63) // 64
+    expected_values = [
+        rows + row
+        for row in range(rows)
+        for _column in range(complete_columns)]
+    edge_expected = ([str((rows + row) & 1) for row in range(rows)]
+                     if source_width % 64 else [])
+    expected_ready = f"READY {client_width} {client_height}"
+
+    def read_sample() -> tuple[int, bool, str]:
+        if probe.stdin is None or probe.stdout is None:
+            raise AssertionError("startup-state probe pipes were closed")
+        probe.stdin.write(b"sample\n")
+        probe.stdin.flush()
+        line = read_line(probe.stdout, 2.0).decode(
+            "ascii", errors="replace").strip()
+        fields = line.split()
+        try:
+            if (len(fields) < 5 or fields[0] != "FRAME" or
+                    int(fields[2]) != complete_columns or
+                    int(fields[3]) != rows):
+                raise ValueError("frame header or geometry mismatch")
+            timestamp_ns = int(fields[1])
+            cursor = 4
+            actual_values: list[int] = []
+            actual_edges: list[str] = []
+            for _row in range(rows):
+                actual_values.extend(
+                    int(value) for value in fields[cursor:cursor + complete_columns])
+                cursor += complete_columns
+                if edge_expected:
+                    edge_field = fields[cursor]
+                    if not edge_field.startswith("EDGE"):
+                        raise ValueError("missing right-edge marker")
+                    actual_edges.append(edge_field[4:])
+                    cursor += 1
+            if cursor >= len(fields) or not fields[cursor].startswith("BARS"):
+                raise ValueError("missing letterbox state")
+            bars_ok = fields[cursor] == "BARS1"
+        except (IndexError, ValueError) as error:
+            return 0, False, f"malformed startup sample {line!r}: {error}"
+
+        matched = (actual_values == expected_values and
+                   actual_edges == edge_expected and bars_ok)
+        if not matched:
+            mismatches = [
+                (index, actual, expected)
+                for index, (actual, expected) in enumerate(
+                    zip(actual_values, expected_values))
+                if actual != expected]
+            detail = (
+                f"tile mismatches={mismatches[:16]!r} "
+                f"edge={actual_edges!r}/{edge_expected!r} bars_ok={bars_ok}")
+            return timestamp_ns, False, detail
+        return timestamp_ns, True, "current generation"
+
+    def save_bad_frame() -> str:
+        if probe.stdin is None or probe.stdout is None:
+            return "probe pipes unavailable"
+        try:
+            probe.stdin.write(f"dump {bad_frame_path}\n".encode("utf-8"))
+            probe.stdin.flush()
+            response = read_line(probe.stdout, 2.0).decode(
+                "ascii", errors="replace").strip()
+            return (str(bad_frame_path) if response == "DUMPED" else response)
+        except (AssertionError, BrokenPipeError, OSError):
+            return "could not save client framebuffer"
+
+    try:
+        ready = read_line(probe.stdout, 5.0).decode(
+            "ascii", errors="replace").strip()
+        if ready != expected_ready:
+            raise AssertionError(
+                f"client window geometry mismatch: {ready!r}, "
+                f"expected {expected_ready!r}")
+
+        deadline_ns = client_connected_at_ns + 1_000_000_000
+        converged_ns: int | None = None
+        last_detail = "no client frame sampled"
+        while time.monotonic_ns() <= deadline_ns:
+            sample_ns, matched, detail = read_sample()
+            last_detail = detail
+            if matched:
+                converged_ns = sample_ns
+                break
+            time.sleep(0.02)
+
+        if converged_ns is None or converged_ns > deadline_ns:
+            saved = save_bad_frame()
+            raise AssertionError(
+                "client did not converge to the current source generation "
+                f"within 1000 ms; last={last_detail}; artifact={saved}\n"
+                f"[xrdp process stdout]\n{read_text(stdout_path)}\n"
+                f"{xrdp_log_excerpt(xrdp_log_path)}\n"
+                f"[FreeRDP client]\n{read_text(client_log_path)}")
+
+        persistence_deadline_ns = converged_ns + 250_000_000
+        while time.monotonic_ns() < persistence_deadline_ns:
+            _sample_ns, matched, detail = read_sample()
+            if not matched:
+                saved = save_bad_frame()
+                raise AssertionError(
+                    "stale/partial startup pixels reappeared after initial "
+                    f"convergence; {detail}; artifact={saved}\n"
+                    f"{xrdp_log_excerpt(xrdp_log_path)}\n"
+                    f"[FreeRDP client]\n{read_text(client_log_path)}")
+            time.sleep(0.02)
+        final_sample_ns, matched, detail = read_sample()
+        if not matched or final_sample_ns < persistence_deadline_ns:
+            saved = save_bad_frame()
+            raise AssertionError(
+                "startup current-state persistence interval was not "
+                f"completed: {detail}; artifact={saved}")
+
+        latency_ms = (converged_ns - client_connected_at_ns) / 1_000_000
+        persistence_ms = (final_sample_ns - converged_ns) / 1_000_000
+        summary = (
+            "XRDP_CONSOLE_STARTUP_CURRENT_STATE "
+            f"source={source_width}x{source_height} "
+            f"client={client_width}x{client_height} "
+            f"convergence_ms={latency_ms:.3f} "
+            f"persistence_ms={persistence_ms:.3f} "
+            f"tiles={len(expected_values)} edge_rows={len(edge_expected)}")
+        print(summary, file=sys.stderr, flush=True)
+        summary_path.write_text(summary + "\n", encoding="utf-8")
+        return latency_ms
+    finally:
+        if probe.stdin is not None:
+            try:
+                probe.stdin.write(b"quit\n")
+                probe.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+        stop_process(probe)
+
+
+def assert_pointer_latency_session(
+        peer: subprocess.Popen[object], peer_log_path: Path,
+        source_display: str, pointer_probe: Path,
+        source_width: int, source_height: int, client_width: int,
+        client_height: int, log_path: Path, churn: bool) -> None:
+    """Measure FreeRDP protocol pointer input through the physical X pointer."""
+    artifact_directory = os.environ.get("XRDP_CONSOLE_TEST_ARTIFACT_DIR")
+    if artifact_directory:
+        status_path = Path(artifact_directory)
+        status_path.mkdir(parents=True, exist_ok=True)
+        (status_path / "pointer-latency-status.txt").write_text(
+            "measurement-started\n", encoding="utf-8")
+    source_environment = os.environ.copy()
+    source_environment["DISPLAY"] = source_display
+    source_environment.pop("XAUTHORITY", None)
+    observer = subprocess.Popen(
+        [str(pointer_probe), "--observe"], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        env=source_environment, bufsize=0, start_new_session=True)
+    if observer.stdin is None or observer.stdout is None or peer.stdin is None:
+        stop_process(observer)
+        raise AssertionError("pointer latency control pipes were not created")
+
+    latencies_ms: list[float] = []
+    stage_input_ms: list[float] = []
+    stage_forward_ms: list[float] = []
+    stage_source_ms: list[float] = []
+    sample_points: list[tuple[int, int, int, int, int, int, int]] = []
+    try:
+        observer_ready = read_line(observer.stdout, 5.0).strip()
+        if observer_ready != b"READY":
+            raise AssertionError(
+                f"source pointer observer failed to initialize: {observer_ready!r}")
+        sent_pattern = re.compile(
+            r"PEER_POINTER_MOVE_SENT sequence=(\d+) mono_ns=(\d+) "
+            r"x=(\d+) y=(\d+)")
+        position_pattern = re.compile(rb"POSITION (\d+) (-?\d+) (-?\d+)\n")
+        for index in range(100):
+            viewport_x, viewport_y, viewport_width, viewport_height = (
+                h264_viewport(source_width, source_height,
+                              client_width, client_height))
+            inset = 16
+            x = viewport_x + inset + (index * 173) % (
+                viewport_width - 2 * inset)
+            y = viewport_y + inset + (index * 97) % (
+                viewport_height - 2 * inset)
+            expected_x, expected_y = map_client_point_to_source(
+                x, y, source_width, source_height,
+                client_width, client_height)
+            if peer.poll() is not None:
+                raise AssertionError(
+                    "FreeRDP pointer peer exited before the move sequence: "
+                    f"returncode={peer.returncode}\n{read_text(peer_log_path)}")
+            peer.stdin.write(f"POINTER_MOVE {x} {y}\n".encode("ascii"))
+            peer.stdin.flush()
+            peer_log = wait_for_peer_marker(
+                peer, peer_log_path,
+                f"PEER_POINTER_MOVE_SENT sequence={index + 1} ", 3.0)
+            sent_matches = [
+                match for match in sent_pattern.finditer(peer_log)
+                if int(match.group(1)) == index + 1]
+            if not sent_matches:
+                raise AssertionError(
+                    f"pointer peer did not confirm move {index + 1}: "
+                    f"{peer_log}")
+            sent_match = sent_matches[-1]
+            sequence_text, start_text, sent_x, sent_y = sent_match.groups()
+            if (int(sequence_text) != index + 1 or int(sent_x) != x or
+                    int(sent_y) != y):
+                raise AssertionError(
+                    "pointer peer confirmed unexpected move: "
+                    f"{sent_match.group(0)!r}; expected "
+                    f"sequence={index + 1} x={x} y={y}")
+            start_ns = int(start_text)
+            deadline = time.monotonic() + 1.0
+            observed_ns = None
+            observed_xy = None
+            last_position = None
+            while time.monotonic() < deadline:
+                remaining = max(0.01, deadline - time.monotonic())
+                try:
+                    position_line = read_line(
+                        observer.stdout, min(0.1, remaining))
+                except (AssertionError, TimeoutError):
+                    continue
+                if not position_line:
+                    if observer.poll() is not None:
+                        raise AssertionError(
+                            "source pointer observer exited before the RDP "
+                            f"motion arrived: returncode={observer.returncode}")
+                    continue
+                position_match = position_pattern.fullmatch(position_line)
+                if position_match is None:
+                    raise AssertionError(
+                        f"malformed source pointer sample: {position_line!r}")
+                event_ns, source_x, source_y = map(
+                    int, position_match.groups())
+                last_position = (source_x, source_y)
+                if (abs(source_x - expected_x) <= 1 and
+                        abs(source_y - expected_y) <= 1):
+                    observed_ns = event_ns
+                    observed_xy = last_position
+                    break
+            if observed_ns is None or observed_xy is None:
+                pointer_trace_tail = "\n".join(
+                    [line for line in read_text(log_path).splitlines()
+                     if "XRDP_CONSOLE_POINTER_TRACE" in line][-12:])
+                raise AssertionError(
+                    f"source pointer did not reach RDP move {index} "
+                    f"({x},{y}) -> ({expected_x},{expected_y}) within 1s; "
+                    f"last observed={last_position}; churn={int(churn)}\n"
+                    f"[pointer trace]\n{pointer_trace_tail}\n"
+                    f"[xrdp log]\n{xrdp_log_excerpt(log_path)}\n"
+                    f"[FreeRDP client]\n{read_text(peer_log_path)}")
+            if observed_ns < start_ns:
+                raise AssertionError("source pointer observation predates injection")
+            latency_ms = (observed_ns - start_ns) / 1_000_000
+            latencies_ms.append(latency_ms)
+            sample_points.append((x, y, expected_x, expected_y,
+                                  start_ns, observed_ns, index))
+
+        trace_input = re.compile(
+            r"XRDP_CONSOLE_POINTER_TRACE event=input-received "
+            r"mono_ns=(\d+) source_x=(-?\d+) source_y=(-?\d+)")
+        trace_forward = re.compile(
+            r"XRDP_CONSOLE_POINTER_TRACE event=input-forwarded "
+            r"mono_ns=(\d+) source_x=(-?\d+) source_y=(-?\d+) handled=1")
+        input_events: dict[tuple[int, int], list[int]] = {}
+        forward_events: dict[tuple[int, int], list[int]] = {}
+        for line in read_text(log_path).splitlines():
+            match = trace_input.search(line)
+            if match is not None:
+                mono, px, py = map(int, match.groups())
+                input_events.setdefault((px, py), []).append(mono)
+            match = trace_forward.search(line)
+            if match is not None:
+                mono, px, py = map(int, match.groups())
+                forward_events.setdefault((px, py), []).append(mono)
+
+        for _x, _y, expected_x, expected_y, start_ns, observed_ns, _idx in sample_points:
+            point = (expected_x, expected_y)
+            input_queue = input_events.get(point, [])
+            forward_queue = forward_events.get(point, [])
+            input_ns = next((value for value in input_queue
+                             if start_ns <= value <= observed_ns), None)
+            forward_ns = next((value for value in forward_queue
+                               if (input_ns is not None and
+                                   input_ns <= value <= observed_ns)), None)
+            if input_ns is None or forward_ns is None:
+                continue
+            forward_queue.remove(forward_ns)
+            stage_input_ms.append((input_ns - start_ns) / 1_000_000)
+            stage_forward_ms.append((forward_ns - input_ns) / 1_000_000)
+            stage_source_ms.append((observed_ns - forward_ns) / 1_000_000)
+
+        def percentile(values: list[float], fraction: float) -> float:
+            ordered = sorted(values)
+            return ordered[max(0, math.ceil(fraction * len(ordered)) - 1)]
+
+        summary = (
+            "XRDP_CONSOLE_POINTER_LATENCY "
+            f"samples={len(latencies_ms)} churn={int(churn)} "
+            f"end_to_end_p50_ms={statistics.median(latencies_ms):.3f} "
+            f"end_to_end_p95_ms={percentile(latencies_ms, 0.95):.3f} "
+            f"end_to_end_max_ms={max(latencies_ms):.3f} "
+            f"module_input_samples={len(stage_input_ms)} "
+            f"module_input_p95_ms="
+            f"{percentile(stage_input_ms, 0.95) if stage_input_ms else -1:.3f} "
+            f"forward_samples={len(stage_forward_ms)} "
+            f"forward_p95_ms="
+            f"{percentile(stage_forward_ms, 0.95) if stage_forward_ms else -1:.3f} "
+            f"physical_pointer_samples={len(stage_source_ms)} "
+            f"physical_pointer_p95_ms="
+            f"{percentile(stage_source_ms, 0.95) if stage_source_ms else -1:.3f}")
+        print(summary, file=sys.stderr, flush=True)
+        if artifact_directory:
+            summary_path = Path(artifact_directory)
+            summary_path.mkdir(parents=True, exist_ok=True)
+            (summary_path / "pointer-latency-summary.txt").write_text(
+                summary + "\n", encoding="utf-8")
+            (summary_path /
+             f"pointer-latency-summary-{os.getpid()}.txt").write_text(
+                 summary + "\n", encoding="utf-8")
+        p95_ms = percentile(latencies_ms, 0.95)
+        maximum_ms = max(latencies_ms)
+        if churn and (p95_ms > 100.0 or maximum_ms > 150.0):
+            raise AssertionError(
+                "pointer input exceeded the measured responsiveness guard "
+                f"under churn: p95={p95_ms:.3f}ms max={maximum_ms:.3f}ms; "
+                "limits are 100ms/150ms")
+    finally:
+        if observer.stdin is not None:
+            try:
+                observer.stdin.write(b"quit\n")
+                observer.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+        stop_process(observer)
 
 
 def assert_client_pixel(client_display: str,
@@ -5857,6 +6501,13 @@ def main() -> int:
     fullhd_source_mode = False
     narrow_source_mode = False
     popup_ui_stress_mode = False
+    popup_narrow_source_mode = False
+    pointer_latency_mode = False
+    startup_current_state_mode = False
+    startup_narrow_mode = False
+    startup_scaled_mode = False
+    startup_identity_mode = False
+    startup_planar_mode = False
     randr_resize_mode = False
     randr_resize_dynamic_resolution = False
     cpu_contention = False
@@ -5868,6 +6519,8 @@ def main() -> int:
     clipboard_abandoned_incr_mode = False
     clipboard_abandoned_incr_terminator_mode = False
     clipboard_abandoned_incr_local_owner_mode = False
+    clipboard_stalled_incr_mode = False
+    clipboard_stalled_incr_progress_reset_mode = False
     clipboard_inflight_png_format_list_mode = False
     clipboard_stale_text_generation_mode = False
     clipboard_png_prefetch_mode = False
@@ -5893,6 +6546,9 @@ def main() -> int:
         "--clipboard-abandoned-incr",
         "--clipboard-abandoned-incr-terminator",
         "--clipboard-abandoned-incr-local-owner-wins",
+        "--clipboard-stalled-incr-deferred-owner",
+        "--clipboard-stalled-incr-local-owner-wins",
+        "--clipboard-stalled-incr-progress-reset",
         "--clipboard-inflight-png-format-list",
         "--clipboard-stale-text-generation",
         "--clipboard-png-prefetch", "--clipboard-png-prefetch-bmp",
@@ -5926,12 +6582,23 @@ def main() -> int:
             selected_clipboard_mode in (
                 "--clipboard-abandoned-incr",
                 "--clipboard-abandoned-incr-terminator",
-                "--clipboard-abandoned-incr-local-owner-wins"))
+                "--clipboard-abandoned-incr-local-owner-wins",
+                "--clipboard-stalled-incr-deferred-owner",
+                "--clipboard-stalled-incr-local-owner-wins",
+                "--clipboard-stalled-incr-progress-reset"))
         clipboard_abandoned_incr_terminator_mode = (
             selected_clipboard_mode == "--clipboard-abandoned-incr-terminator")
         clipboard_abandoned_incr_local_owner_mode = (
+            selected_clipboard_mode in (
+                "--clipboard-abandoned-incr-local-owner-wins",
+                "--clipboard-stalled-incr-local-owner-wins"))
+        clipboard_stalled_incr_mode = selected_clipboard_mode in (
+            "--clipboard-stalled-incr-deferred-owner",
+            "--clipboard-stalled-incr-local-owner-wins",
+            "--clipboard-stalled-incr-progress-reset")
+        clipboard_stalled_incr_progress_reset_mode = (
             selected_clipboard_mode ==
-            "--clipboard-abandoned-incr-local-owner-wins")
+            "--clipboard-stalled-incr-progress-reset")
         clipboard_inflight_png_format_list_mode = (
             selected_clipboard_mode == "--clipboard-inflight-png-format-list")
         clipboard_stale_text_generation_mode = (
@@ -5999,6 +6666,12 @@ def main() -> int:
         "--gfx-h264-coherence", "--gfx-h264-fullhd",
         "--gfx-h264-narrow-source",
         "--gfx-h264-popup-ui-stress",
+        "--gfx-h264-popup-narrow-source-stress",
+        "--gfx-h264-pointer-latency",
+        "--gfx-h264-startup-narrow",
+        "--gfx-h264-startup-scaled",
+        "--gfx-h264-startup-identity",
+        "--gfx-planar-startup",
         "--gfx-h264-randr-resize",
         "--gfx-h264-randr-resize-no-dynamic-resolution")
                     if option in arguments]
@@ -6010,15 +6683,35 @@ def main() -> int:
                 "sole loader-smoke option")
         selected_mode = arguments.pop()
         rfx_mode = selected_mode in ("--rfx", "--rfx-fullhd")
-        gfx_planar_mode = selected_mode == "--gfx-planar"
+        gfx_planar_mode = selected_mode in (
+            "--gfx-planar", "--gfx-planar-startup")
+        startup_narrow_mode = selected_mode == "--gfx-h264-startup-narrow"
+        startup_scaled_mode = selected_mode == "--gfx-h264-startup-scaled"
+        startup_identity_mode = (
+            selected_mode == "--gfx-h264-startup-identity")
+        startup_planar_mode = selected_mode == "--gfx-planar-startup"
+        startup_current_state_mode = (
+            startup_narrow_mode or startup_scaled_mode or
+            startup_identity_mode or startup_planar_mode)
         gfx_h264_mode = selected_mode in (
             "--gfx-h264", "--gfx-h264-coherence", "--gfx-h264-fullhd",
             "--gfx-h264-narrow-source",
             "--gfx-h264-popup-ui-stress",
+            "--gfx-h264-popup-narrow-source-stress",
+            "--gfx-h264-pointer-latency",
+            "--gfx-h264-startup-narrow",
+            "--gfx-h264-startup-scaled",
+            "--gfx-h264-startup-identity",
             "--gfx-h264-randr-resize",
             "--gfx-h264-randr-resize-no-dynamic-resolution")
         popup_ui_stress_mode = (
-            selected_mode == "--gfx-h264-popup-ui-stress")
+            selected_mode in (
+                "--gfx-h264-popup-ui-stress",
+                "--gfx-h264-popup-narrow-source-stress"))
+        popup_narrow_source_mode = (
+            selected_mode == "--gfx-h264-popup-narrow-source-stress")
+        pointer_latency_mode = (
+            selected_mode == "--gfx-h264-pointer-latency")
         coherence_mode = selected_mode == "--gfx-h264-coherence"
         fullhd_source_mode = selected_mode in (
             "--rfx-fullhd", "--classic-fullhd-source",
@@ -6037,12 +6730,15 @@ def main() -> int:
         cpu_contention = True
     if cpu_contention and not (
             coherence_mode or narrow_source_mode or fullhd_source_mode or
-            popup_ui_stress_mode):
+            popup_ui_stress_mode or pointer_latency_mode or
+            startup_current_state_mode):
         raise SystemExit(
             "--cpu-contention requires an H.264 coherence, Full HD, or "
-            "narrow-source or popup UI stress test")
+            "narrow-source, popup UI stress, pointer-latency, or startup "
+            "current-state test")
     full_screen_update_mode = narrow_source_mode or (
-        cpu_contention and (fullhd_source_mode or popup_ui_stress_mode))
+        cpu_contention and (fullhd_source_mode or popup_ui_stress_mode or
+                            pointer_latency_mode))
 
     if clipboard_enabled:
         expected_argument_count = 8 if clipboard_peer_mode else 7
@@ -6054,6 +6750,12 @@ def main() -> int:
         if clipboard_peer_mode:
             overlap_client = Path(arguments[7]).resolve()
         arguments = arguments[:6]
+    elif pointer_latency_mode:
+        if len(arguments) != 7:
+            raise SystemExit(
+                "pointer-latency mode requires the FreeRDP input-peer path")
+        overlap_client = Path(arguments[6]).resolve()
+        arguments = arguments[:6]
     elif len(arguments) not in (6, 8):
         raise SystemExit(
             f"usage: {sys.argv[0]} MODULE XRDP INSTALL_ROOT FREERDP "
@@ -6062,6 +6764,7 @@ def main() -> int:
             "[--rfx|--rfx-fullhd|--classic-fullhd-source|"
             "--gfx-planar|--gfx-h264|--gfx-h264-coherence|"
             "--gfx-h264-fullhd|--gfx-h264-narrow-source|"
+            "--gfx-h264-pointer-latency|"
             "--gfx-h264-randr-resize|"
             "--gfx-h264-randr-resize-no-dynamic-resolution] "
             "[--cpu-contention before the graphics-mode option] "
@@ -6076,12 +6779,18 @@ def main() -> int:
 
     presentation_width = (
         COHERENCE_SOURCE_WIDTH if coherence_mode else
-        1364 if narrow_source_mode else
-        1512 if fullhd_source_mode else 1024)
+        1364 if (narrow_source_mode or popup_narrow_source_mode or
+                 startup_narrow_mode) else
+        1512 if (fullhd_source_mode or pointer_latency_mode or
+                 startup_scaled_mode) else
+        1024)
     presentation_height = (
         COHERENCE_SOURCE_HEIGHT if coherence_mode else
-        768 if narrow_source_mode else
-        949 if fullhd_source_mode else 768)
+        768 if (narrow_source_mode or popup_narrow_source_mode or
+                startup_narrow_mode or startup_identity_mode or
+                startup_planar_mode) else
+        949 if (fullhd_source_mode or pointer_latency_mode or
+                startup_scaled_mode) else 768)
     if len(arguments) == 8:
         try:
             presentation_width = int(arguments[6])
@@ -6133,15 +6842,31 @@ def main() -> int:
                 file=sys.stderr)
             return 1
     source_width = (
-        1920 if popup_ui_stress_mode else
+        1366 if popup_narrow_source_mode else
+        1366 if startup_narrow_mode else
+        1920 if popup_ui_stress_mode or pointer_latency_mode else
+        1920 if startup_scaled_mode else
         COHERENCE_SOURCE_WIDTH if coherence_mode else
         1366 if narrow_source_mode else
         1920 if fullhd_source_mode else 1024)
     source_height = (
-        1080 if popup_ui_stress_mode else
+        768 if popup_narrow_source_mode else
+        768 if startup_narrow_mode else
+        1080 if popup_ui_stress_mode or pointer_latency_mode else
+        1080 if startup_scaled_mode else
         COHERENCE_SOURCE_HEIGHT if coherence_mode else
         768 if narrow_source_mode else
         1080 if fullhd_source_mode else 768)
+    pointer_probe_path: Path | None = None
+    if pointer_latency_mode:
+        pointer_probe_value = os.environ.get("XRDP_CONSOLE_POINTER_PROBE")
+        if pointer_probe_value is None:
+            raise AssertionError(
+                "pointer-latency mode requires XRDP_CONSOLE_POINTER_PROBE")
+        pointer_probe_path = Path(pointer_probe_value).resolve()
+        if not pointer_probe_path.is_file():
+            raise AssertionError(
+                f"missing X11 pointer latency probe: {pointer_probe_path}")
     probe_x, probe_y = presentation_probe_point(
         presentation_width, presentation_height, source_width, source_height)
     window_title = f"xrdp-console-loader-{os.getpid()}"
@@ -6245,6 +6970,7 @@ password=smoke
         chansrv_process: subprocess.Popen[object] | None = None
         clipboard_owner: subprocess.Popen[bytes] | None = None
         selection_stealers: list[subprocess.Popen[bytes]] = []
+        client_connected_at_ns: int | None = None
         try:
             # Create/map the source window before the module connects and
             # installs root XDamage. This excludes map/expose churn from the
@@ -6267,14 +6993,23 @@ password=smoke
                 popup_environment["XRDP_CONSOLE_POPUP_CLOSED_REFERENCE"] = str(
                     popup_artifact_dir / "popup-ui-closed-reference.ppm")
                 stimulus = start_popup_ui_stimulus(
-                    stimulus_path, source_display, popup_environment)
+                    stimulus_path, source_display, popup_environment,
+                    source_width, source_height)
+            elif startup_current_state_mode:
+                stimulus = start_generation_stimulus(
+                    stimulus_path, source_display, os.environ.copy(),
+                    source_width, source_height)
             else:
                 stimulus = start_stimulus(
                     stimulus_path, source_display, os.environ.copy(),
                     coherence_mode=coherence_mode,
                     full_screen_size=(source_width, source_height)
-                    if full_screen_update_mode else None)
-            if cpu_contention and (fullhd_source_mode or popup_ui_stress_mode):
+                    if (full_screen_update_mode or pointer_latency_mode)
+                    else None,
+                    continuous_damage=(pointer_latency_mode and
+                                       cpu_contention))
+            if cpu_contention and (fullhd_source_mode or popup_ui_stress_mode or
+                                   pointer_latency_mode):
                 startup_cpu_spinner = subprocess.Popen(
                     [sys.executable, "-c", "while True: pass"],
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -6321,6 +7056,9 @@ password=smoke
                                         else None),
                         include_file_format=clipboard_filtered_format_list_mode)
             with stdout_path.open("w", encoding="utf-8") as server_stdout:
+                server_environment = os.environ.copy()
+                if pointer_latency_mode:
+                    server_environment["XRDP_CONSOLE_POINTER_TRACE"] = "1"
                 server = subprocess.Popen(
                     [
                         str(xrdp_path),
@@ -6331,15 +7069,17 @@ password=smoke
                     cwd=root,
                     stdout=server_stdout,
                     stderr=subprocess.STDOUT,
+                    env=server_environment,
                     start_new_session=True,
                 )
                 wait_for_listener(server, port, 8.0, stdout_path)
 
                 client_executable = (
-                    overlap_client if clipboard_peer_mode else
+                    overlap_client if (clipboard_peer_mode or
+                                       pointer_latency_mode) else
                     freerdp_path)
                 if client_executable is None:
-                    raise AssertionError("clipboard overlap client was not configured")
+                    raise AssertionError("FreeRDP test peer was not configured")
                 client_command = [
                     str(client_executable),
                     f"/v:127.0.0.1:{port}",
@@ -6448,11 +7188,13 @@ password=smoke
                     client = subprocess.Popen(
                         client_command,
                         cwd=root,
-                        stdin=subprocess.PIPE if clipboard_peer_mode else None,
+                        stdin=subprocess.PIPE if (clipboard_peer_mode or
+                                                  pointer_latency_mode) else None,
                         stdout=client_log,
                         stderr=subprocess.STDOUT,
                         env=client_environment,
-                        bufsize=0 if clipboard_peer_mode else -1,
+                        bufsize=0 if (clipboard_peer_mode or
+                                      pointer_latency_mode) else -1,
                         start_new_session=True,
                     )
                     marker = f"loaded module '{module_name}' ok"
@@ -6481,6 +7223,7 @@ password=smoke
                         stdout_path,
                         client_log_path,
                     )
+                    client_connected_at_ns = time.monotonic_ns()
                     wait_for_log(
                         server,
                         log_path,
@@ -6540,21 +7283,85 @@ password=smoke
                                 server, log_path,
                                 "source=1920x1080 presentation=1512x949",
                                 4.0, stdout_path, client_log_path)
-                        if popup_ui_stress_mode:
+                        if popup_ui_stress_mode and not popup_narrow_source_mode:
                             wait_for_log(
                                 server, log_path,
                                 "source=1920x1080 presentation=1512x949",
+                                4.0, stdout_path, client_log_path)
+                        if popup_narrow_source_mode:
+                            wait_for_log(
+                                server, log_path,
+                                "source=1366x768 presentation=1364x768",
                                 4.0, stdout_path, client_log_path)
                         if narrow_source_mode:
                             wait_for_log(
                                 server, log_path,
                                 "source=1366x768 presentation=1364x768",
                                 4.0, stdout_path, client_log_path)
+                        if startup_narrow_mode:
+                            wait_for_log(
+                                server, log_path,
+                                "source=1366x768 presentation=1364x768",
+                                4.0, stdout_path, client_log_path)
+                        if startup_scaled_mode:
+                            wait_for_log(
+                                server, log_path,
+                                "source=1920x1080 presentation=1512x949",
+                                4.0, stdout_path, client_log_path)
+                        if startup_identity_mode:
+                            wait_for_log(
+                                server, log_path,
+                                "source=1024x768 presentation=1024x768",
+                                4.0, stdout_path, client_log_path)
                     if clipboard_peer_mode:
                         wait_for_peer_marker(
                             client, client_log_path, "PEER_CONNECTED", 10.0)
                         assert_peer_initialization_sequence(
                             client, client_log_path, 10.0)
+                    elif pointer_latency_mode:
+                        wait_for_peer_marker(
+                            client, client_log_path, "PEER_CONNECTED", 10.0)
+                        print("XRDP_CONSOLE_POINTER_LATENCY_STARTED",
+                              file=sys.stderr, flush=True)
+                        assert_pointer_latency_session(
+                            client, client_log_path, source_display,
+                            pointer_probe_path, source_width, source_height,
+                            presentation_width, presentation_height, log_path,
+                            churn=cpu_contention)
+                        if client.poll() is not None:
+                            raise AssertionError(
+                                "FreeRDP pointer peer disconnected during "
+                                f"latency sampling:\n{read_text(client_log_path)}")
+                    elif startup_current_state_mode:
+                        if client_connected_at_ns is None:
+                            raise AssertionError(
+                                "startup-state test missed its RDP connect timestamp")
+                        artifact_directory = Path(os.environ.get(
+                            "XRDP_CONSOLE_TEST_ARTIFACT_DIR",
+                            str(Path.cwd() / "test-artifacts" /
+                                "startup-current-state")))
+                        assert_client_startup_current_state(
+                            os.environ["DISPLAY"], window_title, pixel_probe,
+                            source_width, source_height, presentation_width,
+                            presentation_height, client_connected_at_ns,
+                            artifact_directory, client_log_path, log_path,
+                            stdout_path)
+                        if startup_narrow_mode:
+                            graphics_log = read_text(log_path)
+                            forbidden_fallbacks = (
+                                "presentation-nv12-conversion-failed",
+                                "action=fallback-gfx-planar",
+                                "XRDP_CONSOLE_H264_RECOVERY "
+                                "event=service-failure",
+                                "actual_output=gfx-planar",
+                            )
+                            observed = [item for item in forbidden_fallbacks
+                                        if item in graphics_log]
+                            if observed:
+                                raise AssertionError(
+                                    "narrow startup test did not remain on "
+                                    f"H.264; observed {observed!r}\n"
+                                    f"{xrdp_log_excerpt(log_path)}")
                     elif popup_ui_stress_mode:
                         assert_popup_ui_stress_session(
                             client, os.environ["DISPLAY"], window_title,
@@ -6564,7 +7371,26 @@ password=smoke
                                 "XRDP_CONSOLE_TEST_ARTIFACT_DIR",
                                 str(Path.cwd() / "test-artifacts" /
                                     "popup-ui-stress"))),
-                            presentation_width, presentation_height)
+                            presentation_width, presentation_height,
+                            cycles=3 if popup_narrow_source_mode else 20,
+                            source_width=source_width,
+                            source_height=source_height)
+                        if popup_narrow_source_mode:
+                            graphics_log = read_text(log_path)
+                            forbidden_fallbacks = (
+                                "presentation-nv12-conversion-failed",
+                                "action=fallback-gfx-planar",
+                                "XRDP_CONSOLE_H264_RECOVERY "
+                                "event=service-failure",
+                                "actual_output=gfx-planar",
+                            )
+                            observed = [item for item in forbidden_fallbacks
+                                        if item in graphics_log]
+                            if observed:
+                                raise AssertionError(
+                                    "narrow popup test did not remain on H.264; "
+                                    f"observed {observed!r}\n"
+                                    f"{xrdp_log_excerpt(log_path)}")
                     elif coherence_mode:
                         assert_client_frame_coherence(
                             os.environ["DISPLAY"], stimulus, window_title,
@@ -6676,7 +7502,10 @@ password=smoke
                                 log_path, chansrv_process, chansrv_logs_path,
                                 chansrv_stdout_path, source_display,
                                 clipboard_abandoned_incr_terminator_mode,
-                                clipboard_abandoned_incr_local_owner_mode)
+                                clipboard_abandoned_incr_local_owner_mode,
+                                (clipboard_stalled_incr_mode and
+                                 not clipboard_stalled_incr_progress_reset_mode),
+                                clipboard_stalled_incr_progress_reset_mode)
                         elif clipboard_stale_text_generation_mode:
                             assert_clipboard_stale_text_generation_session(
                                 clipboard_helper, client, client_log_path,

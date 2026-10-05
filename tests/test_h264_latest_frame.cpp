@@ -5,9 +5,12 @@
 #include "rdp/h264_interaction_scheduler.h"
 #include "rdp/gfx_avc420_frame.h"
 #include "core/presentation_scaler.h"
+#include "core/interaction_priority.h"
+#include "module/pending_h264_capture.h"
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <climits>
 #include <cstddef>
 #include <cstdlib>
@@ -1033,7 +1036,15 @@ runFirstScrollQuantum(bool applyScrollPriorityPolicy,
 
     state.markDamage({0, 0, kGeometry.widthPixels, kGeometry.heightPixels});
     InteractionPriorityState interaction{};
-    noteInteractionPointer(interaction, 512, 512, kGeometry, true);
+    constexpr Rectangle postInputDamage{384, 448, 64, 64};
+    noteInteractionPointer(interaction, 512, 512, kGeometry, true, 10U,
+                           InteractionClock::time_point{
+                               std::chrono::seconds{1}});
+    if (!observeInteractionDamage(interaction, postInputDamage, 11U,
+                                  kGeometry))
+    {
+        return false;
+    }
     if (applyScrollPriorityPolicy)
     {
         noteInteractionScroll(interaction, 512, 512);
@@ -1107,6 +1118,244 @@ runFirstScrollQuantum(bool applyScrollPriorityPolicy,
 }
 
 bool
+post_input_popup_damage_preempts_older_background_capture()
+{
+    constexpr PixelSize geometry{1366, 768};
+    constexpr Rectangle popup{24, 0, 520, 720};
+    H264LatestFrameState state;
+    if (!initializeFrameForScrollPriorityTest(state, geometry))
+    {
+        return check(false, "popup-priority H264 baseline initialization failed");
+    }
+
+    state.markDamage({800, 0, 566, 768});
+    InteractionPriorityState interaction{};
+    const auto armedAt = InteractionClock::time_point{
+        std::chrono::seconds{20}};
+    noteInteractionFocus(interaction, 40, 744, geometry, 100U, armedAt);
+
+    std::array<GenerationTileMap::Selection, 64> selections{};
+    std::size_t count = collectH264CaptureSelectionsForInteraction(
+        state, interaction, selections);
+    bool success = check(count != 0 && selections[0].rectangle.x >= 768,
+                         "background selection was lost during the no-damage gap");
+    success &= check(!expireUnobservedInteractionPriority(
+                         interaction,
+                         armedAt + std::chrono::milliseconds{500}) &&
+                         interaction.pending,
+                     "priority was lost during the no-damage service turn");
+
+    success &= check(!observeInteractionDamage(
+                         interaction, {0, 0, geometry.widthPixels,
+                                       geometry.heightPixels},
+                         101U, geometry),
+                     "full-screen churn was incorrectly promoted to priority");
+    success &= check(observeInteractionDamage(
+                         interaction, popup, 102U, geometry),
+                     "post-click popup damage was not associated with the epoch");
+    state.markDamage(popup);
+    count = collectH264CaptureSelectionsForInteraction(
+        state, interaction, selections);
+    success &= check(count != 0 &&
+                         interactionDamageIntersectsSeed(
+                             interactionPrioritySelectionRectangle(interaction),
+                             selections[0].rectangle),
+                     "new popup tile was not selected ahead of background work");
+    return success;
+}
+
+bool
+interaction_snapshot_refresh_retires_unsubmitted_views_without_losing_damage()
+{
+    using xrdp_console::module::PendingBitmapCacheHit;
+    using xrdp_console::module::PendingH264Snapshot;
+    using xrdp_console::module::PendingH264Tile;
+
+    constexpr PixelSize geometry{1366, 768};
+    constexpr Rectangle background{800, 0, 566, 768};
+    constexpr Rectangle popup{24, 0, 520, 720};
+    H264LatestFrameState state;
+    bool success = check(
+        initializeFrameForScrollPriorityTest(state, geometry),
+        "snapshot-refresh H264 baseline initialization failed");
+
+    state.markDamage(background);
+    std::array<GenerationTileMap::Selection, 64> selections{};
+    const std::size_t backgroundCount =
+        state.collectCaptureSelectionsIntersecting(background, selections);
+    success &= check(backgroundCount != 0,
+                     "old background capture work was not selected");
+    if (backgroundCount == 0)
+    {
+        return false;
+    }
+    const GenerationTileMap::Selection selectedBeforeRefresh = selections[0];
+
+    std::array<std::byte, 64U * 64U * 4U> oldArena{};
+    std::array<std::byte, 64U * 64U * 4U> refreshedArena{};
+    const FramebufferView oldView{
+        std::span<const std::byte>{oldArena}, 64U, 64U, 64U * 4U};
+    const FramebufferView refreshedView{
+        std::span<const std::byte>{refreshedArena}, 64U, 64U, 64U * 4U};
+    PendingH264Snapshot snapshot{};
+    PendingH264Tile pendingTile{};
+    PendingBitmapCacheHit cacheHit{};
+    success &= check(snapshot.install({800, 0, 64, 64}, oldView),
+                     "old coherent source snapshot could not be installed");
+    success &= check(snapshot.canRefreshForInteraction(),
+                     "new coherent snapshot had no interaction refresh budget");
+    pendingTile.selection = selectedBeforeRefresh;
+    pendingTile.captureRectangle = {800, 0, 64, 64};
+    pendingTile.frameRectangle = {800, 0, 64, 64};
+    pendingTile.sourcePixels = oldView;
+    pendingTile.fingerprint = 0x1111U;
+    pendingTile.nextFrameRow = 32U;
+    cacheHit.selection = selectedBeforeRefresh;
+    cacheHit.cacheSlot = 1U;
+    success &= check(pendingTile.active() && cacheHit.active(),
+                     "stale tile/cache state was not staged before refresh");
+
+    InteractionPriorityState interaction{};
+    const auto armedAt = InteractionClock::time_point{
+        std::chrono::seconds{30}};
+    noteInteractionFocus(interaction, 40, 744, geometry, 200U, armedAt);
+    success &= check(observeInteractionDamage(
+                         interaction, popup, 201U, geometry),
+                     "post-input popup damage did not activate snapshot refresh");
+    state.markDamage(popup);
+    const bool capturePendingBeforeRefresh = state.capturePending();
+    const bool transmissionPendingBeforeRefresh = state.transmissionPending();
+
+    // This is the production refresh boundary: all non-owning views into the
+    // persistent XShm arena are retired before the next capture mutates it.
+    snapshot.clearForRefresh(pendingTile, cacheHit);
+    success &= check(!snapshot.active() && !pendingTile.active() &&
+                         !cacheHit.active() && pendingTile.fingerprint == 0U &&
+                         pendingTile.nextFrameRow == 0U,
+                     "refresh retained a stale tile or cache-hit view");
+    success &= check(
+        state.capturePending() == capturePendingBeforeRefresh &&
+            state.transmissionPending() == transmissionPendingBeforeRefresh,
+        "retiring snapshot views consumed H264 capture/transmission damage");
+    success &= check(!snapshot.install({0, 0, 64, 64}, {}) &&
+                         !snapshot.active() && state.capturePending(),
+                     "failed refreshed capture retained stale pixels or lost damage");
+    success &= check(snapshot.install({0, 0, 64, 64}, refreshedView) &&
+                         snapshot.sourcePixels.pixels.data() ==
+                             refreshedView.pixels.data(),
+                     "refreshed source snapshot did not replace old arena view");
+    success &= check(snapshot.canRefreshForInteraction(),
+                     "replacement snapshot did not reset its refresh budget");
+    snapshot.noteInteractionRefresh();
+    snapshot.noteInteractionRefresh();
+    success &= check(!snapshot.canRefreshForInteraction(),
+                     "repeated interaction damage reset a snapshot refresh budget");
+    snapshot.clear();
+    success &= check(!snapshot.active() &&
+                         !snapshot.interactionRefreshUsed,
+                     "completed snapshot retained interaction refresh state");
+    success &= check(snapshot.install({0, 0, 64, 64}, refreshedView) &&
+                         snapshot.canRefreshForInteraction(),
+                     "next coherent snapshot inherited prior refresh budget");
+
+    const std::size_t priorityCount =
+        collectH264CaptureSelectionsForInteraction(
+            state, interaction, selections);
+    success &= check(priorityCount != 0 &&
+                         interactionDamageIntersectsSeed(
+                             interactionPrioritySelectionRectangle(interaction),
+                             selections[0].rectangle),
+                     "popup damage was not selected from the refreshed source");
+    if (priorityCount == 0)
+    {
+        return false;
+    }
+
+    const GenerationTileMap::Selection popupSelection = selections[0];
+    success &= check(popupSelection.rectangle.widthPixels >=
+                         GenerationTileMap::kTileWidthPixels &&
+                         popupSelection.rectangle.heightPixels >=
+                             GenerationTileMap::kTileHeightPixels,
+                     "refreshed popup selection did not contain a complete tile");
+    const GenerationTileMap::Selection popupTileSelection{
+        {popupSelection.rectangle.x, popupSelection.rectangle.y,
+         GenerationTileMap::kTileWidthPixels,
+         GenerationTileMap::kTileHeightPixels},
+        popupSelection.generation};
+    Rectangle frameRectangle{};
+    success &= check(state.mapSourceRectangle(
+                         popupTileSelection.rectangle, frameRectangle),
+                     "refreshed popup tile did not map to H264 frame");
+    frameRectangle = alignAvc420Rectangle(frameRectangle, state.geometry());
+    constexpr std::uint64_t refreshedFingerprint = 0x2222U;
+    success &= check(state.commitCapturedChanged(
+                         popupTileSelection, refreshedFingerprint,
+                         frameRectangle),
+                     "refreshed popup capture did not preserve transmit damage");
+    success &= check(state.capturedTileChanged(
+                         popupTileSelection.rectangle, refreshedFingerprint),
+                     "capture prematurely committed the refreshed fingerprint");
+
+    const std::size_t readyCount =
+        state.collectReadyTransmissionSelectionsIntersecting(
+            frameRectangle, selections);
+    success &= check(readyCount != 0,
+                     "refreshed popup transmission damage was lost");
+    if (readyCount == 0)
+    {
+        return false;
+    }
+    const GenerationTileMap::Selection submitted = selections[0];
+    success &= check(state.noteSubmitted(
+                         2, std::span<const GenerationTileMap::Selection>{
+                                &submitted, 1U}),
+                     "refreshed popup frame submission was rejected");
+    success &= check(!state.capturedTileChanged(
+                         popupTileSelection.rectangle, refreshedFingerprint),
+                     "successful submission did not commit its fingerprint");
+    success &= check(state.frameInFlight() && state.nextFrameId() == 0U,
+                     "refreshed frame id did not enter the producer window");
+    success &= check(state.releaseSubmission(2) &&
+                         state.nextFrameIdForReconfiguration() == 3U &&
+                         state.nextFrameId() == 0U,
+                     "refreshed frame release lost monotonic frame IDs or "
+                     "made uncaptured damage submit-ready");
+
+    success &= check(state.capturePending() &&
+                         state.collectCaptureSelectionsIntersecting(
+                             background, selections) != 0,
+                     "refresh/reset lost the older background damage generation");
+    while (state.capturePending())
+    {
+        const std::size_t count = state.collectCaptureSelections(selections);
+        if (count == 0)
+        {
+            success &= check(false,
+                             "remaining damage had no capture selection");
+            break;
+        }
+        for (std::size_t index = 0; index < count; ++index)
+        {
+            success &= check(state.commitCaptured(selections[index]),
+                             "remaining refreshed damage capture failed");
+        }
+    }
+    const std::size_t remainingReadyCount =
+        state.collectReadyTransmissionSelections(selections);
+    success &= check(remainingReadyCount != 0 &&
+                         state.nextFrameId() == 3U &&
+                         state.noteSubmitted(
+                             3U,
+                             std::span<const GenerationTileMap::Selection>{
+                                 selections.data(), remainingReadyCount}),
+                     "remaining damage did not submit as the next frame");
+    success &= check(state.releaseSubmission(3) &&
+                         state.nextFrameIdForReconfiguration() == 4U,
+                     "subsequent submission did not advance the frame ID");
+    return success;
+}
+
+bool
 scroll_priority_creates_and_then_avoids_mouse_local_mixed_age_update()
 {
     FirstScrollQuantum oldScheduling{};
@@ -1116,12 +1365,15 @@ scroll_priority_creates_and_then_avoids_mouse_local_mixed_age_update()
     success &= check(runFirstScrollQuantum(false, oldScheduling),
                      "old scroll-priority quantum did not make progress");
     success &= check(oldScheduling.capturedTile == Rectangle{192, 128, 64, 64},
-                     "old scheduler did not capture inside the pointer region first");
-    success &= check(oldScheduling.clientTilesNew[35] &&
+                     "scheduler did not capture within the activated bounded "
+                         "interaction region first");
+    constexpr std::size_t kInteractionTileIndex = 2U * 16U + 3U;
+    success &= check(oldScheduling.clientTilesNew[
+                             kInteractionTileIndex] &&
                          !oldScheduling.clientTilesNew[0] &&
                          oldScheduling.moreDamagePending,
-                     "expected mixed-age surface was not reproduced: the mouse-local "
-                     "tile should be new while the page corner remains old");
+                     "expected mixed-age surface was not reproduced: the interaction-local "
+                         "tile should be new while the page corner remains old");
 
     success &= check(runFirstScrollQuantum(true, scrollScheduling),
                      "scroll-policy quantum did not make progress");
@@ -1457,15 +1709,25 @@ bool narrow_1366_to_1364_h264_capture_tiles_are_convertible()
                 (static_cast<std::uint32_t>(shade) << 8U) | shade;
         }
     }
-    const FramebufferView source{
-        std::as_bytes(std::span<const std::uint32_t>(pixels)),
-        sourceGeometry.widthPixels, sourceGeometry.heightPixels,
-        static_cast<std::size_t>(sourceGeometry.widthPixels) *
-            sizeof(std::uint32_t)};
     const std::size_t outputBytes = nv12FrameBytes(frameGeometry);
     std::vector<std::byte> direct(outputBytes);
     std::vector<std::byte> staged(outputBytes);
     std::size_t convertedTiles = 0;
+    const auto unionRectanglesLocal = [](Rectangle left,
+                                         Rectangle right) noexcept {
+        const std::int64_t x = std::min(left.x, right.x);
+        const std::int64_t y = std::min(left.y, right.y);
+        const std::int64_t rightEdge = std::max(
+            static_cast<std::int64_t>(left.x) + left.widthPixels,
+            static_cast<std::int64_t>(right.x) + right.widthPixels);
+        const std::int64_t bottomEdge = std::max(
+            static_cast<std::int64_t>(left.y) + left.heightPixels,
+            static_cast<std::int64_t>(right.y) + right.heightPixels);
+        return Rectangle{
+            static_cast<std::int32_t>(x), static_cast<std::int32_t>(y),
+            static_cast<std::uint32_t>(rightEdge - x),
+            static_cast<std::uint32_t>(bottomEdge - y)};
+    };
 
     for (std::uint32_t y = 0; y < sourceGeometry.heightPixels; y += 64U)
     {
@@ -1480,6 +1742,13 @@ bool narrow_1366_to_1364_h264_capture_tiles_are_convertible()
             Rectangle mapped{};
             success &= check(state.mapSourceRectangle(sourceTile, mapped),
                              "narrow H264 source tile could not be mapped");
+            Rectangle scalerMapped{};
+            Rectangle scalerRequiredSource{};
+            success &= check(
+                scaler.mapSourceRectangle(sourceTile, scalerMapped,
+                                          scalerRequiredSource) ==
+                    RectangleMapResult::Mapped && mapped == scalerMapped,
+                "H264 tile-start mapping disagreed with PresentationScaler");
             if (!success)
             {
                 return false;
@@ -1490,9 +1759,44 @@ bool narrow_1366_to_1364_h264_capture_tiles_are_convertible()
                 continue;
             }
 
+            Rectangle requiredSource{};
+            success &= check(
+                scaler.sourceCoverageForPresentationRectangle(
+                    mapped, requiredSource),
+                "narrow H264 mapped tile has no source coverage");
+            if (!success)
+            {
+                return false;
+            }
+            const Rectangle tileCapture = unionRectanglesLocal(
+                sourceTile, requiredSource);
+            std::vector<std::uint32_t> tilePixels(
+                static_cast<std::size_t>(tileCapture.widthPixels) *
+                tileCapture.heightPixels);
+            for (std::uint32_t row = 0; row < tileCapture.heightPixels; ++row)
+            {
+                const std::size_t sourceOffset =
+                    (static_cast<std::size_t>(tileCapture.y) + row) *
+                        sourceGeometry.widthPixels +
+                    static_cast<std::size_t>(tileCapture.x);
+                const std::size_t destinationOffset =
+                    static_cast<std::size_t>(row) * tileCapture.widthPixels;
+                std::copy_n(pixels.begin() +
+                                static_cast<std::ptrdiff_t>(sourceOffset),
+                            tileCapture.widthPixels,
+                            tilePixels.begin() +
+                                static_cast<std::ptrdiff_t>(destinationOffset));
+            }
+            const FramebufferView tileView{
+                std::as_bytes(
+                    std::span<const std::uint32_t>(tilePixels)),
+                tileCapture.widthPixels, tileCapture.heightPixels,
+                static_cast<std::size_t>(tileCapture.widthPixels) *
+                    sizeof(std::uint32_t)};
+
             const ScaledNv12UpdateResult directResult =
                 updateNv12RectangleFromFastDiagonalScaler_709FullRange(
-                    scaler, source, sourceRectangle, mapped, frameGeometry,
+                    scaler, tileView, tileCapture, mapped, frameGeometry,
                     direct, 0, mapped.heightPixels);
             success &= check(
                 directResult != ScaledNv12UpdateResult::InvalidInput,
@@ -1504,14 +1808,14 @@ bool narrow_1366_to_1364_h264_capture_tiles_are_convertible()
             if (directResult == ScaledNv12UpdateResult::Unsupported)
             {
                 const FramebufferView scaled = scaler.scaleRows(
-                    source, sourceRectangle, mapped, 0, mapped.heightPixels);
+                    tileView, tileCapture, mapped, 0, mapped.heightPixels);
                 success &= check(scaled.valid() &&
                                      updateNv12Rectangle_709FullRange(
                                          scaled, mapped, frameGeometry, direct),
                                  "narrow H264 reference conversion failed");
             }
             const FramebufferView scaled = scaler.scaleRows(
-                source, sourceRectangle, mapped, 0, mapped.heightPixels);
+                tileView, tileCapture, mapped, 0, mapped.heightPixels);
             success &= check(scaled.valid() &&
                                  updateNv12Rectangle_709FullRange(
                                      scaled, mapped, frameGeometry, staged),
@@ -2104,6 +2408,8 @@ int main()
     success &= partial_nv12_update_writes_only_selected_rectangle();
     success &= priority_transmission_can_bypass_background_runs();
     success &= scroll_priority_creates_and_then_avoids_mouse_local_mixed_age_update();
+    success &= post_input_popup_damage_preempts_older_background_capture();
+    success &= interaction_snapshot_refresh_retires_unsubmitted_views_without_losing_damage();
     success &= reconfigure_preserves_monotonic_frame_ids();
     success &= replacement_state_continues_rdp_frame_ids();
     success &= full_invalidation_supersedes_incremental_transmission();

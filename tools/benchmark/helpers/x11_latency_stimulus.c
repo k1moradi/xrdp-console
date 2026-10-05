@@ -5,10 +5,13 @@
 #include <X11/keysym.h>
 #include <X11/Xutil.h>
 #include <errno.h>
+#include <poll.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 static long long monotonic_ns(void)
 {
@@ -38,7 +41,10 @@ int main(int argc, char **argv)
     const char *display_name = argc > 1 ? argv[1] : NULL;
     const int key_mode = argc > 2 && strcmp(argv[2], "--key") == 0;
     const int full_screen_mode =
-        argc > 2 && strcmp(argv[2], "--fullscreen") == 0;
+        argc > 2 && (strcmp(argv[2], "--fullscreen") == 0 ||
+                     strcmp(argv[2], "--fullscreen-20hz") == 0);
+    const int continuous_mode =
+        argc > 2 && strcmp(argv[2], "--fullscreen-20hz") == 0;
     int x = 20;
     int y = 20;
 
@@ -120,6 +126,7 @@ int main(int argc, char **argv)
     }
 
     int state = 0;
+    char line[32];
     if (key_mode) {
         const KeyCode trigger = XKeysymToKeycode(display, XK_F9);
         if (trigger == 0) {
@@ -157,10 +164,71 @@ int main(int argc, char **argv)
         }
     }
 
+    if (continuous_mode)
+    {
+        printf("READY %u %u continuous_fps=20\n", width, height);
+        fflush(stdout);
+
+        const int64_t period_ns = INT64_C(50000000);
+        int64_t next_update_ns = monotonic_ns() + period_ns;
+        for (;;)
+        {
+            const int64_t remaining_ns = next_update_ns - monotonic_ns();
+            const int timeout_ms = remaining_ns <= 0
+                                       ? 0
+                                       : (int) ((remaining_ns +
+                                                 INT64_C(999999)) /
+                                                INT64_C(1000000));
+            struct pollfd input = {STDIN_FILENO, POLLIN, 0};
+            const int poll_result = poll(&input, 1, timeout_ms);
+            if (poll_result < 0)
+            {
+                if (errno == EINTR)
+                {
+                    continue;
+                }
+                perror("poll");
+                break;
+            }
+            if (poll_result > 0 &&
+                (input.revents & (POLLIN | POLLHUP)) != 0)
+            {
+                if (fgets(line, sizeof(line), stdin) == NULL ||
+                    strcmp(line, "quit\n") == 0 ||
+                    strcmp(line, "stop\n") == 0)
+                {
+                    break;
+                }
+            }
+
+            const int64_t now_ns = monotonic_ns();
+            if (now_ns >= next_update_ns)
+            {
+                XSetForeground(display, gc,
+                               state ? 0x0000ffUL : 0xff0000UL);
+                XFillRectangle(display, window, gc, 0, 0, width, height);
+                XSync(display, False);
+                state = !state;
+                next_update_ns += period_ns;
+                if (next_update_ns <= now_ns)
+                {
+                    next_update_ns = now_ns + period_ns;
+                }
+            }
+        }
+        XFreeGC(display, sparse_gc_a);
+        XFreeGC(display, sparse_gc_b);
+        XFreeGC(display, gc);
+        XDestroyWindow(display, sparse_window_a);
+        XDestroyWindow(display, sparse_window_b);
+        XDestroyWindow(display, window);
+        XCloseDisplay(display);
+        return EXIT_SUCCESS;
+    }
+
     printf("READY %u %u\n", width, height);
     fflush(stdout);
 
-    char line[32];
     while (fgets(line, sizeof(line), stdin) != NULL) {
         if (strcmp(line, "sparse\n") == 0) {
             XSetForeground(display, sparse_gc_a, 0x0000ff);

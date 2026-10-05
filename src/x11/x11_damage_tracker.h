@@ -2,11 +2,15 @@
 
 #pragma once
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <span>
 
 #include <xcb/damage.h>
 
 #include "../core/damage_region.h"
+#include "../core/interaction_priority.h"
 
 class X11DamageTracker final
 {
@@ -25,6 +29,14 @@ public:
     [[nodiscard]] std::uint64_t damagedPixelCount() const noexcept;
     [[nodiscard]] std::uint64_t snapshotRectangleCount() const noexcept;
     [[nodiscard]] std::uint64_t snapshotPixelCount() const noexcept;
+
+    void beginInteractionObservation(
+        std::uint64_t sequenceAtArm) noexcept;
+    void endInteractionObservation() noexcept;
+    [[nodiscard]] std::uint64_t interactionNotificationOverflowCount()
+        const noexcept;
+    [[nodiscard]] std::size_t copyInteractionNotifications(
+        std::span<InteractionDamageNotification> destination) const noexcept;
 
     [[nodiscard]] bool handles(const xcb_generic_event_t &event) const noexcept;
 
@@ -48,6 +60,14 @@ private:
     std::uint8_t firstEvent_{0};
     bool pendingAcknowledgement_{false};
     DamageRegion pendingDamageRegion_{};
+    std::array<InteractionDamageNotification,
+               kInteractionDamageNotificationHistoryCapacity>
+        interactionNotifications_{};
+    std::size_t interactionNotificationCount_{0};
+    std::size_t interactionNotificationNext_{0};
+    std::uint64_t interactionNotificationOverflowCount_{0};
+    std::uint64_t interactionSequenceAtArm_{0};
+    bool interactionObservationActive_{false};
     std::uint64_t notificationCount_{0};
     std::uint64_t damagedPixelCount_{0};
     std::uint64_t snapshotRectangleCount_{0};

@@ -17,11 +17,14 @@ collectH264CaptureSelectionsForInteraction(
     const InteractionPriorityState &interaction,
     std::span<GenerationTileMap::Selection> selections) noexcept
 {
-    if (interaction.pending)
+    const Rectangle priorityRectangle =
+        interactionPrioritySelectionRectangle(interaction);
+    if (priorityRectangle.widthPixels != 0 &&
+        priorityRectangle.heightPixels != 0)
     {
         const std::size_t priorityCount =
-            frame.collectCaptureSelectionsIntersecting(
-                interaction.rectangle, selections);
+            frame.collectCaptureSelectionsIntersecting(priorityRectangle,
+                                                       selections);
         if (priorityCount != 0)
         {
             return priorityCount;

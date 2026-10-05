@@ -4,8 +4,12 @@
 #define XRDP_CONSOLE_POPUP_UI_CONTRACT_H
 
 /* The stress fixture models a common lower-left application/start menu. */
+#ifndef POPUP_SOURCE_WIDTH
 #define POPUP_SOURCE_WIDTH 1920
+#endif
+#ifndef POPUP_SOURCE_HEIGHT
 #define POPUP_SOURCE_HEIGHT 1080
+#endif
 #define POPUP_PANEL_X 24
 #define POPUP_PANEL_WIDTH 520
 #define POPUP_PANEL_HEIGHT 720

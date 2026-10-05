@@ -12,6 +12,7 @@
 #include <cstring>
 #include <memory>
 #include <new>
+#include <span>
 #include <string_view>
 #include <utility>
 
@@ -52,9 +53,14 @@ extern "C" {
 #include "../x11/x11_input_controller.h"
 #include "../x11/x11_pointer_position_tracker.h"
 #include "../x11/x11_shared_memory_capture.h"
+#include "pending_h264_capture.h"
 
 namespace
 {
+
+using xrdp_console::module::PendingBitmapCacheHit;
+using xrdp_console::module::PendingH264Snapshot;
+using xrdp_console::module::PendingH264Tile;
 
 const char *
 clipboard_pdu_name(std::uint16_t type) noexcept
@@ -790,6 +796,77 @@ private:
     ClipboardController *clipboard_;
 };
 
+void
+beginModuleInteractionObservation(
+    const InteractionPriorityState &priority,
+    X11DamageTracker *damageTracker) noexcept
+{
+    if (priority.pending && damageTracker != nullptr)
+    {
+        damageTracker->beginInteractionObservation(
+            priority.damageSequenceAtArm);
+    }
+}
+
+[[nodiscard]] bool
+pointerTraceEnabled() noexcept
+{
+    const char *value = std::getenv("XRDP_CONSOLE_POINTER_TRACE");
+    return value != nullptr && value[0] == '1' && value[1] == '\0';
+}
+
+[[nodiscard]] long long
+monotonicNanoseconds() noexcept
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+void
+clearModuleInteractionPriority(InteractionPriorityState &priority,
+                               X11DamageTracker *damageTracker) noexcept
+{
+    clearInteractionPriority(priority);
+    if (damageTracker != nullptr)
+    {
+        damageTracker->endInteractionObservation();
+    }
+}
+
+bool
+observeModuleInteractionDamage(InteractionPriorityState &priority,
+                               X11DamageTracker &damageTracker,
+                               PixelSize bounds,
+                               const char *transport) noexcept
+{
+    std::array<InteractionDamageNotification,
+               kInteractionDamageNotificationHistoryCapacity>
+        notifications{};
+    const std::size_t count =
+        damageTracker.copyInteractionNotifications(notifications);
+    InteractionDamageNotification observed{};
+    if (!observeInteractionDamageNotifications(
+            priority, std::span<const InteractionDamageNotification>{
+                          notifications.data(), count},
+            bounds, &observed))
+    {
+        return false;
+    }
+
+    log_message(
+        LOG_LEVEL_INFO,
+        "XRDP_CONSOLE_INTERACTION event=damage-observed "
+        "transport=%s epoch=%llu damage_sequence=%llu mono_ns=%lld "
+        "rectangle=%d,%d,%u,%u",
+        transport, static_cast<unsigned long long>(priority.epoch),
+        static_cast<unsigned long long>(observed.sequence),
+        monotonicNanoseconds(),
+        observed.rectangle.x, observed.rectangle.y,
+        observed.rectangle.widthPixels, observed.rectangle.heightPixels);
+    return true;
+}
+
 int clipboard_callbacks_ready(void *context) noexcept
 {
     return xrdp_console_module_clipboard_callbacks_ready(
@@ -900,72 +977,6 @@ struct PendingPresentation
     }
 };
 
-struct PendingH264Tile final
-{
-    GenerationTileMap::Selection selection{};
-    Rectangle captureRectangle{};
-    Rectangle frameRectangle{};
-    FramebufferView sourcePixels{};
-    std::uint64_t fingerprint{};
-    std::uint32_t nextFrameRow{};
-
-    [[nodiscard]] bool active() const noexcept
-    {
-        return selection.valid() && captureRectangle.widthPixels != 0 &&
-               captureRectangle.heightPixels != 0 && sourcePixels.valid() &&
-               frameRectangle.widthPixels != 0 &&
-               frameRectangle.heightPixels != 0;
-    }
-
-    void clear() noexcept
-    {
-        selection = {};
-        captureRectangle = {};
-        frameRectangle = {};
-        sourcePixels = {};
-        fingerprint = 0;
-        nextFrameRow = 0;
-    }
-};
-
-struct PendingH264Snapshot final
-{
-    Rectangle sourceRectangle{};
-    // Non-owning view into X11SharedMemoryCapture's persistent XShm arena.
-    // No later capture may occur until every generation selected from this
-    // snapshot has been converted or the snapshot is discarded.
-    FramebufferView sourcePixels{};
-
-    [[nodiscard]] bool active() const noexcept
-    {
-        return sourceRectangle.widthPixels != 0 &&
-               sourceRectangle.heightPixels != 0 && sourcePixels.valid();
-    }
-
-    void clear() noexcept
-    {
-        sourceRectangle = {};
-        sourcePixels = {};
-    }
-};
-
-struct PendingBitmapCacheHit final
-{
-    GenerationTileMap::Selection selection{};
-    std::uint16_t cacheSlot{};
-
-    [[nodiscard]] bool active() const noexcept
-    {
-        return selection.valid() && cacheSlot != 0;
-    }
-
-    void clear() noexcept
-    {
-        selection = {};
-        cacheSlot = 0;
-    }
-};
-
 enum class GraphicsTransport
 {
     ClassicBitmap,
@@ -1023,6 +1034,32 @@ struct ModuleContext::Impl
 {
     using Clock = std::chrono::steady_clock;
 
+    struct InteractionTrace final
+    {
+        std::uint64_t epoch{};
+        long long inputReceivedNs{};
+        long long interactionArmedNs{};
+        long long firstDamageNs{};
+        long long firstSnapshotStartNs{};
+        long long firstSnapshotEndNs{};
+        long long firstPriorityCaptureNs{};
+        long long lastPriorityCaptureNs{};
+        long long firstPrioritySubmitNs{};
+        long long lastPrioritySubmitNs{};
+        long long completionNs{};
+        std::uint64_t snapshotRefreshes{};
+        std::uint64_t priorityCaptures{};
+        std::uint64_t prioritySubmissions{};
+        std::uint64_t serviceTurns{};
+        std::uint64_t serviceCalls{};
+        std::uint64_t maximumCallsPerTurn{};
+        std::uint64_t maximumServiceTurnUs{};
+        std::array<std::uint64_t, 1024> serviceTurnDurationsUs{};
+        std::size_t serviceTurnDurationCount{};
+        bool active{};
+        bool completionPending{};
+    };
+
     xrdp_console_module *module{nullptr};
     ModuleState state{};
     std::unique_ptr<X11DisplayConnection> x11Connection{};
@@ -1038,6 +1075,7 @@ struct ModuleContext::Impl
     PresentationScaler presentationScaler{};
     DamageRegion damageRegion{};
     InteractionPriorityState interactionPriority{};
+    InteractionTrace interactionTrace{};
     // sourcePixels is a non-owning view into X11SharedMemoryCapture's
     // persistent XShm arena. While this item is active, no subsequent
     // capture() call may overwrite that arena.
@@ -1095,6 +1133,97 @@ struct ModuleContext::Impl
     // 24 KiB temporary array for every H.264 submission.
     std::array<GenerationTileMap::Selection, kMaximumH264Selections>
         h264ScrollResidualSelections{};
+
+    void recordH264ServiceTurn(std::size_t calls,
+                               Clock::duration elapsed) noexcept
+    {
+        if (!profile.enabled() || !interactionTrace.active)
+        {
+            return;
+        }
+        const auto elapsedUs =
+            std::chrono::duration_cast<std::chrono::microseconds>(elapsed)
+                .count();
+        const std::uint64_t turnUs = elapsedUs > 0
+                                         ? static_cast<std::uint64_t>(elapsedUs)
+                                         : 0U;
+        ++interactionTrace.serviceTurns;
+        interactionTrace.serviceCalls += calls;
+        interactionTrace.maximumCallsPerTurn = std::max(
+            interactionTrace.maximumCallsPerTurn,
+            static_cast<std::uint64_t>(calls));
+        interactionTrace.maximumServiceTurnUs = std::max(
+            interactionTrace.maximumServiceTurnUs, turnUs);
+        if (interactionTrace.serviceTurnDurationCount <
+            interactionTrace.serviceTurnDurationsUs.size())
+        {
+            interactionTrace.serviceTurnDurationsUs[
+                interactionTrace.serviceTurnDurationCount] = turnUs;
+            ++interactionTrace.serviceTurnDurationCount;
+        }
+
+        if (interactionTrace.completionPending)
+        {
+            auto sortedDurations =
+                interactionTrace.serviceTurnDurationsUs;
+            const std::size_t durationCount =
+                interactionTrace.serviceTurnDurationCount;
+            const bool serviceTurnSamplesComplete =
+                interactionTrace.serviceTurns == durationCount;
+            std::uint64_t p95ServiceTurnUs = 0U;
+            if (serviceTurnSamplesComplete && durationCount != 0U)
+            {
+                std::sort(sortedDurations.data(),
+                          sortedDurations.data() + durationCount);
+                const std::size_t p95Index =
+                    (95U * durationCount + 99U) / 100U - 1U;
+                p95ServiceTurnUs = sortedDurations[p95Index];
+            }
+            log_message(
+                LOG_LEVEL_INFO,
+                "XRDP_CONSOLE_INTERACTION_TRACE event=epoch-complete "
+                "epoch=%llu input_received_ns=%lld armed_ns=%lld "
+                "first_damage_ns=%lld snapshot_start_ns=%lld "
+                "snapshot_end_ns=%lld first_priority_capture_ns=%lld "
+                "last_priority_capture_ns=%lld first_priority_submit_ns=%lld "
+                "last_priority_submit_ns=%lld completion_ns=%lld "
+                "snapshot_refreshes=%llu priority_captures=%llu "
+                "priority_submissions=%llu service_turns=%llu "
+                "service_calls=%llu max_calls_per_turn=%llu "
+                "service_turn_p95_us=%llu max_service_turn_us=%llu "
+                "service_turn_samples=%llu "
+                "service_turn_samples_complete=%d",
+                static_cast<unsigned long long>(interactionTrace.epoch),
+                interactionTrace.inputReceivedNs,
+                interactionTrace.interactionArmedNs,
+                interactionTrace.firstDamageNs,
+                interactionTrace.firstSnapshotStartNs,
+                interactionTrace.firstSnapshotEndNs,
+                interactionTrace.firstPriorityCaptureNs,
+                interactionTrace.lastPriorityCaptureNs,
+                interactionTrace.firstPrioritySubmitNs,
+                interactionTrace.lastPrioritySubmitNs,
+                interactionTrace.completionNs,
+                static_cast<unsigned long long>(
+                    interactionTrace.snapshotRefreshes),
+                static_cast<unsigned long long>(
+                    interactionTrace.priorityCaptures),
+                static_cast<unsigned long long>(
+                    interactionTrace.prioritySubmissions),
+                static_cast<unsigned long long>(
+                    interactionTrace.serviceTurns),
+                static_cast<unsigned long long>(interactionTrace.serviceCalls),
+                static_cast<unsigned long long>(
+                    interactionTrace.maximumCallsPerTurn),
+                static_cast<unsigned long long>(p95ServiceTurnUs),
+                static_cast<unsigned long long>(
+                    interactionTrace.maximumServiceTurnUs),
+                static_cast<unsigned long long>(durationCount),
+                serviceTurnSamplesComplete ? 1 : 0);
+            interactionTrace.active = false;
+            interactionTrace.completionPending = false;
+        }
+    }
 
     void armPresentationImmediately() noexcept
     {
@@ -1966,7 +2095,8 @@ ModuleContext::apply_source_geometry_change() noexcept
         impl_->pendingRfx.clear();
         impl_->rfxLetterboxFill.clear();
         impl_->damageRegion.clear();
-        clearInteractionPriority(impl_->interactionPriority);
+        clearModuleInteractionPriority(impl_->interactionPriority,
+                                      impl_->damageTracker.get());
         impl_->sharedMemoryCapture = std::move(sharedMemoryCapture);
         impl_->damageTracker = std::move(damageTracker);
         impl_->inputController = std::move(inputController);
@@ -2175,7 +2305,8 @@ ModuleContext::resize_presentation(int width, int height, int num_monitors,
     impl_->pendingPresentation.clear();
     impl_->pendingH264Snapshot.clear();
     impl_->pendingH264Tile.clear();
-    clearInteractionPriority(impl_->interactionPriority);
+    clearModuleInteractionPriority(impl_->interactionPriority,
+                                   impl_->damageTracker.get());
     impl_->pendingRfx.clear();
     impl_->rfxLetterboxFill.clear();
     impl_->state.presentationGeometry = presentationGeometry;
@@ -2277,7 +2408,8 @@ ModuleContext::invalidate_presentation(int width, int height) noexcept
     impl_->pendingPresentation.clear();
     impl_->pendingH264Snapshot.clear();
     impl_->pendingH264Tile.clear();
-    clearInteractionPriority(impl_->interactionPriority);
+    clearModuleInteractionPriority(impl_->interactionPriority,
+                                   impl_->damageTracker.get());
     impl_->pendingRfx.clear();
     impl_->rfxLetterboxFill.clear();
     if (!impl_->preparePresentationInvalidation())
@@ -2313,7 +2445,8 @@ ModuleContext::suppress_output(bool suppress, int left, int top, int right,
     impl_->pendingPresentation.clear();
     impl_->pendingH264Snapshot.clear();
     impl_->pendingH264Tile.clear();
-    clearInteractionPriority(impl_->interactionPriority);
+    clearModuleInteractionPriority(impl_->interactionPriority,
+                                   impl_->damageTracker.get());
     impl_->pendingRfx.clear();
     impl_->rfxLetterboxFill.clear();
 
@@ -2480,8 +2613,124 @@ ModuleContext::event(int message, long param1, long param2, long param3,
         // let its stale absolute-motion echo snap the X pointer back.
         return 0;
     }
+
+    const bool tracePointer = pointerTraceEnabled() &&
+                              message == WM_MOUSEMOVE;
+    if (tracePointer)
+    {
+        log_message(
+            LOG_LEVEL_INFO,
+            "XRDP_CONSOLE_POINTER_TRACE event=input-received "
+            "mono_ns=%lld source_x=%ld source_y=%ld",
+            monotonicNanoseconds(), param1, param2);
+    }
+
+    long long interactionInputReceivedNs = 0;
+    if (impl_->profile.enabled() && message == WM_LBUTTONDOWN)
+    {
+        interactionInputReceivedNs = monotonicNanoseconds();
+        log_message(
+            LOG_LEVEL_INFO,
+            "XRDP_CONSOLE_INTERACTION_TRACE event=input-received "
+            "mono_ns=%lld source_x=%ld source_y=%ld",
+            interactionInputReceivedNs, param1, param2);
+    }
+
+    bool interactionEpochArmed = false;
+    if (is_pointer_message(message))
+    {
+        const std::int32_t sourceCoordinateX =
+            static_cast<std::int32_t>(param1);
+        const std::int32_t sourceCoordinateY =
+            static_cast<std::int32_t>(param2);
+        const std::uint64_t damageSequence =
+            impl_->damageTracker != nullptr
+                ? impl_->damageTracker->notificationCount()
+                : 0U;
+        const auto inputTime = Impl::Clock::now();
+        if (message == WM_LBUTTONDOWN)
+        {
+            noteInteractionFocus(
+                impl_->interactionPriority, sourceCoordinateX,
+                sourceCoordinateY, impl_->state.sourceGeometry,
+                damageSequence, inputTime);
+            beginModuleInteractionObservation(
+                impl_->interactionPriority, impl_->damageTracker.get());
+            interactionEpochArmed = impl_->interactionPriority.pending;
+            if (interactionEpochArmed && impl_->profile.enabled())
+            {
+                impl_->interactionTrace = {};
+                impl_->interactionTrace.active = true;
+                impl_->interactionTrace.epoch =
+                    impl_->interactionPriority.epoch;
+                impl_->interactionTrace.inputReceivedNs =
+                    interactionInputReceivedNs;
+                impl_->interactionTrace.interactionArmedNs =
+                    monotonicNanoseconds();
+                log_message(
+                    LOG_LEVEL_INFO,
+                    "XRDP_CONSOLE_INTERACTION_TRACE event=epoch-armed "
+                    "epoch=%llu mono_ns=%lld damage_sequence=%llu",
+                    static_cast<unsigned long long>(
+                        impl_->interactionTrace.epoch),
+                    impl_->interactionTrace.interactionArmedNs,
+                    static_cast<unsigned long long>(damageSequence));
+            }
+        }
+        else if (message != WM_MOUSEMOVE &&
+                 !is_pointer_release_message(message) &&
+                 message != WM_TOUCH_VSCROLL &&
+                 message != WM_TOUCH_HSCROLL)
+        {
+            noteInteractionPointer(
+                impl_->interactionPriority, sourceCoordinateX,
+                sourceCoordinateY, impl_->state.sourceGeometry, true,
+                damageSequence, inputTime);
+            beginModuleInteractionObservation(
+                impl_->interactionPriority, impl_->damageTracker.get());
+            interactionEpochArmed = impl_->interactionPriority.pending;
+        }
+    }
+    else if (message == WM_KEYDOWN)
+    {
+        interactionEpochArmed = requestFocusedInteraction(
+            impl_->interactionPriority, impl_->state.sourceGeometry,
+            impl_->damageTracker != nullptr
+                ? impl_->damageTracker->notificationCount()
+                : 0U,
+            Impl::Clock::now());
+        if (interactionEpochArmed)
+        {
+            beginModuleInteractionObservation(
+                impl_->interactionPriority, impl_->damageTracker.get());
+        }
+    }
+
     const bool handled = impl_->inputController->handle(
         message, param1, param2, param3, param4);
+    if (tracePointer)
+    {
+        log_message(
+            LOG_LEVEL_INFO,
+            "XRDP_CONSOLE_POINTER_TRACE event=input-forwarded "
+            "mono_ns=%lld source_x=%ld source_y=%ld handled=%d",
+            monotonicNanoseconds(), param1, param2, handled ? 1 : 0);
+    }
+    if (impl_->profile.enabled() &&
+        message == WM_LBUTTONDOWN && impl_->interactionTrace.active)
+    {
+        log_message(
+            LOG_LEVEL_INFO,
+            "XRDP_CONSOLE_INTERACTION_TRACE event=input-forwarded "
+            "epoch=%llu mono_ns=%lld handled=%d",
+            static_cast<unsigned long long>(impl_->interactionTrace.epoch),
+            monotonicNanoseconds(), handled ? 1 : 0);
+    }
+    if (!handled && interactionEpochArmed)
+    {
+        clearModuleInteractionPriority(impl_->interactionPriority,
+                                      impl_->damageTracker.get());
+    }
     if (handled && is_pointer_message(message) &&
         impl_->pointerPositionTracker != nullptr)
     {
@@ -2495,18 +2744,16 @@ ModuleContext::event(int message, long param1, long param2, long param3,
             static_cast<std::int32_t>(param1);
         const std::int32_t sourceCoordinateY =
             static_cast<std::int32_t>(param2);
-        if (message == WM_LBUTTONDOWN)
-        {
-            noteInteractionFocus(
-                impl_->interactionPriority, sourceCoordinateX,
-                sourceCoordinateY, impl_->state.sourceGeometry);
-        }
-        else if (message == WM_TOUCH_VSCROLL ||
+        if (message == WM_TOUCH_VSCROLL ||
                  message == WM_TOUCH_HSCROLL)
         {
             noteInteractionScroll(
                 impl_->interactionPriority, sourceCoordinateX,
                 sourceCoordinateY);
+            if (impl_->damageTracker != nullptr)
+            {
+                impl_->damageTracker->endInteractionObservation();
+            }
         }
         else if (message == WM_MOUSEMOVE ||
                  is_pointer_release_message(message))
@@ -2515,17 +2762,6 @@ ModuleContext::event(int message, long param1, long param2, long param3,
                 impl_->interactionPriority, sourceCoordinateX,
                 sourceCoordinateY, impl_->state.sourceGeometry, false);
         }
-        else
-        {
-            noteInteractionPointer(
-                impl_->interactionPriority, sourceCoordinateX,
-                sourceCoordinateY, impl_->state.sourceGeometry, true);
-        }
-    }
-    else if (handled && message == WM_KEYDOWN)
-    {
-        static_cast<void>(requestFocusedInteraction(
-            impl_->interactionPriority, impl_->state.sourceGeometry));
     }
     return handled ? 0 : 1;
 }
@@ -2752,10 +2988,13 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
     const bool classicAvailable =
         impl_->graphicsTransport == GraphicsTransport::ClassicBitmap &&
         impl_->rdpUpdateSink.available();
+    const Rectangle interactionDamageRectangle =
+        interactionPrioritySelectionRectangle(impl_->interactionPriority);
     const bool priorityDamagePending =
-        impl_->interactionPriority.pending &&
+        interactionDamageRectangle.widthPixels != 0 &&
+        interactionDamageRectangle.heightPixels != 0 &&
         impl_->damageTracker->pendingDamageIntersects(
-            impl_->interactionPriority.rectangle);
+            interactionDamageRectangle);
     const ClassicWorkClass classicWorkClass = classifyClassicWork(
         impl_->pendingPresentation.active(),
         !impl_->damageRegion.rectangles().empty(),
@@ -2814,6 +3053,25 @@ ModuleContext::get_wait_objs(tbus *read_objects, int *read_count,
             {
                 *timeout = requestedTimeout;
             }
+        }
+    }
+    if (timeout != nullptr && impl_->interactionPriority.pending &&
+        !impl_->interactionPriority.postInputDamageObserved &&
+        impl_->interactionPriority.armedAt != Impl::Clock::time_point{})
+    {
+        const auto deadline = impl_->interactionPriority.armedAt +
+                              kInteractionPriorityUnobservedLifetime;
+        const auto remaining = deadline - Impl::Clock::now();
+        const int requestedTimeout =
+            remaining <= Impl::Clock::duration::zero()
+                ? 0
+                : static_cast<int>(std::min<std::int64_t>(
+                      INT_MAX,
+                      std::chrono::ceil<std::chrono::milliseconds>(remaining)
+                          .count()));
+        if (*timeout < 0 || requestedTimeout < *timeout)
+        {
+            *timeout = requestedTimeout;
         }
     }
     if (timeout != nullptr && impl_->clipboard != nullptr &&
@@ -3244,6 +3502,10 @@ ModuleContext::check_h264_gfx() noexcept
         {
             impl_->armNextPresentation(Impl::Clock::now());
         }
+        else if (!impl_->damageRegion.rectangles().empty())
+        {
+            impl_->armPresentationImmediately();
+        }
         else
         {
             // New state which arrives while an asynchronous frame is active
@@ -3254,7 +3516,8 @@ ModuleContext::check_h264_gfx() noexcept
         const bool workPending =
             impl_->h264Frame.frameInFlight() ||
             impl_->h264Frame.capturePending() || submissionPending ||
-            impl_->damageTracker->hasPendingDamage();
+            impl_->damageTracker->hasPendingDamage() ||
+            !impl_->damageRegion.rectangles().empty();
         if (!workPending)
         {
             impl_->presentationWorkStarted = {};
@@ -3270,29 +3533,158 @@ ModuleContext::check_h264_gfx() noexcept
 
     const bool coherentSnapshotMode =
         impl_->h264CoherentCaptureAvailable;
-    if ((!coherentSnapshotMode ||
-         !impl_->pendingH264Snapshot.active()) &&
-        impl_->damageTracker->hasPendingDamage())
+    const bool coherentSnapshotActive =
+        coherentSnapshotMode && impl_->pendingH264Snapshot.active();
+    const bool canObserveInteractionDamage =
+        coherentSnapshotActive && impl_->interactionPriority.pending;
+    if ((!coherentSnapshotActive &&
+         (impl_->damageTracker->hasPendingDamage() ||
+          !impl_->damageRegion.rectangles().empty())) ||
+        (canObserveInteractionDamage &&
+         impl_->damageTracker->hasPendingDamage()))
     {
         const std::uint64_t previousSnapshotRectangles =
             impl_->damageTracker->snapshotRectangleCount();
         const std::uint64_t previousSnapshotPixels =
             impl_->damageTracker->snapshotPixelCount();
-        impl_->damageRegion.clear();
+        if (!coherentSnapshotActive &&
+            (!coherentSnapshotMode ||
+             impl_->damageRegion.rectangles().empty()))
+        {
+            impl_->damageRegion.clear();
+        }
         if (!impl_->damageTracker->snapshot(impl_->damageRegion))
         {
             return fail("damage-snapshot-failed");
         }
-        for (const Rectangle rectangle : impl_->damageRegion.rectangles())
+        const bool interactionDamageObserved =
+            impl_->interactionPriority.pending &&
+            observeModuleInteractionDamage(
+                impl_->interactionPriority, *impl_->damageTracker,
+                impl_->state.sourceGeometry, "h264");
+        if (interactionDamageObserved && impl_->profile.enabled() &&
+            impl_->interactionTrace.active &&
+            impl_->interactionTrace.epoch ==
+                impl_->interactionPriority.epoch &&
+            impl_->interactionTrace.firstDamageNs == 0)
         {
-            impl_->h264Frame.markDamage(rectangle);
+            impl_->interactionTrace.firstDamageNs = monotonicNanoseconds();
         }
-        impl_->damageRegion.clear();
+        const bool refreshInteractionSnapshot =
+            coherentSnapshotActive && interactionDamageObserved &&
+            impl_->pendingH264Snapshot.canRefreshForInteraction();
+        if (!coherentSnapshotActive || refreshInteractionSnapshot)
+        {
+            for (const Rectangle rectangle : impl_->damageRegion.rectangles())
+            {
+                impl_->h264Frame.markDamage(rectangle);
+            }
+            impl_->damageRegion.clear();
+        }
         impl_->profile.noteSnapshot(
             impl_->damageTracker->snapshotRectangleCount() -
                 previousSnapshotRectangles,
             impl_->damageTracker->snapshotPixelCount() -
                 previousSnapshotPixels);
+
+        if (refreshInteractionSnapshot)
+        {
+            const long long snapshotRefreshStartNs =
+                impl_->profile.enabled() && impl_->interactionTrace.active
+                    ? monotonicNanoseconds()
+                    : 0;
+            if (snapshotRefreshStartNs != 0)
+            {
+                ++impl_->interactionTrace.snapshotRefreshes;
+                if (impl_->interactionTrace.firstSnapshotStartNs == 0)
+                {
+                    impl_->interactionTrace.firstSnapshotStartNs =
+                        snapshotRefreshStartNs;
+                }
+                log_message(
+                    LOG_LEVEL_INFO,
+                    "XRDP_CONSOLE_INTERACTION_TRACE "
+                    "event=snapshot-refresh-start epoch=%llu mono_ns=%lld",
+                    static_cast<unsigned long long>(
+                        impl_->interactionTrace.epoch),
+                    snapshotRefreshStartNs);
+            }
+            Rectangle refreshedCaptureRectangle{};
+            if (!impl_->h264Frame.sourceCaptureBoundsForPendingDamage(
+                    impl_->presentationScaler, refreshedCaptureRectangle))
+            {
+                return fail("interaction-snapshot-bounds-invalid");
+            }
+
+            // The current coherent snapshot predates this interaction's
+            // damage. Replace its still-unencoded source pixels with a fresh
+            // snapshot of all capture-pending damage, then let the existing
+            // tile priority schedule the interaction region first.
+            impl_->pendingH264Snapshot.clearForRefresh(
+                impl_->pendingH264Tile, impl_->pendingBitmapCacheHit);
+            const bool profileH264Timing = impl_->profile.enabled();
+            const auto captureStarted = profileH264Timing
+                                            ? std::chrono::steady_clock::now()
+                                            : std::chrono::steady_clock::time_point{};
+            const FramebufferView refreshedSnapshot =
+                impl_->sharedMemoryCapture->capture(
+                    refreshedCaptureRectangle);
+            if (profileH264Timing)
+            {
+                impl_->profile.noteH264Capture(
+                    std::chrono::steady_clock::now() - captureStarted);
+            }
+            if (!refreshedSnapshot.valid())
+            {
+                return fail("interaction-source-capture-invalid");
+            }
+            if (!impl_->pendingH264Snapshot.install(
+                    refreshedCaptureRectangle, refreshedSnapshot))
+            {
+                return fail("interaction-source-snapshot-install-failed");
+            }
+            impl_->pendingH264Snapshot.noteInteractionRefresh();
+            if (snapshotRefreshStartNs != 0)
+            {
+                const long long snapshotRefreshEndNs =
+                    monotonicNanoseconds();
+                if (impl_->interactionTrace.firstSnapshotEndNs == 0)
+                {
+                    impl_->interactionTrace.firstSnapshotEndNs =
+                        snapshotRefreshEndNs;
+                }
+                log_message(
+                    LOG_LEVEL_INFO,
+                    "XRDP_CONSOLE_INTERACTION_TRACE "
+                    "event=snapshot-refresh-end epoch=%llu mono_ns=%lld "
+                    "elapsed_us=%lld",
+                    static_cast<unsigned long long>(
+                        impl_->interactionTrace.epoch),
+                    snapshotRefreshEndNs,
+                    (snapshotRefreshEndNs - snapshotRefreshStartNs) / 1000LL);
+            }
+            impl_->profile.noteCapture(refreshedCaptureRectangle);
+            if (impl_->scrollMotionObserver.valid() &&
+                !impl_->scrollMotionObserver.stageCapture(
+                    refreshedSnapshot, refreshedCaptureRectangle))
+            {
+                log_message(
+                    LOG_LEVEL_WARNING,
+                    "xrdp-console: disabling scroll motion observation "
+                    "after interaction snapshot refresh failure");
+                impl_->scrollMotionObserver.reset();
+            }
+            log_message(
+                LOG_LEVEL_INFO,
+                "XRDP_CONSOLE_H264_CAPTURE event=snapshot-refreshed "
+                "reason=interaction epoch=%llu source=%d,%d %ux%u "
+                "refresh_budget=1",
+                static_cast<unsigned long long>(
+                    impl_->interactionPriority.epoch),
+                refreshedCaptureRectangle.x, refreshedCaptureRectangle.y,
+                refreshedCaptureRectangle.widthPixels,
+                refreshedCaptureRectangle.heightPixels);
+        }
     }
 
     if (coherentSnapshotMode &&
@@ -3321,8 +3713,10 @@ ModuleContext::check_h264_gfx() noexcept
             return fail("source-capture-invalid");
         }
 
-        impl_->pendingH264Snapshot.sourceRectangle = captureRectangle;
-        impl_->pendingH264Snapshot.sourcePixels = snapshot;
+        if (!impl_->pendingH264Snapshot.install(captureRectangle, snapshot))
+        {
+            return fail("source-snapshot-install-failed");
+        }
         impl_->profile.noteCapture(captureRectangle);
         if (impl_->scrollMotionObserver.valid() &&
             !impl_->scrollMotionObserver.stageCapture(
@@ -3480,6 +3874,32 @@ ModuleContext::check_h264_gfx() noexcept
             {
                 return fail("captured-tile-fingerprint-invalid");
             }
+            if (impl_->profile.enabled() && impl_->interactionTrace.active &&
+                impl_->interactionPriority.pending &&
+                impl_->interactionPriority.postInputDamageObserved &&
+                interactionDamageIntersectsSeed(
+                    interactionPrioritySelectionRectangle(
+                        impl_->interactionPriority),
+                    sourceTile))
+            {
+                const long long capturedNs = monotonicNanoseconds();
+                ++impl_->interactionTrace.priorityCaptures;
+                impl_->interactionTrace.lastPriorityCaptureNs = capturedNs;
+                if (impl_->interactionTrace.firstPriorityCaptureNs == 0)
+                {
+                    impl_->interactionTrace.firstPriorityCaptureNs =
+                        capturedNs;
+                    log_message(
+                        LOG_LEVEL_INFO,
+                        "XRDP_CONSOLE_INTERACTION_TRACE "
+                        "event=first-priority-tile-captured "
+                        "epoch=%llu mono_ns=%lld tile=%d,%d,%ux%u",
+                        static_cast<unsigned long long>(
+                            impl_->interactionTrace.epoch),
+                        capturedNs, sourceTile.x, sourceTile.y,
+                        sourceTile.widthPixels, sourceTile.heightPixels);
+                }
+            }
             if (impl_->bitmapCacheObserver.valid())
             {
                 impl_->profile.noteBitmapCacheObservation(
@@ -3612,6 +4032,9 @@ ModuleContext::check_h264_gfx() noexcept
         const bool identitySnapshot =
             impl_->h264Frame.identityMapping() &&
             sourceGeometry == impl_->state.presentationGeometry;
+        int directResultCode = -1;
+        bool fallbackAttempted = false;
+        bool fallbackValid = false;
         bool converted = false;
         if (identitySnapshot)
         {
@@ -3633,21 +4056,24 @@ ModuleContext::check_h264_gfx() noexcept
                     impl_->h264Frame.geometry(),
                     impl_->h264Frame.frameBytes(),
                     pending.nextFrameRow, rows);
+            directResultCode = static_cast<int>(direct);
             if (direct == ScaledNv12UpdateResult::Updated)
             {
                 converted = true;
             }
             else if (direct == ScaledNv12UpdateResult::Unsupported)
             {
+                fallbackAttempted = true;
                 const FramebufferView scaled =
                     impl_->presentationScaler.scaleRows(
                         pending.sourcePixels, pending.captureRectangle,
                         pending.frameRectangle, pending.nextFrameRow, rows);
-                converted =
+                fallbackValid =
                     scaled.valid() && updateNv12Rectangle_709FullRange(
                                           scaled, destination,
                                           impl_->h264Frame.geometry(),
                                           impl_->h264Frame.frameBytes());
+                converted = fallbackValid;
             }
         }
         if (profileH264Timing)
@@ -3658,6 +4084,31 @@ ModuleContext::check_h264_gfx() noexcept
         }
         if (!converted)
         {
+            log_message(
+                LOG_LEVEL_ERROR,
+                "XRDP_CONSOLE_H264_CONVERSION_FAILURE "
+                "path=%s direct_result=%d fallback_attempted=%d "
+                "fallback_valid=%d source_geometry=%ux%u "
+                "frame_geometry=%ux%u capture=%d,%d,%ux%u "
+                "source_view=%ux%u stride=%zu tile=%d,%d,%ux%u "
+                "destination=%d,%d,%ux%u next_row=%u rows=%u",
+                identitySnapshot ? "identity" : "scaled",
+                directResultCode, fallbackAttempted, fallbackValid,
+                sourceGeometry.widthPixels, sourceGeometry.heightPixels,
+                impl_->h264Frame.geometry().widthPixels,
+                impl_->h264Frame.geometry().heightPixels,
+                pending.captureRectangle.x, pending.captureRectangle.y,
+                pending.captureRectangle.widthPixels,
+                pending.captureRectangle.heightPixels,
+                pending.sourcePixels.widthPixels,
+                pending.sourcePixels.heightPixels,
+                pending.sourcePixels.strideBytes,
+                pending.frameRectangle.x, pending.frameRectangle.y,
+                pending.frameRectangle.widthPixels,
+                pending.frameRectangle.heightPixels,
+                destination.x, destination.y,
+                destination.widthPixels, destination.heightPixels,
+                pending.nextFrameRow, rows);
             return fail("presentation-nv12-conversion-failed");
         }
         pending.nextFrameRow += rows;
@@ -3785,10 +4236,14 @@ ModuleContext::check_h264_gfx() noexcept
     bool priorityFrameRectangleValid = false;
     if (impl_->interactionPriority.pending)
     {
+        const Rectangle prioritySourceRectangle =
+            interactionPrioritySelectionRectangle(
+                impl_->interactionPriority);
         priorityFrameRectangleValid =
-            impl_->h264Frame.mapSourceRectangle(
-                impl_->interactionPriority.rectangle,
-                priorityFrameRectangle);
+            prioritySourceRectangle.widthPixels != 0 &&
+            prioritySourceRectangle.heightPixels != 0 &&
+            impl_->h264Frame.mapSourceRectangle(prioritySourceRectangle,
+                                                priorityFrameRectangle);
         if (priorityFrameRectangleValid &&
             priorityFrameRectangle.widthPixels != 0 &&
             priorityFrameRectangle.heightPixels != 0)
@@ -4229,6 +4684,43 @@ ModuleContext::check_h264_gfx() noexcept
         // generation bookkeeping.
         return fail("h264-submission-bookkeeping-failed");
     }
+    if (impl_->profile.enabled() && impl_->interactionTrace.active &&
+        impl_->interactionPriority.pending &&
+        impl_->interactionPriority.postInputDamageObserved &&
+        priorityFrameRectangleValid)
+    {
+        std::size_t prioritySelectionCount = 0;
+        for (std::size_t index = 0; index < authoritativeCount; ++index)
+        {
+            if (interactionDamageIntersectsSeed(
+                    priorityFrameRectangle,
+                    authoritativeSelections[index].rectangle))
+            {
+                ++prioritySelectionCount;
+            }
+        }
+        if (prioritySelectionCount != 0)
+        {
+            const long long submittedNs = monotonicNanoseconds();
+            impl_->interactionTrace.prioritySubmissions +=
+                prioritySelectionCount;
+            impl_->interactionTrace.lastPrioritySubmitNs = submittedNs;
+            if (impl_->interactionTrace.firstPrioritySubmitNs == 0)
+            {
+                impl_->interactionTrace.firstPrioritySubmitNs = submittedNs;
+                log_message(
+                    LOG_LEVEL_INFO,
+                    "XRDP_CONSOLE_INTERACTION_TRACE "
+                    "event=first-priority-frame-submitted "
+                    "epoch=%llu mono_ns=%lld frame_id=%u "
+                    "priority_selections=%llu",
+                    static_cast<unsigned long long>(
+                        impl_->interactionTrace.epoch),
+                    submittedNs, frameId,
+                    static_cast<unsigned long long>(prioritySelectionCount));
+            }
+        }
+    }
     if (useCacheHit)
     {
         impl_->verifiedBitmapCache.noteHitSubmitted(
@@ -4316,21 +4808,39 @@ ModuleContext::check_h264_gfx() noexcept
         impl_->h264SubmittedAt = std::chrono::steady_clock::now();
     }
 
-    if (impl_->interactionPriority.pending)
+    if (impl_->interactionPriority.pending &&
+        impl_->interactionPriority.postInputDamageObserved)
     {
+        const Rectangle prioritySourceRectangle =
+            interactionPrioritySelectionRectangle(
+                impl_->interactionPriority);
         std::array<GenerationTileMap::Selection, 1> remaining{};
         const bool captureStillPending =
             impl_->h264Frame.collectCaptureSelectionsIntersecting(
-                impl_->interactionPriority.rectangle, remaining) != 0;
+                prioritySourceRectangle, remaining) != 0;
         const bool transmissionStillPending =
             priorityFrameRectangleValid &&
             priorityFrameRectangle.widthPixels != 0 &&
             priorityFrameRectangle.heightPixels != 0 &&
             impl_->h264Frame.collectReadyTransmissionSelectionsIntersecting(
                 priorityFrameRectangle, remaining) != 0;
-        if (!captureStillPending && !transmissionStillPending)
+        const bool newDamageStillPending =
+            impl_->damageTracker->pendingDamageIntersects(
+                prioritySourceRectangle) ||
+            impl_->damageRegion.intersects(prioritySourceRectangle);
+        if (!captureStillPending && !transmissionStillPending &&
+            !newDamageStillPending)
         {
-            clearInteractionPriority(impl_->interactionPriority);
+            if (impl_->profile.enabled() && impl_->interactionTrace.active &&
+                impl_->interactionTrace.epoch ==
+                    impl_->interactionPriority.epoch)
+            {
+                impl_->interactionTrace.completionNs =
+                    monotonicNanoseconds();
+                impl_->interactionTrace.completionPending = true;
+            }
+            clearModuleInteractionPriority(impl_->interactionPriority,
+                                          impl_->damageTracker.get());
         }
     }
     impl_->profile.notePresentationBatch();
@@ -4394,6 +4904,21 @@ ModuleContext::check_wait_objs() noexcept
     impl_->profile.noteDamage(
         impl_->damageTracker->notificationCount() - previousNotifications,
         impl_->damageTracker->damagedPixelCount() - previousDamagedPixels);
+    const std::uint64_t interactionEpoch =
+        impl_->interactionPriority.epoch;
+    if (expireUnobservedInteractionPriority(
+            impl_->interactionPriority, Impl::Clock::now()))
+    {
+        if (impl_->damageTracker != nullptr)
+        {
+            impl_->damageTracker->endInteractionObservation();
+        }
+        log_message(
+            LOG_LEVEL_INFO,
+            "XRDP_CONSOLE_INTERACTION event=priority-expired "
+            "reason=no-post-input-damage epoch=%llu",
+            static_cast<unsigned long long>(interactionEpoch));
+    }
     if (impl_->presentationWorkStarted == Impl::Clock::time_point{} &&
         (impl_->damageTracker->hasPendingDamage() ||
          !impl_->damageRegion.rectangles().empty() ||
@@ -4621,11 +5146,20 @@ ModuleContext::check_wait_objs() noexcept
                 impl_->h264Frame.sourceGeometry(),
                 impl_->h264Frame.geometry(),
                 kMaximumPresentationPixelsPerService);
+        const Impl::Clock::time_point h264ServiceStarted =
+            Impl::Clock::now();
+        std::size_t h264ServiceCalls = 0;
+        const auto recordH264ServiceTurn = [&]() noexcept {
+            impl_->recordH264ServiceTurn(
+                h264ServiceCalls,
+                Impl::Clock::now() - h264ServiceStarted);
+        };
         int h264Result = 0;
         for (std::size_t passIndex = 0;
              passIndex < maximumPasses;
              ++passIndex)
         {
+            ++h264ServiceCalls;
             h264Result = check_h264_gfx();
             if (h264Result != 0)
             {
@@ -4638,9 +5172,20 @@ ModuleContext::check_wait_objs() noexcept
             if (impl_->h264Frame.frameInFlight() ||
                 !impl_->h264Frame.capturePending())
             {
+                recordH264ServiceTurn();
+                return 0;
+            }
+            if (xrdp_console::module::h264ServiceSliceExpired(
+                    h264ServiceStarted, Impl::Clock::now()))
+            {
+                // Yield to xrdp's input/channel loop between bounded groups
+                // of tile work; check_h264_gfx() has already armed immediate
+                // continuation while capture damage remains pending.
+                recordH264ServiceTurn();
                 return 0;
             }
         }
+        recordH264ServiceTurn();
         if (h264Result == 0)
         {
             return 0;
@@ -4772,11 +5317,15 @@ ModuleContext::check_wait_objs() noexcept
             static_cast<unsigned long long>(addedPixels));
     }
 
-    const bool priorityDamagePending =
-        impl_->interactionPriority.pending &&
-        impl_->damageTracker->pendingDamageIntersects(
-            impl_->interactionPriority.rectangle);
-    const ClassicWorkClass classicWorkClass = classifyClassicWork(
+    Rectangle interactionDamageRectangle =
+        interactionPrioritySelectionRectangle(impl_->interactionPriority);
+    bool priorityDamagePending =
+        interactionDamageRectangle.widthPixels != 0 &&
+        interactionDamageRectangle.heightPixels != 0 &&
+        (impl_->damageTracker->pendingDamageIntersects(
+             interactionDamageRectangle) ||
+         impl_->damageRegion.intersects(interactionDamageRectangle));
+    ClassicWorkClass classicWorkClass = classifyClassicWork(
         impl_->pendingPresentation.active(),
         !impl_->damageRegion.rectangles().empty(),
         impl_->damageTracker->hasPendingDamage(),
@@ -4805,17 +5354,39 @@ ModuleContext::check_wait_objs() noexcept
                         "source=damage-snapshot");
             return 1;
         }
+        if (impl_->interactionPriority.pending)
+        {
+            static_cast<void>(observeModuleInteractionDamage(
+                impl_->interactionPriority, *impl_->damageTracker,
+                impl_->state.sourceGeometry, "classic"));
+        }
         impl_->profile.noteSnapshot(
             impl_->damageTracker->snapshotRectangleCount() -
                 previousSnapshotRectangles,
             impl_->damageTracker->snapshotPixelCount() -
                 previousSnapshotPixels);
+        interactionDamageRectangle = interactionPrioritySelectionRectangle(
+            impl_->interactionPriority);
+        priorityDamagePending =
+            interactionDamageRectangle.widthPixels != 0 &&
+            interactionDamageRectangle.heightPixels != 0 &&
+            (impl_->damageRegion.intersects(interactionDamageRectangle) ||
+             impl_->damageTracker->pendingDamageIntersects(
+                 interactionDamageRectangle));
+        classicWorkClass = classifyClassicWork(
+            impl_->pendingPresentation.active(),
+            !impl_->damageRegion.rectangles().empty(),
+            impl_->damageTracker->hasPendingDamage(),
+            priorityDamagePending);
     }
 
     const bool priorityDamageReady =
         classicWorkClass == ClassicWorkClass::PriorityDamage &&
         impl_->interactionPriority.pending &&
-        impl_->damageRegion.intersects(impl_->interactionPriority.rectangle);
+        impl_->interactionPriority.postInputDamageObserved &&
+        impl_->damageRegion.intersects(
+            interactionPrioritySelectionRectangle(
+                impl_->interactionPriority));
     if (priorityDamageReady)
     {
         // DamageRegion still owns the old source rectangle. Release the
@@ -4824,7 +5395,9 @@ ModuleContext::check_wait_objs() noexcept
 
         Rectangle presentationRectangle{};
         Rectangle samplingRectangle{};
-        const Rectangle sourceRectangle = impl_->interactionPriority.rectangle;
+        const Rectangle sourceRectangle =
+            interactionPrioritySelectionRectangle(
+                impl_->interactionPriority);
         const RectangleMapResult mapping =
             impl_->presentationScaler.mapSourceRectangle(
                 sourceRectangle, presentationRectangle, samplingRectangle);
@@ -4837,7 +5410,8 @@ ModuleContext::check_wait_objs() noexcept
         }
         if (mapping == RectangleMapResult::Empty)
         {
-            clearInteractionPriority(impl_->interactionPriority);
+            clearModuleInteractionPriority(impl_->interactionPriority,
+                                          impl_->damageTracker.get());
         }
         else
         {
@@ -5109,7 +5683,8 @@ ModuleContext::check_wait_objs() noexcept
     }
     if (success && completedInteractionPriority)
     {
-        clearInteractionPriority(impl_->interactionPriority);
+        clearModuleInteractionPriority(impl_->interactionPriority,
+                                      impl_->damageTracker.get());
     }
     if (success && (filledPresentationBackground || !fillAvailable))
     {
@@ -5118,9 +5693,11 @@ ModuleContext::check_wait_objs() noexcept
     if (success)
     {
         const bool remainingPriorityDamage =
-            impl_->interactionPriority.pending &&
+            interactionPrioritySelectionRectangle(
+                impl_->interactionPriority).widthPixels != 0 &&
             impl_->damageTracker->pendingDamageIntersects(
-                impl_->interactionPriority.rectangle);
+                interactionPrioritySelectionRectangle(
+                    impl_->interactionPriority));
         const ClassicWorkClass remainingWorkClass = classifyClassicWork(
             impl_->pendingPresentation.active(),
             !impl_->damageRegion.rectangles().empty(),

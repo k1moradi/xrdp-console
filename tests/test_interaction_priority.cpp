@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
+#include <chrono>
+#include <cstdint>
 #include <iostream>
+#include <span>
 
 #include "../src/core/interaction_priority.h"
 
@@ -46,6 +50,13 @@ interaction_priority_tracks_pointer_focus_and_bounds()
     success &= check(
         state.rectangle == Rectangle{726, 0, 640, 768},
         "bottom-right pointer hotspot left source bounds");
+
+    InteractionPriorityState pointerOnly{};
+    noteInteractionPointer(pointerOnly, 900, 500, {1366, 768}, false);
+    success &= check(requestFocusedInteraction(pointerOnly, {1366, 768}) &&
+                         pointerOnly.rectangle == Rectangle{580, 0, 640, 768},
+                     "keyboard request without recorded focus ignored the "
+                         "current pointer anchor");
 
     noteInteractionPointer(state, -500, -500, {200, 100}, true);
     success &= check(
@@ -115,6 +126,107 @@ scroll_clears_local_priority_without_losing_keyboard_focus()
     return success;
 }
 
+bool
+priority_survives_the_input_to_damage_gap_and_expires_boundedly()
+{
+    constexpr PixelSize source{1920, 1080};
+    const auto armedAt = InteractionClock::time_point{
+        std::chrono::seconds{10}};
+    InteractionPriorityState state{};
+    noteInteractionFocus(state, 40, 1056, source, 12U, armedAt);
+
+    bool success = true;
+    success &= check(state.pending && !state.postInputDamageObserved &&
+                         interactionPrioritySelectionRectangle(state) ==
+                             Rectangle{},
+                     "priority did not wait for post-input damage");
+    success &= check(!expireUnobservedInteractionPriority(
+                         state, armedAt + std::chrono::milliseconds{999}) &&
+                         state.pending,
+                     "priority expired before its bounded grace period");
+    success &= check(!observeInteractionDamage(
+                         state, {0, 0, source.widthPixels,
+                                 source.heightPixels},
+                         13U, source) &&
+                         !state.postInputDamageObserved,
+                     "full-screen background damage was promoted to popup priority");
+
+    constexpr Rectangle popup{24, 312, 520, 720};
+    success &= check(observeInteractionDamage(state, popup, 14U, source) &&
+                         state.pending && state.postInputDamageObserved &&
+                         interactionPrioritySelectionRectangle(state) ==
+                             state.rectangle,
+                     "bounded popup damage did not activate the full bounded "
+                         "interaction priority region");
+    success &= check(!observeInteractionDamage(
+                         state, {900, 640, 100, 100}, 15U, source),
+                     "later background damage re-armed the interaction epoch");
+    success &= check(!expireUnobservedInteractionPriority(
+                         state, armedAt + std::chrono::seconds{3}) &&
+                         state.pending,
+                     "observed popup priority expired before queued work drained");
+
+    InteractionPriorityState noRedraw{};
+    noteInteractionFocus(noRedraw, 40, 1056, source, 15U, armedAt);
+    success &= check(expireUnobservedInteractionPriority(
+                         noRedraw,
+                         armedAt + kInteractionPriorityUnobservedLifetime) &&
+                         !noRedraw.pending,
+                     "priority without a redraw did not expire at its deadline");
+    return success;
+}
+
+bool
+only_individually_post_input_damage_can_activate_priority()
+{
+    constexpr PixelSize source{1920, 1080};
+    constexpr Rectangle popup{24, 312, 520, 720};
+    InteractionPriorityState state{};
+    noteInteractionFocus(state, 40, 1056, source, 10U,
+                         InteractionClock::time_point{
+                             std::chrono::seconds{10}});
+
+    const std::array<InteractionDamageNotification, 2> mixedBatch{{
+        {popup, 9U},
+        {{300, 640, 40, 40}, 11U},
+    }};
+    bool success = check(
+        !observeInteractionDamageNotifications(state, mixedBatch, source) &&
+            !state.postInputDamageObserved,
+        "pre-input damage was promoted using a later notification sequence");
+
+    constexpr InteractionDamageNotification popupNotification{popup, 12U};
+    success &= check(
+        observeInteractionDamageNotifications(
+            state, std::span{&popupNotification, 1U}, source) &&
+            state.postInputDamageObserved,
+        "actual post-input popup notification did not activate priority");
+    constexpr InteractionDamageNotification priorityOnlyNotification{
+        {300, 640, 40, 40}, 13U};
+    success &= check(
+        observeInteractionDamageNotifications(
+            state, std::span{&priorityOnlyNotification, 1U}, source),
+        "later popup repaint inside the bounded interaction area but outside "
+        "the seed was not observed");
+    constexpr InteractionDamageNotification popupRepaintNotification{
+        {320, 650, 48, 32}, 14U};
+    success &= check(
+        observeInteractionDamageNotifications(
+            state, std::span{&popupRepaintNotification, 1U}, source),
+        "later popup repaint within the activated interaction area was lost");
+    constexpr InteractionDamageNotification fullScreenNotification{
+        {0, 0, source.widthPixels, source.heightPixels}, 15U};
+    success &= check(
+        !observeInteractionDamageNotifications(
+            state, std::span{&fullScreenNotification, 1U}, source),
+        "full-screen background damage was promoted after interaction activation");
+    success &= check(
+        !observeInteractionDamageNotifications(
+            state, std::span{&fullScreenNotification, 1U}, source),
+        "the same XDamage notification was processed twice");
+    return success;
+}
+
 } // namespace
 
 int
@@ -124,5 +236,7 @@ main()
     success &= interaction_priority_tracks_pointer_focus_and_bounds();
     success &= pointer_priority_covers_an_upward_opening_start_menu();
     success &= scroll_clears_local_priority_without_losing_keyboard_focus();
+    success &= priority_survives_the_input_to_damage_gap_and_expires_boundedly();
+    success &= only_individually_post_input_damage_can_activate_priority();
     return success ? 0 : 1;
 }

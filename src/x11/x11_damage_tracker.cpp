@@ -2,6 +2,7 @@
 
 #include "x11_damage_tracker.h"
 
+#include <algorithm>
 #include <cstdlib>
 
 X11DamageTracker::X11DamageTracker(xcb_connection_t &connection,
@@ -146,6 +147,51 @@ X11DamageTracker::snapshotPixelCount() const noexcept
     return snapshotPixelCount_;
 }
 
+void
+X11DamageTracker::beginInteractionObservation(
+    std::uint64_t sequenceAtArm) noexcept
+{
+    interactionSequenceAtArm_ = sequenceAtArm;
+    interactionNotificationCount_ = 0;
+    interactionNotificationNext_ = 0;
+    interactionNotificationOverflowCount_ = 0;
+    interactionObservationActive_ = true;
+}
+
+void
+X11DamageTracker::endInteractionObservation() noexcept
+{
+    interactionNotificationCount_ = 0;
+    interactionNotificationNext_ = 0;
+    interactionObservationActive_ = false;
+}
+
+std::uint64_t
+X11DamageTracker::interactionNotificationOverflowCount() const noexcept
+{
+    return interactionNotificationOverflowCount_;
+}
+
+std::size_t
+X11DamageTracker::copyInteractionNotifications(
+    std::span<InteractionDamageNotification> destination) const noexcept
+{
+    const std::size_t count =
+        std::min(interactionNotificationCount_, destination.size());
+    const std::size_t skipped = interactionNotificationCount_ - count;
+    const std::size_t start =
+        (interactionNotificationNext_ +
+         kInteractionDamageNotificationHistoryCapacity -
+         interactionNotificationCount_ + skipped) %
+        kInteractionDamageNotificationHistoryCapacity;
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        destination[index] = interactionNotifications_[
+            (start + index) % kInteractionDamageNotificationHistoryCapacity];
+    }
+    return count;
+}
+
 bool
 X11DamageTracker::handles(const xcb_generic_event_t &event) const noexcept
 {
@@ -175,10 +221,29 @@ X11DamageTracker::handle(const xcb_generic_event_t &event) noexcept
     const auto &notification =
         reinterpret_cast<const xcb_damage_notify_event_t &>(event);
     ++notificationCount_;
+    const Rectangle damagedRectangle{
+        notification.area.x, notification.area.y,
+        notification.area.width, notification.area.height};
     pendingDamageRegion_.add(
-        {notification.area.x, notification.area.y,
-         notification.area.width, notification.area.height},
-        bounds_);
+        damagedRectangle, bounds_);
+    if (interactionObservationActive_ &&
+        notificationCount_ > interactionSequenceAtArm_)
+    {
+        interactionNotifications_[interactionNotificationNext_] = {
+            damagedRectangle, notificationCount_};
+        interactionNotificationNext_ =
+            (interactionNotificationNext_ + 1) %
+            kInteractionDamageNotificationHistoryCapacity;
+        if (interactionNotificationCount_ <
+                kInteractionDamageNotificationHistoryCapacity)
+        {
+            ++interactionNotificationCount_;
+        }
+        else
+        {
+            ++interactionNotificationOverflowCount_;
+        }
+    }
     damagedPixelCount_ +=
         static_cast<std::uint64_t>(notification.area.width) *
         notification.area.height;

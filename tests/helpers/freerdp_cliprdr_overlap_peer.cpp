@@ -13,6 +13,7 @@
 #include <freerdp/event.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/gdi/gdi.h>
+#include <freerdp/input.h>
 
 #include <winpr/synch.h>
 
@@ -29,6 +30,7 @@
 #include <optional>
 #include <poll.h>
 #include <span>
+#include <string_view>
 #include <time.h>
 #include <unistd.h>
 #include <vector>
@@ -75,6 +77,7 @@ struct PeerContext
     BYTE* png;
     std::size_t pngSize;
     UINT32 frameCount;
+    UINT32 pointerMoveSequence;
     bool initialFormatsSent;
     bool overlapFormatsSent;
     bool imageResponseSent;
@@ -1155,6 +1158,52 @@ UINT on_server_format_data_request(
 
 void process_control_command(PeerContext* peer, const char* command)
 {
+    constexpr std::string_view pointerPrefix{"POINTER_MOVE "};
+    const std::string_view control{command};
+    if (control.starts_with(pointerPrefix))
+    {
+        const std::string_view coordinates = control.substr(pointerPrefix.size());
+        const std::size_t separator = coordinates.find(' ');
+        UINT32 x = 0U;
+        UINT32 y = 0U;
+        if (peer == nullptr || separator == std::string_view::npos ||
+            std::from_chars(coordinates.data(),
+                            coordinates.data() + separator, x).ec !=
+                std::errc{} ||
+            std::from_chars(coordinates.data() + separator + 1U,
+                            coordinates.data() + coordinates.size(), y).ec !=
+                std::errc{} ||
+            x > std::numeric_limits<UINT16>::max() ||
+            y > std::numeric_limits<UINT16>::max() ||
+            peer->common.context.input == nullptr)
+        {
+            if (peer != nullptr)
+            {
+                peer->failed = true;
+            }
+            std::fputs("invalid POINTER_MOVE test command\n", stderr);
+            return;
+        }
+
+        UINT64 sentMonoNs = 0U;
+        if (!monotonic_time_ns(&sentMonoNs) ||
+            !freerdp_input_send_mouse_event(
+                peer->common.context.input, PTR_FLAGS_MOVE,
+                static_cast<UINT16>(x), static_cast<UINT16>(y)))
+        {
+            peer->failed = true;
+            std::fputs("FreeRDP POINTER_MOVE send failed\n", stderr);
+            return;
+        }
+        ++peer->pointerMoveSequence;
+        std::printf("PEER_POINTER_MOVE_SENT sequence=%u mono_ns=%llu "
+                    "x=%u y=%u\n",
+                    peer->pointerMoveSequence,
+                    static_cast<unsigned long long>(sentMonoNs), x, y);
+        std::fflush(stdout);
+        return;
+    }
+
     if (std::strcmp(command, "DISCONNECT_WHILE_PNG_RESPONSE_PENDING") == 0)
     {
         if (!peer->delayedPngResponseActive ||
@@ -1889,6 +1938,7 @@ int main(int argc, char** argv)
     peer->png = nullptr;
     peer->pngSize = 0U;
     peer->frameCount = 0U;
+    peer->pointerMoveSequence = 0U;
     peer->initialFormatsSent = false;
     peer->overlapFormatsSent = false;
     peer->imageResponseSent = false;

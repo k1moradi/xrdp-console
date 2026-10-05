@@ -76,6 +76,17 @@ draw_generation_band(Display *display, Drawable drawable, GC gc,
                            TILE_DIMENSION_PIXELS);
         }
     }
+    if (width % TILE_DIMENSION_PIXELS != 0U)
+    {
+        const unsigned int partialWidth =
+            width % TILE_DIMENSION_PIXELS;
+        const unsigned long pixel =
+            (generation & 1U) != 0U ? white : black;
+        XSetForeground(display, gc, pixel);
+        XFillRectangle(display, drawable, gc,
+                       (int) (width - partialWidth), (int) top,
+                       partialWidth, TILE_DIMENSION_PIXELS);
+    }
 }
 
 static void
@@ -83,7 +94,8 @@ publish_generation_frame(Display *display, Pixmap staging, Window window,
                          GC gc, unsigned int width, unsigned int height,
                          const uint32_t *row_generations)
 {
-    const unsigned int rows = height / TILE_DIMENSION_PIXELS;
+    const unsigned int rows =
+        (height + TILE_DIMENSION_PIXELS - 1U) / TILE_DIMENSION_PIXELS;
 
     for (unsigned int row = 0; row < rows; ++row)
     {
@@ -106,7 +118,8 @@ advance_scroll(Display *display, Pixmap staging, Window window, GC gc,
                unsigned int width, unsigned int height,
                uint32_t *row_generations, uint32_t *next_generation)
 {
-    const unsigned int rows = height / TILE_DIMENSION_PIXELS;
+    const unsigned int rows =
+        (height + TILE_DIMENSION_PIXELS - 1U) / TILE_DIMENSION_PIXELS;
 
     for (unsigned int row = 0; row + 1U < rows; ++row)
     {
@@ -149,13 +162,11 @@ main(int argc, char **argv)
     if (argc != 4 ||
         !parse_positive_dimension(argv[2], &width) ||
         !parse_positive_dimension(argv[3], &height) ||
-        width % TILE_DIMENSION_PIXELS != 0 ||
-        height % TILE_DIMENSION_PIXELS != 0 ||
         width < TILE_DIMENSION_PIXELS ||
         height < TILE_DIMENSION_PIXELS)
     {
         fprintf(stderr,
-                "usage: %s DISPLAY WIDTH HEIGHT (positive multiples of 64)\n",
+                "usage: %s DISPLAY WIDTH HEIGHT (at least 64 pixels)\n",
                 argv[0]);
         return 2;
     }
@@ -194,8 +205,10 @@ main(int argc, char **argv)
         fputs("XCreateGC failed\n", stderr);
         goto cleanup;
     }
-    columns = width / TILE_DIMENSION_PIXELS;
-    rows = height / TILE_DIMENSION_PIXELS;
+    columns = (width + TILE_DIMENSION_PIXELS - 1U) /
+              TILE_DIMENSION_PIXELS;
+    rows = (height + TILE_DIMENSION_PIXELS - 1U) /
+           TILE_DIMENSION_PIXELS;
     next_generation = rows;
     row_generations = calloc(rows, sizeof(*row_generations));
     if (row_generations == NULL)

@@ -11,6 +11,23 @@
 #include "presentation_transform.h"
 #include "rectangle.h"
 
+[[nodiscard]] constexpr bool
+presentationAxisUsesAreaFilter(std::uint32_t sourcePixels,
+                               std::uint32_t outputPixels) noexcept
+{
+    if (sourcePixels <= outputPixels)
+    {
+        return false;
+    }
+
+    // A one- or two-pixel negotiation mismatch on a desktop-sized axis is
+    // visually closer to identity than to a real downscale. Preserve sharp
+    // UI/text edges instead of blending adjacent pixels for that tiny shrink.
+    const std::uint32_t removedPixels = sourcePixels - outputPixels;
+    return removedPixels > 2U ||
+           static_cast<std::uint64_t>(removedPixels) * 100U > sourcePixels;
+}
+
 namespace xrdp_console::rdp
 {
 class PresentationScalerNv12Converter;

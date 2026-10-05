@@ -6,6 +6,7 @@
 
 #include <xcb/xcb.h>
 
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -13,9 +14,20 @@
 #include <cstdlib>
 #include <memory>
 #include <poll.h>
+#include <span>
 
 namespace
 {
+
+bool
+check_condition(bool condition, const char *message) noexcept
+{
+    if (!condition)
+    {
+        std::fprintf(stderr, "%s\n", message);
+    }
+    return condition;
+}
 
 bool
 check_request(xcb_connection_t *connection, xcb_void_cookie_t cookie,
@@ -205,6 +217,368 @@ root_damage_preserves_disjoint_rectangles(xcb_connection_t *connection,
         return false;
     }
     return true;
+}
+
+bool
+root_damage_preserves_interaction_notification_provenance(
+    xcb_connection_t *connection, const xcb_screen_t &screen,
+    xcb_window_t nearWindow, xcb_gcontext_t graphicsContext,
+    PixelSize bounds) noexcept
+{
+    if (bounds.widthPixels < 512 || bounds.heightPixels < 384)
+    {
+        std::fprintf(stderr,
+                     "Xvfb is too small for interaction provenance stimulus\n");
+        return false;
+    }
+
+    const std::uint32_t backgroundValues[] = {screen.black_pixel, 1U};
+    const std::uint32_t childMask = XCB_CW_BACK_PIXEL |
+                                    XCB_CW_OVERRIDE_REDIRECT;
+    const std::int16_t farX = static_cast<std::int16_t>(
+        bounds.widthPixels - 140U);
+    const std::int16_t farY = static_cast<std::int16_t>(
+        bounds.heightPixels - 140U);
+    const xcb_window_t farWindow = xcb_generate_id(connection);
+    const xcb_window_t fullScreenWindow = xcb_generate_id(connection);
+    if (!check_request(
+            connection,
+            xcb_create_window_checked(
+                connection, XCB_COPY_FROM_PARENT, farWindow, screen.root,
+                farX, farY, 120, 120, 0, XCB_WINDOW_CLASS_INPUT_OUTPUT,
+                screen.root_visual, childMask, backgroundValues),
+            "create far XDamage provenance window") ||
+        !check_request(
+            connection,
+            xcb_create_window_checked(
+                connection, XCB_COPY_FROM_PARENT, fullScreenWindow,
+                screen.root, 0, 0,
+                static_cast<std::uint16_t>(bounds.widthPixels),
+                static_cast<std::uint16_t>(bounds.heightPixels), 0,
+                XCB_WINDOW_CLASS_INPUT_OUTPUT, screen.root_visual,
+                childMask, backgroundValues),
+            "create full-screen XDamage provenance window") ||
+        !check_request(connection, xcb_map_window_checked(connection, farWindow),
+                       "map far XDamage provenance window") ||
+        xcb_flush(connection) <= 0)
+    {
+        return false;
+    }
+
+    X11DamageTracker tracker(*connection, screen.root, bounds);
+    if (!tracker.valid() || !discard_initial_damage(connection, tracker))
+    {
+        std::fprintf(stderr,
+                     "interaction-provenance XDamage setup failed: %s\n",
+                     tracker.failureReason() != nullptr
+                         ? tracker.failureReason()
+                         : "baseline did not settle");
+        return false;
+    }
+
+    const auto draw_and_wait = [&](xcb_window_t drawable,
+                                   Rectangle rectangle,
+                                   std::uint64_t targetNotification)
+    {
+        const xcb_rectangle_t xRectangle{
+            static_cast<std::int16_t>(rectangle.x),
+            static_cast<std::int16_t>(rectangle.y),
+            static_cast<std::uint16_t>(rectangle.widthPixels),
+            static_cast<std::uint16_t>(rectangle.heightPixels)};
+        if (!check_request(connection,
+                           xcb_poly_fill_rectangle_checked(
+                               connection, drawable, graphicsContext, 1,
+                               &xRectangle),
+                           "draw interaction-provenance rectangle") ||
+            xcb_flush(connection) <= 0 ||
+            !wait_for_damage(connection, tracker, targetNotification) ||
+            !drain_damage_events_through_barrier(connection, tracker))
+        {
+            std::fprintf(stderr,
+                         "draw did not produce expected damage: "
+                         "rectangle=%d,%d,%u,%u target=%llu current=%llu "
+                         "pending=%d connection_error=%d\n",
+                         rectangle.x, rectangle.y, rectangle.widthPixels,
+                         rectangle.heightPixels,
+                         static_cast<unsigned long long>(targetNotification),
+                         static_cast<unsigned long long>(
+                             tracker.notificationCount()),
+                         tracker.hasPendingDamage(),
+                         xcb_connection_has_error(connection));
+            return false;
+        }
+        return true;
+    };
+
+    bool success = true;
+    constexpr Rectangle preInputDamage{20, 30, 30, 30};
+    constexpr Rectangle preInputDamageOnRoot{30, 40, 30, 30};
+    constexpr Rectangle unrelatedDamage{10, 10, 30, 30};
+    constexpr Rectangle postInputDamage{80, 90, 30, 30};
+    const std::uint64_t beforePreInput = tracker.notificationCount();
+    success &= draw_and_wait(nearWindow, preInputDamage,
+                             beforePreInput + 1);
+    DamageRegion accumulated;
+    success &= check_condition(
+        tracker.snapshot(accumulated) &&
+            accumulated.intersects(preInputDamageOnRoot),
+        "pre-input seed damage was not retained in the pending region");
+
+    const std::uint64_t sequenceAtArm = tracker.notificationCount();
+    tracker.beginInteractionObservation(sequenceAtArm);
+    InteractionPriorityState priority{};
+    noteInteractionFocus(priority, 100, 100, bounds, sequenceAtArm,
+                         InteractionClock::now());
+
+    success &= draw_and_wait(farWindow, unrelatedDamage,
+                             sequenceAtArm + 1);
+    std::array<InteractionDamageNotification,
+               kInteractionDamageNotificationHistoryCapacity>
+        notifications{};
+    std::size_t notificationCount =
+        tracker.copyInteractionNotifications(notifications);
+    bool allPostArm = notificationCount != 0;
+    for (std::size_t index = 0; index < notificationCount; ++index)
+    {
+        allPostArm = allPostArm &&
+                     notifications[index].sequence > sequenceAtArm;
+    }
+    success &= check_condition(
+        allPostArm,
+        "post-arm notification history included pre-arm damage");
+    success &= check_condition(
+        !observeInteractionDamageNotifications(
+            priority,
+            std::span<const InteractionDamageNotification>{
+                notifications.data(), notificationCount},
+            bounds) &&
+            !priority.postInputDamageObserved,
+        "pre-arm seed damage was activated by unrelated post-arm damage");
+    success &= check_condition(tracker.snapshot(accumulated),
+                               "unrelated post-arm damage snapshot failed");
+
+    success &= draw_and_wait(nearWindow, postInputDamage,
+                             sequenceAtArm + 2);
+    notificationCount = tracker.copyInteractionNotifications(notifications);
+    const bool activated = observeInteractionDamageNotifications(
+        priority,
+        std::span<const InteractionDamageNotification>{
+            notifications.data(), notificationCount},
+        bounds);
+    if (!activated)
+    {
+        std::fprintf(stderr,
+                     "interaction damage not activated: count=%zu arm=%llu "
+                     "current=%llu seed=%d,%d,%u,%u\n",
+                     notificationCount,
+                     static_cast<unsigned long long>(sequenceAtArm),
+                     static_cast<unsigned long long>(
+                         tracker.notificationCount()),
+                     priority.seedRectangle.x, priority.seedRectangle.y,
+                     priority.seedRectangle.widthPixels,
+                     priority.seedRectangle.heightPixels);
+        for (std::size_t index = 0; index < notificationCount; ++index)
+        {
+            const InteractionDamageNotification &notification =
+                notifications[index];
+            std::fprintf(stderr,
+                         "  seq=%llu rect=%d,%d,%u,%u\n",
+                         static_cast<unsigned long long>(
+                             notification.sequence),
+                         notification.rectangle.x,
+                         notification.rectangle.y,
+                         notification.rectangle.widthPixels,
+                         notification.rectangle.heightPixels);
+        }
+    }
+    success &= check_condition(
+        activated && priority.postInputDamageObserved,
+        "matching post-arm XDamage did not activate priority");
+
+    constexpr Rectangle popupRepaint{110, 100, 20, 20};
+    success &= draw_and_wait(nearWindow, popupRepaint,
+                             sequenceAtArm + 3);
+    notificationCount = tracker.copyInteractionNotifications(notifications);
+    success &= check_condition(
+        observeInteractionDamageNotifications(
+            priority,
+            std::span<const InteractionDamageNotification>{
+                notifications.data(), notificationCount},
+            bounds),
+        "later actual popup XDamage was not retained for snapshot refresh");
+
+    tracker.endInteractionObservation();
+    success &= check_condition(
+        tracker.snapshot(accumulated) &&
+            accumulated.intersects(preInputDamageOnRoot),
+        "provenance tracking discarded old pending damage");
+
+    // A full-screen pre-input event is likewise excluded from the epoch.
+    const Rectangle fullScreen{0, 0, bounds.widthPixels,
+                               bounds.heightPixels};
+    success &= check_request(
+        connection, xcb_map_window_checked(connection, fullScreenWindow),
+        "map full-screen XDamage provenance window");
+    success &= xcb_flush(connection) > 0 &&
+               discard_initial_damage(connection, tracker);
+    const std::uint64_t beforeFullScreen = tracker.notificationCount();
+    success &= draw_and_wait(fullScreenWindow, fullScreen,
+                             beforeFullScreen + 1);
+    DamageRegion fullScreenAccumulated;
+    success &= check_condition(
+        tracker.snapshot(fullScreenAccumulated) &&
+            fullScreenAccumulated.intersects(
+                Rectangle{100, 250, 20, 20}),
+        "full-screen pre-input damage was not retained");
+    const std::uint64_t fullScreenSequence = tracker.notificationCount();
+    tracker.beginInteractionObservation(fullScreenSequence);
+    InteractionPriorityState fullScreenPriority{};
+    noteInteractionFocus(fullScreenPriority, 300, 300, bounds,
+                         fullScreenSequence, InteractionClock::now());
+    success &= check_condition(
+        fullScreenAccumulated.intersects(
+            fullScreenPriority.seedRectangle),
+        "pre-input full-screen damage did not remain pending at interaction arm");
+    const Rectangle fullScreenUnrelated{
+        static_cast<std::int32_t>(bounds.widthPixels - 80U),
+        20, 30, 30};
+    const std::uint32_t ringBlackForeground[] = {screen.black_pixel};
+    success &= check_request(
+        connection,
+        xcb_change_gc_checked(connection, graphicsContext,
+                              XCB_GC_FOREGROUND, ringBlackForeground),
+        "change interaction-provenance test foreground");
+    success &= draw_and_wait(fullScreenWindow, fullScreenUnrelated,
+                             fullScreenSequence + 1);
+    notificationCount = tracker.copyInteractionNotifications(notifications);
+    success &= check_condition(
+        !observeInteractionDamageNotifications(
+            fullScreenPriority,
+            std::span<const InteractionDamageNotification>{
+                notifications.data(), notificationCount},
+            bounds) &&
+            !fullScreenPriority.postInputDamageObserved,
+        "pre-input full-screen damage activated a later interaction");
+    tracker.endInteractionObservation();
+    success &= check_condition(tracker.snapshot(fullScreenAccumulated),
+                               "full-screen damage snapshot failed");
+
+    success &= check_request(
+        connection, xcb_unmap_window_checked(connection, fullScreenWindow),
+        "unmap full-screen XDamage provenance window");
+    success &= xcb_flush(connection) > 0 &&
+               discard_initial_damage(connection, tracker);
+
+    constexpr std::size_t overflowEvents =
+        kInteractionDamageNotificationHistoryCapacity + 5U;
+    constexpr Rectangle ringDamage{2, 2, 8, 8};
+    const std::uint32_t invertFunction[] = {XCB_GX_INVERT};
+    success &= check_request(
+        connection,
+        xcb_change_gc_checked(connection, graphicsContext,
+                              XCB_GC_FUNCTION, invertFunction),
+        "set XDamage history ring XOR function");
+    success &= check_condition(!tracker.hasPendingDamage(),
+                               "XDamage history ring began with pending damage");
+    const std::uint64_t sequenceAtRingArm = tracker.notificationCount();
+    tracker.beginInteractionObservation(sequenceAtRingArm);
+    for (std::size_t index = 0; index < overflowEvents; ++index)
+    {
+        const std::uint64_t nextSequence = tracker.notificationCount() + 1U;
+        if (!draw_and_wait(nearWindow, ringDamage, nextSequence))
+        {
+            success = false;
+            break;
+        }
+        if (!tracker.snapshot(accumulated))
+        {
+            success = false;
+            break;
+        }
+    }
+    const std::uint32_t copyFunction[] = {XCB_GX_COPY};
+    success &= check_request(
+        connection,
+        xcb_change_gc_checked(connection, graphicsContext,
+                              XCB_GC_FUNCTION, copyFunction),
+        "restore XDamage history ring copy function");
+
+    std::array<InteractionDamageNotification,
+               kInteractionDamageNotificationHistoryCapacity>
+        retainedNotifications{};
+    const std::size_t retainedCount =
+        tracker.copyInteractionNotifications(retainedNotifications);
+    const std::uint64_t finalSequence = tracker.notificationCount();
+    const std::uint64_t eventCount = finalSequence - sequenceAtRingArm;
+    bool orderedHistory =
+        retainedCount == kInteractionDamageNotificationHistoryCapacity &&
+        eventCount > kInteractionDamageNotificationHistoryCapacity &&
+        tracker.interactionNotificationOverflowCount() ==
+            eventCount - kInteractionDamageNotificationHistoryCapacity;
+    for (std::size_t index = 0; index < retainedCount; ++index)
+    {
+        const std::uint64_t expectedSequence =
+            finalSequence - static_cast<std::uint64_t>(retainedCount) +
+            static_cast<std::uint64_t>(index) + 1U;
+        orderedHistory = orderedHistory &&
+                         retainedNotifications[index].sequence ==
+                             expectedSequence;
+        if (index != 0U)
+        {
+            orderedHistory = orderedHistory &&
+                retainedNotifications[index - 1U].sequence <
+                    retainedNotifications[index].sequence;
+        }
+    }
+    success &= check_condition(
+        orderedHistory,
+        "bounded XDamage history overflow was not ordered or counted");
+
+    InteractionPriorityState overflowPriority{};
+    noteInteractionFocus(overflowPriority, 100, 100, bounds,
+                         sequenceAtRingArm, InteractionClock::now());
+    success &= check_condition(
+        !observeInteractionDamageNotifications(
+            overflowPriority,
+            std::span<const InteractionDamageNotification>{
+                retainedNotifications.data(), retainedCount},
+            bounds) && !overflowPriority.postInputDamageObserved,
+        "overflowed unrelated XDamage history falsely activated priority");
+    success &= draw_and_wait(nearWindow, postInputDamage,
+                             tracker.notificationCount() + 1U);
+    const std::size_t afterOverflowCount =
+        tracker.copyInteractionNotifications(retainedNotifications);
+    success &= check_condition(
+        observeInteractionDamageNotifications(
+            overflowPriority,
+            std::span<const InteractionDamageNotification>{
+                retainedNotifications.data(), afterOverflowCount},
+            bounds) && overflowPriority.postInputDamageObserved,
+        "actual seed damage after history overflow did not activate priority");
+
+    std::array<InteractionDamageNotification,
+               kInteractionDamageNotificationHistoryCapacity>
+        repeatedCopy{};
+    const std::size_t repeatedCount =
+        tracker.copyInteractionNotifications(repeatedCopy);
+    bool repeatedCopyMatches = repeatedCount == retainedCount;
+    for (std::size_t index = 0; index < retainedCount; ++index)
+    {
+        repeatedCopyMatches = repeatedCopyMatches &&
+            repeatedCopy[index].sequence ==
+                retainedNotifications[index].sequence &&
+            repeatedCopy[index].rectangle ==
+                retainedNotifications[index].rectangle;
+    }
+    success &= check_condition(
+        repeatedCopyMatches,
+        "repeated XDamage history copy reordered or invented events");
+    tracker.endInteractionObservation();
+
+    xcb_destroy_window(connection, fullScreenWindow);
+    xcb_destroy_window(connection, farWindow);
+    success &= xcb_flush(connection) > 0;
+    return success;
 }
 
 int
@@ -489,11 +863,14 @@ run() noexcept
     const std::uint32_t rootForeground[] = {screen->white_pixel};
     if (!check_request(
             connection,
-            xcb_create_gc_checked(connection, rootGraphicsContext, window,
+            xcb_create_gc_checked(connection, rootGraphicsContext,
+                                  screen->root,
                                   XCB_GC_FOREGROUND, rootForeground),
             "create root damage graphics context") ||
         !root_damage_preserves_disjoint_rectangles(
-            connection, screen->root, window, rootGraphicsContext, bounds))
+            connection, screen->root, window, rootGraphicsContext, bounds) ||
+        !root_damage_preserves_interaction_notification_provenance(
+            connection, *screen, window, rootGraphicsContext, bounds))
     {
         xcb_free_gc(connection, rootGraphicsContext);
         xcb_destroy_window(connection, window);
