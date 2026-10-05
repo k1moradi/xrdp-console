@@ -26,6 +26,12 @@ set(serialized_clipboard_data_patch
     "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0048-xrdp-chansrv-serialize-format-data-generations.patch")
 set(unavailable_queue_depth_patch
     "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0049-xrdp-console-ignore-unavailable-gfx-queue-depth.patch")
+set(disconnect_format_request_patch
+    "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0050-xrdp-chansrv-retire-pending-format-request-on-disconnect.patch")
+set(installed_owner_log_patch
+    "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0051-xrdp-chansrv-log-installed-clipboard-owner.patch")
+set(deferred_incr_progress_patch
+    "${XRDP_CONSOLE_SOURCE_DIR}/patches/xrdp/0052-xrdp-chansrv-recover-stalled-deferred-image-incr.patch")
 
 foreach(required IN ITEMS "${series_file}" "${h264_patch}" "${pacing_patch}"
         "${image_retry_patch}" "${image_waiters_patch}"
@@ -43,7 +49,10 @@ foreach(required IN ITEMS "${series_file}" "${h264_patch}" "${pacing_patch}"
         "${stale_targets_retry_patch}"
         "${abandoned_incr_patch}"
         "${serialized_clipboard_data_patch}"
-        "${unavailable_queue_depth_patch}")
+        "${unavailable_queue_depth_patch}"
+        "${disconnect_format_request_patch}"
+        "${installed_owner_log_patch}"
+        "${deferred_incr_progress_patch}")
     if(NOT EXISTS "${required}")
         message(FATAL_ERROR "required optimization patch input is missing: ${required}")
     endif()
@@ -99,6 +108,15 @@ list(FIND series_lines
 list(FIND series_lines
     "0049-xrdp-console-ignore-unavailable-gfx-queue-depth.patch"
     unavailable_queue_depth_index)
+list(FIND series_lines
+    "0050-xrdp-chansrv-retire-pending-format-request-on-disconnect.patch"
+    disconnect_format_request_index)
+list(FIND series_lines
+    "0051-xrdp-chansrv-log-installed-clipboard-owner.patch"
+    installed_owner_log_index)
+list(FIND series_lines
+    "0052-xrdp-chansrv-recover-stalled-deferred-image-incr.patch"
+    deferred_incr_progress_index)
 if(image_retire_terminator_index LESS 0 OR channel_containment_index LESS 0 OR
         png_priority_index LESS 0 OR image_x11_diagnostics_index LESS 0 OR
         image_deferred_owner_index LESS 0 OR image_targets_response_index LESS 0 OR
@@ -107,6 +125,8 @@ if(image_retire_terminator_index LESS 0 OR channel_containment_index LESS 0 OR
         chansrv_vc_buffer_index LESS 0 OR stale_targets_retry_index LESS 0 OR
         abandoned_incr_index LESS 0 OR serialized_clipboard_data_index LESS 0 OR
         unavailable_queue_depth_index LESS 0 OR
+        disconnect_format_request_index LESS 0 OR
+        installed_owner_log_index LESS 0 OR deferred_incr_progress_index LESS 0 OR
         png_prefetch_index GREATER -1)
     message(FATAL_ERROR "xrdp clipboard diagnostics must be in series and experimental PNG prefetch must remain inactive")
 endif()
@@ -124,6 +144,9 @@ math(EXPR expected_stale_targets_retry_index "${chansrv_vc_buffer_index} + 1")
 math(EXPR expected_abandoned_incr_index "${stale_targets_retry_index} + 1")
 math(EXPR expected_serialized_clipboard_data_index "${abandoned_incr_index} + 1")
 math(EXPR expected_unavailable_queue_depth_index "${serialized_clipboard_data_index} + 1")
+math(EXPR expected_disconnect_format_request_index "${expected_unavailable_queue_depth_index} + 1")
+math(EXPR expected_installed_owner_log_index "${expected_disconnect_format_request_index} + 1")
+math(EXPR expected_deferred_incr_progress_index "${expected_installed_owner_log_index} + 1")
 if(NOT channel_containment_index EQUAL expected_channel_containment_index OR
         NOT png_priority_index EQUAL expected_png_priority_index OR
         NOT image_x11_diagnostics_index EQUAL expected_image_x11_diagnostics_index OR
@@ -137,7 +160,10 @@ if(NOT channel_containment_index EQUAL expected_channel_containment_index OR
         NOT stale_targets_retry_index EQUAL expected_stale_targets_retry_index OR
         NOT abandoned_incr_index EQUAL expected_abandoned_incr_index OR
         NOT serialized_clipboard_data_index EQUAL expected_serialized_clipboard_data_index OR
-        NOT unavailable_queue_depth_index EQUAL expected_unavailable_queue_depth_index)
+        NOT unavailable_queue_depth_index EQUAL expected_unavailable_queue_depth_index OR
+        NOT disconnect_format_request_index EQUAL expected_disconnect_format_request_index OR
+        NOT installed_owner_log_index EQUAL expected_installed_owner_log_index OR
+        NOT deferred_incr_progress_index EQUAL expected_deferred_incr_progress_index)
     message(FATAL_ERROR "channel containment, PNG-priority, and xrdp diagnostics patches must follow clipboard fixes in order")
 endif()
 
@@ -167,6 +193,21 @@ foreach(marker IN ITEMS
     if(marker_index LESS 0)
         message(FATAL_ERROR
             "abandoned C2S INCR patch is missing marker: ${marker}")
+    endif()
+endforeach()
+
+file(READ "${deferred_incr_progress_patch}" deferred_incr_progress_text)
+foreach(marker IN ITEMS
+        "DEFERRED_IMAGE_INCR_STALL_TIMEOUT_NS"
+        "clipboard_monotonic_time_ns"
+        "PropertyDelete"
+        "reason=deferred-owner-progress-timeout"
+        "clipboard_get_wait_timeout"
+        "clipboard_check_wait_timeout")
+    string(FIND "${deferred_incr_progress_text}" "${marker}" marker_index)
+    if(marker_index LESS 0)
+        message(FATAL_ERROR
+            "deferred INCR progress patch is missing marker: ${marker}")
     endif()
 endforeach()
 

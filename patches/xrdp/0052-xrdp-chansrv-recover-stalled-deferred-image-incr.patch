@@ -1,0 +1,243 @@
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -264,6 +264,9 @@
+ static int g_clipboard_owner_update_pending = 0;
+ static Time g_clipboard_owner_update_time = CurrentTime;
+ static int g_clipboard_owner_update_time_valid = 0;
++static unsigned long long g_deferred_image_incr_last_progress_ns;
++
++#define DEFERRED_IMAGE_INCR_STALL_TIMEOUT_NS 10000000000ULL
+ 
+ /* Format ID assigned to "FileGroupDescriptorW" by the client */
+ static int g_file_group_descriptor_format_id = -1;
+@@ -580,6 +583,7 @@
+     g_clipboard_owner_update_pending = 0;
+     g_clipboard_owner_update_time = CurrentTime;
+     g_clipboard_owner_update_time_valid = 0;
++    g_deferred_image_incr_last_progress_ns = 0;
+     clipboard_image_retry_cancel(&g_image_retry.policy);
+     g_image_retry.format_id = -1;
+     g_image_retry.format_generation = 0;
+@@ -743,6 +747,7 @@
+     g_clipboard_owner_update_pending = 0;
+     g_clipboard_owner_update_time = CurrentTime;
+     g_clipboard_owner_update_time_valid = 0;
++    g_deferred_image_incr_last_progress_ns = 0;
+     if (g_wnd != 0)
+     {
+         XDestroyWindow(g_display, g_wnd);
+@@ -1127,12 +1132,19 @@
+ static void
+ clipboard_restore_deferred_selection_owner(Time selection_time)
+ {
+     Window owner;
+ 
++    if ((!g_clip_c2s.incr_in_progress ||
++            g_clip_c2s.xrdp_clip_type != XRDP_CB_BITMAP) &&
++            !g_image_incr_terminator_pending)
++    {
++        g_deferred_image_incr_last_progress_ns = 0;
++    }
++
+     if (!g_clipboard_owner_update_pending ||
+             g_clip_c2s.incr_in_progress ||
+             g_clip_s2c.incr_in_progress ||
+             g_image_incr_terminator_pending)
+     {
+         return;
+     }
+@@ -1190,6 +1202,120 @@
+     }
+ }
+ 
++static int
++clipboard_deferred_image_incr_active(void)
++{
++    return g_clipboard_owner_update_pending &&
++           ((g_clip_c2s.incr_in_progress &&
++             g_clip_c2s.xrdp_clip_type == XRDP_CB_BITMAP) ||
++            g_image_incr_terminator_pending);
++}
++
++void
++clipboard_get_wait_timeout(int *timeout)
++{
++    unsigned long long now;
++    unsigned long long elapsed;
++    unsigned long long remaining_ns;
++    int requested_ms;
++
++    if (timeout == NULL || !clipboard_deferred_image_incr_active() ||
++            g_deferred_image_incr_last_progress_ns == 0)
++    {
++        return;
++    }
++
++    now = clipboard_monotonic_time_ns();
++    elapsed = now >= g_deferred_image_incr_last_progress_ns ?
++              now - g_deferred_image_incr_last_progress_ns : 0;
++    remaining_ns = elapsed >= DEFERRED_IMAGE_INCR_STALL_TIMEOUT_NS ? 0 :
++                   DEFERRED_IMAGE_INCR_STALL_TIMEOUT_NS - elapsed;
++    requested_ms = (int)((remaining_ns + 999999ULL) / 1000000ULL);
++    if (*timeout < 0 || requested_ms < *timeout)
++    {
++        *timeout = requested_ms;
++    }
++}
++
++int
++clipboard_check_wait_timeout(void)
++{
++    unsigned long long now;
++    Window requestor;
++    Atom property;
++    int active_incr;
++    int terminator_pending;
++    int bytes_sent;
++    int total_bytes;
++
++    if (!clipboard_deferred_image_incr_active() ||
++            g_deferred_image_incr_last_progress_ns == 0)
++    {
++        return 0;
++    }
++
++    now = clipboard_monotonic_time_ns();
++    if (now < g_deferred_image_incr_last_progress_ns ||
++            now - g_deferred_image_incr_last_progress_ns <
++                DEFERRED_IMAGE_INCR_STALL_TIMEOUT_NS)
++    {
++        return 0;
++    }
++
++    active_incr = g_clip_c2s.incr_in_progress;
++    terminator_pending = g_image_incr_terminator_pending;
++    requestor = active_incr ? g_clip_c2s.window :
++                g_image_incr_terminator_window;
++    property = active_incr ? g_clip_c2s.property :
++               g_image_incr_terminator_property;
++    bytes_sent = g_clip_c2s.incr_bytes_done;
++    total_bytes = g_clip_c2s.total_bytes;
++
++    if (active_incr && requestor != None && property != None)
++    {
++        /* The requestor accepted INCR but stopped acknowledging progress.
++         * End the stale transfer before releasing the replacement offer. */
++        XChangeProperty(g_display, requestor, property, g_clip_c2s.type, 8,
++                        PropModeReplace, NULL, 0);
++        XFlush(g_display);
++    }
++    if (requestor != None)
++    {
++        XSelectInput(g_display, requestor, NoEventMask);
++    }
++
++    LOG(LOG_LEVEL_WARNING,
++        "XRDP_CONSOLE_CLIPBOARD_IMAGE event=c2s-incr-aborted "
++        "reason=deferred-owner-progress-timeout requestor=0x%lx "
++        "property=0x%lx bytes_sent=%d total_bytes=%d "
++        "active_incr=%d terminator_pending=%d old_generation=%llu "
++        "new_generation=%llu stalled_ms=%llu",
++        requestor, property, bytes_sent, total_bytes, active_incr,
++        terminator_pending,
++        (unsigned long long)g_image_incr_terminator_generation,
++        (unsigned long long)g_clipboard_format_generation,
++        (now - g_deferred_image_incr_last_progress_ns) / 1000000ULL);
++
++    if (g_png_x11_transaction_active)
++    {
++        clipboard_png_digest_reset();
++    }
++    g_clip_c2s.incr_in_progress = 0;
++    g_clip_c2s.incr_bytes_done = 0;
++    g_clip_c2s.window = 0;
++    g_clip_c2s.property = None;
++    g_clip_c2s.converted = 0;
++    g_image_cached_generation = 0;
++    g_image_incr_terminator_pending = 0;
++    g_image_incr_terminator_window = 0;
++    g_image_incr_terminator_property = None;
++    g_image_incr_terminator_generation = 0;
++    g_deferred_image_incr_last_progress_ns = 0;
++    clipboard_refuse_image_waiters();
++    clipboard_restore_deferred_selection_owner(CurrentTime);
++    return 0;
++}
++
+ /*****************************************************************************/
+ static int
+ clipboard_provide_selection_c2s(XSelectionRequestEvent *req, Atom type)
+@@ -1776,6 +1902,19 @@
+     else if (g_clip_c2s.incr_in_progress || g_clip_s2c.incr_in_progress)
+     {
+         g_clipboard_owner_update_pending = 1;
++        if (g_clip_c2s.incr_in_progress &&
++                g_clip_c2s.xrdp_clip_type == XRDP_CB_BITMAP &&
++                g_deferred_image_incr_last_progress_ns == 0)
++        {
++            g_deferred_image_incr_last_progress_ns =
++                clipboard_monotonic_time_ns();
++        }
++        else if (g_image_incr_terminator_pending &&
++                 g_deferred_image_incr_last_progress_ns == 0)
++        {
++            g_deferred_image_incr_last_progress_ns =
++                clipboard_monotonic_time_ns();
++        }
+     }
+     else
+     {
+@@ -4162,6 +4292,11 @@
+             (xevent->xproperty.atom == g_clip_c2s.property) &&
+             (xevent->xproperty.state == PropertyDelete))
+     {
++        if (clipboard_deferred_image_incr_active())
++        {
++            g_deferred_image_incr_last_progress_ns =
++                clipboard_monotonic_time_ns();
++        }
+         LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_property_notify: INCR PropertyDelete");
+         if (g_clip_c2s.type == g_image_png_atom)
+         {
+@@ -4340,6 +4475,11 @@
+             xevent->xproperty.atom == g_image_incr_terminator_property &&
+             xevent->xproperty.state == PropertyDelete)
+     {
++        if (clipboard_deferred_image_incr_active())
++        {
++            g_deferred_image_incr_last_progress_ns =
++                clipboard_monotonic_time_ns();
++        }
+         diagnostic_state_match =
+             g_png_x11_transaction_active &&
+             g_png_x11_requestor == xevent->xproperty.window &&
+--- a/sesman/chansrv/clipboard.h
++++ b/sesman/chansrv/clipboard.h
+@@ -27,5 +27,7 @@
+ int clipboard_deinit(void);
+ int clipboard_data_in(struct stream *s, int chan_id, int chan_flags, int length, int total_length);
+ int clipboard_xevent(void *xevent);
++void clipboard_get_wait_timeout(int *timeout);
++int clipboard_check_wait_timeout(void);
+ 
+ #endif
+--- a/sesman/chansrv/xcommon.c
++++ b/sesman/chansrv/xcommon.c
+@@ -158,6 +158,10 @@
+     {
+         return 0;
+     }
++    if (g_clip_up && timeout != 0)
++    {
++        clipboard_get_wait_timeout(timeout);
++    }
+     lcount = *count;
+     objs[lcount] = g_x_wait_obj;
+     lcount++;
+@@ -189,5 +193,5 @@
+                       xevent.type);
+         }
+     }
+-    return 0;
++    return g_clip_up ? clipboard_check_wait_timeout() : 0;
+ }
