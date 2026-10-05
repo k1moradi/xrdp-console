@@ -5237,18 +5237,42 @@ def assert_popup_ui_stress_session(
                 minimum_observed_contrast, visible_frame[6])
 
             # Keep the menu stationary while the background continues to
-            # animate. Every sample checks its generation, structure and text.
-            stable_deadline = time.monotonic() + 0.25
+            # animate. Verify the capture timestamps span 250 ms; requiring a
+            # fixed number of samples in a 250 ms wall-clock loop makes the
+            # result depend on the cost of reading and analyzing the client ROI.
+            stable_deadline_ns = time.monotonic_ns() + 1_000_000_000
             stable_samples = 0
-            while time.monotonic() < stable_deadline:
-                frame = sample(0.5)
+            first_stable_sample_ns = None
+            last_stable_sample_ns = None
+            while (time.monotonic_ns() < stable_deadline_ns and
+                   (stable_samples < 2 or
+                    first_stable_sample_ns is None or
+                    last_stable_sample_ns - first_stable_sample_ns <
+                        250_000_000)):
+                remaining = max(
+                    0.01,
+                    (stable_deadline_ns - time.monotonic_ns()) /
+                    1_000_000_000)
+                frame = sample(min(0.5, remaining))
                 require_complete_menu(frame, expected_generation, cycle)
                 stable_samples += 1
+                if first_stable_sample_ns is None:
+                    first_stable_sample_ns = frame[0]
+                last_stable_sample_ns = frame[0]
                 time.sleep(0.015)
-            if stable_samples < 4:
+            stable_span_ms = (
+                0.0 if first_stable_sample_ns is None or
+                last_stable_sample_ns is None else
+                (last_stable_sample_ns - first_stable_sample_ns) / 1_000_000)
+            if (stable_samples < 2 or
+                    first_stable_sample_ns is None or
+                    last_stable_sample_ns is None or
+                    last_stable_sample_ns - first_stable_sample_ns <
+                        250_000_000):
                 fail(
-                    f"popup stayed valid for too few client samples at "
-                    f"cycle={cycle}: {stable_samples}")
+                    "popup did not remain verifiably current for 250 ms at "
+                    f"cycle={cycle}: samples={stable_samples} "
+                    f"span_ms={stable_span_ms:.1f}")
             stable_samples_total += stable_samples
             stable_quality, stable_quality_values = check_reference_quality(
                 cycle)
@@ -5366,7 +5390,9 @@ def assert_popup_ui_stress_session(
                 f"close_input_ns={close_ns},close_event_ns="
                 f"{close_event_ns},close_draw_done_ns={close_draw_ns},"
                 f"close_oracle_ns={closed_frame[0]},close_ms="
-                f"{close_latency_ms:.1f},open_quality="
+                f"{close_latency_ms:.1f},open_stable_samples="
+                f"{stable_samples},open_stable_span_ms={stable_span_ms:.1f},"
+                f"open_quality="
                 f"{last_reference_quality},closed_quality="
                 f"{last_closed_quality}")
 
