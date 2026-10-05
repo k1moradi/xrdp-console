@@ -5241,12 +5241,14 @@ def assert_popup_ui_stress_session(
             # fixed number of samples in a 250 ms wall-clock loop makes the
             # result depend on the cost of reading and analyzing the client ROI.
             stable_deadline_ns = time.monotonic_ns() + 1_000_000_000
+            minimum_stable_samples = 3
             stable_samples = 0
             first_stable_sample_ns = None
             last_stable_sample_ns = None
             while (time.monotonic_ns() < stable_deadline_ns and
-                   (stable_samples < 2 or
+                   (stable_samples < minimum_stable_samples or
                     first_stable_sample_ns is None or
+                    last_stable_sample_ns is None or
                     last_stable_sample_ns - first_stable_sample_ns <
                         250_000_000)):
                 remaining = max(
@@ -5264,7 +5266,7 @@ def assert_popup_ui_stress_session(
                 0.0 if first_stable_sample_ns is None or
                 last_stable_sample_ns is None else
                 (last_stable_sample_ns - first_stable_sample_ns) / 1_000_000)
-            if (stable_samples < 2 or
+            if (stable_samples < minimum_stable_samples or
                     first_stable_sample_ns is None or
                     last_stable_sample_ns is None or
                     last_stable_sample_ns - first_stable_sample_ns <
