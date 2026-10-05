@@ -66,8 +66,7 @@ if(XRDP_CONSOLE_ENABLE_CODEC_BENCH)
     if(XRDP_CONSOLE_BUILD_XRDP)
         set(RFXCODEC_INCLUDE_DIR
             "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/include")
-        set(RFXCODEC_LIBRARY
-            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/librfxencode.a")
+        set(RFXCODEC_LIBRARY xrdp-rfxencode)
     else()
         find_path(RFXCODEC_INCLUDE_DIR rfxcodec_encode.h)
         find_library(RFXCODEC_LIBRARY NAMES rfxencode)

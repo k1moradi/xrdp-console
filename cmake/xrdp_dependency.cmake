@@ -157,6 +157,23 @@ if(XRDP_CONSOLE_RUN_XRDP_TESTS)
             -P "${CMAKE_SOURCE_DIR}/cmake/run_xrdp_tests.cmake")
 endif()
 
+set(_xrdp_installed_byproducts
+    "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+    "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libxrdp.so"
+    "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libcommon.so"
+    "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/librfxencode.a")
+if(CMAKE_VERSION VERSION_GREATER_EQUAL "3.26")
+    # These files are created by `make install`, not by the build step.
+    set(_xrdp_install_output_arguments
+        INSTALL_BYPRODUCTS ${_xrdp_installed_byproducts})
+else()
+    # CMake before 3.26 cannot model install-step byproducts. Consumers of
+    # these installed files also depend on the complete xrdp_upstream target
+    # below, so they cannot race the install step.
+    set(_xrdp_install_output_arguments
+        BUILD_BYPRODUCTS ${_xrdp_installed_byproducts})
+endif()
+
 ExternalProject_Add(xrdp_upstream
     PREFIX "${CMAKE_BINARY_DIR}/xrdp_upstream-${_xrdp_state_tag}-prefix"
     URL "${XRDP_CONSOLE_XRDP_SOURCE_URL}"
@@ -185,11 +202,7 @@ ExternalProject_Add(xrdp_upstream
     # install relink rewrites those references to the private install prefix;
     # retain it rather than filtering or suppressing these expected notices.
     INSTALL_COMMAND "${XRDP_CONSOLE_MAKE_PROGRAM}" install "${_xrdp_make_flags}"
-    BUILD_BYPRODUCTS
-        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
-        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libxrdp.so"
-        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libcommon.so"
-        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/librfxencode.a"
+    ${_xrdp_install_output_arguments}
     USES_TERMINAL_CONFIGURE TRUE
     USES_TERMINAL_BUILD TRUE
     USES_TERMINAL_TEST TRUE
@@ -198,6 +211,14 @@ ExternalProject_Add(xrdp_upstream
 if(XRDP_CONSOLE_RUN_XRDP_TESTS)
     ExternalProject_Add_StepTargets(xrdp_upstream test)
 endif()
+
+# Keep the installed archive's full build-and-install ordering attached to the
+# library abstraction. Ninja otherwise sees an installed archive declared as
+# an ExternalProject build byproduct and may start a consumer before install.
+add_library(xrdp-rfxencode STATIC IMPORTED GLOBAL)
+set_target_properties(xrdp-rfxencode PROPERTIES
+    IMPORTED_LOCATION "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/librfxencode.a")
+add_dependencies(xrdp-rfxencode xrdp_upstream)
 
 message(STATUS "xrdp ${XRDP_CONSOLE_XRDP_VERSION} will build natively with: ${XRDP_CONSOLE_XRDP_CFLAGS}")
 message(STATUS "xrdp patchset hash: ${_xrdp_patchset_hash}")

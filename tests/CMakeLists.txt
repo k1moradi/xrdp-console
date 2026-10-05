@@ -235,8 +235,7 @@ if(TARGET xrdp-console)
     target_include_directories(rfx-encoder-unit PRIVATE
         ${CMAKE_SOURCE_DIR}/src
         ${XRDP_CONSOLE_RFXCODEC_INCLUDE_DIRS})
-    target_link_libraries(rfx-encoder-unit PRIVATE
-        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/librfxencode.a")
+    target_link_libraries(rfx-encoder-unit PRIVATE xrdp-rfxencode)
     add_test(NAME rfx-encoder-unit COMMAND rfx-encoder-unit)
 
     add_executable(rfx-capability-policy-unit

@@ -123,7 +123,7 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         PkgConfig::XRDP_CONSOLE_XCB_XINPUT
         PkgConfig::XRDP_CONSOLE_XCB_XTEST
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libxrdp.so"
-        "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/librfxencode.a"
+        xrdp-rfxencode
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libcommon.so")
     set_target_properties(xrdp-console PROPERTIES
         BUILD_RPATH
