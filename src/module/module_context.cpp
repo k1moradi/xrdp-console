@@ -1054,8 +1054,6 @@ struct ModuleContext::Impl
         std::uint64_t serviceCalls{};
         std::uint64_t maximumCallsPerTurn{};
         std::uint64_t maximumServiceTurnUs{};
-        std::array<std::uint64_t, 1024> serviceTurnDurationsUs{};
-        std::size_t serviceTurnDurationCount{};
         bool active{};
         bool completionPending{};
     };
@@ -1154,31 +1152,8 @@ struct ModuleContext::Impl
             static_cast<std::uint64_t>(calls));
         interactionTrace.maximumServiceTurnUs = std::max(
             interactionTrace.maximumServiceTurnUs, turnUs);
-        if (interactionTrace.serviceTurnDurationCount <
-            interactionTrace.serviceTurnDurationsUs.size())
-        {
-            interactionTrace.serviceTurnDurationsUs[
-                interactionTrace.serviceTurnDurationCount] = turnUs;
-            ++interactionTrace.serviceTurnDurationCount;
-        }
-
         if (interactionTrace.completionPending)
         {
-            auto sortedDurations =
-                interactionTrace.serviceTurnDurationsUs;
-            const std::size_t durationCount =
-                interactionTrace.serviceTurnDurationCount;
-            const bool serviceTurnSamplesComplete =
-                interactionTrace.serviceTurns == durationCount;
-            std::uint64_t p95ServiceTurnUs = 0U;
-            if (serviceTurnSamplesComplete && durationCount != 0U)
-            {
-                std::sort(sortedDurations.data(),
-                          sortedDurations.data() + durationCount);
-                const std::size_t p95Index =
-                    (95U * durationCount + 99U) / 100U - 1U;
-                p95ServiceTurnUs = sortedDurations[p95Index];
-            }
             log_message(
                 LOG_LEVEL_INFO,
                 "XRDP_CONSOLE_INTERACTION_TRACE event=epoch-complete "
@@ -1190,9 +1165,7 @@ struct ModuleContext::Impl
                 "snapshot_refreshes=%llu priority_captures=%llu "
                 "priority_submissions=%llu service_turns=%llu "
                 "service_calls=%llu max_calls_per_turn=%llu "
-                "service_turn_p95_us=%llu max_service_turn_us=%llu "
-                "service_turn_samples=%llu "
-                "service_turn_samples_complete=%d",
+                "max_service_turn_us=%llu",
                 static_cast<unsigned long long>(interactionTrace.epoch),
                 interactionTrace.inputReceivedNs,
                 interactionTrace.interactionArmedNs,
@@ -1215,11 +1188,8 @@ struct ModuleContext::Impl
                 static_cast<unsigned long long>(interactionTrace.serviceCalls),
                 static_cast<unsigned long long>(
                     interactionTrace.maximumCallsPerTurn),
-                static_cast<unsigned long long>(p95ServiceTurnUs),
                 static_cast<unsigned long long>(
-                    interactionTrace.maximumServiceTurnUs),
-                static_cast<unsigned long long>(durationCount),
-                serviceTurnSamplesComplete ? 1 : 0);
+                    interactionTrace.maximumServiceTurnUs));
             interactionTrace.active = false;
             interactionTrace.completionPending = false;
         }

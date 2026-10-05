@@ -8,7 +8,6 @@
 using xrdp_console::module::h264CapturePassesPerService;
 using xrdp_console::module::h264ServiceSliceExpired;
 using xrdp_console::module::kMaximumH264ServiceSlice;
-using xrdp_console::module::kMaximumScaledH264PassesPerService;
 using xrdp_console::module::H264ServiceClock;
 
 namespace
@@ -26,7 +25,7 @@ check(bool condition, const char *message)
 }
 
 bool
-scaled_h264_uses_a_configured_hard_pass_cap()
+scaled_h264_yields_after_one_capture_pass()
 {
     constexpr std::uint64_t maximumPixels = 128U * 1024U;
     constexpr PixelSize source{1920, 1080};
@@ -38,8 +37,8 @@ scaled_h264_uses_a_configured_hard_pass_cap()
         const std::size_t passes = h264CapturePassesPerService(
             source, frame, maximumPixels);
         success &= check(
-            passes == kMaximumScaledH264PassesPerService,
-            "scaled H.264 must obey its configured hard pass cap");
+            passes == 1U,
+            "scaled H.264 must yield after one capture pass");
     }
     return success;
 }
@@ -90,7 +89,7 @@ h264_service_slice_uses_a_monotonic_deadline()
 int
 main()
 {
-    return scaled_h264_uses_a_configured_hard_pass_cap() &&
+    return scaled_h264_yields_after_one_capture_pass() &&
                    identity_and_upscaled_paths_keep_their_budgets() &&
                    h264_service_slice_uses_a_monotonic_deadline()
                ? 0
