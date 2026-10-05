@@ -5341,15 +5341,18 @@ def assert_popup_ui_stress_session(
             close_latencies_ms.append(close_latency_ms)
 
             # Keep the source underlay fixed while collecting passing client
-            # captures spanning at least 250 ms. The pixel comparison itself
-            # is relatively expensive, so bound collection by one second and
-            # measure the actual capture timestamps rather than sleeping.
+            # captures spanning at least 250 ms. The capture which first
+            # converged to the closed reference is already a validated sample;
+            # carry it into this stability interval rather than discarding it.
+            # The pixel comparison itself is relatively expensive, so bound
+            # additional collection by one second and use capture timestamps.
             closed_stable_deadline_ns = time.monotonic_ns() + 1_000_000_000
-            closed_stable_samples = 0
-            first_closed_sample_ns = None
-            last_closed_sample_ns = None
+            minimum_closed_stable_samples = 3
+            closed_stable_samples = 1
+            first_closed_sample_ns = closed_frame[0]
+            last_closed_sample_ns = closed_frame[0]
             while (time.monotonic_ns() < closed_stable_deadline_ns and
-                   (closed_stable_samples < 2 or
+                   (closed_stable_samples < minimum_closed_stable_samples or
                     first_closed_sample_ns is None or
                     last_closed_sample_ns - first_closed_sample_ns <
                         250_000_000)):
@@ -5369,7 +5372,7 @@ def assert_popup_ui_stress_session(
                 if first_closed_sample_ns is None:
                     first_closed_sample_ns = frame[0]
                 last_closed_sample_ns = frame[0]
-            if (closed_stable_samples < 2 or
+            if (closed_stable_samples < minimum_closed_stable_samples or
                     first_closed_sample_ns is None or
                     last_closed_sample_ns is None or
                     last_closed_sample_ns - first_closed_sample_ns <
