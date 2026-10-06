@@ -149,14 +149,37 @@ def fallback_control_line(*, generation: int, latest_generation: int,
 
 
 def image_transaction_outcome(
-        events: list[dict[str, object]], capture_error: str | None
+        events: list[dict[str, object]], capture_error: str | None,
+        clipboard_transaction: dict[str, object] | None = None
         ) -> dict[str, object]:
+    if capture_error is not None and "generation replaced" in capture_error:
+        return {"status": "generation-replaced", "reason": capture_error}
+    if clipboard_transaction is not None:
+        image_transactions = clipboard_transaction.get(
+            "image_transactions", [])
+        if isinstance(image_transactions, list):
+            replaced_request = next((item for item in image_transactions
+                                     if isinstance(item, dict) and
+                                     item.get(
+                                         "x11_request_generation_matches_active")
+                                     is False), None)
+            if replaced_request is not None:
+                target = replaced_request.get("target", "image")
+                observed_generation = replaced_request.get(
+                    "observed_x11_request_generation")
+                active_generation = clipboard_transaction.get(
+                    "active_clipboard_generation")
+                return {
+                    "status": "generation-replaced",
+                    "reason": (
+                        f"{target} X11 request belongs to clipboard "
+                        f"generation {observed_generation}, not active "
+                        f"generation {active_generation}"),
+                }
     if capture_error == "no installed image-bearing Format List before timeout":
         return {"status": "no-trigger", "reason": capture_error}
     if capture_error == "image clipboard transaction deadline expired":
         return {"status": "transaction-timeout", "reason": capture_error}
-    if capture_error is not None and "generation replaced" in capture_error:
-        return {"status": "generation-replaced", "reason": capture_error}
     if capture_error is not None and "PNG-to-BMP fallback" in capture_error:
         return {"status": "fallback-cancelled", "reason": capture_error}
     if (capture_error is not None and
@@ -193,11 +216,13 @@ def image_transaction_outcome(
     return {"status": "not-started" if not events else "incomplete"}
 
 
-def probe_exit_is_expected(exit_status: int | None,
-                           transaction_outcome_error: bool) -> bool:
-    if exit_status in (None, 0, 1):
+def probe_exit_is_expected(helper_started: bool, exit_status: int | None,
+                           termination_requested_by_runner: bool) -> bool:
+    if not helper_started:
+        return exit_status is None
+    if exit_status in (0, 1):
         return True
-    return (transaction_outcome_error and
+    return (termination_requested_by_runner and
             exit_status == -signal.SIGTERM)
 
 
@@ -830,8 +855,10 @@ def build_sealed_transaction_report(
                       if event.get("event") == "selection_notify"]
     probe_results = [event for event in probe_events
                      if event.get("event") == "selection_result"]
-    all_x11 = [entry for entry in chansrv.get("x11_selection_requests", [])
-               if _metadata_fields(entry).get("generation") == generation_text]
+    all_x11 = list(chansrv.get("x11_selection_requests", []))
+    generation_x11 = [entry for entry in all_x11
+                      if _metadata_fields(entry).get("generation") ==
+                      generation_text]
     all_format_requests = [entry for entry in
                            chansrv.get("format_data_requests", [])]
     all_format_responses = [entry for entry in
@@ -862,6 +889,7 @@ def build_sealed_transaction_report(
         if _metadata_fields(entry).get("generation") == generation_text]
 
     image_targets = ("image/png", "image/bmp")
+    generation_replaced_by_x11_request = False
     target_format_ids = {
         "image/png": _integer(offer_fields.get("png_format_id")),
         "image/bmp": (_integer(offer_fields.get("dib_format_id"))
@@ -879,18 +907,46 @@ def build_sealed_transaction_report(
                                   event, target, targets_requestor)), None)
         requestor = (str(probe_request.get("requestor", "")).lower()
                      if isinstance(probe_request, dict) else None)
-        x11_request = next((entry for entry in all_x11
+        probe_request_ns = (_integer(probe_request.get("monotonic_ns"))
+                            if isinstance(probe_request, dict) else None)
+        probe_result = next((event for event in probe_results
+                             if _probe_event_matches(
+                                 event, target, requestor)), None)
+        result_end_ns = (_integer(probe_result.get(
+            "completed_monotonic_ns"))
+            if isinstance(probe_result, dict) else None)
+        transaction_end_ns = (_integer(end_marker.get("monotonic_ns"))
+                              if isinstance(end_marker, dict) else None)
+        request_upper_ns = result_end_ns or transaction_end_ns
+        matching_x11_requests = [
+            entry for entry in all_x11
+            if _metadata_fields(entry).get("target") == target
+            and _metadata_fields(entry).get("requestor", "").lower() ==
+            (requestor or "")
+            and _metadata_fields(entry).get("owner", "").lower() ==
+            owner_normalized]
+        x11_request = next((entry for entry in generation_x11
                             if _metadata_fields(entry).get("target") == target
                             and _metadata_fields(entry).get("requestor", "").lower()
                             == (requestor or "")
                             and _metadata_fields(entry).get("owner", "").lower()
                             == owner_normalized), None)
+        replaced_x11_request = None
+        if probe_request_ns is not None and request_upper_ns is not None:
+            for entry in matching_x11_requests:
+                fields = _metadata_fields(entry)
+                event_generation = _integer(fields.get("generation"))
+                event_ns = _integer(fields.get("mono_ns"))
+                if (event_generation is not None and
+                        event_generation > generation and event_ns is not None and
+                        probe_request_ns <= event_ns <= request_upper_ns):
+                    replaced_x11_request = entry
+                    break
+        if replaced_x11_request is not None:
+            generation_replaced_by_x11_request = True
         x11_fields = _metadata_fields(x11_request)
         x11_request_ns = _integer(x11_fields.get("mono_ns"))
         property_xid = x11_fields.get("property")
-        probe_result = next((event for event in probe_results
-                             if _probe_event_matches(
-                                 event, target, requestor)), None)
         probe_notify = next((event for event in probe_notifies
                              if _probe_event_matches(
                                  event, target, requestor)), None)
@@ -1006,18 +1062,26 @@ def build_sealed_transaction_report(
                 retained_chansrv["format_data_responses"].append(
                     _public_chansrv_event(response_entry))
 
+        report_x11_request = (replaced_x11_request
+                              if replaced_x11_request is not None
+                              else x11_request)
         if isinstance(probe_request, dict):
             target_probe_requestor = str(probe_request.get("requestor", "")).lower()
-            for entry in all_x11:
+            for entry in (*generation_x11,
+                          *((replaced_x11_request,)
+                            if replaced_x11_request is not None else ())):
                 fields = _metadata_fields(entry)
                 if (fields.get("target") == target and
                         fields.get("requestor", "").lower() == target_probe_requestor and
                         fields.get("owner", "").lower() == owner_normalized):
-                    retained_chansrv["x11_selection_requests"].append(
-                        _public_chansrv_event(entry))
+                    public_entry = _public_chansrv_event(entry)
+                    if public_entry not in retained_chansrv[
+                            "x11_selection_requests"]:
+                        retained_chansrv["x11_selection_requests"].append(
+                            public_entry)
 
         if target == "image/png" and targets_requestor is not None:
-            for entry in all_x11:
+            for entry in generation_x11:
                 fields = _metadata_fields(entry)
                 if (fields.get("target") == "TARGETS" and
                         fields.get("requestor", "").lower() == targets_requestor and
@@ -1088,7 +1152,10 @@ def build_sealed_transaction_report(
         successful_cliprdr_response = any(
             bool(attempt.get("successful_CLIPRDR_image_response"))
             for attempt in attempts)
-        if target not in target_names:
+        if replaced_x11_request is not None:
+            completion_reason = (
+                "clipboard-generation-replaced-before-X11-image-request")
+        elif target not in target_names:
             completion_reason = "image-target-not-advertised-in-X11-TARGETS"
         elif probe_request is None:
             completion_reason = "probe-did-not-issue-image-SelectionRequest"
@@ -1118,10 +1185,16 @@ def build_sealed_transaction_report(
             "target": target,
             "target_in_X11_TARGETS": target in target_names,
             "requested_format_id": format_id,
+            "observed_x11_request_generation": (
+                _integer(_metadata_fields(report_x11_request).get("generation"))
+                if isinstance(report_x11_request, dict) else None),
+            "x11_request_generation_matches_active": (
+                _metadata_fields(report_x11_request).get("generation") ==
+                generation_text if isinstance(report_x11_request, dict) else None),
             "probe_selection_request": probe_request,
             "chansrv_x11_selection_request": (
-                _public_chansrv_event(x11_request)
-                if isinstance(x11_request, dict) else None),
+                _public_chansrv_event(report_x11_request)
+                if isinstance(report_x11_request, dict) else None),
             "probe_selection_notify": probe_notify,
             "chansrv_request_attempts": attempts,
             "chansrv_x11_delivery": [
@@ -1186,7 +1259,8 @@ def build_sealed_transaction_report(
             "targets": targets_result,
             "image_transactions": image_transactions,
             "generation_replaced_during_window": (
-                generation_replaced_during_window),
+                generation_replaced_during_window or
+                generation_replaced_by_x11_request),
             "generic_request_correlation": protocol_chansrv[
                 "generic_request_correlation"],
         },
@@ -1234,13 +1308,13 @@ def discard_raw_capture_artifacts(metadata: dict[str, object],
     }
 
 
-def stop_process(process: subprocess.Popen[bytes] | None) -> None:
+def stop_process(process: subprocess.Popen[bytes] | None) -> bool:
     if process is None or process.poll() is not None:
-        return
+        return False
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
-        return
+        return False
     try:
         process.wait(timeout=2.0)
     except subprocess.TimeoutExpired:
@@ -1249,6 +1323,7 @@ def stop_process(process: subprocess.Popen[bytes] | None) -> None:
         except ProcessLookupError:
             pass
         process.wait(timeout=2.0)
+    return True
 
 
 def read_boot_id() -> str | None:
@@ -1405,6 +1480,7 @@ def main() -> int:
         helper_environment["DISPLAY"] = arguments.display
     helper_process: subprocess.Popen[bytes] | None = None
     helper_capture: BoundedPipeCapture | None = None
+    helper_termination_requested_by_runner = False
     capture_error: str | None = None
     helper_command: list[str] | None = None
     trigger_reader = ChansrvFormatListTrigger()
@@ -1481,7 +1557,9 @@ def main() -> int:
             ready_timeout = min(10.0, remaining_ms / 1000.0)
             if not helper_capture.ready.wait(timeout=ready_timeout):
                 capture_error = "probe did not report ready within 10 seconds"
-                stop_process(helper_process)
+                helper_termination_requested_by_runner = (
+                    stop_process(helper_process) or
+                    helper_termination_requested_by_runner)
             else:
                 while helper_process.poll() is None:
                     appended_lines = chansrv_window.read_appended_lines()
@@ -1504,12 +1582,16 @@ def main() -> int:
                             helper_process.stdin.flush()
                             fallback_control_sent = True
                         else:
-                            stop_process(helper_process)
+                            helper_termination_requested_by_runner = (
+                                stop_process(helper_process) or
+                                helper_termination_requested_by_runner)
                             break
                     if chansrv_window.monitor_truncated:
                         capture_error = (
                             "chansrv trigger monitor exceeded its byte bound")
-                        stop_process(helper_process)
+                        helper_termination_requested_by_runner = (
+                            stop_process(helper_process) or
+                            helper_termination_requested_by_runner)
                         break
                     if (helper_capture.fallback_bmp_pending.is_set() and
                             not fallback_control_sent):
@@ -1538,7 +1620,9 @@ def main() -> int:
                         if helper_process.stdin is None:
                             capture_error = (
                                 "probe fallback authorization pipe is unavailable")
-                            stop_process(helper_process)
+                            helper_termination_requested_by_runner = (
+                                stop_process(helper_process) or
+                                helper_termination_requested_by_runner)
                             break
                         helper_process.stdin.write(command.encode("ascii"))
                         helper_process.stdin.flush()
@@ -1548,12 +1632,16 @@ def main() -> int:
                         transaction_deadline_ns)
                     if timeout_reason is not None:
                         capture_error = timeout_reason
-                        stop_process(helper_process)
+                        helper_termination_requested_by_runner = (
+                            stop_process(helper_process) or
+                            helper_termination_requested_by_runner)
                         break
                     time.sleep(0.02)
     except (OSError, RuntimeError) as error:
         capture_error = str(error)
-        stop_process(helper_process)
+        helper_termination_requested_by_runner = (
+            stop_process(helper_process) or
+            helper_termination_requested_by_runner)
 
     if (helper_process is not None and helper_process.poll() is not None and
             helper_capture is not None and active_trigger is not None):
@@ -1668,7 +1756,8 @@ def main() -> int:
     retained_probe_events = sealed_protocol["probe_events"]
     retained = len(protocol["cliprdr_packets"])
     transaction = sealed_protocol["clipboard_transaction"]
-    image_outcome = image_transaction_outcome(probe_events, capture_error)
+    image_outcome = image_transaction_outcome(
+        probe_events, capture_error, transaction)
     valid_outcome_errors = {
         "no installed image-bearing Format List before timeout",
         "image clipboard transaction deadline expired",
@@ -1682,7 +1771,9 @@ def main() -> int:
                           if helper_process is not None else None)
     capture_execution_failed = (
         not journal_started or journal_exit_status is not None or
-        not probe_exit_is_expected(helper_exit_status, outcome_error) or
+        not probe_exit_is_expected(
+            helper_process is not None, helper_exit_status,
+            helper_termination_requested_by_runner) or
         (helper_exit_status == 1 and not probe_events) or
         bool(chansrv_metadata.get("capture_truncated")) or
         bool(chansrv_metadata.get("raw_metadata_artifacts_retained")) or

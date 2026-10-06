@@ -130,15 +130,18 @@ class ClipboardCaptureTests(unittest.TestCase):
 
     def test_expected_bounded_probe_termination_is_not_capture_failure(self) -> None:
         capture = load_capture_module(Path(sys.argv[1]))
-        self.assertTrue(capture.probe_exit_is_expected(None, False))
-        self.assertTrue(capture.probe_exit_is_expected(0, False))
-        self.assertTrue(capture.probe_exit_is_expected(1, False))
+        self.assertTrue(capture.probe_exit_is_expected(False, None, False))
+        self.assertFalse(capture.probe_exit_is_expected(False, 0, False))
+        self.assertFalse(capture.probe_exit_is_expected(True, None, False))
+        self.assertTrue(capture.probe_exit_is_expected(True, 0, False))
+        self.assertTrue(capture.probe_exit_is_expected(True, 1, False))
         self.assertTrue(capture.probe_exit_is_expected(
-            -signal.SIGTERM, True))
+            True, -signal.SIGTERM, True))
         self.assertFalse(capture.probe_exit_is_expected(
-            -signal.SIGTERM, False))
+            True, -signal.SIGTERM, False))
         self.assertFalse(capture.probe_exit_is_expected(
-            -signal.SIGKILL, True))
+            True, -signal.SIGKILL, True))
+        self.assertFalse(capture.probe_exit_is_expected(True, 2, True))
 
     def test_journal_capture_keeps_only_sanitized_cliprdr_metadata(self) -> None:
         capture = load_capture_module(Path(sys.argv[1]))
@@ -753,6 +756,125 @@ class ClipboardCaptureTests(unittest.TestCase):
             self.assertEqual([packet["msg_type"] for packet in
                               report["protocol_summary"]["cliprdr_packets"]],
                              [4, 5])
+
+    def test_same_owner_bmp_fallback_is_not_attributed_to_replaced_generation(self) -> None:
+        with tempfile.TemporaryDirectory(
+                prefix="clipboard-same-owner-generation-race-") as raw:
+            root = Path(raw)
+            capture = load_capture_module(Path(sys.argv[1]))
+            owner = "0x1200002"
+            requestor = "0x2400011"
+            markers = {
+                "test_id": "f5d8e6a1-2db8-4cb2-ae13-667712345678",
+                "realtime": "2026-10-06T10:02:00Z",
+                "realtime_ns": 5_000_000,
+                "monotonic_ns": 1_000,
+            }
+            chansrv = {
+                "format_lists": [{
+                    "fields": {"generation": "50", "png_format_id": "40005",
+                               "dib_format_id": "8", "dibv5_format_id": "-1"},
+                    "recognized_formats": [
+                        {"id": 40005, "name": "PNG"},
+                        {"id": 8, "name": "CF_DIB"}],
+                    "advertised_formats": [
+                        {"id": "0x00009c45", "name": "PNG"},
+                        {"id": "0x00000008", "name": "CF_DIB"}],
+                    "advertised_format_details_complete": True,
+                }],
+                "selection_owner_installs": [{
+                    "fields": {"generation": "50", "owner": owner,
+                               "chansrv_window": owner,
+                               "result": "installed"}},
+                    {"fields": {"generation": "51", "owner": owner,
+                                 "chansrv_window": owner,
+                                 "result": "installed"}},
+                ],
+                "x11_selection_requests": [
+                    {"fields": {"generation": "50", "target": "TARGETS",
+                                "requestor": requestor, "owner": owner,
+                                "mono_ns": "1100"}},
+                    {"fields": {"generation": "50", "target": "image/png",
+                                "requestor": requestor, "owner": owner,
+                                "property": "0x3001", "mono_ns": "1200"}},
+                    {"fields": {"generation": "51", "target": "image/bmp",
+                                "requestor": requestor, "owner": owner,
+                                "property": "0x3002", "mono_ns": "1500"}},
+                ],
+                "format_data_requests": [{
+                    "fields": {"event": "request", "format_id": "40005",
+                               "target": "image/png", "attempt": "1",
+                               "mono_ns": "1300"}},
+                ],
+                "format_data_responses": [{
+                    "fields": {"event": "response", "status": "0x2",
+                               "bytes": "0", "format_id": "40005",
+                               "attempt": "1", "mono_ns": "1400"}},
+                ],
+                "x11_targets_responses": [{
+                    "fields": {"event": "targets-response-issued",
+                               "generation": "50", "requestor": requestor,
+                               "result": "0"}},
+                ],
+                "x11_deliveries": [{
+                    "fields": {"event": "x11-delivery-issued",
+                               "generation": "51", "target": "image/bmp",
+                               "requestor": requestor, "owner": owner,
+                               "property": "0x3002", "path": "direct",
+                               "bytes": "64"}},
+                ],
+                "x11_incr_events": [],
+                "generic_request_correlation": "single outstanding request",
+            }
+            probe_events = [
+                {"event": "selection_request", "requestor": requestor,
+                 "owner": owner, "request_serial": 1, "target": "TARGETS",
+                 "monotonic_ns": 1_100},
+                {"event": "targets_result", "requestor": requestor,
+                 "owner": owner, "request_serial": 1,
+                 "targets": ["TARGETS", "image/png", "image/bmp"],
+                 "result": "success", "monotonic_ns": 1_150},
+                {"event": "selection_request", "requestor": requestor,
+                 "owner": owner, "request_serial": 2, "target": "image/png",
+                 "monotonic_ns": 1_200},
+                {"event": "selection_result", "requestor": requestor,
+                 "owner": owner, "request_serial": 2, "target": "image/png",
+                 "result": "failure", "reason": "selection-notify-none",
+                 "bytes": 0, "request_started_ns": 1_200,
+                 "completed_monotonic_ns": 1_450},
+                {"event": "fallback_bmp_authorized", "generation": 50,
+                 "owner": owner, "monotonic_ns": 1_460},
+                {"event": "selection_request", "requestor": requestor,
+                 "owner": owner, "request_serial": 3, "target": "image/bmp",
+                 "monotonic_ns": 1_470},
+                {"event": "selection_result", "requestor": requestor,
+                 "owner": owner, "request_serial": 3, "target": "image/bmp",
+                 "result": "success", "path": "immediate", "bytes": 64,
+                 "request_started_ns": 1_470,
+                 "completed_monotonic_ns": 1_600},
+            ]
+            report = capture.build_sealed_transaction_report(
+                test_id=markers["test_id"], generation=50, owner=owner,
+                begin_marker=markers,
+                end_marker={**markers, "monotonic_ns": 1_700},
+                chansrv=chansrv, probe_events=probe_events,
+                cliprdr_packets=[], journal_window_path=root / "journal.jsonl")
+
+            transaction = report["clipboard_transaction"]
+            _, bmp = transaction["image_transactions"]
+            self.assertEqual(transaction["active_clipboard_generation"], 50)
+            self.assertEqual(transaction["x11_owner_xid"], owner)
+            self.assertTrue(transaction["generation_replaced_during_window"])
+            self.assertEqual(bmp["observed_x11_request_generation"], 51)
+            self.assertFalse(bmp["x11_request_generation_matches_active"])
+            self.assertEqual(bmp["probe_result"]["result"], "success")
+            self.assertEqual(
+                bmp["completion_or_failure_reason"],
+                "clipboard-generation-replaced-before-X11-image-request")
+            outcome = capture.image_transaction_outcome(
+                probe_events, None, transaction)
+            self.assertEqual(outcome["status"], "generation-replaced")
+            self.assertNotEqual(outcome["status"], "image-data-delivered")
 
     def test_sealed_report_keeps_unanswered_image_request_as_timeout(self) -> None:
         with tempfile.TemporaryDirectory(prefix="clipboard-sealed-timeout-") as raw:
