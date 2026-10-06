@@ -99,20 +99,11 @@ convertFourBgraPixelsSsse3(const std::uint8_t *source) noexcept
     const __m128i pixels =
         _mm_loadu_si128(reinterpret_cast<const __m128i *>(source));
     const __m128i zero = _mm_setzero_si128();
-    // Gather each BGRA channel directly into the 16-bit lanes consumed by
-    // the conversion arithmetic instead of shifting/masking 32-bit pixels
-    // and packing them down afterward.
-    const __m128i blue16 = _mm_shuffle_epi8(
-        pixels,
-        _mm_setr_epi8(0, -1, 4, -1, 8, -1, 12, -1,
-                      -1, -1, -1, -1, -1, -1, -1, -1));
+    // Luma needs G widened because its effective coefficient includes +256G.
+    // U/V stay packed and use SSSE3 pairwise multiply-add below.
     const __m128i green16 = _mm_shuffle_epi8(
         pixels,
         _mm_setr_epi8(1, -1, 5, -1, 9, -1, 13, -1,
-                      -1, -1, -1, -1, -1, -1, -1, -1));
-    const __m128i red16 = _mm_shuffle_epi8(
-        pixels,
-        _mm_setr_epi8(2, -1, 6, -1, 10, -1, 14, -1,
                       -1, -1, -1, -1, -1, -1, -1, -1));
 
     // 54R + 183G + 18B = 256G + 54R - 73G + 18B. The signed
@@ -127,24 +118,32 @@ convertFourBgraPixelsSsse3(const std::uint8_t *source) noexcept
     const __m128i lumaTerms = _mm_hadd_epi16(lumaPairSums, zero);
     __m128i y = _mm_add_epi16(_mm_srai_epi16(lumaTerms, 8), green16);
 
-    __m128i u = _mm_add_epi16(
-        _mm_add_epi16(_mm_mullo_epi16(red16, _mm_set1_epi16(-29)),
-                      _mm_mullo_epi16(green16, _mm_set1_epi16(-99))),
-        _mm_mullo_epi16(blue16, _mm_set1_epi16(128)));
+    // PMADDUBSW's signed-byte coefficient cannot encode +128, so form the
+    // negated U/V expressions and negate the 16-bit result:
+    //
+    //   -( -128B +  99G + 29R ) = 128B -  99G - 29R
+    //   -(   12B + 116G -128R ) = 128R - 116G - 12B
+    //
+    // Every PMADDUBSW pair and PHADDW final sum is within +/-32640. Therefore
+    // pairwise saturation cannot occur, negation cannot overflow, and the
+    // arithmetic shift exactly preserves the scalar floor division. The
+    // resulting U/V values are already in [0,255], so no clamp pack/unpack is
+    // required before the 2x2 chroma average.
+    const __m128i uNegCoefficients =
+        _mm_setr_epi8(-128, 99, 29, 0, -128, 99, 29, 0,
+                      -128, 99, 29, 0, -128, 99, 29, 0);
+    __m128i u = _mm_hadd_epi16(
+        _mm_maddubs_epi16(pixels, uNegCoefficients), zero);
+    u = _mm_sub_epi16(zero, u);
     u = _mm_add_epi16(_mm_srai_epi16(u, 8), _mm_set1_epi16(128));
 
-    __m128i v = _mm_add_epi16(
-        _mm_add_epi16(_mm_mullo_epi16(red16, _mm_set1_epi16(128)),
-                      _mm_mullo_epi16(green16, _mm_set1_epi16(-116))),
-        _mm_mullo_epi16(blue16, _mm_set1_epi16(-12)));
+    const __m128i vNegCoefficients =
+        _mm_setr_epi8(12, 116, -128, 0, 12, 116, -128, 0,
+                      12, 116, -128, 0, 12, 116, -128, 0);
+    __m128i v = _mm_hadd_epi16(
+        _mm_maddubs_epi16(pixels, vNegCoefficients), zero);
+    v = _mm_sub_epi16(zero, v);
     v = _mm_add_epi16(_mm_srai_epi16(v, 8), _mm_set1_epi16(128));
-
-    // Pack and widen the chroma channels to exactly mirror scalar clamping
-    // before the 2x2 box average.
-    const __m128i u8 = _mm_packus_epi16(u, zero);
-    const __m128i v8 = _mm_packus_epi16(v, zero);
-    u = _mm_unpacklo_epi8(u8, zero);
-    v = _mm_unpacklo_epi8(v8, zero);
     return {y, u, v};
 }
 
