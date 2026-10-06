@@ -3809,7 +3809,8 @@ def assert_clipboard_cold_png_waiters_session(
 
 def assert_clipboard_image_response_failure_session(
         helper: Path, client: subprocess.Popen[object],
-        client_log_path: Path, chansrv_process: subprocess.Popen[object],
+        client_log_path: Path, xrdp_vc_log_path: Path,
+        chansrv_process: subprocess.Popen[object],
         chansrv_logs: Path, chansrv_stdout: Path, source_display: str,
         image_target: str) -> None:
     """The diagnostic probe records an actual CLIPRDR image refusal."""
@@ -3847,6 +3848,12 @@ def assert_clipboard_image_response_failure_session(
         "PEER_INITIAL_FORMAT_LIST_SENT text=13 dib=8")
     wait_for_peer_marker(
         client, client_log_path, initial_offer_marker, 10.0)
+
+    response_packet_pattern = (
+        r"event=cliprdr-first-fragment direction=client-to-server "
+        r"total_len=\d+ fragment_bytes=\d+ [^\n]*msg_type=5")
+    responses_before = len(re.findall(
+        response_packet_pattern, read_text(xrdp_vc_log_path)))
 
     events, probe_output = run_clipboard_remote_image_probe(
         helper, source_display, image_target=image_target,
@@ -3897,12 +3904,60 @@ def assert_clipboard_image_response_failure_session(
         raise AssertionError(
             "synthetic peer did not record the exact failed type-4/type-5 "
             f"CLIPRDR exchange:\n{peer_log}")
+    xrdp_vc_log = read_text(xrdp_vc_log_path)
+    xrdp_type5_lines = [
+        line for line in xrdp_vc_log.splitlines()
+        if re.search(response_packet_pattern, line)]
+    if len(xrdp_type5_lines) <= responses_before:
+        raise AssertionError(
+            "the failed client type-5 response was not observed at xrdp's "
+            f"VC receive boundary:\n{xrdp_log_excerpt(xrdp_vc_log_path)}")
+    xrdp_type5_fields = dict(re.findall(
+        r"([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)",
+        xrdp_type5_lines[responses_before]))
+    try:
+        xrdp_type5_flags = int(xrdp_type5_fields["msg_flags"], 0)
+        xrdp_type5_data_len = int(xrdp_type5_fields["data_len"], 0)
+    except (KeyError, ValueError) as error:
+        raise AssertionError(
+            "xrdp's failed type-5 boundary record omitted parseable flags or "
+            f"data length: {xrdp_type5_fields!r}") from error
+    if (xrdp_type5_fields.get("direction") != "client-to-server" or
+            xrdp_type5_fields.get("msg_type") != "5" or
+            xrdp_type5_flags != 0x0002 or xrdp_type5_data_len != 0):
+        raise AssertionError(
+            "xrdp's actual VC receive boundary did not show a zero-length "
+            "CB_FORMAT_DATA_RESPONSE FAIL: "
+            f"{xrdp_type5_fields!r}\n{xrdp_log_excerpt(xrdp_vc_log_path)}")
     full_log = chansrv_log_text(chansrv_logs)
     if not re.search(
             rf"event=response status=0x2 bytes=0 "
             rf"format_id={format_id} attempt=\d+", full_log):
         raise AssertionError(
             f"chansrv did not observe a zero-length CLIPRDR FAIL:\n{full_log}")
+    failure_transaction = {
+        "evidence_kind": "synthetic-pinned-xrdp-controlled-peer",
+        "requested_x11_target": image_target,
+        "requested_format_id": format_id,
+        "controlled_peer": {
+            "sent_type5": {"flags": "0x0002", "bytes": 0},
+        },
+        "xrdp_vc": {
+            "client_to_server_type5_received": {
+                key: xrdp_type5_fields.get(key)
+                for key in ("direction", "msg_type", "msg_flags", "data_len",
+                            "total_len", "fragment_bytes")
+            },
+        },
+        "chansrv": {
+            "response": {"status": "FAIL", "format_id": format_id,
+                         "bytes": 0},
+        },
+        "clipboard_payload_captured": False,
+    }
+    print("SYNTHETIC_CLIPRDR_FAILURE=" + json.dumps(
+        failure_transaction, sort_keys=True, separators=(",", ":")),
+        flush=True)
     if ("event=x11-selection-notify-issued path=incr " in full_log or
             "event=x11-incr-announcement " in full_log or
             f"event=x11-delivery-issued path=incr target={image_target}" in full_log or
@@ -8243,12 +8298,14 @@ password=smoke
                         elif clipboard_png_response_fail_mode:
                             assert_clipboard_image_response_failure_session(
                                 clipboard_helper, client, client_log_path,
+                                log_path,
                                 chansrv_process, chansrv_logs_path,
                                 chansrv_stdout_path, source_display,
                                 "image/png")
                         elif clipboard_dib_response_fail_mode:
                             assert_clipboard_image_response_failure_session(
                                 clipboard_helper, client, client_log_path,
+                                log_path,
                                 chansrv_process, chansrv_logs_path,
                                 chansrv_stdout_path, source_display,
                                 "image/bmp")
