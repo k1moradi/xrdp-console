@@ -4,11 +4,11 @@ Subject: [DIAGNOSTIC-ONLY] xrdp: log outbound CLIPRDR PDU header metadata
 Apply after the repository's pinned xrdp patch series, including patch 0043.
 This patch is not part of patches/xrdp/series and must not be deployed without
 explicit authorization. It decodes only an uncompressed first-fragment
-CLIPRDR common header before channel framing, then logs the decoded metadata
+CLIPRDR common header after channel framing, then logs the decoded metadata
 only after xrdp_sec_send succeeds. Payload bytes are never logged or copied.
 
 diff --git a/libxrdp/xrdp_channel.c b/libxrdp/xrdp_channel.c
-index 6e9331d..7fcfc67 100644
+index 6e9331d..475a7fb 100644
 --- a/libxrdp/xrdp_channel.c
 +++ b/libxrdp/xrdp_channel.c
 @@ -114,2 +114,5 @@ xrdp_channel_send(struct xrdp_channel *self, struct stream *s, int channel_id,
@@ -17,9 +17,8 @@ index 6e9331d..7fcfc67 100644
 +    int cliprdr_header_available = 0;
 +    int cliprdr_fragment_bytes = 0;
      struct mcs_channel_item *channel;
-@@ -133,3 +136,14 @@ xrdp_channel_send(struct xrdp_channel *self, struct stream *s, int channel_id,
-     }
--
+@@ -154,2 +157,14 @@ xrdp_channel_send(struct xrdp_channel *self, struct stream *s, int channel_id,
+     out_uint32_le(s, flags);
 +    if (xrdp_channel_is_cliprdr(channel) &&
 +            (flags & XR_CHANNEL_FLAG_FIRST) != 0 &&
 +            (flags & XR_CHANNEL_PACKET_COMPRESSED) == 0)
@@ -32,8 +31,8 @@ index 6e9331d..7fcfc67 100644
 +            cliprdr_header_available = 1;
 +        }
 +    }
-     s_pop_layer(s, channel_hdr);
-@@ -178,3 +192,15 @@ xrdp_channel_send(struct xrdp_channel *self, struct stream *s, int channel_id,
+     LOG_DEVEL(LOG_LEVEL_TRACE, "Adding header [MS-RDPBCGR] CHANNEL_PDU_HEADER "
+@@ -178,3 +193,15 @@ xrdp_channel_send(struct xrdp_channel *self, struct stream *s, int channel_id,
      }
 -
 +    /* Log the decoded header only after the secure-layer send succeeds. */
