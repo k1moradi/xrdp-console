@@ -33,5 +33,18 @@ class BuildDirectConsoleScriptTests(unittest.TestCase):
         self.assertNotIn(r"\n  '", script)
 
 
+    def test_build_verifies_source_and_module_provenance(self) -> None:
+        script = Path(sys.argv[1]).read_text(encoding="utf-8")
+
+        self.assertIn("XRDP_CONSOLE_EXPECT_REVISION", script)
+        self.assertIn("XRDP_CONSOLE_REQUIRE_CLEAN", script)
+        self.assertIn("Source provenance changed during the build.", script)
+        self.assertIn("generated/build_revision.h", script)
+        self.assertIn("libxrdp_console.so", script)
+        self.assertIn("strings \"$module_path\"", script)
+        self.assertIn("Verified built module revision:", script)
+
+
+
 if __name__ == "__main__":
     unittest.main(argv=[sys.argv[0]])
