@@ -1014,10 +1014,18 @@ class GpuChurnDriver:
                         self._first_frame_ns = visible_ns
                     self._last_frame_ns = visible_ns
                     self._generated_frames += 1
+                    first_frame_completed = self._generated_frames == 1
                     if lateness > 0.0:
                         self._missed_deadlines += 1
                         self._maximum_lateness_seconds = max(
                             self._maximum_lateness_seconds, lateness)
+
+                if first_frame_completed:
+                    print(
+                        "GPU_CHURN_FIRST_FRAME "
+                        f"monotonic_ns={visible_ns}",
+                        flush=True,
+                    )
 
                 self._stop.wait(
                     max(0.0, next_deadline - time.monotonic()))
