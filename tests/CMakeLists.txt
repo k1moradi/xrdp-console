@@ -13,7 +13,8 @@ set(PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/test_memory_pressure.py
     ${CMAKE_CURRENT_SOURCE_DIR}/h264_frame_coherence.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_h264_frame_coherence.py
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_build_direct_console_script.py)
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_build_direct_console_script.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_lxqt_menu_quality_calibration.py)
 
 if(TARGET xrdp-console)
     add_test(NAME xrdp-clipboard-padding-source-contract
@@ -93,6 +94,14 @@ add_test(NAME network-unit
     COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/test_network.py)
 set_tests_properties(network-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+add_test(NAME lxqt-menu-quality-calibration-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_lxqt_menu_quality_calibration.py)
+set_tests_properties(lxqt-menu-quality-calibration-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 120
+    LABELS "unit;quality;lxqt")
 
 add_test(NAME display-power-unit
     COMMAND ${Python3_EXECUTABLE} -B
@@ -865,6 +874,18 @@ if(TARGET xrdp-console)
             PkgConfig::TEST_X11 PkgConfig::TEST_XTEST)
         target_compile_options(x11-popup-ui-probe PRIVATE
             -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror)
+
+        add_executable(x11-lxqt-menu-quality-probe
+            helpers/x11_lxqt_menu_quality_probe.c)
+        target_link_libraries(x11-lxqt-menu-quality-probe PRIVATE
+            PkgConfig::TEST_X11)
+        target_compile_options(x11-lxqt-menu-quality-probe PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror)
+        add_test(NAME lxqt-menu-quality-mapping-unit
+            COMMAND $<TARGET_FILE:x11-lxqt-menu-quality-probe>
+                --self-test-mapping)
+        set_tests_properties(lxqt-menu-quality-mapping-unit PROPERTIES
+            LABELS "unit;quality;lxqt")
 
         add_executable(clipboard-x11-session-peer
             helpers/clipboard_x11_session_peer.c)
@@ -1678,6 +1699,30 @@ if(TARGET xrdp-console)
             RESOURCE_LOCK xrdp_console_loader_display
             RUN_SERIAL TRUE
             LABELS "h264;latency;integration;stress")
+        find_program(XRDP_CONSOLE_LXQT_PANEL_EXECUTABLE NAMES lxqt-panel)
+        find_program(XRDP_CONSOLE_DBUS_RUN_SESSION_EXECUTABLE
+            NAMES dbus-run-session)
+        if(XRDP_CONSOLE_LXQT_PANEL_EXECUTABLE AND
+           XRDP_CONSOLE_DBUS_RUN_SESSION_EXECUTABLE)
+            add_test(NAME xrdp-loader-gfx-h264-lxqt-menu-stress
+                COMMAND ${Python3_EXECUTABLE} -B
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+                $<TARGET_FILE:xrdp-console>
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+                "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+                $<TARGET_FILE:x11-popup-ui-probe>
+                $<TARGET_FILE:x11-popup-menu-stress>
+                1512 949 --cpu-contention --gfx-h264-lxqt-menu-stress)
+            set_tests_properties(xrdp-loader-gfx-h264-lxqt-menu-stress
+                PROPERTIES
+                ENVIRONMENT
+                    "PYTHONDONTWRITEBYTECODE=1;XRDP_CONSOLE_PROFILE=1;XRDP_CONSOLE_TEST_ARTIFACT_DIR=${CMAKE_BINARY_DIR}/test-artifacts/xrdp-loader-gfx-h264-lxqt-menu-stress;XRDP_CONSOLE_LXQT_PANEL_EXECUTABLE=${XRDP_CONSOLE_LXQT_PANEL_EXECUTABLE};XRDP_CONSOLE_DBUS_RUN_SESSION=${XRDP_CONSOLE_DBUS_RUN_SESSION_EXECUTABLE};XRDP_CONSOLE_LXQT_MENU_QUALITY_PROBE=$<TARGET_FILE:x11-lxqt-menu-quality-probe>"
+                TIMEOUT 240
+                RESOURCE_LOCK xrdp_console_loader_display
+                RUN_SERIAL TRUE
+                LABELS "h264;latency;integration;stress;lxqt")
+        endif()
         add_test(NAME xrdp-loader-gfx-h264-popup-narrow-source-stress
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py

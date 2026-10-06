@@ -840,6 +840,25 @@ main(int argc, char **argv)
                 fflush(stdout);
             }
         }
+        else if (strcmp(command, "buttons-released") == 0)
+        {
+            Window root_return;
+            Window child_return;
+            int root_x;
+            int root_y;
+            int window_x;
+            int window_y;
+            unsigned int mask = 0U;
+            const int query_ok = XQueryPointer(
+                probe.display, probe.window, &root_return, &child_return,
+                &root_x, &root_y, &window_x, &window_y, &mask);
+            const unsigned int button_mask = Button1Mask | Button2Mask |
+                Button3Mask | Button4Mask | Button5Mask;
+
+            printf("INPUT_STATE buttons_released=%u\n",
+                   (unsigned int)(query_ok && (mask & button_mask) == 0U));
+            fflush(stdout);
+        }
         else if (strncmp(command, "dump ", 5) == 0)
         {
             printf("%s\n", write_ppm(&probe, command + 5) ?
