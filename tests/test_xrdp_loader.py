@@ -4340,14 +4340,30 @@ def assert_clipboard_remote_image_probe_session(
         raise AssertionError(
             "successful client type-5 response was not observed at xrdp's VC "
             f"boundary:\n{xrdp_log_excerpt(log_path)}")
+    vc_response_lines = [
+        line for line in current_vc_log.splitlines()
+        if re.search(response_packet_pattern, line)]
+    if len(vc_response_lines) <= response_packets_before:
+        raise AssertionError(
+            "xrdp's successful type-5 boundary line was not retained")
+    vc_type5_fields = dict(re.findall(
+        r"([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)",
+        vc_response_lines[response_packets_before]))
+    outbound_request_lines = [
+        line for line in current_vc_log.splitlines()
+        if re.search(outbound_request_pattern, line)]
+    if (os.environ.get("XRDP_CONSOLE_TEST_EXPECT_OUTBOUND_CLIPRDR") == "1" and
+            len(outbound_request_lines) <= outbound_requests_before):
+        raise AssertionError(
+            "instrumented xrdp did not report a successful outbound "
+            "CB_FORMAT_DATA_REQUEST type-4 at the VC send boundary:\n"
+            f"{xrdp_log_excerpt(log_path)}")
     if os.environ.get("XRDP_CONSOLE_TEST_EXPECT_OUTBOUND_CLIPRDR") == "1":
-        outbound_request_count = len(re.findall(
-            outbound_request_pattern, current_vc_log))
-        if outbound_request_count <= outbound_requests_before:
-            raise AssertionError(
-                "instrumented xrdp did not report a successful outbound "
-                "CB_FORMAT_DATA_REQUEST type-4 at the VC send boundary:\n"
-                f"{xrdp_log_excerpt(log_path)}")
+        vc_type4_fields = dict(re.findall(
+            r"([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)",
+            outbound_request_lines[outbound_requests_before]))
+    else:
+        vc_type4_fields = {}
 
     image_bytes = int(image_result["bytes"])
     expected_x11_bytes = response_bytes + (14 if image_target == "image/bmp" else 0)
@@ -4377,11 +4393,12 @@ def assert_clipboard_remote_image_probe_session(
             rf"event=x11-incr-terminator-ack requestor="
             rf"{re.escape(requestor_xid)} property={re.escape(property_xid)} "
             rf"terminator_generation={generation} current_generation={generation}")
-        wait_for_chansrv_pattern_after_lines(
+        terminator_log = wait_for_chansrv_pattern_after_lines(
             chansrv_logs, terminator_pattern, chansrv_lines_before, 15.0,
             chansrv_process, chansrv_stdout)
         probe_completion = "INCR terminator acknowledged"
     else:
+        terminator_log = ""
         probe_completion = "immediate SelectionNotify/property read completed"
 
     if clipboard_selection_owner(helper, source_display).lower() != owner_xid:
@@ -4394,10 +4411,68 @@ def assert_clipboard_remote_image_probe_session(
         raise AssertionError(
             "a later clipboard generation superseded the image transaction: "
             f"selected={generation} observed={generations}")
+    controlled_transaction = {
+        "evidence_kind": "synthetic-pinned-xrdp-controlled-peer",
+        "generation": generation,
+        "x11_owner_xid": owner_xid,
+        "advertised_targets": target_names,
+        "requested_x11_target": image_target,
+        "requested_format_id": format_id,
+        "chansrv": {
+            "created_format_data_request": True,
+            "request_attempt": 1,
+            "request_monotonic_ns": chansrv_format_request_mono_ns,
+            "response": {
+                "status": "SUCCESS",
+                "format_id": format_id,
+                "bytes": response_bytes,
+                "monotonic_ns": chansrv_response_mono_ns,
+            },
+        },
+        "xrdp_vc": {
+            "server_to_client_type4_after_send_success": {
+                key: vc_type4_fields.get(key)
+                for key in ("direction", "stage", "msg_type", "data_len",
+                            "send_status")
+            },
+            "client_to_server_type5_received": {
+                key: vc_type5_fields.get(key)
+                for key in ("direction", "msg_type", "data_len", "total_len",
+                            "fragment_bytes")
+            },
+        },
+        "controlled_peer": {
+            "received_type4": {
+                "format_id": format_id,
+                "generation": int(peer_request_match.group(1)),
+                "monotonic_ns": peer_request_mono_ns,
+            },
+            "sent_type5": {
+                "format_id": format_id,
+                "generation": int(peer_response_match.group(1)),
+                "flags": "0x0001",
+                "bytes": response_bytes,
+                "monotonic_ns": peer_response_mono_ns,
+            },
+        },
+        "x11_delivery": {
+            "path": expected_path,
+            "bytes": image_bytes,
+            "completed": True,
+            "completion": probe_completion,
+            "terminator_ack_observed": (
+                expected_path != "incr" or
+                re.search(terminator_pattern, terminator_log) is not None),
+        },
+        "clipboard_payload_captured": False,
+    }
     print(
         f"REMOTE_IMAGE_PROBE target={image_target} generation={generation} "
         f"owner={owner_xid} format_id={format_id} bytes={image_bytes} "
         f"path={expected_path} completion={probe_completion}",
+        flush=True)
+    print("SYNTHETIC_CLIPRDR_TRANSACTION=" + json.dumps(
+        controlled_transaction, sort_keys=True, separators=(",", ":")),
         flush=True)
 
 
