@@ -8,6 +8,7 @@
 #include <X11/Xutil.h>
 #include <errno.h>
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -153,9 +154,58 @@ static void draw_frame(int state, int frame, unsigned int width,
     glVertex2f(marker_left, marker_bottom);
     glEnd();
 
-    glXSwapBuffers(glXGetCurrentDisplay(), glXGetCurrentDrawable());
-    glFinish();
     (void) phase;
+}
+
+#define READBACK_SIDE 32U
+#define READBACK_BYTES (READBACK_SIDE * READBACK_SIDE * 4U)
+
+static int readback_backbuffer(unsigned int width, unsigned int height,
+                               uint32_t *checksum)
+{
+    GLubyte pixels[READBACK_BYTES];
+    uint32_t hash = UINT32_C(2166136261);
+    unsigned int index;
+    int nonzero = 0;
+    GLenum error;
+
+    if (width < READBACK_SIDE || height < READBACK_SIDE)
+    {
+        fputs("GL_READBACK_ERROR framebuffer is smaller than 32x32\n", stderr);
+        return 0;
+    }
+
+    /* Ignore any earlier drawing error; report the readback operation itself. */
+    while (glGetError() != GL_NO_ERROR)
+    {
+    }
+    glReadBuffer(GL_BACK);
+    glReadPixels((GLint) (width / 2U - READBACK_SIDE / 2U),
+                 (GLint) (height / 2U - READBACK_SIDE / 2U),
+                 (GLsizei) READBACK_SIDE, (GLsizei) READBACK_SIDE,
+                 GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    error = glGetError();
+    if (error != GL_NO_ERROR)
+    {
+        fprintf(stderr, "GL_READBACK_ERROR code=0x%x\n", error);
+        return 0;
+    }
+
+    for (index = 0; index < READBACK_BYTES; ++index)
+    {
+        nonzero |= pixels[index] != 0;
+        hash ^= pixels[index];
+        hash *= UINT32_C(16777619);
+    }
+    if (!nonzero)
+    {
+        fputs("GL_READBACK_ERROR returned an all-zero framebuffer patch\n",
+              stderr);
+        return 0;
+    }
+
+    *checksum = hash;
+    return 1;
 }
 
 int main(int argc, char **argv)
@@ -178,6 +228,8 @@ int main(int argc, char **argv)
     int screen;
     int state = 0;
     int frame = 0;
+    int readback_enabled = 0;
+    int exit_status = 0;
     char line[64];
 
     if (argc > 2 && !parse_dimension(argv[2], &width))
@@ -188,6 +240,22 @@ int main(int argc, char **argv)
     if (argc > 3 && !parse_dimension(argv[3], &height))
     {
         fputs("invalid stimulus height\n", stderr);
+        return 2;
+    }
+    if (argc > 4)
+    {
+        if (argc != 5 || strcmp(argv[4], "--gl-readback-32x32") != 0)
+        {
+            fputs("unknown GPU stimulus option\n", stderr);
+            return 2;
+        }
+        readback_enabled = 1;
+    }
+    if (readback_enabled &&
+        (width < READBACK_SIDE || height < READBACK_SIDE))
+    {
+        fputs("GL readback requires framebuffer dimensions of at least 32x32\n",
+              stderr);
         return 2;
     }
 
@@ -238,16 +306,48 @@ int main(int argc, char **argv)
         XNextEvent(display, &event);
     }
 
-    printf("READY %ux%u renderer=%s\n", width, height,
-           (const char *) glGetString(GL_RENDERER));
+    if (readback_enabled)
+    {
+        const GLubyte *vendor = glGetString(GL_VENDOR);
+        const GLubyte *renderer = glGetString(GL_RENDERER);
+
+        printf("GL_VENDOR %s\n",
+               vendor != NULL ? (const char *) vendor : "unavailable");
+        printf("GL_RENDERER %s\n",
+               renderer != NULL ? (const char *) renderer : "unavailable");
+        printf("READY %ux%u gl_readback=32x32\n", width, height);
+    }
+    else
+    {
+        printf("READY %ux%u renderer=%s gl_readback=off\n", width, height,
+               (const char *) glGetString(GL_RENDERER));
+    }
     fflush(stdout);
 
     while (fgets(line, sizeof(line), stdin) != NULL)
     {
         long long before = monotonic_ns();
+        uint32_t readback_checksum = 0;
+
         draw_frame(state, frame++, width, height);
-        printf("%lld %d %lld\n", monotonic_ns(), state,
-               monotonic_ns() - before);
+        if (readback_enabled &&
+            !readback_backbuffer(width, height, &readback_checksum))
+        {
+            exit_status = 3;
+            break;
+        }
+        glXSwapBuffers(glXGetCurrentDisplay(), glXGetCurrentDrawable());
+        glFinish();
+        if (readback_enabled)
+        {
+            printf("%lld %d %lld %u\n", monotonic_ns(), state,
+                   monotonic_ns() - before, readback_checksum);
+        }
+        else
+        {
+            printf("%lld %d %lld\n", monotonic_ns(), state,
+                   monotonic_ns() - before);
+        }
         fflush(stdout);
         state = !state;
     }
@@ -257,5 +357,5 @@ int main(int argc, char **argv)
     glXDestroyContext(display, context);
     XDestroyWindow(display, window);
     XCloseDisplay(display);
-    return 0;
+    return exit_status;
 }

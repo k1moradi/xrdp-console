@@ -955,13 +955,14 @@ class GpuChurnDriver:
     """Generate independent GPU frames at a requested cadence."""
 
     def __init__(self, process: subprocess.Popen[bytes], reader: LineReader,
-                 target_fps: float) -> None:
+                 target_fps: float, require_readback: bool = False) -> None:
         if target_fps <= 0.0:
             raise ValueError("GPU churn target FPS must be positive")
 
         self._process = process
         self._reader = reader
         self._target_fps = target_fps
+        self._require_readback = require_readback
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -1006,7 +1007,9 @@ class GpuChurnDriver:
                     raise RuntimeError(
                         "GPU churn stimulus stopped responding")
 
-                visible_ns, _, _ = parse_graphics_frame(line)
+                visible_ns, _, _, readback_checksum = parse_graphics_frame(
+                    line, require_readback=self._require_readback,
+                )
                 now = time.monotonic()
                 lateness = max(0.0, now - next_deadline)
                 with self._lock:
@@ -1021,11 +1024,14 @@ class GpuChurnDriver:
                             self._maximum_lateness_seconds, lateness)
 
                 if first_frame_completed:
-                    print(
-                        "GPU_CHURN_FIRST_FRAME "
-                        f"monotonic_ns={visible_ns}",
-                        flush=True,
-                    )
+                    marker = f"GPU_CHURN_FIRST_FRAME monotonic_ns={visible_ns}"
+                    if self._require_readback:
+                        assert readback_checksum is not None
+                        marker += (
+                            " gl_readback=32x32 "
+                            f"checksum={readback_checksum}"
+                        )
+                    print(marker, flush=True)
 
                 self._stop.wait(
                     max(0.0, next_deadline - time.monotonic()))
@@ -1062,8 +1068,12 @@ class GpuChurnDriver:
 def start_gpu_stimulus(args: argparse.Namespace,
                        env_source: dict[str, str],
                        name: str) -> tuple[subprocess.Popen[bytes], LineReader]:
+    command = [str(GPU_STIMULUS), args.display, str(args.width), str(args.height)]
+    require_readback = getattr(args, "gl_readback_32x32", False)
+    if require_readback:
+        command.append("--gl-readback-32x32")
     process = subprocess.Popen(
-        [str(GPU_STIMULUS), args.display, str(args.width), str(args.height)],
+        command,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=env_source, bufsize=0, start_new_session=True,
     )
@@ -1072,13 +1082,40 @@ def start_gpu_stimulus(args: argparse.Namespace,
         raise RuntimeError("GPU stimulus pipes were not created")
 
     reader = LineReader(process.stdout)
-    first = reader.readline(5)
-    if first.startswith(b"SWAP_CONTROL "):
-        print(f"{name}: {first.decode(errors='replace').strip()}")
+    vendor: str | None = None
+    renderer: str | None = None
+    while True:
         first = reader.readline(5)
-    if not first.startswith(b"READY "):
+        if not first:
+            kill_process(process)
+            raise RuntimeError("GPU stimulus exited before its READY record")
+        if first.startswith(b"SWAP_CONTROL "):
+            print(f"{name}: {first.decode(errors='replace').strip()}")
+            continue
+        if first.startswith(b"GL_VENDOR "):
+            if vendor is not None:
+                kill_process(process)
+                raise RuntimeError("GPU stimulus emitted duplicate GL_VENDOR records")
+            vendor = first.removeprefix(b"GL_VENDOR ").decode(
+                errors="replace").strip()
+            print(f"{name}: GL_VENDOR {vendor}")
+            continue
+        if first.startswith(b"GL_RENDERER "):
+            if renderer is not None:
+                kill_process(process)
+                raise RuntimeError("GPU stimulus emitted duplicate GL_RENDERER records")
+            renderer = first.removeprefix(b"GL_RENDERER ").decode(
+                errors="replace").strip()
+            print(f"{name}: GL_RENDERER {renderer}")
+            continue
+        if first.startswith(b"READY "):
+            break
         kill_process(process)
-        raise RuntimeError(f"GPU stimulus did not become ready: {first!r}")
+        raise RuntimeError(f"GPU stimulus emitted an unknown startup record: {first!r}")
+
+    if require_readback and (not vendor or not renderer):
+        kill_process(process)
+        raise RuntimeError("GPU readback stimulus omitted GL vendor/renderer identity")
 
     fields = first.split()
     if (len(fields) < 2 or
@@ -1086,6 +1123,22 @@ def start_gpu_stimulus(args: argparse.Namespace,
         kill_process(process)
         raise RuntimeError(
             f"GPU stimulus dimensions differ from request: {first!r}")
+
+    expected_readback = (
+        b"gl_readback=32x32" if require_readback else b"gl_readback=off"
+    )
+    if expected_readback not in fields[2:]:
+        kill_process(process)
+        raise RuntimeError(
+            "GPU stimulus readback mode differs from request: "
+            f"{first!r}")
+    if require_readback and not re.search(
+            r"(?<![A-Za-z0-9])NV[0-9A-F]{2}(?![A-Za-z0-9])",
+            renderer or "", re.IGNORECASE):
+        kill_process(process)
+        raise RuntimeError(
+            "GL readback trigger requires the pinned Nouveau NVxx renderer; "
+            f"observed {renderer!r}")
 
     return process, reader
 
@@ -2386,16 +2439,19 @@ def parse_physical_marker(line: bytes) -> tuple[int, int, int]:
     raise RuntimeError(f"invalid physical marker line: {line!r}")
 
 
-def parse_graphics_frame(line: bytes) -> tuple[int, int, int]:
+def parse_graphics_frame(
+    line: bytes, *, require_readback: bool = False,
+) -> tuple[int, int, int, int | None]:
     """Decode one strict graphics stimulus frame record.
 
-    The RDP graphics benchmark needs all three fields: the time the marker
-    became visible locally, the marker state, and the local draw duration.
+    The RDP graphics benchmark needs the timestamp, marker state, and local
+    draw duration. The BAR2 readback experiment also requires its checksum.
     A malformed helper response is a benchmark setup/protocol failure, not a
     client delivery miss.
     """
     fields = line.split()
-    if len(fields) != 3:
+    expected_fields = 4 if require_readback else 3
+    if len(fields) != expected_fields:
         raise RuntimeError(
             f"invalid graphics stimulus response: {line!r}")
 
@@ -2403,6 +2459,7 @@ def parse_graphics_frame(line: bytes) -> tuple[int, int, int]:
         visible_ns = int(fields[0])
         state = int(fields[1])
         render_ns = int(fields[2])
+        readback_checksum = int(fields[3]) if require_readback else None
     except ValueError as error:
         raise RuntimeError(
             f"non-numeric graphics stimulus response: {line!r}") from error
@@ -2416,8 +2473,13 @@ def parse_graphics_frame(line: bytes) -> tuple[int, int, int]:
     if render_ns < 0:
         raise RuntimeError(
             f"graphics stimulus render duration must be nonnegative: {line!r}")
+    if require_readback and (
+            readback_checksum is None or
+            not 0 < readback_checksum <= 0xFFFFFFFF):
+        raise RuntimeError(
+            f"graphics stimulus readback checksum is invalid: {line!r}")
 
-    return visible_ns, state, render_ns
+    return visible_ns, state, render_ns, readback_checksum
 
 
 def require_no_rfx_decoder_failure(log_path: Path) -> None:
@@ -3225,7 +3287,10 @@ def run_graphics_under_churn(
             raise RuntimeError("graphics marker probe did not become ready")
 
         churn, churn_reader = start_gpu_stimulus(args, env_source, name)
-        churn_driver = GpuChurnDriver(churn, churn_reader, args.fps)
+        churn_driver = GpuChurnDriver(
+            churn, churn_reader, args.fps,
+            require_readback=args.gl_readback_32x32,
+        )
         churn_driver.start()
 
         marker.stdin.write(b"frame\n")
@@ -3799,7 +3864,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
         warmup = stimulus_reader.readline(5)
         if not warmup:
             raise RuntimeError("graphics stimulus produced no warm-up frame")
-        warmup_visible_ns, warmup_state, _ = parse_graphics_frame(warmup)
+        warmup_visible_ns, warmup_state, _, _ = parse_graphics_frame(warmup)
         warmup_diagnostics = MarkerWaitDiagnostics()
         warmup_latency = wait_marker(
             probe_reader, probe.stdin, warmup_state, warmup_visible_ns,
@@ -3838,7 +3903,7 @@ def run_case(args: argparse.Namespace, name: str, profile: str,
             stimulus.stdin.write(b"frame\n")
             stimulus.stdin.flush()
             line = stimulus_reader.readline(5)
-            visible_ns, state, render_duration_ns = parse_graphics_frame(line)
+            visible_ns, state, render_duration_ns, _ = parse_graphics_frame(line)
             source_visible_ns.append(visible_ns)
             render_ns.append(render_duration_ns)
             observed_ns: list[int] = []
@@ -3958,6 +4023,11 @@ def main() -> int:
     parser.add_argument("--auth")
     parser.add_argument("--duration", type=float, default=20.0)
     parser.add_argument("--fps", type=float, default=15.0)
+    parser.add_argument(
+        "--gl-readback-32x32", action="store_true",
+        help=("synchronously read and checksum a 32x32 GL_BACK RGBA patch "
+              "per frame; supported only by direct-X11 graphics-under-churn"),
+    )
     parser.add_argument(
         "--memory-pressure-mib", type=int, default=0,
         help=("hold this many MiB of page-touched anonymous memory during "
@@ -4121,6 +4191,14 @@ def main() -> int:
             )
     if args.mode == "graphics-under-churn" and args.transport != "rdp":
         parser.error("--mode graphics-under-churn requires --transport rdp")
+    if args.gl_readback_32x32 and (
+            args.backend != "direct-x11" or args.transport != "rdp" or
+            args.mode != "graphics-under-churn" or
+            args.direct_graphics_transport != "gfx-planar"):
+        parser.error(
+            "--gl-readback-32x32 requires direct-X11 RDP "
+            "graphics-under-churn with GFX Planar"
+        )
     if (args.width <= 0 or args.height <= 0 or
             args.client_width <= 0 or args.client_height <= 0 or
             args.duration <= 0 or args.fps <= 0 or args.repetitions <= 0 or
