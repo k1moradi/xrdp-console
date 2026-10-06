@@ -231,7 +231,7 @@ bool rectangle_conversion_matches_scalar_reference()
     return success;
 }
 
-bool ssse3_channel_gather_matches_scalar_zero_ff_patterns()
+bool ssse3_vector_conversion_matches_scalar_zero_ff_patterns()
 {
     constexpr std::uint32_t kPatterns = 1U << 16U;
     constexpr std::uint32_t kWidthPixels = 4;
@@ -270,9 +270,9 @@ bool ssse3_channel_gather_matches_scalar_zero_ff_patterns()
             {kWidthPixels, kHeightPixels}, candidate);
 
     return check(!scalar.empty() && candidateConverted,
-                 "exhaustive SSSE3 channel-gather conversion failed") &&
+                 "exhaustive SSSE3 vector conversion failed") &&
            check(candidate == scalar,
-                 "SSSE3 channel gather diverged on a zero/255 byte pattern");
+                 "SSSE3 vector conversion diverged on a zero/255 byte pattern");
 }
 
 bool rectangle_alignment_matches_avc420_requirements()
@@ -411,7 +411,7 @@ int main()
     success &= conversion_matches_xorgxrdp_reference();
     success &= conversion_validates_geometry_and_stride();
     success &= rectangle_conversion_matches_scalar_reference();
-    success &= ssse3_channel_gather_matches_scalar_zero_ff_patterns();
+    success &= ssse3_vector_conversion_matches_scalar_zero_ff_patterns();
     success &= rectangle_alignment_matches_avc420_requirements();
     success &= command_layout_matches_xrdp_encoder_contract();
     success &= command_rejects_invalid_input();
