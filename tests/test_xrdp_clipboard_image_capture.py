@@ -629,6 +629,101 @@ class ClipboardCaptureTests(unittest.TestCase):
                               report["protocol_summary"]["cliprdr_packets"]],
                              [4, 5])
 
+    def test_sealed_report_keeps_unanswered_image_request_as_timeout(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="clipboard-sealed-timeout-") as raw:
+            root = Path(raw)
+            capture = load_capture_module(Path(sys.argv[1]))
+            test_id = "b7f2b90b-8f61-47ce-8e0a-b953a8a0a812"
+            owner = "0x1200002"
+            requestor = "0x2400011"
+            begin_ns = 9_000_000
+            end_ns = 9_100_000
+            chansrv = {
+                "format_lists": [{
+                    "fields": {"generation": "90", "dib_format_id": "-1",
+                               "dibv5_format_id": "-1",
+                               "png_format_id": "40005"},
+                    "recognized_formats": [{"id": 40005, "name": "PNG"}],
+                    "advertised_formats": [{"id": "0x00009c45",
+                                            "name": "PNG"}],
+                    "advertised_format_details_complete": True,
+                }],
+                "selection_owner_installs": [{
+                    "fields": {"generation": "90", "owner": owner,
+                               "chansrv_window": owner,
+                               "result": "installed"},
+                }],
+                "x11_selection_requests": [{
+                    "fields": {"generation": "90", "target": "image/png",
+                               "requestor": requestor, "owner": owner,
+                               "property": "0x3001",
+                               "mono_ns": str(begin_ns + 2_000)},
+                }],
+                "format_data_requests": [{
+                    "fields": {"event": "request", "format_id": "40005",
+                               "target": "image/png", "attempt": "1",
+                               "mono_ns": str(begin_ns + 3_000)},
+                }],
+                "format_data_responses": [],
+                "x11_targets_responses": [],
+                "x11_deliveries": [],
+                "x11_incr_events": [],
+                "generic_request_correlation": "single outstanding request",
+            }
+            probe_events = [
+                {"event": "targets_result", "requestor": requestor,
+                 "owner": owner, "request_serial": 1,
+                 "targets": ["TARGETS", "image/png"],
+                 "result": "success"},
+                {"event": "selection_request", "requestor": requestor,
+                 "owner": owner, "request_serial": 2,
+                 "target": "image/png"},
+                {"event": "selection_notify", "requestor": requestor,
+                 "owner": owner, "request_serial": 2,
+                 "target": "image/png", "result": "success",
+                 "property": "0x3001"},
+                {"event": "selection_result", "requestor": requestor,
+                 "owner": owner, "request_serial": 2,
+                 "target": "image/png", "result": "failure",
+                 "reason": "request-timeout", "path": "none",
+                 "bytes": 0, "request_started_ns": begin_ns + 2_000,
+                 "completed_monotonic_ns": end_ns - 1_000},
+                {"event": "probe_timeout", "requestor": requestor,
+                 "owner": owner, "request_serial": 2,
+                 "target": "image/png"},
+            ]
+            packets = [{
+                "msg_type": 4, "msg_name": "CB_FORMAT_DATA_REQUEST",
+                "direction": "server-to-client", "send_status": "success",
+                "data_len": 4, "format_id": 40005,
+                "monotonic_ns": begin_ns + 3_500,
+            }]
+            markers = {
+                "test_id": test_id, "realtime": "2026-10-06T10:02:00Z",
+                "realtime_ns": 5_000_000, "monotonic_ns": begin_ns,
+            }
+            report = capture.build_sealed_transaction_report(
+                test_id=test_id, generation=90, owner=owner,
+                begin_marker=markers, end_marker={
+                    **markers, "monotonic_ns": end_ns},
+                chansrv=chansrv, probe_events=probe_events,
+                cliprdr_packets=packets,
+                journal_window_path=root / "journal-window.jsonl")
+
+            png = report["clipboard_transaction"]["image_transactions"][0]
+            attempt = png["chansrv_request_attempts"][0]
+            self.assertEqual(attempt["outbound_vc_type4"]["msg_type"], 4)
+            self.assertIsNone(attempt["inbound_vc_type5"])
+            self.assertIsNone(attempt["chansrv_response"])
+            self.assertFalse(attempt["successful_CLIPRDR_image_response"])
+            self.assertEqual(png["completion_or_failure_reason"],
+                             "request-timeout")
+            self.assertEqual([packet["msg_type"] for packet in
+                              report["protocol_summary"]["cliprdr_packets"]],
+                             [4])
+            self.assertEqual(png["result_bytes"], 0)
+            self.assertEqual(png["probe_result"]["reason"], "request-timeout")
+
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
