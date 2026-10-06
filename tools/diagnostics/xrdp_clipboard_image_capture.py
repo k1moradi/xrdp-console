@@ -23,6 +23,7 @@ MAX_CAPTURE_BYTES = 64 * 1024 * 1024
 MAX_TRACKED_GENERATIONS = 64
 DEFAULT_TIMEOUT_SECONDS = 120
 DEFAULT_REQUEST_TIMEOUT_MS = 20_000
+INCR_TERMINATOR_ACK_TIMEOUT_SECONDS = 15
 CLIPRDR_NAMES = {
     2: "CB_FORMAT_LIST",
     3: "CB_FORMAT_LIST_RESPONSE",
@@ -948,10 +949,21 @@ def build_sealed_transaction_report(
                         _public_chansrv_event(entry))
             for entry in all_incr_events:
                 fields = _metadata_fields(entry)
-                event_generation = next((fields.get(name) for name in (
-                    "generation", "start_generation", "current_generation",
-                    "terminator_generation") if fields.get(name) is not None), None)
+                if fields.get("event") == "x11-incr-terminator-ack":
+                    # The transfer's start generation may differ after a
+                    # replacement. The final acknowledgement belongs to the
+                    # terminator/current generation recorded together.
+                    event_generation = fields.get("terminator_generation")
+                    ack_is_current = (
+                        fields.get("current_generation") == generation_text)
+                else:
+                    event_generation = next((fields.get(name) for name in (
+                        "generation", "start_generation", "current_generation",
+                        "terminator_generation")
+                        if fields.get(name) is not None), None)
+                    ack_is_current = True
                 if (event_generation == generation_text and
+                        ack_is_current and
                         fields.get("target", target) in (target, "-") and
                         fields.get("requestor", "").lower() == requestor and
                         (property_xid is None or
@@ -1170,6 +1182,52 @@ def parse_probe_events(path: Path) -> list[dict[str, object]]:
     return events
 
 
+def required_incr_terminator_acks(
+        events: list[dict[str, object]], generation: int
+        ) -> set[tuple[str, str, str, int]]:
+    """Return successful X11 INCR transfers whose final delete must be seen."""
+    required: set[tuple[str, str, str, int]] = set()
+    for result in events:
+        if (result.get("event") != "selection_result" or
+                result.get("target") not in ("image/png", "image/bmp") or
+                result.get("result") != "success" or
+                result.get("path") != "incr"):
+            continue
+        target = str(result.get("target"))
+        requestor = str(result.get("requestor", "")).lower()
+        serial = result.get("request_serial")
+        notify = next((event for event in events
+                       if event.get("event") == "selection_notify" and
+                       event.get("target") == target and
+                       event.get("request_serial") == serial and
+                       event.get("result") == "success"), None)
+        property_xid = (str(notify.get("property", "")).lower()
+                        if isinstance(notify, dict) else "")
+        if requestor and property_xid:
+            required.add((target, requestor, property_xid, generation))
+    return required
+
+
+def incr_terminator_ack_identity(
+        line: str
+        ) -> tuple[str, str, str, int] | None:
+    """Parse only metadata required to match one INCR terminator ack."""
+    if "event=x11-incr-terminator-ack" not in line:
+        return None
+    fields = ChansrvFormatListTrigger._fields(line)
+    try:
+        terminator_generation = int(fields["terminator_generation"], 0)
+        current_generation = int(fields["current_generation"], 0)
+    except (KeyError, ValueError):
+        return None
+    if terminator_generation != current_generation:
+        return None
+    return (fields.get("target", ""),
+            fields.get("requestor", "").lower(),
+            fields.get("property", "").lower(),
+            terminator_generation)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--probe", type=Path, required=True)
@@ -1243,16 +1301,22 @@ def main() -> int:
     trigger_reader = ChansrvFormatListTrigger()
     active_trigger: dict[str, object] | None = None
     generation_replaced_by: int | None = None
+    observed_incr_acks: set[tuple[str, str, str, int]] = set()
+    required_acks: set[tuple[str, str, str, int]] = set()
+    pending_acks: set[tuple[str, str, str, int]] = set()
+    deadline_ns = begin_mono_ns + arguments.timeout_seconds * 1_000_000_000
     try:
         print("PROBE_READY: take one fresh screenshot. Waiting for a new "
               "image-bearing chansrv Format List and its successful "
               "owner-install marker; XFixes owner changes are supporting "
               "evidence only. After image probes complete or the bounded "
               "window seals, continue normal Mac/RDP clipboard use.", flush=True)
-        deadline_ns = begin_mono_ns + arguments.timeout_seconds * 1_000_000_000
         while time.monotonic_ns() < deadline_ns:
-            triggers = trigger_reader.consume_many(
-                chansrv_window.read_appended_lines())
+            appended_lines = chansrv_window.read_appended_lines()
+            observed_incr_acks.update(
+                identity for line in appended_lines
+                if (identity := incr_terminator_ack_identity(line)) is not None)
+            triggers = trigger_reader.consume_many(appended_lines)
             if triggers:
                 active_trigger, generation_replaced_by = select_current_trigger(
                     triggers, trigger_reader.latest_generation)
@@ -1291,8 +1355,12 @@ def main() -> int:
                 stop_process(helper_process)
             else:
                 while helper_process.poll() is None:
-                    trigger_reader.consume_many(
-                        chansrv_window.read_appended_lines())
+                    appended_lines = chansrv_window.read_appended_lines()
+                    observed_incr_acks.update(
+                        identity for line in appended_lines
+                        if (identity := incr_terminator_ack_identity(line))
+                        is not None)
+                    trigger_reader.consume_many(appended_lines)
                     if trigger_reader.latest_generation > generation:
                         generation_replaced_by = trigger_reader.latest_generation
                         capture_error = (
@@ -1313,6 +1381,45 @@ def main() -> int:
     except (OSError, RuntimeError) as error:
         capture_error = str(error)
         stop_process(helper_process)
+
+    if (helper_process is not None and helper_process.poll() is not None and
+            helper_capture is not None and active_trigger is not None):
+        if not helper_capture.join(3.0):
+            capture_error = "probe output capture did not drain before sealing"
+        else:
+            required_acks = required_incr_terminator_acks(
+                parse_probe_events(run_directory / "x11-probe.jsonl"),
+                int(active_trigger["generation"]))
+            pending_acks = required_acks - observed_incr_acks
+            ack_deadline_ns = min(
+                deadline_ns,
+                time.monotonic_ns() +
+                INCR_TERMINATOR_ACK_TIMEOUT_SECONDS * 1_000_000_000)
+            while pending_acks and time.monotonic_ns() < ack_deadline_ns:
+                appended_lines = chansrv_window.read_appended_lines()
+                observed_incr_acks.update(
+                    identity for line in appended_lines
+                    if (identity := incr_terminator_ack_identity(line))
+                    is not None)
+                trigger_reader.consume_many(appended_lines)
+                generation = int(active_trigger["generation"])
+                if trigger_reader.latest_generation > generation:
+                    generation_replaced_by = trigger_reader.latest_generation
+                    capture_error = (
+                        "clipboard generation replaced before INCR evidence "
+                        "was sealed")
+                    break
+                pending_acks = required_acks - observed_incr_acks
+                if chansrv_window.monitor_truncated:
+                    capture_error = (
+                        "chansrv trigger monitor exceeded its byte bound")
+                    break
+                if pending_acks:
+                    time.sleep(0.02)
+            if pending_acks and capture_error is None:
+                capture_error = (
+                    "X11 INCR terminator acknowledgement was not observed "
+                    "before the bounded seal deadline")
 
     # Mark the end as soon as the deliberate probe stops. Do not drain the
     # trigger monitor again here: user clipboard activity after probe completion
@@ -1409,6 +1516,23 @@ def main() -> int:
         "chansrv_capture": chansrv_metadata,
         "markers": sealed_protocol["markers"],
         "clipboard_transaction": transaction,
+        "incr_terminator_ack_audit": {
+            "required": [
+                {"target": target, "requestor": requestor,
+                 "property": property_xid, "generation": generation}
+                for target, requestor, property_xid, generation
+                in sorted(required_acks)],
+            "observed_for_required": [
+                {"target": target, "requestor": requestor,
+                 "property": property_xid, "generation": generation}
+                for target, requestor, property_xid, generation
+                in sorted(required_acks & observed_incr_acks)],
+            "pending": [
+                {"target": target, "requestor": requestor,
+                 "property": property_xid, "generation": generation}
+                for target, requestor, property_xid, generation
+                in sorted(pending_acks)],
+        },
         "probe_events": retained_probe_events,
         "protocol_summary": protocol,
         "post_window_user_activity_included": False,

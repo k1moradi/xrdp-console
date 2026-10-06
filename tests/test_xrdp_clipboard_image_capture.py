@@ -192,6 +192,32 @@ class ClipboardCaptureTests(unittest.TestCase):
                 generation_b[0]["format_list"]["fields"]["png_format_id"],
                 "49341")
 
+    def test_incr_completion_requires_matching_terminator_ack(self) -> None:
+        capture = load_capture_module(Path(sys.argv[1]))
+        events = [
+            {"event": "selection_notify", "target": "image/bmp",
+             "request_serial": 7, "requestor": "0x2400011",
+             "property": "0x3002", "result": "success"},
+            {"event": "selection_result", "target": "image/bmp",
+             "request_serial": 7, "requestor": "0x2400011",
+             "result": "success", "path": "incr"},
+            {"event": "selection_result", "target": "image/png",
+             "request_serial": 8, "requestor": "0x2400011",
+             "result": "failure", "path": "none"},
+        ]
+        required = capture.required_incr_terminator_acks(events, 60)
+        self.assertEqual(required, {
+            ("image/bmp", "0x2400011", "0x3002", 60)})
+        self.assertIsNone(capture.incr_terminator_ack_identity(
+            "event=x11-incr-terminator-ack target=image/bmp "
+            "requestor=0x2400011 property=0x3002 "
+            "terminator_generation=59 current_generation=60"))
+        self.assertEqual(capture.incr_terminator_ack_identity(
+            "event=x11-incr-terminator-ack target=image/bmp "
+            "requestor=0x2400011 property=0x3002 "
+            "terminator_generation=60 current_generation=60"),
+            ("image/bmp", "0x2400011", "0x3002", 60))
+
     def test_trigger_history_is_bounded_and_generation_reset_is_handled(self) -> None:
         capture = load_capture_module(Path(sys.argv[1]))
         trigger = capture.ChansrvFormatListTrigger()
@@ -333,7 +359,8 @@ class ClipboardCaptureTests(unittest.TestCase):
                 "generation=60 total_bytes=114",
                 "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-incr-terminator-ack "
                 "target=image/bmp requestor=0x2400011 property=0x3002 "
-                "terminator_generation=60 current_generation=60",
+                "terminator_generation=60 current_generation=60 "
+                "start_generation=59",
             ]
             with source.open("a", encoding="utf-8") as output:
                 output.write("\n".join(source_lines) + "\n")
