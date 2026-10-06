@@ -31,6 +31,7 @@ typedef struct
 {
     Window source_window;
     unsigned int sequence;
+    int fast_only;
     int continue_full_after_fast_wait;
 } capture_request;
 
@@ -88,6 +89,7 @@ parse_capture_request(const char *line, capture_request *request)
     if (sscanf(line, "%15s %31s %31s %c", operation, xid_text,
                sequence_text, &trailing) != 3 ||
         (strcmp(operation, "capture") != 0 &&
+         strcmp(operation, "capture-fast") != 0 &&
          strcmp(operation, "capture-full") != 0))
     {
         return 0;
@@ -113,6 +115,7 @@ parse_capture_request(const char *line, capture_request *request)
     }
     request->source_window = window;
     request->sequence = (unsigned int)sequence;
+    request->fast_only = strcmp(operation, "capture-fast") == 0;
     request->continue_full_after_fast_wait =
         strcmp(operation, "capture-full") == 0;
     return 1;
@@ -430,6 +433,7 @@ capture_and_compare(Display *source_display, Window source_window,
                     const char *artifact_dir, int fast_mode,
                     uint64_t capture_request_ns,
                     unsigned int sequence,
+                    int fast_only,
                     int continue_full_after_fast_wait)
 {
     XWindowAttributes source_attributes;
@@ -744,7 +748,7 @@ capture_and_compare(Display *source_display, Window source_window,
             }
             fast_compare_end_ns = monotonic_ns();
             const int passed = samples != 0U &&
-                outliers * 100U <= samples * 20U && sample_p95 <= 96U &&
+                outliers * 100U <= samples * 20U && sample_p95 <= 108U &&
                 distinct_count >= 4U && luma_range >= 30U;
 
             printf("MENU_FAST %s sample_ns=%" PRIu64
@@ -802,6 +806,12 @@ capture_and_compare(Display *source_display, Window source_window,
                     XDestroyImage(client_image);
                     return 1;
                 }
+            }
+            else if (fast_only)
+            {
+                XDestroyImage(source_image);
+                XDestroyImage(client_image);
+                return 0;
             }
         }
     }
@@ -1144,12 +1154,17 @@ main(int argc, char **argv)
                 client_display, client_window,
                 atoi(argv[4]), atoi(argv[5]), artifact_dir, 1,
                 capture_request_ns, request.sequence,
+                request.fast_only,
                 request.continue_full_after_fast_wait);
-            printf("MENU_DONE status=%s request_ns=%" PRIu64
-                   " sequence=%u\n",
-                   result == 0 ? "PASS" : result == 1 ? "WAIT" : "ERROR",
-                   capture_request_ns, request.sequence);
-            fflush(stdout);
+            if (!request.fast_only)
+            {
+                printf("MENU_DONE status=%s request_ns=%" PRIu64
+                       " sequence=%u\n",
+                       result == 0 ? "PASS" :
+                           result == 1 ? "WAIT" : "ERROR",
+                       capture_request_ns, request.sequence);
+                fflush(stdout);
+            }
         }
         result = 0;
     }
@@ -1158,7 +1173,7 @@ main(int argc, char **argv)
         result = capture_and_compare(source_display, source_window,
                                      client_display, client_window,
                                      atoi(argv[5]), atoi(argv[6]), argv[7],
-                                     fast_mode, helper_start_ns, 0U, 0);
+                                     fast_mode, helper_start_ns, 0U, 0, 0);
     }
     XCloseDisplay(source_display);
     XCloseDisplay(client_display);

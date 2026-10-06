@@ -32,6 +32,8 @@ typedef struct
     int popup_open;
     int background_paused;
     int background_only;
+    int epoch_controlled;
+    unsigned int external_epoch;
     const char *closed_reference_path;
 } Scene;
 
@@ -146,8 +148,54 @@ draw_background(Scene *scene)
                    8, POPUP_SOURCE_HEIGHT - 40, 64, 32);
     XDrawString(scene->display, scene->background, scene->background_gc,
                 20, POPUP_SOURCE_HEIGHT - 19, "MENU", 4);
+    if (scene->epoch_controlled)
+    {
+        for (unsigned int bit = 0U;
+             bit < POPUP_BACKGROUND_EPOCH_BITS; ++bit)
+        {
+            const unsigned int value =
+                (scene->external_epoch >>
+                 (POPUP_BACKGROUND_EPOCH_BITS - 1U - bit)) & 1U;
+            const unsigned long color = value != 0U ? scene->colors[10] :
+                                                       scene->colors[5];
+            const int x = POPUP_BACKGROUND_EPOCH_X +
+                (int)(bit * POPUP_BACKGROUND_EPOCH_CELL_WIDTH);
+
+            fill(scene, scene->background, x, POPUP_BACKGROUND_EPOCH_Y,
+                 POPUP_BACKGROUND_EPOCH_CELL_WIDTH,
+                 POPUP_BACKGROUND_EPOCH_CELL_HEIGHT, color);
+        }
+    }
     ++scene->background_phase;
     XFlush(scene->display);
+}
+
+static int
+handle_epoch_command(Scene *scene)
+{
+    char line[128];
+    char trailing;
+    unsigned int epoch;
+
+    if (fgets(line, sizeof(line), stdin) == NULL)
+    {
+        return 0;
+    }
+    line[strcspn(line, "\r\n")] = '\0';
+    if (strncmp(line, "epoch ", 6U) == 0 &&
+        sscanf(line + 6, "%u %c", &epoch, &trailing) == 1 &&
+        epoch < (1U << POPUP_BACKGROUND_EPOCH_BITS))
+    {
+        scene->external_epoch = epoch;
+        draw_background(scene);
+        printf("EPOCH %u %" PRId64 "\n", epoch,
+               monotonic_nanoseconds());
+        fflush(stdout);
+        return 1;
+    }
+    puts("ERROR epoch");
+    fflush(stdout);
+    return 1;
 }
 
 static void
@@ -393,14 +441,18 @@ main(int argc, char **argv)
     int width;
     int height;
     int x_fd;
+    int input_open;
     int result = EXIT_FAILURE;
     const char *reference_path;
     struct timespec frame_interval = {0, 50000000L};
 
     if ((argc != 2 && argc != 3) ||
-        (argc == 3 && strcmp(argv[2], "--background-only") != 0))
+        (argc == 3 && strcmp(argv[2], "--background-only") != 0 &&
+         strcmp(argv[2], "--background-only-controllable") != 0))
     {
-        fprintf(stderr, "usage: %s DISPLAY [--background-only]\n", argv[0]);
+        fprintf(stderr, "usage: %s DISPLAY "
+                "[--background-only|--background-only-controllable]\n",
+                argv[0]);
         return 2;
     }
     display = XOpenDisplay(argv[1]);
@@ -424,6 +476,8 @@ main(int argc, char **argv)
     scene.display = display;
     scene.root = RootWindow(display, screen);
     scene.background_only = argc == 3;
+    scene.epoch_controlled = argc == 3 &&
+        strcmp(argv[2], "--background-only-controllable") == 0;
     scene.panel_y = POPUP_SOURCE_HEIGHT - POPUP_PANEL_HEIGHT -
                     POPUP_PANEL_BOTTOM_MARGIN;
     scene.colors[0] = allocate_rgb(display, 26, 34, 47);
@@ -487,24 +541,47 @@ main(int argc, char **argv)
     printf("READY source=%dx%d trigger=%s background_fps=20\n",
            width, height,
            scene.background_only ? "background-only" : "taskbar-button");
+    if (scene.epoch_controlled)
+    {
+        fputs("EPOCH_CONTROL_READY\n", stdout);
+    }
     fflush(stdout);
 
+    input_open = scene.epoch_controlled;
+    if (input_open)
+    {
+        (void)setvbuf(stdin, NULL, _IONBF, 0);
+    }
     x_fd = ConnectionNumber(display);
     for (;;)
     {
         fd_set read_fds;
         struct timeval timeout;
         int select_result;
+        int max_fd = x_fd;
 
         FD_ZERO(&read_fds);
         FD_SET(x_fd, &read_fds);
+        if (input_open)
+        {
+            FD_SET(STDIN_FILENO, &read_fds);
+            if (STDIN_FILENO > max_fd)
+            {
+                max_fd = STDIN_FILENO;
+            }
+        }
         timeout.tv_sec = frame_interval.tv_sec;
         timeout.tv_usec = (suseconds_t)(frame_interval.tv_nsec / 1000L);
-        select_result = select(x_fd + 1, &read_fds, NULL, NULL, &timeout);
+        select_result = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
         if (select_result < 0 && errno != EINTR)
         {
             perror("select");
             break;
+        }
+        if (input_open && FD_ISSET(STDIN_FILENO, &read_fds) &&
+            !handle_epoch_command(&scene))
+        {
+            input_open = 0;
         }
         while (XPending(display) > 0)
         {

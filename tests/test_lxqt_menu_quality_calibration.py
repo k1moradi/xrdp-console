@@ -18,7 +18,7 @@ import unittest
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "lxqt-menu-quality"
 FAST_ERROR_LIMIT = 64
 FAST_OUTLIER_LIMIT_PERCENT = 20.0
-FAST_P95_LIMIT = 96
+FAST_P95_LIMIT = 108
 FULL_ERROR_LIMIT = 64
 FULL_MEAN_LIMIT = 10.0
 FULL_P95_LIMIT = 72

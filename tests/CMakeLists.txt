@@ -851,6 +851,10 @@ if(TARGET xrdp-console)
 
         add_executable(x11-popup-menu-stress
             helpers/x11_popup_menu_stress.c)
+        set_target_properties(x11-popup-menu-stress PROPERTIES
+            C_STANDARD 23
+            C_STANDARD_REQUIRED ON
+            C_EXTENSIONS OFF)
         target_include_directories(x11-popup-menu-stress PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/helpers)
         target_link_libraries(x11-popup-menu-stress PRIVATE
@@ -860,6 +864,10 @@ if(TARGET xrdp-console)
 
         add_executable(x11-popup-menu-stress-narrow
             helpers/x11_popup_menu_stress.c)
+        set_target_properties(x11-popup-menu-stress-narrow PROPERTIES
+            C_STANDARD 23
+            C_STANDARD_REQUIRED ON
+            C_EXTENSIONS OFF)
         target_include_directories(x11-popup-menu-stress-narrow PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/helpers)
         target_compile_definitions(x11-popup-menu-stress-narrow PRIVATE
@@ -871,6 +879,10 @@ if(TARGET xrdp-console)
 
         add_executable(x11-popup-ui-probe
             helpers/x11_popup_ui_probe.c)
+        set_target_properties(x11-popup-ui-probe PROPERTIES
+            C_STANDARD 23
+            C_STANDARD_REQUIRED ON
+            C_EXTENSIONS OFF)
         target_include_directories(x11-popup-ui-probe PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/helpers)
         target_link_libraries(x11-popup-ui-probe PRIVATE
@@ -880,10 +892,18 @@ if(TARGET xrdp-console)
 
         add_executable(x11-lxqt-menu-quality-probe
             helpers/x11_lxqt_menu_quality_probe.c)
+        set_target_properties(x11-lxqt-menu-quality-probe PROPERTIES
+            C_STANDARD 23
+            C_STANDARD_REQUIRED ON
+            C_EXTENSIONS OFF)
         target_link_libraries(x11-lxqt-menu-quality-probe PRIVATE
             PkgConfig::TEST_X11)
         target_compile_options(x11-lxqt-menu-quality-probe PRIVATE
             -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror)
+        add_test(NAME popup-background-epoch-unit
+            COMMAND $<TARGET_FILE:x11-popup-ui-probe> --self-test-epoch)
+        set_tests_properties(popup-background-epoch-unit PROPERTIES
+            LABELS "unit;quality;popup")
         add_test(NAME lxqt-menu-quality-mapping-unit
             COMMAND $<TARGET_FILE:x11-lxqt-menu-quality-probe>
                 --self-test-mapping)
@@ -1732,7 +1752,7 @@ if(TARGET xrdp-console)
             set_tests_properties(xrdp-loader-gfx-h264-lxqt-menu-stress
                 PROPERTIES
                 ENVIRONMENT
-                    "PYTHONDONTWRITEBYTECODE=1;XRDP_CONSOLE_PROFILE=1;XRDP_CONSOLE_TEST_ARTIFACT_DIR=${CMAKE_BINARY_DIR}/test-artifacts/xrdp-loader-gfx-h264-lxqt-menu-stress;XRDP_CONSOLE_LXQT_PANEL_EXECUTABLE=${XRDP_CONSOLE_LXQT_PANEL_EXECUTABLE};XRDP_CONSOLE_DBUS_RUN_SESSION=${XRDP_CONSOLE_DBUS_RUN_SESSION_EXECUTABLE};XRDP_CONSOLE_LXQT_MENU_QUALITY_PROBE=$<TARGET_FILE:x11-lxqt-menu-quality-probe>;XRDP_CONSOLE_LXQT_STABILITY_SAMPLES=3"
+                    "PYTHONDONTWRITEBYTECODE=1;XRDP_CONSOLE_PROFILE=1;XRDP_CONSOLE_TEST_ARTIFACT_DIR=${CMAKE_BINARY_DIR}/test-artifacts/xrdp-loader-gfx-h264-lxqt-menu-stress;XRDP_CONSOLE_LXQT_PANEL_EXECUTABLE=${XRDP_CONSOLE_LXQT_PANEL_EXECUTABLE};XRDP_CONSOLE_DBUS_RUN_SESSION=${XRDP_CONSOLE_DBUS_RUN_SESSION_EXECUTABLE};XRDP_CONSOLE_LXQT_MENU_QUALITY_PROBE=$<TARGET_FILE:x11-lxqt-menu-quality-probe>"
                 TIMEOUT 240
                 RESOURCE_LOCK xrdp_console_loader_display
                 RUN_SERIAL TRUE

@@ -143,6 +143,107 @@ luma(unsigned int red, unsigned int green, unsigned int blue)
 }
 
 static int
+decode_background_epoch_lumas(
+    const unsigned int lumas[POPUP_BACKGROUND_EPOCH_BITS],
+    unsigned int *epoch)
+{
+    unsigned int value = 0U;
+
+    for (unsigned int bit = 0U; bit < POPUP_BACKGROUND_EPOCH_BITS; ++bit)
+    {
+        if (lumas[bit] >= 180U)
+        {
+            value = (value << 1U) | 1U;
+        }
+        else if (lumas[bit] < 75U)
+        {
+            value <<= 1U;
+        }
+        else
+        {
+            return 0;
+        }
+    }
+    *epoch = value;
+    return 1;
+}
+
+static int
+sample_background_epoch(Probe *probe)
+{
+    const int left = map_source_coordinate(
+        probe, POPUP_BACKGROUND_EPOCH_X, probe->viewport_x);
+    const int top = map_source_coordinate(
+        probe, POPUP_BACKGROUND_EPOCH_Y, probe->viewport_y);
+    const int right = map_source_coordinate(
+        probe, POPUP_BACKGROUND_EPOCH_X +
+               (int)(POPUP_BACKGROUND_EPOCH_BITS *
+                     POPUP_BACKGROUND_EPOCH_CELL_WIDTH),
+        probe->viewport_x);
+    const int bottom = map_source_coordinate(
+        probe, POPUP_BACKGROUND_EPOCH_Y +
+               POPUP_BACKGROUND_EPOCH_CELL_HEIGHT,
+        probe->viewport_y);
+    const int width = right - left;
+    const int height = bottom - top;
+    unsigned int lumas[POPUP_BACKGROUND_EPOCH_BITS];
+    XImage *image;
+    int64_t sample_ns;
+    unsigned int epoch = 0U;
+
+    if (left < 0 || top < 0 || width <= 0 || height <= 0 ||
+        right > probe->attributes.width ||
+        bottom > probe->attributes.height)
+    {
+        puts("ERROR sample-epoch-geometry");
+        fflush(stdout);
+        return 0;
+    }
+    image = XGetImage(probe->display, probe->window, left, top,
+                      (unsigned int)width, (unsigned int)height,
+                      AllPlanes, ZPixmap);
+    if (image == NULL)
+    {
+        puts("ERROR sample-epoch-image");
+        fflush(stdout);
+        return 0;
+    }
+    sample_ns = monotonic_nanoseconds();
+    for (unsigned int bit = 0U;
+         bit < POPUP_BACKGROUND_EPOCH_BITS; ++bit)
+    {
+        const int source_x = POPUP_BACKGROUND_EPOCH_X +
+            (int)(bit * POPUP_BACKGROUND_EPOCH_CELL_WIDTH) +
+            POPUP_BACKGROUND_EPOCH_CELL_WIDTH / 2;
+        const int source_y = POPUP_BACKGROUND_EPOCH_Y +
+                             POPUP_BACKGROUND_EPOCH_CELL_HEIGHT / 2;
+        const int x = map_source_coordinate(probe, source_x,
+                                            probe->viewport_x) - left;
+        const int y = map_source_coordinate(probe, source_y,
+                                            probe->viewport_y) - top;
+        const unsigned long pixel = XGetPixel(image, x, y);
+
+        lumas[bit] = luma(
+            component(pixel, probe->attributes.visual->red_mask),
+            component(pixel, probe->attributes.visual->green_mask),
+            component(pixel, probe->attributes.visual->blue_mask));
+    }
+    XDestroyImage(image);
+    if (decode_background_epoch_lumas(lumas, &epoch))
+    {
+        printf("EPOCH_SEEN value=%u sample_ns=%" PRId64 "\n",
+               epoch, sample_ns);
+    }
+    else
+    {
+        printf("EPOCH_SEEN value=invalid sample_ns=%" PRId64 "\n",
+               sample_ns);
+    }
+    fflush(stdout);
+    return 1;
+}
+
+static int
 near_color(const Probe *probe, int x, int y,
            unsigned int expected_red, unsigned int expected_green,
            unsigned int expected_blue, unsigned int tolerance)
@@ -173,52 +274,6 @@ capture_roi(Probe *probe)
         (unsigned int)probe->roi_width, (unsigned int)probe->roi_height,
         AllPlanes, ZPixmap);
     return probe->last_roi != NULL;
-}
-
-static int
-hash_region(Probe *probe, int x, int y, int width, int height,
-            uint64_t *hash)
-{
-    XImage *image;
-    uint64_t value = UINT64_C(14695981039346656037);
-
-    if (width <= 0 || height <= 0 || x < 0 || y < 0 ||
-        x + width > probe->attributes.width ||
-        y + height > probe->attributes.height)
-    {
-        return 0;
-    }
-    image = XGetImage(probe->display, probe->window, x, y,
-                      (unsigned int)width, (unsigned int)height,
-                      AllPlanes, ZPixmap);
-    if (image == NULL)
-    {
-        return 0;
-    }
-    for (int row = 0; row < height; ++row)
-    {
-        for (int column = 0; column < width; ++column)
-        {
-            const unsigned long pixel = XGetPixel(image, column, row);
-            const unsigned char rgb[3] = {
-                (unsigned char)component(
-                    pixel, probe->attributes.visual->red_mask),
-                (unsigned char)component(
-                    pixel, probe->attributes.visual->green_mask),
-                (unsigned char)component(
-                    pixel, probe->attributes.visual->blue_mask),
-            };
-
-            for (unsigned int channel = 0U; channel < 3U; ++channel)
-            {
-                value ^= rgb[channel];
-                value *= UINT64_C(1099511628211);
-            }
-        }
-    }
-    XDestroyImage(image);
-    *hash = value;
-    return 1;
 }
 
 static unsigned int
@@ -820,6 +875,141 @@ initialize_geometry(Probe *probe)
     return 1;
 }
 
+static int
+self_test_background_epoch(void)
+{
+    static const struct
+    {
+        int numerator;
+        int denominator;
+        int viewport_x;
+        int viewport_y;
+    } mappings[] = {
+        {1, 1, 0, 0},
+        {1364, 1366, 0, 0},
+        {1512, 1920, 0, 24},
+        {1600, 1920, 0, 50},
+    };
+    static const unsigned int expected_values[] = {1U, 2U, 17U, 255U};
+    unsigned int lumas[POPUP_BACKGROUND_EPOCH_BITS];
+
+    for (size_t mapping_index = 0U;
+         mapping_index < sizeof(mappings) / sizeof(mappings[0]);
+         ++mapping_index)
+    {
+        Probe probe;
+
+        memset(&probe, 0, sizeof(probe));
+        probe.scale_numerator = mappings[mapping_index].numerator;
+        probe.scale_denominator = mappings[mapping_index].denominator;
+        probe.viewport_x = mappings[mapping_index].viewport_x;
+        probe.viewport_y = mappings[mapping_index].viewport_y;
+        for (unsigned int bit = 0U;
+             bit < POPUP_BACKGROUND_EPOCH_BITS; ++bit)
+        {
+            const int source_x = POPUP_BACKGROUND_EPOCH_X +
+                (int)(bit * POPUP_BACKGROUND_EPOCH_CELL_WIDTH) +
+                POPUP_BACKGROUND_EPOCH_CELL_WIDTH / 2;
+            const int source_y = POPUP_BACKGROUND_EPOCH_Y +
+                POPUP_BACKGROUND_EPOCH_CELL_HEIGHT / 2;
+            const int sample_x = map_source_coordinate(
+                &probe, source_x, probe.viewport_x);
+            const int sample_y = map_source_coordinate(
+                &probe, source_y, probe.viewport_y);
+            const int cell_left = map_source_coordinate(
+                &probe, POPUP_BACKGROUND_EPOCH_X +
+                        (int)(bit * POPUP_BACKGROUND_EPOCH_CELL_WIDTH),
+                probe.viewport_x);
+            const int cell_right = map_source_coordinate(
+                &probe, POPUP_BACKGROUND_EPOCH_X +
+                        (int)((bit + 1U) *
+                              POPUP_BACKGROUND_EPOCH_CELL_WIDTH),
+                probe.viewport_x);
+            const int cell_top = map_source_coordinate(
+                &probe, POPUP_BACKGROUND_EPOCH_Y, probe.viewport_y);
+            const int cell_bottom = map_source_coordinate(
+                &probe, POPUP_BACKGROUND_EPOCH_Y +
+                        POPUP_BACKGROUND_EPOCH_CELL_HEIGHT,
+                probe.viewport_y);
+
+            if (sample_x < cell_left || sample_x >= cell_right ||
+                sample_y < cell_top || sample_y >= cell_bottom)
+            {
+                fputs("BACKGROUND_EPOCH_SELF_TEST FAIL mapped-cell\n",
+                      stderr);
+                return 1;
+            }
+        }
+        for (size_t value_index = 0U;
+             value_index < sizeof(expected_values) /
+                               sizeof(expected_values[0]); ++value_index)
+        {
+            unsigned int decoded = 0U;
+
+            for (unsigned int bit = 0U;
+                 bit < POPUP_BACKGROUND_EPOCH_BITS; ++bit)
+            {
+                const unsigned int value =
+                    (expected_values[value_index] >>
+                     (POPUP_BACKGROUND_EPOCH_BITS - 1U - bit)) & 1U;
+                lumas[bit] = value != 0U ? 235U : 16U;
+            }
+            if (!decode_background_epoch_lumas(lumas, &decoded) ||
+                decoded != expected_values[value_index])
+            {
+                fputs("BACKGROUND_EPOCH_SELF_TEST FAIL value\n", stderr);
+                return 1;
+            }
+        }
+    }
+
+    {
+        unsigned int decoded = 0U;
+        for (unsigned int bit = 0U;
+             bit < POPUP_BACKGROUND_EPOCH_BITS; ++bit)
+        {
+            const unsigned int value = (17U >> (7U - bit)) & 1U;
+            lumas[bit] = value != 0U ? 235U : 16U;
+        }
+        lumas[3] = lumas[3] >= 180U ? 16U : 235U;
+
+        if (!decode_background_epoch_lumas(lumas, &decoded) ||
+            decoded == 17U)
+        {
+            fputs("BACKGROUND_EPOCH_SELF_TEST FAIL bit-flip\n", stderr);
+            return 1;
+        }
+    }
+    {
+        unsigned int stale_epoch = 0U;
+        for (unsigned int bit = 0U;
+             bit < POPUP_BACKGROUND_EPOCH_BITS; ++bit)
+        {
+            const unsigned int value = (1U >> (7U - bit)) & 1U;
+            lumas[bit] = value != 0U ? 235U : 16U;
+        }
+        if (!decode_background_epoch_lumas(lumas, &stale_epoch) ||
+            stale_epoch == 2U)
+        {
+            fputs("BACKGROUND_EPOCH_SELF_TEST FAIL stale-epoch\n", stderr);
+            return 1;
+        }
+    }
+    lumas[2] = 120U;
+    {
+        unsigned int decoded = 0U;
+        if (decode_background_epoch_lumas(lumas, &decoded))
+        {
+            fputs("BACKGROUND_EPOCH_SELF_TEST FAIL invalid-cell\n", stderr);
+            return 1;
+        }
+    }
+    puts("BACKGROUND_EPOCH_SELF_TEST PASS values=1,2,17,255 "
+         "mappings=identity,1366-to-1364,downscale,viewport-offset "
+         "bit-flip=detected stale=1-vs-2-rejected");
+    return 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -828,6 +1018,10 @@ main(int argc, char **argv)
     int result = EXIT_FAILURE;
 
     memset(&probe, 0, sizeof(probe));
+    if (argc == 2 && strcmp(argv[1], "--self-test-epoch") == 0)
+    {
+        return self_test_background_epoch();
+    }
     if (argc != 5 || !parse_window(argv[2], &probe.window) ||
         !parse_integer(argv[3], &probe.source_width) ||
         !parse_integer(argv[4], &probe.source_height) ||
@@ -863,6 +1057,13 @@ main(int argc, char **argv)
         if (strcmp(command, "sample") == 0)
         {
             if (!sample_frame(&probe))
+            {
+                break;
+            }
+        }
+        else if (strcmp(command, "sample-epoch") == 0)
+        {
+            if (!sample_background_epoch(&probe))
             {
                 break;
             }
@@ -903,39 +1104,6 @@ main(int argc, char **argv)
 
             printf("INPUT_STATE buttons_released=%u\n",
                    (unsigned int)(query_ok && (mask & button_mask) == 0U));
-            fflush(stdout);
-        }
-        else if (strncmp(command, "hash-region ", 12) == 0)
-        {
-            int x;
-            int y;
-            int width;
-            int height;
-            char x_text[16];
-            char y_text[16];
-            char width_text[16];
-            char height_text[16];
-            char trailing;
-            uint64_t hash;
-
-            if (sscanf(command + 12, "%15s %15s %15s %15s %c",
-                       x_text, y_text, width_text, height_text,
-                       &trailing) != 4 ||
-                !parse_integer(x_text, &x) ||
-                !parse_integer(y_text, &y) ||
-                !parse_integer(width_text, &width) ||
-                !parse_integer(height_text, &height) ||
-                !hash_region(&probe, x, y, width, height, &hash))
-            {
-                puts("ERROR hash-region");
-            }
-            else
-            {
-                printf("REGION_HASH %016" PRIx64 " pixels=%" PRIu64
-                       " captured_ns=%" PRId64 "\n", hash,
-                       (uint64_t)width * (uint64_t)height,
-                       monotonic_nanoseconds());
-            }
             fflush(stdout);
         }
         else if (strncmp(command, "dump ", 5) == 0)
