@@ -69,6 +69,8 @@ struct probe
     bool has_expected_owner;
     bool once;
     bool complete_after_images;
+    bool png_first_fallback_bmp;
+    bool awaiting_bmp_fallback;
     bool has_png;
     bool has_bmp;
     bool png_resolved;
@@ -77,6 +79,8 @@ struct probe
     bool failed;
     uint64_t image_bytes;
     uint64_t incr_announced_bytes;
+    uint64_t clipboard_generation;
+    uint64_t png_owner_observation;
 };
 
 static uint64_t
@@ -285,6 +289,41 @@ finish_image_request(struct probe *probe, bool success, const char *reason,
     {
         return;
     }
+    if (completed_kind == REQUEST_PNG && probe->png_first_fallback_bmp)
+    {
+        if (success && byte_count != 0U)
+        {
+            probe->done = true;
+            return;
+        }
+        if (!probe->has_bmp)
+        {
+            probe->done = probe->complete_after_images;
+            return;
+        }
+        const Window current_owner =
+            XGetSelectionOwner(probe->display, probe->clipboard);
+        if (current_owner != probe->expected_owner)
+        {
+            log_prefix("fallback_bmp_cancelled");
+            printf(",\"reason\":\"owner-changed\",\"owner\":\"0x%lx\""
+                   ",\"generation\":%llu}\n",
+                   current_owner,
+                   (unsigned long long)probe->clipboard_generation);
+            fflush(stdout);
+            probe->done = true;
+            return;
+        }
+        probe->awaiting_bmp_fallback = true;
+        log_prefix("fallback_bmp_pending");
+        printf(",\"owner\":\"0x%lx\",\"owner_observation\":%llu"
+               ",\"generation\":%llu}\n",
+               probe->expected_owner,
+               (unsigned long long)probe->owner_observation,
+               (unsigned long long)probe->clipboard_generation);
+        fflush(stdout);
+        return;
+    }
     if (completed_kind == REQUEST_PNG && probe->has_bmp)
     {
         begin_selection_request(probe, REQUEST_BMP, probe->image_bmp);
@@ -459,6 +498,7 @@ handle_targets_property(struct probe *probe, Atom actual_type,
     probe->saw_image_offer = true;
     if (probe->has_png)
     {
+        probe->png_owner_observation = probe->owner_observation;
         begin_selection_request(probe, REQUEST_PNG, probe->image_png);
     }
     else if (probe->has_bmp)
@@ -730,6 +770,23 @@ handle_owner_notification(struct probe *probe,
     {
         subtype = "SelectionClientClose";
     }
+    if (probe->png_first_fallback_bmp &&
+            (probe->awaiting_bmp_fallback ||
+             probe->request_kind == REQUEST_PNG))
+    {
+        cancel_active_request(probe, "clipboard-owner-changed-during-image");
+        ++probe->owner_observation;
+        probe->owner = event->owner;
+        log_owner(probe, event->owner, "xfixes", subtype, event->timestamp);
+        log_prefix("fallback_bmp_cancelled");
+        printf(",\"reason\":\"owner-event-during-png\","
+               "\"owner\":\"0x%lx\",\"generation\":%llu}\n",
+               event->owner,
+               (unsigned long long)probe->clipboard_generation);
+        fflush(stdout);
+        probe->done = true;
+        return;
+    }
     cancel_active_request(probe, "clipboard-owner-changed");
     ++probe->owner_observation;
     probe->owner = event->owner;
@@ -759,11 +816,13 @@ run_probe(uint64_t timeout_ms, uint64_t request_timeout_ms,
           bool ignore_initial_owner, bool once,
           bool complete_after_images,
           enum image_selection_mode image_selection_mode,
-          bool has_expected_owner, Window expected_owner)
+          bool has_expected_owner, Window expected_owner,
+          bool png_first_fallback_bmp,
+          uint64_t clipboard_generation)
 {
     struct probe probe;
     int fixes_error_base = 0;
-    struct pollfd descriptor;
+    struct pollfd descriptors[2];
     memset(&probe, 0, sizeof(probe));
     probe.timeout_ms = timeout_ms;
     probe.request_timeout_ms = request_timeout_ms;
@@ -773,6 +832,8 @@ run_probe(uint64_t timeout_ms, uint64_t request_timeout_ms,
     probe.image_selection_mode = image_selection_mode;
     probe.has_expected_owner = has_expected_owner;
     probe.expected_owner = expected_owner;
+    probe.png_first_fallback_bmp = png_first_fallback_bmp;
+    probe.clipboard_generation = clipboard_generation;
     probe.display = XOpenDisplay(NULL);
     if (probe.display == NULL)
     {
@@ -852,15 +913,16 @@ run_probe(uint64_t timeout_ms, uint64_t request_timeout_ms,
         }
     }
 
-    descriptor.fd = ConnectionNumber(probe.display);
-    descriptor.events = POLLIN;
-    descriptor.revents = 0;
+    descriptors[0].fd = ConnectionNumber(probe.display);
+    descriptors[0].events = POLLIN;
+    descriptors[0].revents = 0;
     while (!probe.done)
     {
         const uint64_t now_ns = monotonic_ns();
         uint64_t next_deadline_ns = probe.deadline_ns;
         int timeout;
         int poll_result;
+        nfds_t descriptor_count = 1U;
         if (probe.request_kind != REQUEST_NONE)
         {
             const uint64_t request_deadline = probe.request_started_ns +
@@ -907,18 +969,22 @@ run_probe(uint64_t timeout_ms, uint64_t request_timeout_ms,
             timeout = remaining_ms > (uint64_t)INT_MAX ? INT_MAX :
                       (int)remaining_ms;
         }
+        if (probe.awaiting_bmp_fallback)
+        {
+            descriptors[1].fd = STDIN_FILENO;
+            descriptors[1].events = POLLIN | POLLHUP | POLLERR;
+            descriptors[1].revents = 0;
+            descriptor_count = 2U;
+        }
         if (XPending(probe.display) > 0)
         {
-            poll_result = 1;
+            timeout = 0;
         }
-        else
+        do
         {
-            do
-            {
-                poll_result = poll(&descriptor, 1, timeout);
-            }
-            while (poll_result < 0 && errno == EINTR);
+            poll_result = poll(descriptors, descriptor_count, timeout);
         }
+        while (poll_result < 0 && errno == EINTR);
         if (poll_result < 0)
         {
             perror("clipboard image probe: poll");
@@ -944,6 +1010,66 @@ run_probe(uint64_t timeout_ms, uint64_t request_timeout_ms,
                     &probe, (const XFixesSelectionNotifyEvent *)&event);
             }
         }
+        if (!probe.done && probe.awaiting_bmp_fallback &&
+                (descriptors[1].revents & (POLLIN | POLLHUP | POLLERR)) != 0)
+        {
+            char control[64];
+            if (fgets(control, sizeof(control), stdin) == NULL)
+            {
+                log_prefix("fallback_bmp_cancelled");
+                printf(",\"reason\":\"authorization-closed\","
+                       "\"generation\":%llu}\n",
+                       (unsigned long long)probe.clipboard_generation);
+                fflush(stdout);
+                probe.awaiting_bmp_fallback = false;
+                probe.done = true;
+            }
+            else if (strncmp(control, "allow-bmp ", 10U) == 0)
+            {
+                char *end = NULL;
+                unsigned long long authorization_generation;
+                errno = 0;
+                authorization_generation = strtoull(control + 10, &end, 10);
+                if (errno != 0 || end == control + 10 || *end != '\n' ||
+                        end[1] != '\0' ||
+                        (uint64_t)authorization_generation !=
+                        probe.clipboard_generation ||
+                        probe.owner_observation !=
+                            probe.png_owner_observation ||
+                        XGetSelectionOwner(probe.display, probe.clipboard) !=
+                            probe.expected_owner)
+                {
+                    log_prefix("fallback_bmp_cancelled");
+                    printf(",\"reason\":\"authorization-stale\","
+                           "\"generation\":%llu}\n",
+                           (unsigned long long)probe.clipboard_generation);
+                    fflush(stdout);
+                    probe.awaiting_bmp_fallback = false;
+                    probe.done = true;
+                }
+                else
+                {
+                    probe.awaiting_bmp_fallback = false;
+                    log_prefix("fallback_bmp_authorized");
+                    printf(",\"owner\":\"0x%lx\",\"generation\":%llu}\n",
+                           probe.expected_owner,
+                           (unsigned long long)probe.clipboard_generation);
+                    fflush(stdout);
+                    begin_selection_request(&probe, REQUEST_BMP,
+                                            probe.image_bmp);
+                }
+            }
+            else
+            {
+                log_prefix("fallback_bmp_cancelled");
+                printf(",\"reason\":\"generation-replaced\","
+                       "\"generation\":%llu}\n",
+                       (unsigned long long)probe.clipboard_generation);
+                fflush(stdout);
+                probe.awaiting_bmp_fallback = false;
+                probe.done = true;
+            }
+        }
     }
 
     XFixesSelectSelectionInput(probe.display, probe.window, probe.clipboard, 0);
@@ -962,6 +1088,9 @@ main(int argc, char **argv)
     Window expected_owner = None;
     bool once = false;
     bool complete_after_images = true;
+    bool png_first_fallback_bmp = false;
+    bool has_clipboard_generation = false;
+    uint64_t clipboard_generation = 0U;
     enum image_selection_mode image_selection_mode = IMAGE_SELECTION_ALL;
     int index;
     for (index = 1; index < argc; ++index)
@@ -1018,6 +1147,21 @@ main(int argc, char **argv)
         {
             complete_after_images = false;
         }
+        else if (strcmp(argv[index], "--png-first-fallback-bmp") == 0)
+        {
+            png_first_fallback_bmp = true;
+        }
+        else if (strcmp(argv[index], "--clipboard-generation") == 0 &&
+                 index + 1 < argc)
+        {
+            if (!parse_u64(argv[++index], 1U, UINT64_MAX,
+                           &clipboard_generation))
+            {
+                fputs("invalid --clipboard-generation\n", stderr);
+                return 2;
+            }
+            has_clipboard_generation = true;
+        }
         else if (strcmp(argv[index], "--only-png") == 0)
         {
             if (image_selection_mode != IMAGE_SELECTION_ALL)
@@ -1049,7 +1193,18 @@ main(int argc, char **argv)
         fputs("--once cannot be combined with --ignore-initial-owner\n", stderr);
         return 2;
     }
+    if (png_first_fallback_bmp &&
+            (!once || !complete_after_images || !has_expected_owner ||
+             !has_clipboard_generation ||
+             image_selection_mode != IMAGE_SELECTION_ALL))
+    {
+        fputs("--png-first-fallback-bmp requires --once, an expected owner, "
+              "a clipboard generation, and unfiltered image targets\n", stderr);
+        return 2;
+    }
     return run_probe(timeout_ms, request_timeout_ms, ignore_initial_owner,
                      once, complete_after_images, image_selection_mode,
-                     has_expected_owner, expected_owner);
+                     has_expected_owner, expected_owner,
+                     png_first_fallback_bmp,
+                     clipboard_generation);
 }

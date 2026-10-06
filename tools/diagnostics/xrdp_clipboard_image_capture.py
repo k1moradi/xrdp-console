@@ -22,7 +22,12 @@ from typing import BinaryIO
 MAX_CAPTURE_BYTES = 64 * 1024 * 1024
 MAX_TRACKED_GENERATIONS = 64
 DEFAULT_TIMEOUT_SECONDS = 120
+DEFAULT_TRANSACTION_TIMEOUT_SECONDS = 60
 DEFAULT_REQUEST_TIMEOUT_MS = 20_000
+MIN_TRANSACTION_TIMEOUT_SECONDS = 5
+MAX_TRANSACTION_TIMEOUT_SECONDS = 300
+NANOSECONDS_PER_SECOND = 1_000_000_000
+NANOSECONDS_PER_MILLISECOND = 1_000_000
 INCR_TERMINATOR_ACK_TIMEOUT_SECONDS = 15
 CLIPRDR_NAMES = {
     2: "CB_FORMAT_LIST",
@@ -108,6 +113,94 @@ def now_pair() -> tuple[str, int, int]:
     return realtime, realtime_ns, monotonic_ns
 
 
+def deadline_after(start_ns: int, duration_seconds: int) -> int:
+    if start_ns < 0 or duration_seconds < 0:
+        raise ValueError("deadline inputs must be non-negative")
+    return start_ns + duration_seconds * NANOSECONDS_PER_SECOND
+
+
+def remaining_timeout_ms(deadline_ns: int, now_ns: int,
+                         maximum_ms: int) -> int:
+    if deadline_ns < 0 or now_ns < 0 or maximum_ms < 0:
+        raise ValueError("timeout inputs must be non-negative")
+    if now_ns >= deadline_ns or maximum_ms == 0:
+        return 0
+    remaining = (deadline_ns - now_ns) // NANOSECONDS_PER_MILLISECOND
+    return min(maximum_ms, remaining)
+
+
+def capture_timeout_reason(now_ns: int, trigger_deadline_ns: int,
+                           transaction_deadline_ns: int | None) -> str | None:
+    if transaction_deadline_ns is not None:
+        if now_ns >= transaction_deadline_ns:
+            return "image clipboard transaction deadline expired"
+        return None
+    if now_ns >= trigger_deadline_ns:
+        return "no installed image-bearing Format List before timeout"
+    return None
+
+
+def fallback_control_line(*, generation: int, latest_generation: int,
+                          expected_owner: str, observed_owner: str) -> str:
+    if (generation == latest_generation and expected_owner.lower() ==
+            observed_owner.lower()):
+        return f"allow-bmp {generation}\n"
+    return f"deny-bmp {latest_generation}\n"
+
+
+def image_transaction_outcome(
+        events: list[dict[str, object]], capture_error: str | None
+        ) -> dict[str, object]:
+    if capture_error == "no installed image-bearing Format List before timeout":
+        return {"status": "no-trigger", "reason": capture_error}
+    if capture_error == "image clipboard transaction deadline expired":
+        return {"status": "transaction-timeout", "reason": capture_error}
+    if capture_error is not None and "generation replaced" in capture_error:
+        return {"status": "generation-replaced", "reason": capture_error}
+    if capture_error is not None and "PNG-to-BMP fallback" in capture_error:
+        return {"status": "fallback-cancelled", "reason": capture_error}
+    if (capture_error is not None and
+            "INCR terminator acknowledgement" in capture_error):
+        return {"status": "incr-terminator-ack-timeout",
+                "reason": capture_error}
+    cancelled = next((event for event in reversed(events)
+                     if event.get("event") == "fallback_bmp_cancelled"), None)
+    if cancelled is not None:
+        return {"status": "fallback-cancelled",
+                "reason": cancelled.get("reason")}
+
+    image_results = [event for event in events
+                     if event.get("event") == "selection_result" and
+                     event.get("target") in ("image/png", "image/bmp")]
+    successes = [event for event in image_results
+                 if event.get("result") == "success" and
+                 isinstance(event.get("bytes"), int) and
+                 event["bytes"] > 0]
+    if successes:
+        return {"status": "image-data-delivered",
+                "successful_targets": [event["target"] for event in successes]}
+    if image_results:
+        last = image_results[-1]
+        return {"status": "image-request-failed",
+                "target": last.get("target"),
+                "reason": last.get("reason"),
+                "bytes": last.get("bytes", 0)}
+    if any(event.get("event") == "no_requested_image_target"
+           for event in events):
+        return {"status": "no-x11-image-target"}
+    if any(event.get("event") == "probe_timeout" for event in events):
+        return {"status": "transaction-timeout", "reason": "probe timeout"}
+    return {"status": "not-started" if not events else "incomplete"}
+
+
+def probe_exit_is_expected(exit_status: int | None,
+                           transaction_outcome_error: bool) -> bool:
+    if exit_status in (None, 0, 1):
+        return True
+    return (transaction_outcome_error and
+            exit_status == -signal.SIGTERM)
+
+
 def emit_marker(path: Path, label: str, test_id: str,
                 realtime: str, realtime_ns: int, monotonic_ns: int) -> None:
     line = (f"{label} {test_id} realtime={realtime} "
@@ -171,6 +264,7 @@ class BoundedPipeCapture:
         self.bytes_written = 0
         self.truncated = False
         self.ready = threading.Event()
+        self.fallback_bmp_pending = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> None:
@@ -186,6 +280,8 @@ class BoundedPipeCapture:
                     line = sanitized_cliprdr_journal_line(line)
                     if line is None:
                         continue
+                fallback_pending = (
+                    b'"event":"fallback_bmp_pending"' in line)
                 if b'"event":"ready"' in line:
                     self.ready.set()
                 remaining = self.limit - self.bytes_written
@@ -193,6 +289,8 @@ class BoundedPipeCapture:
                     output.write(line[:remaining])
                     self.bytes_written += min(len(line), remaining)
                     output.flush()
+                if fallback_pending:
+                    self.fallback_bmp_pending.set()
                 if len(line) > remaining:
                     self.truncated = True
 
@@ -1163,8 +1261,11 @@ def read_boot_id() -> str | None:
 
 
 def probe_command(probe: Path, timeout_ms: int,
-                  request_timeout_ms: int, expected_owner: str) -> list[str]:
+                  request_timeout_ms: int, expected_owner: str,
+                  generation: int) -> list[str]:
     return [str(probe), "--once", "--expected-owner", expected_owner,
+            "--clipboard-generation", str(generation),
+            "--png-first-fallback-bmp",
             "--timeout-ms", str(timeout_ms), "--request-timeout-ms",
             str(request_timeout_ms)]
 
@@ -1238,6 +1339,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--journal-unit", action="append")
     parser.add_argument("--timeout-seconds", type=int,
                         default=DEFAULT_TIMEOUT_SECONDS)
+    parser.add_argument("--transaction-timeout-seconds", type=int,
+                        default=DEFAULT_TRANSACTION_TIMEOUT_SECONDS)
     parser.add_argument("--request-timeout-ms", type=int,
                         default=DEFAULT_REQUEST_TIMEOUT_MS)
     parser.add_argument("--display")
@@ -1248,6 +1351,12 @@ def main() -> int:
     arguments = parse_args()
     if arguments.timeout_seconds < 1 or arguments.timeout_seconds > 3600:
         raise SystemExit("--timeout-seconds must be in 1..3600")
+    if (arguments.transaction_timeout_seconds <
+            MIN_TRANSACTION_TIMEOUT_SECONDS or
+            arguments.transaction_timeout_seconds >
+            MAX_TRANSACTION_TIMEOUT_SECONDS):
+        raise SystemExit(
+            "--transaction-timeout-seconds must be in 5..300")
     if arguments.request_timeout_ms < 1 or arguments.request_timeout_ms > 300_000:
         raise SystemExit("--request-timeout-ms must be in 1..300000")
     if not arguments.probe.is_file() or not os.access(arguments.probe, os.X_OK):
@@ -1304,14 +1413,18 @@ def main() -> int:
     observed_incr_acks: set[tuple[str, str, str, int]] = set()
     required_acks: set[tuple[str, str, str, int]] = set()
     pending_acks: set[tuple[str, str, str, int]] = set()
-    deadline_ns = begin_mono_ns + arguments.timeout_seconds * 1_000_000_000
+    trigger_deadline_ns = deadline_after(
+        begin_mono_ns, arguments.timeout_seconds)
+    transaction_started_ns: int | None = None
+    transaction_deadline_ns: int | None = None
+    fallback_control_sent = False
     try:
         print("PROBE_READY: take one fresh screenshot. Waiting for a new "
               "image-bearing chansrv Format List and its successful "
               "owner-install marker; XFixes owner changes are supporting "
               "evidence only. After image probes complete or the bounded "
               "window seals, continue normal Mac/RDP clipboard use.", flush=True)
-        while time.monotonic_ns() < deadline_ns:
+        while True:
             appended_lines = chansrv_window.read_appended_lines()
             observed_incr_acks.update(
                 identity for line in appended_lines
@@ -1328,29 +1441,45 @@ def main() -> int:
             if chansrv_window.monitor_truncated:
                 capture_error = "chansrv trigger monitor exceeded its byte bound"
                 break
-            time.sleep(0.02)
+            capture_error = capture_timeout_reason(
+                time.monotonic_ns(), trigger_deadline_ns, None)
+            if capture_error is not None:
+                break
+            time.sleep(min(
+                0.02,
+                max(0.001, (trigger_deadline_ns - time.monotonic_ns()) /
+                    NANOSECONDS_PER_SECOND)))
         if active_trigger is None and capture_error is None:
             capture_error = "no installed image-bearing Format List before timeout"
 
         if active_trigger is not None and capture_error is None:
             generation = int(active_trigger["generation"])
             expected_owner = str(active_trigger["owner"])
-            remaining_ms = max(
-                1, min(120_000,
-                       (deadline_ns - time.monotonic_ns()) // 1_000_000))
+            transaction_started_ns = time.monotonic_ns()
+            transaction_deadline_ns = deadline_after(
+                transaction_started_ns,
+                arguments.transaction_timeout_seconds)
+            remaining_ms = remaining_timeout_ms(
+                transaction_deadline_ns, time.monotonic_ns(),
+                arguments.transaction_timeout_seconds * 1000)
+            if remaining_ms == 0:
+                capture_error = "image clipboard transaction deadline expired"
+                raise RuntimeError(capture_error)
             helper_command = probe_command(
                 arguments.probe, int(remaining_ms),
-                arguments.request_timeout_ms, expected_owner)
+                arguments.request_timeout_ms, expected_owner, generation)
             helper_process = subprocess.Popen(
                 helper_command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                env=helper_environment, start_new_session=True)
+                stdin=subprocess.PIPE, env=helper_environment,
+                start_new_session=True)
             if helper_process.stdout is None:
                 raise RuntimeError("probe did not provide a capture stream")
             helper_capture = BoundedPipeCapture(
                 helper_process.stdout, run_directory / "x11-probe.jsonl",
                 MAX_CAPTURE_BYTES)
             helper_capture.start()
-            if not helper_capture.ready.wait(timeout=10.0):
+            ready_timeout = min(10.0, remaining_ms / 1000.0)
+            if not helper_capture.ready.wait(timeout=ready_timeout):
                 capture_error = "probe did not report ready within 10 seconds"
                 stop_process(helper_process)
             else:
@@ -1366,15 +1495,59 @@ def main() -> int:
                         capture_error = (
                             "clipboard generation replaced while image probe "
                             "was active")
-                        stop_process(helper_process)
-                        break
+                        if (helper_capture.fallback_bmp_pending.is_set() and
+                                not fallback_control_sent and
+                                helper_process.stdin is not None):
+                            helper_process.stdin.write(
+                                f"deny-bmp {trigger_reader.latest_generation}\n"
+                                .encode("ascii"))
+                            helper_process.stdin.flush()
+                            fallback_control_sent = True
+                        else:
+                            stop_process(helper_process)
+                            break
                     if chansrv_window.monitor_truncated:
                         capture_error = (
                             "chansrv trigger monitor exceeded its byte bound")
                         stop_process(helper_process)
                         break
-                    if time.monotonic_ns() >= deadline_ns:
-                        capture_error = "bounded clipboard evidence window expired"
+                    if (helper_capture.fallback_bmp_pending.is_set() and
+                            not fallback_control_sent):
+                        events = parse_probe_events(
+                            run_directory / "x11-probe.jsonl")
+                        pending = next((event for event in reversed(events)
+                                        if event.get("event") ==
+                                        "fallback_bmp_pending"), None)
+                        pending_owner = (str(pending.get("owner", ""))
+                                         if pending is not None else "")
+                        command = fallback_control_line(
+                            generation=generation,
+                            latest_generation=trigger_reader.latest_generation,
+                            expected_owner=expected_owner,
+                            observed_owner=pending_owner)
+                        if command.startswith("deny-bmp"):
+                            if trigger_reader.latest_generation > generation:
+                                generation_replaced_by = (
+                                    trigger_reader.latest_generation)
+                            capture_error = (
+                                "clipboard generation changed before "
+                                "PNG-to-BMP fallback"
+                                if trigger_reader.latest_generation > generation
+                                else "X11 owner did not match before "
+                                     "PNG-to-BMP fallback")
+                        if helper_process.stdin is None:
+                            capture_error = (
+                                "probe fallback authorization pipe is unavailable")
+                            stop_process(helper_process)
+                            break
+                        helper_process.stdin.write(command.encode("ascii"))
+                        helper_process.stdin.flush()
+                        fallback_control_sent = True
+                    timeout_reason = capture_timeout_reason(
+                        time.monotonic_ns(), trigger_deadline_ns,
+                        transaction_deadline_ns)
+                    if timeout_reason is not None:
+                        capture_error = timeout_reason
                         stop_process(helper_process)
                         break
                     time.sleep(0.02)
@@ -1391,8 +1564,11 @@ def main() -> int:
                 parse_probe_events(run_directory / "x11-probe.jsonl"),
                 int(active_trigger["generation"]))
             pending_acks = required_acks - observed_incr_acks
+            if transaction_deadline_ns is None:
+                raise RuntimeError(
+                    "active clipboard trigger has no transaction deadline")
             ack_deadline_ns = min(
-                deadline_ns,
+                transaction_deadline_ns,
                 time.monotonic_ns() +
                 INCR_TERMINATOR_ACK_TIMEOUT_SECONDS * 1_000_000_000)
             while pending_acks and time.monotonic_ns() < ack_deadline_ns:
@@ -1492,6 +1668,28 @@ def main() -> int:
     retained_probe_events = sealed_protocol["probe_events"]
     retained = len(protocol["cliprdr_packets"])
     transaction = sealed_protocol["clipboard_transaction"]
+    image_outcome = image_transaction_outcome(probe_events, capture_error)
+    valid_outcome_errors = {
+        "no installed image-bearing Format List before timeout",
+        "image clipboard transaction deadline expired",
+    }
+    outcome_error = (capture_error is not None and
+                     (capture_error in valid_outcome_errors or
+                      "generation replaced" in capture_error or
+                      "PNG-to-BMP fallback" in capture_error or
+                      "INCR terminator acknowledgement" in capture_error))
+    helper_exit_status = (helper_process.returncode
+                          if helper_process is not None else None)
+    capture_execution_failed = (
+        not journal_started or journal_exit_status is not None or
+        not probe_exit_is_expected(helper_exit_status, outcome_error) or
+        (helper_exit_status == 1 and not probe_events) or
+        bool(chansrv_metadata.get("capture_truncated")) or
+        bool(chansrv_metadata.get("raw_metadata_artifacts_retained")) or
+        chansrv_window.monitor_truncated or
+        (helper_capture is not None and helper_capture.truncated) or
+        (journal_capture is not None and journal_capture.truncated) or
+        (capture_error is not None and not outcome_error))
     summary = {
         "test_id": test_id,
         "boot_id": read_boot_id(),
@@ -1501,10 +1699,18 @@ def main() -> int:
         "end": {"realtime": end_realtime,
                 "realtime_ns": end_realtime_ns,
                 "monotonic_ns": end_mono_ns},
+        "trigger_timeout_seconds": arguments.timeout_seconds,
+        "transaction_timeout_seconds": (
+            arguments.transaction_timeout_seconds),
+        "trigger_deadline_monotonic_ns": trigger_deadline_ns,
+        "transaction_started_monotonic_ns": transaction_started_ns,
+        "transaction_deadline_monotonic_ns": transaction_deadline_ns,
         "helper_command": helper_command,
-        "helper_exit_status": (helper_process.returncode
-                               if helper_process is not None else None),
+        "helper_exit_status": helper_exit_status,
         "capture_error": capture_error,
+        "capture_execution_status": (
+            "failed" if capture_execution_failed else "completed"),
+        "image_transaction_outcome": image_outcome,
         "journal_capture_started": journal_started,
         "journal_exit_status_before_seal": journal_exit_status,
         "journal_error": (journal_error_path.read_text(
@@ -1547,6 +1753,8 @@ def main() -> int:
         "active_clipboard_generation": (
             active_trigger.get("generation") if active_trigger else None),
         "helper_exit_status": summary["helper_exit_status"],
+        "capture_execution_status": summary["capture_execution_status"],
+        "image_transaction_outcome": image_outcome,
         "probe_results": [
             {key: event.get(key) for key in (
                 "event", "target", "result", "reason", "path", "bytes",
@@ -1557,14 +1765,7 @@ def main() -> int:
         "cliprdr_image_packet_count": len(protocol["cliprdr_packets"]),
         "capture_error": capture_error,
     }, indent=2), flush=True)
-    if (capture_error is not None or active_trigger is None or not journal_started or
-            journal_exit_status is not None or
-            bool(chansrv_metadata.get("capture_truncated")) or
-            bool(chansrv_metadata.get("raw_metadata_artifacts_retained")) or
-            chansrv_window.monitor_truncated or
-            (helper_capture is not None and helper_capture.truncated) or
-            (journal_capture is not None and journal_capture.truncated) or
-            (helper_process is not None and helper_process.returncode != 0)):
+    if capture_execution_failed:
         return 2
     return 0
 

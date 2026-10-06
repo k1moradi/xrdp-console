@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import signal
 import sys
 import tempfile
 import unittest
@@ -24,6 +25,121 @@ def load_capture_module(path: Path):
 
 
 class ClipboardCaptureTests(unittest.TestCase):
+    def test_screenshot_wait_and_image_transaction_deadlines_are_independent(self) -> None:
+        capture = load_capture_module(Path(sys.argv[1]))
+        begin_ns = 10_000_000_000
+        trigger_deadline = capture.deadline_after(begin_ns, 300)
+        transaction_seconds = 60
+
+        for trigger_ns in (begin_ns, trigger_deadline - 1_000_000):
+            transaction_deadline = capture.deadline_after(
+                trigger_ns, transaction_seconds)
+            self.assertEqual(
+                capture.remaining_timeout_ms(
+                    transaction_deadline, trigger_ns,
+                    transaction_seconds * 1000),
+                transaction_seconds * 1000)
+
+        self.assertIsNone(capture.capture_timeout_reason(
+            trigger_deadline - 1, trigger_deadline, None))
+        self.assertEqual(capture.capture_timeout_reason(
+            trigger_deadline, trigger_deadline, None),
+            "no installed image-bearing Format List before timeout")
+        self.assertEqual(capture.image_transaction_outcome(
+            [], "no installed image-bearing Format List before timeout"),
+            {"status": "no-trigger",
+             "reason": "no installed image-bearing Format List before timeout"})
+
+    def test_transaction_deadline_has_its_own_timeout_classification(self) -> None:
+        capture = load_capture_module(Path(sys.argv[1]))
+        begin_ns = 20_000_000_000
+        trigger_deadline = capture.deadline_after(begin_ns, 300)
+        trigger_ns = trigger_deadline - 1_000_000
+        transaction_deadline = capture.deadline_after(trigger_ns, 60)
+        self.assertIsNone(capture.capture_timeout_reason(
+            transaction_deadline - 1, trigger_deadline,
+            transaction_deadline))
+        self.assertEqual(capture.capture_timeout_reason(
+            transaction_deadline, trigger_deadline,
+            transaction_deadline),
+            "image clipboard transaction deadline expired")
+        self.assertEqual(capture.image_transaction_outcome(
+            [], "image clipboard transaction deadline expired"),
+            {"status": "transaction-timeout",
+             "reason": "image clipboard transaction deadline expired"})
+
+    def test_png_fallback_authorization_is_generation_and_owner_bound(self) -> None:
+        capture = load_capture_module(Path(sys.argv[1]))
+        self.assertEqual(capture.fallback_control_line(
+            generation=90, latest_generation=90,
+            expected_owner="0x1200002", observed_owner="0x1200002"),
+            "allow-bmp 90\n")
+        self.assertEqual(capture.fallback_control_line(
+            generation=90, latest_generation=91,
+            expected_owner="0x1200002", observed_owner="0x1200002"),
+            "deny-bmp 91\n")
+        self.assertEqual(capture.fallback_control_line(
+            generation=90, latest_generation=90,
+            expected_owner="0x1200002", observed_owner="0x1300002"),
+            "deny-bmp 90\n")
+
+    def test_image_transaction_outcome_reports_delivery_and_failures(self) -> None:
+        capture = load_capture_module(Path(sys.argv[1]))
+        png_success = capture.image_transaction_outcome([
+            {"event": "selection_result", "target": "image/png",
+             "result": "success", "bytes": 70},
+        ], None)
+        self.assertEqual(png_success, {
+            "status": "image-data-delivered",
+            "successful_targets": ["image/png"],
+        })
+
+        bmp_fallback_success = capture.image_transaction_outcome([
+            {"event": "selection_result", "target": "image/png",
+             "result": "failure", "bytes": 0},
+            {"event": "selection_result", "target": "image/bmp",
+             "result": "success", "bytes": 1024},
+        ], None)
+        self.assertEqual(bmp_fallback_success, {
+            "status": "image-data-delivered",
+            "successful_targets": ["image/bmp"],
+        })
+
+        failed_image = capture.image_transaction_outcome([
+            {"event": "selection_result", "target": "image/bmp",
+             "result": "failure", "reason": "selection-notified-none",
+             "bytes": 0},
+        ], None)
+        self.assertEqual(failed_image, {
+            "status": "image-request-failed", "target": "image/bmp",
+            "reason": "selection-notified-none", "bytes": 0,
+        })
+
+        generation_replaced = capture.image_transaction_outcome(
+            [], "clipboard generation replaced while image probe was active")
+        self.assertEqual(generation_replaced["status"], "generation-replaced")
+
+        fallback_cancelled = capture.image_transaction_outcome([
+            {"event": "fallback_bmp_cancelled",
+             "reason": "authorization-stale"},
+        ], None)
+        self.assertEqual(fallback_cancelled, {
+            "status": "fallback-cancelled",
+            "reason": "authorization-stale",
+        })
+
+    def test_expected_bounded_probe_termination_is_not_capture_failure(self) -> None:
+        capture = load_capture_module(Path(sys.argv[1]))
+        self.assertTrue(capture.probe_exit_is_expected(None, False))
+        self.assertTrue(capture.probe_exit_is_expected(0, False))
+        self.assertTrue(capture.probe_exit_is_expected(1, False))
+        self.assertTrue(capture.probe_exit_is_expected(
+            -signal.SIGTERM, True))
+        self.assertFalse(capture.probe_exit_is_expected(
+            -signal.SIGTERM, False))
+        self.assertFalse(capture.probe_exit_is_expected(
+            -signal.SIGKILL, True))
+
     def test_journal_capture_keeps_only_sanitized_cliprdr_metadata(self) -> None:
         capture = load_capture_module(Path(sys.argv[1]))
         raw = json.dumps({

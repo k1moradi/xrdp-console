@@ -128,6 +128,205 @@ def run_once(probe: Path, timeout_ms: int = 8000,
     return result.returncode, json_events(output), output
 
 
+def start_adaptive_probe(probe: Path, owner_xid: str,
+                         generation: int = 50
+                         ) -> tuple[subprocess.Popen[bytes], Lines, list[str]]:
+    process = subprocess.Popen(
+        [str(probe), "--once", "--expected-owner", owner_xid,
+         "--clipboard-generation", str(generation),
+         "--png-first-fallback-bmp", "--timeout-ms", "8000",
+         "--request-timeout-ms", "3000"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT, start_new_session=True)
+    if process.stdout is None or process.stdin is None:
+        raise AssertionError("adaptive probe is missing its control pipes")
+    lines = Lines(process.stdout)
+    captured: list[str] = []
+    lines.until(lambda line: '"event":"ready"' in line,
+                5.0, captured)
+    return process, lines, captured
+
+
+def finish_adaptive_probe(process: subprocess.Popen[bytes], lines: Lines,
+                          captured: list[str], timeout: float = 10.0
+                          ) -> tuple[int, list[dict[str, object]], str]:
+    process.wait(timeout=timeout)
+    lines.drain(captured)
+    output = "".join(captured)
+    return process.returncode, json_events(output), output
+
+
+def validate_png_first_fallback(probe: Path, peer: Path) -> None:
+    owner, owner_lines, owner_output = start_peer(peer, ["owner"])
+    process: subprocess.Popen[bytes] | None = None
+    try:
+        # The startup line is emitted before start_peer returns; query the X11
+        # owner through the existing peer command to avoid relying on parsing a
+        # process-specific log suffix.
+        owner_xid = selection_owner_xid(peer)
+
+        process, probe_lines, probe_output = start_adaptive_probe(
+            probe, owner_xid)
+        status, events, output = finish_adaptive_probe(
+            process, probe_lines, probe_output)
+        requests = [event.get("target") for event in events
+                    if event.get("event") == "selection_request"]
+        png = result_for(events, "image/png")
+        if (status != 0 or requests != ["TARGETS", "image/png"] or
+                png.get("result") != "success" or png.get("bytes", 0) <= 0 or
+                any(event.get("event") == "fallback_bmp_pending"
+                    for event in events)):
+            raise AssertionError(
+                f"successful PNG did not stop before BMP: {events!r}\n{output}")
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=2.0)
+        owner_lines.drain(owner_output)
+        stop_peer(owner)
+
+    with tempfile.TemporaryDirectory(prefix="clipboard-adaptive-png-incr-") as raw:
+        png_path = Path(raw) / "tiny.png"
+        png_path.write_bytes(PNG_1X1)
+        owner, owner_lines, owner_output = start_peer(
+            peer, ["owner-png-file-incr-xrdp-targets", str(png_path)])
+        process = None
+        try:
+            process, probe_lines, probe_output = start_adaptive_probe(
+                probe, selection_owner_xid(peer))
+            status, events, output = finish_adaptive_probe(
+                process, probe_lines, probe_output)
+            owner_lines.drain(owner_output)
+            requests = [event.get("target") for event in events
+                        if event.get("event") == "selection_request"]
+            png = result_for(events, "image/png")
+            if (status != 0 or requests != ["TARGETS", "image/png"] or
+                    png.get("result") != "success" or png.get("path") != "incr" or
+                    png.get("bytes", 0) <= 0 or
+                    "PNG_FILE_OWNER_INCR_TERMINATOR_ACK" not in
+                    "".join(owner_output)):
+                raise AssertionError(
+                    f"PNG INCR did not complete before sealing: "
+                    f"{events!r}\n{output}\n{''.join(owner_output)}")
+        finally:
+            if process is not None and process.poll() is None:
+                process.terminate()
+                process.wait(timeout=2.0)
+            owner_lines.drain(owner_output)
+            stop_peer(owner)
+
+    owner, owner_lines, owner_output = start_peer(peer, ["owner-refuse-png"])
+    process = None
+    try:
+        owner_xid = selection_owner_xid(peer)
+        process, probe_lines, probe_output = start_adaptive_probe(
+            probe, owner_xid)
+        probe_lines.until(
+            lambda line: '"event":"fallback_bmp_pending"' in line,
+            5.0, probe_output)
+        assert process.stdin is not None
+        process.stdin.write(b"allow-bmp 50\n")
+        process.stdin.flush()
+        status, events, output = finish_adaptive_probe(
+            process, probe_lines, probe_output)
+        requests = [event.get("target") for event in events
+                    if event.get("event") == "selection_request"]
+        if (status != 0 or requests != ["TARGETS", "image/png", "image/bmp"]):
+            raise AssertionError(
+                f"failed PNG did not fall back serially to BMP: "
+                f"{events!r}\n{output}")
+        png = result_for(events, "image/png")
+        bmp = result_for(events, "image/bmp")
+        if (png.get("reason") != "selection-notify-none" or
+                bmp.get("result") != "success" or bmp.get("bytes", 0) <= 0):
+            raise AssertionError(
+                f"PNG failure/BMP success outcomes were wrong: {events!r}")
+        serials = [event.get("request_serial") for event in events
+                   if event.get("event") == "selection_request"]
+        if serials != sorted(serials) or len(set(serials)) != len(serials):
+            raise AssertionError("adaptive selection requests were not serialized")
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=2.0)
+        owner_lines.drain(owner_output)
+        stop_peer(owner)
+
+    owner, _owner_lines, _owner_output = start_peer(peer, ["owner-bmp-only"])
+    process = None
+    try:
+        process, probe_lines, probe_output = start_adaptive_probe(
+            probe, selection_owner_xid(peer))
+        status, events, output = finish_adaptive_probe(
+            process, probe_lines, probe_output)
+        requests = [event.get("target") for event in events
+                    if event.get("event") == "selection_request"]
+        bmp = result_for(events, "image/bmp")
+        if (status != 0 or requests != ["TARGETS", "image/bmp"] or
+                bmp.get("result") != "success" or bmp.get("bytes", 0) <= 0):
+            raise AssertionError(
+                f"BMP-only offer was not requested directly: {events!r}\n{output}")
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=2.0)
+        stop_peer(owner)
+
+    owner, _owner_lines, _owner_output = start_peer(
+        peer, ["owner-png-only-refuse"])
+    process = None
+    try:
+        process, probe_lines, probe_output = start_adaptive_probe(
+            probe, selection_owner_xid(peer))
+        status, events, output = finish_adaptive_probe(
+            process, probe_lines, probe_output)
+        requests = [event.get("target") for event in events
+                    if event.get("event") == "selection_request"]
+        png = result_for(events, "image/png")
+        if (status != 0 or requests != ["TARGETS", "image/png"] or
+                png.get("result") != "failure" or any(
+                    event.get("event") == "fallback_bmp_pending"
+                    for event in events)):
+            raise AssertionError(
+                f"PNG-only refusal incorrectly attempted BMP: "
+                f"{events!r}\n{output}")
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=2.0)
+        stop_peer(owner)
+
+    owner, _owner_lines, _owner_output = start_peer(peer, ["owner-refuse-png"])
+    process = None
+    try:
+        process, probe_lines, probe_output = start_adaptive_probe(
+            probe, selection_owner_xid(peer), generation=50)
+        probe_lines.until(
+            lambda line: '"event":"fallback_bmp_pending"' in line,
+            5.0, probe_output)
+        assert process.stdin is not None
+        process.stdin.write(b"allow-bmp 51\n")
+        process.stdin.flush()
+        status, events, output = finish_adaptive_probe(
+            process, probe_lines, probe_output)
+        requests = [event.get("target") for event in events
+                    if event.get("event") == "selection_request"]
+        cancelled = next((event for event in events
+                          if event.get("event") ==
+                          "fallback_bmp_cancelled"), None)
+        if (status != 0 or requests != ["TARGETS", "image/png"] or
+                cancelled is None or cancelled.get("reason") !=
+                "authorization-stale"):
+            raise AssertionError(
+                f"stale generation authorization issued BMP: "
+                f"{events!r}\n{output}")
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            process.wait(timeout=2.0)
+        stop_peer(owner)
+
+
 def result_for(events: list[dict[str, object]], target: str) -> dict[str, object]:
     matches = [event for event in events
                if event.get("event") == "selection_result" and
@@ -135,6 +334,18 @@ def result_for(events: list[dict[str, object]], target: str) -> dict[str, object
     if not matches:
         raise AssertionError(f"probe has no result for {target}: {events!r}")
     return matches[-1]
+
+
+def selection_owner_xid(peer: Path) -> str:
+    result = subprocess.run(
+        [str(peer), "selection-owner"], check=False,
+        capture_output=True, text=True, timeout=5.0)
+    match = re.search(r"(?:owner|SELECTION_OWNER)=0x([0-9a-fA-F]+)",
+                      result.stdout)
+    if result.returncode != 0 or match is None:
+        raise AssertionError(
+            f"could not query synthetic clipboard owner: {result!r}")
+    return "0x" + match.group(1)
 
 
 def load_capture_trigger():
@@ -552,11 +763,13 @@ def main() -> int:
         raise SystemExit("isolated Xvfb DISPLAY is required")
     validate_direct_and_incr(probe, peer)
     validate_target_filters(probe, peer)
+    validate_png_first_fallback(probe, peer)
     validate_xfixes_change(probe, peer)
     validate_same_owner_reassert(probe, peer)
     validate_failure_and_timeout(probe, peer)
     validate_generation_replacement(probe, peer)
     print("clipboard remote-image probe: direct, INCR, target filters, "
+          "PNG-first sequential fallback, "
           "failure, timeout, XFixes change, same-owner reassert, and owner "
           "replacement passed")
     return 0

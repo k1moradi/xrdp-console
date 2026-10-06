@@ -640,7 +640,8 @@ handle_selection_request(Display *display,
                          size_t bitmap_length,
                          struct image_transfer *transfer,
                          int text_generation,
-                         unsigned int owner_generation)
+                         unsigned int owner_generation,
+                         int offer_png, int offer_bmp, int refuse_png)
 {
     Atom property = request->property == None ? request->target :
                     request->property;
@@ -671,8 +672,14 @@ handle_selection_request(Display *display,
         supported[count++] = XA_STRING;
         if (request->owner == image_owner && !text_generation)
         {
-            supported[count++] = image_bmp;
-            supported[count++] = image_png;
+            if (offer_bmp)
+            {
+                supported[count++] = image_bmp;
+            }
+            if (offer_png)
+            {
+                supported[count++] = image_png;
+            }
         }
         XChangeProperty(display, request->requestor, property, XA_ATOM, 32,
                         PropModeReplace, (unsigned char *)supported, count);
@@ -688,8 +695,17 @@ handle_selection_request(Display *display,
     }
 
     if (request->target == image_png && request->owner == image_owner &&
+        offer_png &&
         !text_generation)
     {
+        if (refuse_png)
+        {
+            send_selection_notify(display, request, None);
+            printf("PNG_REQUEST_REFUSED owner_generation=%u\n",
+                   owner_generation);
+            fflush(stdout);
+            return;
+        }
         XChangeProperty(display, request->requestor, property, image_png, 8,
                         PropModeReplace, kPngFixture,
                         (int)sizeof(kPngFixture));
@@ -702,6 +718,7 @@ handle_selection_request(Display *display,
     }
 
     if (request->target == image_bmp && request->owner == image_owner &&
+            offer_bmp &&
             !text_generation && !transfer->active && bitmap != NULL)
     {
         if (start_incr_transfer(display, request, property, image_bmp, incr,
@@ -741,7 +758,8 @@ handle_selection_request(Display *display,
 
 static int
 run_owner(const char *named_png_path, int delayed_activation,
-          int include_file_format)
+          int include_file_format, int offer_png, int offer_bmp,
+          int refuse_png)
 {
     Display *display = XOpenDisplay(NULL);
     Window image_owner;
@@ -1048,7 +1066,8 @@ run_owner(const char *named_png_path, int delayed_activation,
                         display, &event.xselectionrequest, image_owner,
                         text_owner, clipboard, targets, utf8, image_bmp,
                         image_png, incr, bitmap, bitmap_length, &transfer,
-                        text_generation, owner_generation);
+                        text_generation, owner_generation, offer_png,
+                        offer_bmp, refuse_png);
                 }
             }
             else if (event.type == PropertyNotify && transfer.active &&
@@ -2676,20 +2695,36 @@ main(int argc, char **argv)
     }
     if (argc == 2 && strcmp(argv[1], "owner") == 0)
     {
-        return run_owner(NULL, 0, 0);
+        return run_owner(NULL, 0, 0, 1, 1, 0);
     }
     if (argc == 2 && strcmp(argv[1], "owner-delayed") == 0)
     {
-        return run_owner(NULL, 1, 0);
+        return run_owner(NULL, 1, 0, 1, 1, 0);
+    }
+    if (argc == 2 && strcmp(argv[1], "owner-refuse-png") == 0)
+    {
+        return run_owner(NULL, 0, 0, 1, 1, 1);
+    }
+    if (argc == 2 && strcmp(argv[1], "owner-png-only") == 0)
+    {
+        return run_owner(NULL, 0, 0, 1, 0, 0);
+    }
+    if (argc == 2 && strcmp(argv[1], "owner-bmp-only") == 0)
+    {
+        return run_owner(NULL, 0, 0, 0, 1, 0);
+    }
+    if (argc == 2 && strcmp(argv[1], "owner-png-only-refuse") == 0)
+    {
+        return run_owner(NULL, 0, 0, 1, 0, 1);
     }
     if (argc == 3 && strcmp(argv[1], "owner-named-png") == 0)
     {
-        return run_owner(argv[2], 0, 0);
+        return run_owner(argv[2], 0, 0, 1, 0, 0);
     }
     if (argc == 3 &&
             strcmp(argv[1], "owner-named-png-with-file-format") == 0)
     {
-        return run_owner(argv[2], 0, 1);
+        return run_owner(argv[2], 0, 1, 1, 0, 0);
     }
     if (argc == 3 && strcmp(argv[1], "owner-png-file") == 0)
     {
@@ -2786,6 +2821,8 @@ main(int argc, char **argv)
         return run_requestor(argc, argv);
     }
     fputs("usage: clipboard_x11_session_peer owner | owner-delayed | "
+          "owner-refuse-png | owner-png-only | owner-bmp-only | "
+          "owner-png-only-refuse | "
           "owner-named-png PNG_FILE | "
           "owner-named-png-with-file-format PNG_FILE | "
           "owner-png-file PNG_FILE | owner-png-file-incr PNG_FILE | "
