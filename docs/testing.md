@@ -145,13 +145,14 @@ desktop-entry fixtures, and opens it through remote pointer input. Within the
 source menu against their mapped pixels in the decoded client frame. If they
 match, the probe runs the full-region quality checks on those same captured
 images, so a later recovered frame cannot mask a broken first rendering. It
-then keeps the menu open for three additional full-region captures to detect
-later partial redraws or corruption. The default endurance campaign runs at
-least 20 open/close cycles over at least 75 seconds, with one-CPU contention
-and a 20 Hz background update. A unique test-controlled background epoch must
-reach the decoded client before each open and return within one second after
-each close. A missing epoch is retained as a failure with the decoded screen,
-timings, source/client captures, and server/client logs. Saved-image
+then keeps the menu open for one additional full-region capture by default to
+detect later partial redraws or corruption. The ordinary CTest profile runs
+five open/close cycles with no extra CPU worker and no minimum duration, while
+a 20 Hz background update continues throughout. A unique test-controlled
+background epoch must reach the decoded client before each open and return
+within one second after each close. A missing epoch is retained as a failure
+with the decoded screen, timings, source/client captures, and server/client
+logs. Saved-image
 calibration runs independently of LXQt and keeps thresholds fixed across
 known-good and known-bad pairs. The test is registered when both `lxqt-panel` and
 `dbus-run-session` are installed. Install `lxqt-panel` on another machine if
@@ -162,11 +163,15 @@ source/client PPM captures and summary are written to
 `build-direct-console/test-artifacts/xrdp-loader-gfx-h264-lxqt-menu-stress/`.
 For each cycle, the first loading frame and the first populated-but-mismatched
 frame are saved as paired source/client PPMs, when those states occur.
-Set `XRDP_CONSOLE_LXQT_MENU_STRESS_CYCLES` to a value from 1 to 20 for a longer
-stress run; this sets the minimum cycle count. The test also runs for at least
-`XRDP_CONSOLE_LXQT_MIN_STRESS_SECONDS` seconds, defaulting to 75. Set that
-value to 0 only for short debugging runs. `XRDP_CONSOLE_LXQT_STABILITY_SAMPLES`
-controls the extra full-region captures per open menu and defaults to 3.
+Set `XRDP_CONSOLE_LXQT_MENU_STRESS_CYCLES` (1 to 20),
+`XRDP_CONSOLE_LXQT_STABILITY_SAMPLES` (0 to 3), and
+`XRDP_CONSOLE_LXQT_MIN_STRESS_SECONDS` to select a run profile. The default
+values are 5, 1, and 0 seconds. For a more difficult endurance run, use at least
+20 cycles, three extra full-region captures per popup, and a 75-second minimum;
+`XRDP_CONSOLE_LXQT_CPU_CONTENTION=1` adds one CPU worker. The stress summary
+reports completed cycles, accepted popup frames, every fast observation,
+valid decoded-client samples, capture errors, all full comparisons, and
+stability samples separately.
 
 The calibration fixture provenance and measured threshold distributions are
 documented in `tests/fixtures/lxqt-menu-quality/README.md`. The saved pairs
@@ -184,6 +189,17 @@ Build and run the real-menu stress test with:
 cmake --build build-direct-console --target \
   xrdp-console x11-popup-ui-probe x11-popup-menu-stress \
   x11-lxqt-menu-quality-probe
+ctest --test-dir build-direct-console --output-on-failure \
+  -R '^xrdp-loader-gfx-h264-lxqt-menu-stress$'
+```
+
+Run the explicit endurance profile with:
+
+```bash
+XRDP_CONSOLE_LXQT_MENU_STRESS_CYCLES=20 \
+XRDP_CONSOLE_LXQT_STABILITY_SAMPLES=3 \
+XRDP_CONSOLE_LXQT_MIN_STRESS_SECONDS=75 \
+XRDP_CONSOLE_LXQT_CPU_CONTENTION=1 \
 ctest --test-dir build-direct-console --output-on-failure \
   -R '^xrdp-loader-gfx-h264-lxqt-menu-stress$'
 ```

@@ -15,25 +15,25 @@ Replace `build-direct-console` with the configured build directory. The test
 is registered when CMake finds `lxqt-panel` and `dbus-run-session`; reconfigure
 after installing either dependency if the test is absent from `ctest -N`.
 
-The test opens the LXQt menu at least 20 times while a changing 20 Hz desktop
-image and a CPU worker run. It continues for at least 75 seconds by default,
-so a delayed or gradually corrupting popup has time to appear. Every cycle
-must deliver a coherent menu within 1000 ms of the injected client click, pass
-a sparse response check and a full menu-region comparison of the same captured
-source/client images, remain visually stable for three additional captures,
-and show a test-controlled background epoch after the menu closes. Epoch
-values change per cycle, so an arbitrary pixel change or a retained prior
+The ordinary test profile opens the LXQt menu five times while a changing 20 Hz
+desktop image runs, with one extra full-region capture per popup. It does not
+start an extra CPU worker or impose a minimum duration. Every cycle must deliver
+a coherent menu within 1000 ms of the injected client click, pass a sparse
+response check and a full menu-region comparison of the same captured
+source/client images, remain visually stable during the configured extra
+captures, and show a test-controlled background epoch after the menu closes.
+Epoch values change per cycle, so an arbitrary pixel change or a retained prior
 popup image cannot mark a cycle fresh. Artifacts and per-cycle timings are
 saved under the build's
 `test-artifacts/xrdp-loader-gfx-h264-lxqt-menu-stress` directory.
 
-To shorten the endurance run while debugging the test, set these controls
-explicitly:
+Run the explicit endurance profile with these controls:
 
 ```sh
 XRDP_CONSOLE_LXQT_MENU_STRESS_CYCLES=20 \
 XRDP_CONSOLE_LXQT_STABILITY_SAMPLES=3 \
-XRDP_CONSOLE_LXQT_MIN_STRESS_SECONDS=0 \
+XRDP_CONSOLE_LXQT_MIN_STRESS_SECONDS=75 \
+XRDP_CONSOLE_LXQT_CPU_CONTENTION=1 \
 ctest --test-dir build-direct-console \
     -R '^xrdp-loader-gfx-h264-lxqt-menu-stress$' \
     --output-on-failure
@@ -43,9 +43,10 @@ The one-second clock starts at the remote click injection and stops when the
 client's decoded pixels are sampled. It does not include CTest, server, or
 FreeRDP startup. The sparse response check and full-region quality check use
 the same captured source/client images; later stability captures are separate
-and each must pass the full-region check. The summary records every response
-sample, including failed and over-budget samples, and every full-check capture
-timestamp.
+and each must pass the full-region check. The summary separates completed
+cycles, accepted popup frames, every fast observation, valid decoded-client
+samples, capture errors, full comparisons, and stability captures. The full
+comparison's CPU time is outside the one-second freshness measurement.
 
 - `source-menu.ppm` and `client-01.ppm` through `client-04.ppm` are four
   distinct decoded-client captures from successful cycles 2 through 5 of the

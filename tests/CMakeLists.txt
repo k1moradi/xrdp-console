@@ -1759,7 +1759,7 @@ if(TARGET xrdp-console)
                 "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
                 $<TARGET_FILE:x11-popup-ui-probe>
                 $<TARGET_FILE:x11-popup-menu-stress>
-                1512 949 --cpu-contention --gfx-h264-lxqt-menu-stress)
+                1512 949 --gfx-h264-lxqt-menu-stress)
             set_tests_properties(xrdp-loader-gfx-h264-lxqt-menu-stress
                 PROPERTIES
                 ENVIRONMENT

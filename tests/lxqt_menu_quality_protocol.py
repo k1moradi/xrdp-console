@@ -58,3 +58,39 @@ def validate_capture_correlation(fast_line: bytes,
             f"capture request identity mismatch: {fast_line!r} "
             f"{done_line!r}")
     return fast_request_ns, fast_sequence
+
+
+def validate_full_capture_correlation(
+        fast_line: bytes, quality_line: bytes, timing_line: bytes,
+        done_line: bytes) -> tuple[int, int, int]:
+    """Prove sparse, full-region, and timing records describe one frame."""
+    if not quality_line.startswith(b"MENU_QUALITY "):
+        raise ValueError(f"not a MENU_QUALITY record: {quality_line!r}")
+    if not timing_line.startswith(b"MENU_TIMING "):
+        raise ValueError(f"not a MENU_TIMING record: {timing_line!r}")
+
+    request_ns, sequence = validate_capture_correlation(fast_line, done_line)
+    fast_fields = parse_protocol_fields(fast_line)
+    quality_fields = parse_protocol_fields(quality_line)
+    timing_fields = parse_protocol_fields(timing_line)
+    try:
+        sample_ns = int(fast_fields["sample_ns"])
+        client_capture_end_ns = int(fast_fields["client_capture_end_ns"])
+        timing_client_capture_end_ns = int(
+            timing_fields["client_capture_end_ns"])
+    except (KeyError, ValueError) as error:
+        raise ValueError(
+            "full capture records omitted decoded-client sample time") from error
+
+    for name, fields in (("MENU_QUALITY", quality_fields),
+                         ("MENU_TIMING", timing_fields)):
+        if (fields.get("capture_request_ns") != str(request_ns) or
+                fields.get("sequence") != str(sequence)):
+            raise ValueError(
+                f"{name} does not belong to the same capture request")
+    if (sample_ns != client_capture_end_ns or
+            timing_client_capture_end_ns != client_capture_end_ns):
+        raise ValueError(
+            "sparse, full-region, and timing records do not share the "
+            "decoded-client frame")
+    return request_ns, sequence, client_capture_end_ns

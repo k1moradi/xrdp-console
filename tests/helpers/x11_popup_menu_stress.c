@@ -33,6 +33,7 @@ typedef struct
     int background_paused;
     int background_only;
     int epoch_controlled;
+    int report_background_window;
     unsigned int external_epoch;
     const char *closed_reference_path;
 } Scene;
@@ -188,6 +189,7 @@ handle_epoch_command(Scene *scene)
     {
         scene->external_epoch = epoch;
         draw_background(scene);
+        XSync(scene->display, False);
         printf("EPOCH %u %" PRId64 "\n", epoch,
                monotonic_nanoseconds());
         fflush(stdout);
@@ -443,16 +445,46 @@ main(int argc, char **argv)
     int x_fd;
     int input_open;
     int result = EXIT_FAILURE;
+    int background_only = 0;
+    int epoch_controlled = 0;
+    int report_background_window = 0;
     const char *reference_path;
     struct timespec frame_interval = {0, 50000000L};
 
-    if ((argc != 2 && argc != 3) ||
-        (argc == 3 && strcmp(argv[2], "--background-only") != 0 &&
-         strcmp(argv[2], "--background-only-controllable") != 0))
+    if (argc < 2 || argc > 4)
     {
         fprintf(stderr, "usage: %s DISPLAY "
-                "[--background-only|--background-only-controllable]\n",
+                "[--background-only|--background-only-controllable] "
+                "[--report-background-window]\n",
                 argv[0]);
+        return 2;
+    }
+    for (int argument = 2; argument < argc; ++argument)
+    {
+        if (strcmp(argv[argument], "--background-only") == 0)
+        {
+            background_only = 1;
+        }
+        else if (strcmp(argv[argument],
+                        "--background-only-controllable") == 0)
+        {
+            background_only = 1;
+            epoch_controlled = 1;
+        }
+        else if (strcmp(argv[argument], "--report-background-window") == 0)
+        {
+            report_background_window = 1;
+        }
+        else
+        {
+            fprintf(stderr, "unknown option: %s\n", argv[argument]);
+            return 2;
+        }
+    }
+    if (report_background_window && !epoch_controlled)
+    {
+        fputs("--report-background-window requires "
+              "--background-only-controllable\n", stderr);
         return 2;
     }
     display = XOpenDisplay(argv[1]);
@@ -475,9 +507,9 @@ main(int argc, char **argv)
     memset(&scene, 0, sizeof(scene));
     scene.display = display;
     scene.root = RootWindow(display, screen);
-    scene.background_only = argc == 3;
-    scene.epoch_controlled = argc == 3 &&
-        strcmp(argv[2], "--background-only-controllable") == 0;
+    scene.background_only = background_only;
+    scene.epoch_controlled = epoch_controlled;
+    scene.report_background_window = report_background_window;
     scene.panel_y = POPUP_SOURCE_HEIGHT - POPUP_PANEL_HEIGHT -
                     POPUP_PANEL_BOTTOM_MARGIN;
     scene.colors[0] = allocate_rgb(display, 26, 34, 47);
@@ -543,8 +575,12 @@ main(int argc, char **argv)
            scene.background_only ? "background-only" : "taskbar-button");
     if (scene.epoch_controlled)
     {
-        printf("EPOCH_CONTROL_READY window=0x%lx\n",
-               (unsigned long)scene.background);
+        puts("EPOCH_CONTROL_READY");
+        if (scene.report_background_window)
+        {
+            printf("EPOCH_CONTROL_WINDOW window=0x%lx\n",
+                   (unsigned long)scene.background);
+        }
     }
     fflush(stdout);
 

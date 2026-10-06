@@ -43,6 +43,7 @@ def run_epoch_capture_test(probe_path: Path, stimulus_path: Path,
          "1920x1080x24", "-nolisten", "tcp", "-ac"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
     stimulus: subprocess.Popen[bytes] | None = None
+    legacy_stimulus: subprocess.Popen[bytes] | None = None
     probe: subprocess.Popen[bytes] | None = None
     try:
         if xvfb.stdout is None:
@@ -52,8 +53,27 @@ def run_epoch_capture_test(probe_path: Path, stimulus_path: Path,
             raise AssertionError(f"Xvfb returned invalid display: {display_number!r}")
         display = f":{display_number.strip().decode('ascii')}"
 
-        stimulus = subprocess.Popen(
+        legacy_stimulus = subprocess.Popen(
             [str(stimulus_path), display, "--background-only-controllable"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, bufsize=0)
+        if legacy_stimulus.stdin is None or legacy_stimulus.stdout is None:
+            raise AssertionError("epoch stimulus pipes are unavailable")
+        ready = read_line(legacy_stimulus.stdout, 3.0, "stimulus READY")
+        if ready != b"READY source=1920x1080 trigger=background-only background_fps=20\n":
+            raise AssertionError(f"unexpected stimulus readiness: {ready!r}")
+        control = read_line(
+            legacy_stimulus.stdout, 1.0, "epoch control readiness")
+        if control != b"EPOCH_CONTROL_READY\n":
+            raise AssertionError(
+                f"default epoch readiness changed: {control!r}")
+        stop(legacy_stimulus)
+        if legacy_stimulus.stderr is not None:
+            legacy_stimulus.stderr.read(65536)
+
+        stimulus = subprocess.Popen(
+            [str(stimulus_path), display, "--background-only-controllable",
+             "--report-background-window"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, bufsize=0)
         if stimulus.stdin is None or stimulus.stdout is None:
@@ -62,10 +82,16 @@ def run_epoch_capture_test(probe_path: Path, stimulus_path: Path,
         if ready != b"READY source=1920x1080 trigger=background-only background_fps=20\n":
             raise AssertionError(f"unexpected stimulus readiness: {ready!r}")
         control = read_line(stimulus.stdout, 1.0, "epoch control readiness")
-        control_match = re.fullmatch(rb"EPOCH_CONTROL_READY window=(0x[0-9a-f]+)\n",
-                                     control)
-        if control_match is None:
+        if control != b"EPOCH_CONTROL_READY\n":
             raise AssertionError(f"invalid epoch control record: {control!r}")
+        window_record = read_line(
+            stimulus.stdout, 1.0, "epoch control window identifier")
+        control_match = re.fullmatch(
+            rb"EPOCH_CONTROL_WINDOW window=(0x[0-9a-fA-F]+)\n",
+            window_record)
+        if control_match is None:
+            raise AssertionError(
+                f"invalid epoch control window record: {window_record!r}")
         window = control_match.group(1).decode("ascii")
 
         probe = subprocess.Popen(
@@ -144,25 +170,31 @@ def run_epoch_capture_test(probe_path: Path, stimulus_path: Path,
         for observation in observations:
             print(observation)
     except Exception:
+        for process in (probe, stimulus, legacy_stimulus, xvfb):
+            stop(process)
         for label, process in (("probe", probe), ("stimulus", stimulus),
+                               ("legacy stimulus", legacy_stimulus),
                                ("Xvfb", xvfb)):
             if process is not None and process.poll() is None:
-                print(f"{label} still running", file=sys.stderr)
+                print(f"{label} still running after stop", file=sys.stderr)
         if probe is not None and probe.stderr is not None:
             print("probe stderr: " +
-                  probe.stderr.read().decode(errors="replace"), file=sys.stderr)
+                  probe.stderr.read(65536).decode(errors="replace"), file=sys.stderr)
         if stimulus is not None and stimulus.stderr is not None:
             print("stimulus stderr: " +
-                  stimulus.stderr.read().decode(errors="replace"), file=sys.stderr)
+                  stimulus.stderr.read(65536).decode(errors="replace"), file=sys.stderr)
+        if legacy_stimulus is not None and legacy_stimulus.stderr is not None:
+            print("legacy stimulus stderr: " +
+                  legacy_stimulus.stderr.read(65536).decode(errors="replace"),
+                  file=sys.stderr)
         if xvfb.stderr is not None:
-            ready, _, _ = select.select([xvfb.stderr], [], [], 0)
-            if ready:
-                print("Xvfb stderr: " +
-                      xvfb.stderr.read().decode(errors="replace"), file=sys.stderr)
+            print("Xvfb stderr: " +
+                  xvfb.stderr.read(65536).decode(errors="replace"), file=sys.stderr)
         raise
     finally:
         stop(probe)
         stop(stimulus)
+        stop(legacy_stimulus)
         stop(xvfb)
 
 

@@ -18,6 +18,7 @@ from lxqt_menu_quality_protocol import (
     parse_done_record,
     parse_protocol_fields,
     validate_capture_correlation,
+    validate_full_capture_correlation,
 )
 
 
@@ -46,6 +47,27 @@ class ProtocolParsingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "identity mismatch"):
             validate_capture_correlation(
                 fast, b"MENU_DONE status=PASS request_ns=123 sequence=5")
+
+    def test_full_quality_and_timing_share_the_decoded_client_frame(self) -> None:
+        fast = (b"MENU_FAST PASS sample_ns=222 capture_request_ns=123 "
+                b"sequence=4 client_capture_end_ns=222")
+        quality = (b"MENU_QUALITY PASS capture_request_ns=123 sequence=4")
+        timing = (b"MENU_TIMING capture_request_ns=123 sequence=4 "
+                  b"client_capture_end_ns=222")
+        done = b"MENU_DONE status=PASS request_ns=123 sequence=4"
+        self.assertEqual(
+            validate_full_capture_correlation(fast, quality, timing, done),
+            (123, 4, 222))
+        with self.assertRaisesRegex(ValueError, "MENU_QUALITY"):
+            validate_full_capture_correlation(
+                fast,
+                b"MENU_QUALITY PASS capture_request_ns=123 sequence=5",
+                timing, done)
+        with self.assertRaisesRegex(ValueError, "decoded-client frame"):
+            validate_full_capture_correlation(
+                fast, quality,
+                b"MENU_TIMING capture_request_ns=123 sequence=4 "
+                b"client_capture_end_ns=223", done)
 
     def test_field_parser_rejects_empty_values(self) -> None:
         with self.assertRaisesRegex(ValueError, "invalid protocol field"):
@@ -262,13 +284,10 @@ def run_interactive_protocol_test(helper: Path, artifact_root: Path,
                 not second_quality or not second_timing or
                 second_quality.split()[1] != b"PASS"):
             raise AssertionError(f"matching client did not return PASS: {second}")
-        request_ns, sequence = validate_capture_correlation(
-            second_fast, second_done)
-        if (second_quality_fields.get("capture_request_ns") != str(request_ns) or
-                second_quality_fields.get("sequence") != str(sequence)):
-            raise AssertionError(
-                "MENU_QUALITY did not describe the same capture request: "
-                f"{second_quality!r}")
+        request_ns, sequence, frame_end_ns = validate_full_capture_correlation(
+            second_fast, second_quality, second_timing, second_done)
+        if second_quality_fields.get("sequence") != str(sequence):
+            raise AssertionError("MENU_QUALITY lost its capture sequence")
         required_timing = (
             "capture_request_ns", "source_capture_start_ns",
             "source_capture_end_ns", "client_capture_start_ns",
@@ -284,18 +303,18 @@ def run_interactive_protocol_test(helper: Path, artifact_root: Path,
         if int(second_timing_fields.get("client_capture_us", "-1")) < 0:
             raise AssertionError(f"bad client capture duration: {second_timing!r}")
 
-        xlib.XDestroyWindow(display, source_a)
-        xlib.XSync(display, 0)
-        source_windows.remove(source_a)
         source_b = xlib.XCreateSimpleWindow(
             display, root, 0, 0, 160, 160, 0, 0, 0)
         source_gc_b = xlib.XCreateGC(display, source_b, 0, None)
         if not source_gc_b:
             raise AssertionError("could not create source B drawing context")
         if source_b == source_a:
-            raise AssertionError("Xvfb reused the destroyed source XID")
+            raise AssertionError("live X windows unexpectedly share an XID")
         source_windows.append(source_b)
         source_gcs.append(source_gc_b)
+        xlib.XDestroyWindow(display, source_a)
+        xlib.XSync(display, 0)
+        source_windows.remove(source_a)
         xlib.XMapWindow(display, source_b)
         draw_pattern(xlib, display, source_gc_b, source_b, True)
         xlib.XSync(display, 0)
@@ -347,8 +366,9 @@ def run_interactive_protocol_test(helper: Path, artifact_root: Path,
                 not fourth_quality or not fourth_timing):
             raise AssertionError(
                 f"observer did not recover with source B: {fourth}")
-        fourth_request_ns, fourth_sequence = validate_capture_correlation(
-            fourth_fast, fourth_done)
+        (fourth_request_ns, fourth_sequence,
+         fourth_frame_end_ns) = validate_full_capture_correlation(
+            fourth_fast, fourth_quality, fourth_timing, fourth_done)
         fourth_quality_fields = parse_protocol_fields(fourth_quality)
         fourth_timing_fields = parse_protocol_fields(fourth_timing)
         for fields in (fourth_quality_fields, fourth_timing_fields):
@@ -357,10 +377,8 @@ def run_interactive_protocol_test(helper: Path, artifact_root: Path,
                 raise AssertionError(
                     f"source B result lost request correlation: {fourth}")
         if (fourth_sequence != 4 or
-                int(fourth_fast_fields["sample_ns"]) != int(
-                    fourth_fast_fields["client_capture_end_ns"]) or
-                fourth_timing_fields.get("client_capture_end_ns") !=
-                fourth_fast_fields["client_capture_end_ns"]):
+                fourth_frame_end_ns != int(
+                    fourth_fast_fields["client_capture_end_ns"])):
             raise AssertionError(
                 f"source B result did not use its decoded-client frame: {fourth}")
 
@@ -376,12 +394,18 @@ def run_interactive_protocol_test(helper: Path, artifact_root: Path,
         if not (run_artifacts / "capture-000002" /
                 "lxqt-menu-source.ppm").is_file():
             raise AssertionError("PASS capture did not preserve its source image")
+        if not (run_artifacts / "capture-000002" /
+                "lxqt-menu-client.ppm").is_file():
+            raise AssertionError("PASS capture did not preserve its client image")
         if (run_artifacts / "capture-000003" /
                 "lxqt-menu-source.ppm").exists():
             raise AssertionError("stale XID unexpectedly produced a source image")
         if not (run_artifacts / "capture-000004" /
                 "lxqt-menu-source.ppm").is_file():
             raise AssertionError("source B capture did not preserve its image")
+        if not (run_artifacts / "capture-000004" /
+                "lxqt-menu-client.ppm").is_file():
+            raise AssertionError("source B capture did not preserve its client image")
         if process.poll() is not None:
             raise AssertionError("observer exited before EOF")
         process.stdin.close()
