@@ -96,6 +96,7 @@ struct PeerContext
     UINT64 pngResponseDeadlineNs;
     bool deferOverlapFormatList;
     bool staleTextGeneration;
+    bool imageOfferWithText;
     bool staleTextResponseHeld;
     bool pngAllowed;
     bool pendingPngResponse;
@@ -108,6 +109,7 @@ struct PeerContext
     UINT32 serverFormatCount;
     UINT32 serverFormatIds[kMaximumTrackedServerFormats];
     UINT32 pngFormatId;
+    bool keepImageFormatListOnDibRequest;
     UINT32 nextPngFormatId;
     bool pngEnabled;
     UINT32 pendingServerFormatId;
@@ -525,7 +527,7 @@ UINT send_pending_client_format_response(PeerContext* peer, UINT16 flags,
         (void)monotonic_time_ns(&sentMonoNs);
         std::printf("PEER_CLIENT_FORMAT_RESPONSE_SENT format_id=%u "
                     "request_generation=%llu flags=0x%04x bytes=%zu "
-                    "mono_ns=%llu\n",
+                    "mono_ns=%llu msg_type=5\n",
                     peer->pendingClientFormatId,
                     static_cast<unsigned long long>(
                         peer->pendingClientFormatGeneration),
@@ -624,20 +626,26 @@ UINT on_monitor_ready(CliprdrClientContext* cliprdr,
                 kSpecPeerTemporaryDirectory);
     std::fflush(stdout);
 
-    CLIPRDR_FORMAT formats[2]{};
-    formats[0].formatId = peer->staleTextGeneration ?
-        kCfUnicodeText : kCfDib;
+    CLIPRDR_FORMAT formats[3]{};
     const bool advertisePng = peer->pngEnabled &&
         (peer->pngOverlap || peer->pngPrefetchDelay ||
          peer->pngResponseDelayEnabled || peer->pngResponseFail ||
          peer->pngResponseFlagsEnabled || peer->pngResponseInjectionMode);
-    if (advertisePng)
+    UINT32 formatCount = 0U;
+    if (peer->staleTextGeneration || peer->imageOfferWithText)
     {
-        formats[1].formatId = peer->pngFormatId;
-        formats[1].formatName = const_cast<char*>("PNG");
+        formats[formatCount++].formatId = kCfUnicodeText;
     }
-    const UINT32 formatCount = peer->staleTextGeneration ? 1U :
-                               (advertisePng ? 2U : 1U);
+    if (!peer->staleTextGeneration)
+    {
+        formats[formatCount++].formatId = kCfDib;
+    }
+    if (advertisePng && !peer->staleTextGeneration)
+    {
+        formats[formatCount].formatId = peer->pngFormatId;
+        formats[formatCount].formatName = const_cast<char*>("PNG");
+        ++formatCount;
+    }
     status = send_format_list(cliprdr, formats, formatCount);
     if (status == CHANNEL_RC_OK)
     {
@@ -648,6 +656,11 @@ UINT on_monitor_ready(CliprdrClientContext* cliprdr,
         if (peer->staleTextGeneration)
         {
             std::puts("PEER_INITIAL_FORMAT_LIST_SENT text=13");
+        }
+        else if (peer->imageOfferWithText && advertisePng)
+        {
+            std::printf("PEER_INITIAL_FORMAT_LIST_SENT text=13 dib=8 png=%u\n",
+                        peer->pngFormatId);
         }
         else if (advertisePng)
         {
@@ -660,9 +673,9 @@ UINT on_monitor_ready(CliprdrClientContext* cliprdr,
         }
         ++peer->clientFormatGeneration;
         std::printf("PEER_FORMAT_LIST_GENERATION generation=%llu png_id=%u "
-                    "png_offered=%u\n",
+                    "png_offered=%u format_count=%u\n",
                     static_cast<unsigned long long>(peer->clientFormatGeneration),
-                    peer->pngFormatId, advertisePng ? 1U : 0U);
+                    peer->pngFormatId, advertisePng ? 1U : 0U, formatCount);
         std::fflush(stdout);
     }
     else
@@ -907,7 +920,7 @@ UINT on_server_format_data_request(
         return CHANNEL_RC_BAD_PROC;
     }
     std::printf("PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id=%u "
-                "request_generation=%llu mono_ns=%llu\n",
+                "request_generation=%llu mono_ns=%llu msg_type=4\n",
                 request->requestedFormatId,
                 static_cast<unsigned long long>(
                     peer->pendingClientFormatGeneration),
@@ -922,6 +935,23 @@ UINT on_server_format_data_request(
         if (status == CHANNEL_RC_OK)
         {
             std::puts("PEER_PNG_FORMAT_RESPONSE_FAIL_SENT");
+            std::fflush(stdout);
+        }
+        return status;
+    }
+
+    if (peer->imageOfferWithText && peer->pngResponseFail &&
+        request->requestedFormatId == kCfUnicodeText)
+    {
+        static const BYTE text[] = {
+            'i', 0, 'm', 0, 'a', 0, 'g', 0, 'e', 0, ' ', 0,
+            'o', 0, 'f', 0, 'f', 0, 'e', 0, 'r', 0, 0, 0
+        };
+        const UINT status = send_pending_client_format_response(
+            peer, CB_RESPONSE_OK, text, sizeof(text));
+        if (status == CHANNEL_RC_OK)
+        {
+            std::puts("PEER_IMAGE_OFFER_TEXT_RESPONSE_SENT");
             std::fflush(stdout);
         }
         return status;
@@ -1001,7 +1031,8 @@ UINT on_server_format_data_request(
 
     if (request->requestedFormatId == kCfDib && !peer->overlapFormatsSent)
     {
-        if (!peer->pngPrefetchDelay && !peer->deferOverlapFormatList)
+        if (!peer->pngPrefetchDelay && !peer->deferOverlapFormatList &&
+                !peer->keepImageFormatListOnDibRequest)
         {
             CLIPRDR_FORMAT textFormat{};
             textFormat.formatId = kCfUnicodeText;
@@ -1957,6 +1988,7 @@ int main(int argc, char** argv)
     peer->disconnectRequested = false;
     peer->deferOverlapFormatList = false;
     peer->staleTextGeneration = false;
+    peer->imageOfferWithText = false;
     peer->staleTextResponseHeld = false;
     peer->pngAllowed = false;
     peer->pendingPngResponse = false;
@@ -1969,6 +2001,7 @@ int main(int argc, char** argv)
     peer->serverFormatCount = 0U;
     peer->pngFormatId = pngFormatId;
     peer->nextPngFormatId = nextPngFormatId;
+    peer->keepImageFormatListOnDibRequest = false;
     peer->pngEnabled = noPngText == nullptr ||
                        std::strcmp(noPngText, "1") != 0;
     peer->pendingServerFormatId = 0U;
@@ -2079,10 +2112,39 @@ int main(int argc, char** argv)
         std::getenv("XRDP_CONSOLE_TEST_DEFER_OVERLAP_FORMAT_LIST");
     peer->deferOverlapFormatList = deferOverlapFormatList != nullptr &&
         std::strcmp(deferOverlapFormatList, "1") == 0;
+    const char* keepImageFormatListOnDibRequest = std::getenv(
+        "XRDP_CONSOLE_TEST_KEEP_IMAGE_FORMAT_LIST_ON_DIB_REQUEST");
+    if (keepImageFormatListOnDibRequest != nullptr &&
+            std::strcmp(keepImageFormatListOnDibRequest, "0") != 0 &&
+            std::strcmp(keepImageFormatListOnDibRequest, "1") != 0)
+    {
+        std::fputs("invalid keep-image-format-list configuration\n", stderr);
+        freerdp_disconnect(context->instance);
+        freerdp_client_stop(context);
+        freerdp_client_context_free(context);
+        return 2;
+    }
+    peer->keepImageFormatListOnDibRequest =
+        keepImageFormatListOnDibRequest != nullptr &&
+        std::strcmp(keepImageFormatListOnDibRequest, "1") == 0;
     const char* staleTextGeneration = std::getenv(
         "XRDP_CONSOLE_TEST_STALE_TEXT_GENERATION");
     peer->staleTextGeneration = staleTextGeneration != nullptr &&
         std::strcmp(staleTextGeneration, "1") == 0;
+    const char* imageOfferWithText = std::getenv(
+        "XRDP_CONSOLE_TEST_IMAGE_OFFER_WITH_TEXT");
+    if (imageOfferWithText != nullptr &&
+            std::strcmp(imageOfferWithText, "0") != 0 &&
+            std::strcmp(imageOfferWithText, "1") != 0)
+    {
+        std::fputs("invalid image-offer-with-text configuration\n", stderr);
+        freerdp_disconnect(context->instance);
+        freerdp_client_stop(context);
+        freerdp_client_context_free(context);
+        return 2;
+    }
+    peer->imageOfferWithText = imageOfferWithText != nullptr &&
+        std::strcmp(imageOfferWithText, "1") == 0;
     const char* auditServerClipboard =
         std::getenv("XRDP_CONSOLE_TEST_CLIPBOARD_SERVER_AUDIT");
     peer->auditServerClipboard = auditServerClipboard != nullptr &&

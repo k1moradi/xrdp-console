@@ -1,0 +1,34 @@
+--- a/libxrdp/xrdp_channel.c
++++ b/libxrdp/xrdp_channel.c
+@@ -115,0 +116,3 @@
++    struct xrdp_cliprdr_diagnostic_header clip_header;
++    int cliprdr_header_available = 0;
++    int cliprdr_fragment_bytes = 0;
+@@ -158,0 +162,12 @@
++            (flags & XR_CHANNEL_FLAG_FIRST) != 0)
++    {
++        cliprdr_fragment_bytes = (int)(s->end - s->p);
++        if (xrdp_vc_diagnostic_decode_cliprdr_header(
++                    (const uint8_t *)s->p,
++                    (size_t)cliprdr_fragment_bytes, &clip_header))
++        {
++            cliprdr_header_available = 1;
++        }
++    }
++
++    if (xrdp_channel_is_cliprdr(channel) &&
+@@ -177,0 +193,13 @@
++    }
++
++    if (cliprdr_header_available)
++    {
++        LOG(LOG_LEVEL_INFO,
++            "XRDP_CONSOLE_RDP_VC event=cliprdr-pdu "
++            "direction=server-to-client stage=sec-send-success "
++            "msg_type=%u msg_flags=0x%4.4x data_len=%u "
++            "vc_total_len=%d vc_fragment_bytes=%d "
++            "vc_flags=0x%8.8x vc_first=1 vc_last=%d send_status=success",
++            clip_header.message_type, clip_header.message_flags,
++            clip_header.data_length, total_data_len, cliprdr_fragment_bytes,
++            flags, (flags & XR_CHANNEL_FLAG_LAST) != 0);
++    }

@@ -694,7 +694,9 @@ handle_selection_request(Display *display,
                         PropModeReplace, kPngFixture,
                         (int)sizeof(kPngFixture));
         send_selection_notify(display, request, property);
-        puts("PNG_REQUEST");
+        printf("PNG_REQUEST owner_generation=%u bytes=%zu\n",
+               owner_generation, sizeof(kPngFixture));
+        fflush(stdout);
         fflush(stdout);
         return;
     }
@@ -708,7 +710,9 @@ handle_selection_request(Display *display,
                                 0,
                                 "IMAGE_FIRST_CHUNK", "IMAGE_INCR_DONE") == 0)
         {
-            puts("IMAGE_REQUEST");
+            printf("IMAGE_REQUEST owner_generation=%u bytes=%zu\n",
+                   owner_generation, bitmap_length);
+            fflush(stdout);
             fflush(stdout);
         }
         return;
@@ -944,6 +948,56 @@ run_owner(const char *named_png_path, int delayed_activation,
                 puts("IMAGE_OWNER_REANNOUNCED");
                 fflush(stdout);
             }
+            else if (strncmp(command, "same-owner-reassert", 19) == 0 &&
+                     !text_generation)
+            {
+                const Window old_owner = XGetSelectionOwner(display, clipboard);
+                if (old_owner != image_owner)
+                {
+                    fprintf(stderr,
+                            "SAME_OWNER_REASSERT_FAILED before=0x%lx "
+                            "expected=0x%lx\n", old_owner, image_owner);
+                    return 1;
+                }
+                XSetSelectionOwner(display, clipboard, image_owner, CurrentTime);
+                XSync(display, False);
+                const Window new_owner = XGetSelectionOwner(display, clipboard);
+                if (new_owner != image_owner)
+                {
+                    fprintf(stderr,
+                            "SAME_OWNER_REASSERT_FAILED after=0x%lx "
+                            "expected=0x%lx\n", new_owner, image_owner);
+                    return 1;
+                }
+                if (bitmap != NULL && bitmap_length > 54U)
+                {
+                    unsigned char *expanded;
+
+                    if (bitmap_length >= (size_t)UINT32_MAX)
+                    {
+                        fputs("SAME_OWNER_REASSERT_FAILED reason=image-too-large\n",
+                              stderr);
+                        return 1;
+                    }
+                    expanded = (unsigned char *)realloc(bitmap,
+                                                         bitmap_length + 1U);
+                    if (expanded == NULL)
+                    {
+                        fputs("SAME_OWNER_REASSERT_FAILED reason=allocation\n",
+                              stderr);
+                        return 1;
+                    }
+                    bitmap = expanded;
+                    ++bitmap_length;
+                    /* Generation B has a distinct, valid BMP byte length. */
+                    put_u32_le(bitmap, 2, (uint32_t)bitmap_length);
+                    bitmap[54] ^= 0xffU;
+                }
+                ++owner_generation;
+                printf("SAME_OWNER_REASSERTED owner=0x%lx "
+                       "owner_generation=%u\n", new_owner, owner_generation);
+                fflush(stdout);
+            }
             else if (strncmp(command, "barrier", 7) == 0)
             {
                 XSync(display, False);
@@ -1005,7 +1059,12 @@ run_owner(const char *named_png_path, int delayed_activation,
                 if (transfer.terminator_waiting)
                 {
                     const char *done_marker = transfer.done_marker;
-                    XSelectInput(display, transfer.requestor, NoEventMask);
+                    /*
+                     * The requestor may destroy its window immediately after
+                     * acknowledging the INCR terminator. The event selection
+                     * belongs to that window and disappears with it; avoid a
+                     * late XSelectInput that could raise BadWindow.
+                     */
                     memset(&transfer, 0, sizeof(transfer));
                     puts(done_marker != NULL ? done_marker : "INCR_DONE");
                     fflush(stdout);

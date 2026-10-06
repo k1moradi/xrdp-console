@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import binascii
 import hashlib
+import json
 import math
 import os
 import random
@@ -447,6 +448,48 @@ def start_clipboard_requestor(helper: Path, display: str, target: str,
         command, stdin=subprocess.PIPE if requestor_modes != 0 else None,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         env=environment, bufsize=0, start_new_session=True)
+
+
+def run_clipboard_remote_image_probe(
+        x11_helper: Path, display: str, timeout_seconds: float = 45.0,
+        image_target: str = "all", expected_owner: str | None = None
+        ) -> tuple[list[dict[str, object]], str]:
+    """Request TARGETS, PNG, and BMP serially without retaining payload bytes."""
+    probe = x11_helper.with_name("clipboard-remote-image-probe")
+    if not probe.is_file():
+        raise AssertionError(f"remote-image diagnostic probe is missing: {probe}")
+    environment = os.environ.copy()
+    environment["DISPLAY"] = display
+    command = [str(probe), "--once", "--timeout-ms", "40000",
+               "--request-timeout-ms", "20000"]
+    if image_target in ("image/png", "image/bmp"):
+        command.append("--only-png" if image_target == "image/png" else
+                       "--only-bmp")
+    elif image_target != "all":
+        raise ValueError(f"unsupported image target filter: {image_target}")
+    if expected_owner is not None:
+        command.extend(("--expected-owner", expected_owner))
+    result = subprocess.run(
+        command,
+        check=False, capture_output=True, text=True, env=environment,
+        timeout=timeout_seconds)
+    output = result.stdout + result.stderr
+    if result.returncode != 0:
+        raise AssertionError(
+            f"remote-image diagnostic probe exited {result.returncode}:\n{output}")
+    return parse_clipboard_remote_image_events(output), output
+
+
+def parse_clipboard_remote_image_events(output: str) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise AssertionError(
+                f"remote-image probe emitted non-JSON output: {line!r}\n{output}") from error
+        events.append(event)
+    return events
 
 
 def start_clipboard_owner(
@@ -945,17 +988,34 @@ def assert_clipboard_image_session(
 
     # First prove a >23 MB image can traverse FreeRDP -> CLIPRDR -> chansrv ->
     # X11 INCR intact before stressing a clipboard-generation change.
-    baseline_image = start_clipboard_requestor(helper, source_display, "image/bmp")
-    wait_for_owner_marker(owner, "IMAGE_REQUEST", 15.0, owner_log_path)
-    image_output = finish_clipboard_requestor(
-        baseline_image, 45.0, chansrv_logs)
-    image_match = re.search(
-        r"RESULT target=image/bmp bytes=(\d+) width=3072 height=1932",
-        image_output)
-    if image_match is None or int(image_match.group(1)) < 20_000_000:
+    baseline_events, baseline_output = run_clipboard_remote_image_probe(
+        helper, source_display, timeout_seconds=60.0, image_target="image/bmp")
+    owner_image_request = wait_for_owner_line_pattern(
+        owner, r"IMAGE_REQUEST owner_generation=(\d+) bytes=(\d+)",
+        15.0, owner_log_path)
+    baseline_targets = next((event for event in baseline_events
+                             if event.get("event") == "targets_result"), None)
+    baseline_bmp = next((event for event in baseline_events
+                         if event.get("event") == "selection_result" and
+                         event.get("target") == "image/bmp"), None)
+    if (baseline_targets is None or baseline_bmp is None or
+            "image/bmp" not in baseline_targets.get("targets", []) or
+            baseline_bmp.get("result") != "success" or
+            baseline_bmp.get("path") != "incr" or
+            baseline_bmp.get("bytes", 0) < 20_000_000):
         raise AssertionError(
-            f"large image clipboard payload was not delivered intact: {image_output!r}\n"
+            "new remote-image probe did not complete the large BMP through "
+            f"X11 INCR: {baseline_output}\n"
             f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
+    image_bytes = int(baseline_bmp["bytes"])
+    owner_image_match = re.search(
+        r"IMAGE_REQUEST owner_generation=(\d+) bytes=(\d+)",
+        owner_image_request)
+    if (owner_image_match is None or owner_image_match.group(1) != "1" or
+            int(owner_image_match.group(2)) != image_bytes):
+        raise AssertionError(
+            "BMP request did not receive the expected generation-1 fixture "
+            f"payload: {owner_image_request!r}; probe={baseline_bmp!r}")
     wait_for_owner_marker(owner, "IMAGE_INCR_DONE", 10.0, owner_log_path)
     wait_for_chansrv_marker(
         chansrv_logs, "event=response status=0x1", 1, 10.0,
@@ -975,6 +1035,10 @@ def assert_clipboard_image_session(
         raise AssertionError(
             "large CF_DIB response did not exercise the negotiated VC chunk "
             f"size:\n{xrdp_log_excerpt(log_path)}")
+    # This legacy xfreerdp smoke can prove the successful type-5 response at
+    # the VC boundary, but the patched xrdp logger does not decode outbound
+    # type-4 messages. The dedicated controlled-peer image-probe modes below
+    # assert type 4 at the client's OnServerFormatDataRequest callback.
     x11_log = chansrv_log_text(chansrv_logs)
     request_match = re.search(
         r"event=x11-request target=image/bmp requestor=(0x[0-9a-fA-F]+) "
@@ -988,6 +1052,15 @@ def assert_clipboard_image_session(
             f"[chansrv]\n{x11_log}")
     requestor_id, server_owner_id, _, property_id, generation_id = (
         request_match.groups())
+    bmp_selection_request = next((event for event in baseline_events
+                                  if event.get("event") == "selection_request" and
+                                  event.get("target") == "image/bmp"), None)
+    if (bmp_selection_request is None or
+            str(bmp_selection_request.get("requestor", "")).lower() !=
+            requestor_id.lower()):
+        raise AssertionError(
+            "probe SelectionRequest does not match the chansrv X11 request: "
+            f"probe={bmp_selection_request!r}; log={request_match.groups()!r}")
     server_owner_id = server_owner_id.lower()
     if clipboard_selection_owner(helper, source_display) != server_owner_id:
         raise AssertionError(
@@ -1001,7 +1074,7 @@ def assert_clipboard_image_session(
     if (delivery_match is None or
             delivery_match.group(1) != requestor_id or
             delivery_match.group(2) != property_id or
-            int(delivery_match.group(3)) != int(image_match.group(1)) or
+            int(delivery_match.group(3)) != image_bytes or
             delivery_match.group(4) != generation_id):
         raise AssertionError(
             "large BMP X11 INCR delivery did not match the original request "
@@ -2299,14 +2372,39 @@ def assert_clipboard_inflight_png_format_list_session(
 
     initial_list = wait_for_chansrv_pattern(
         chansrv_logs,
-        rf"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        rf"event=format-list[^\n]*stored_formats=3 dib_format_id=8 "
         rf"png_format_id={NAMED_PNG_FORMAT_ID}",
         15.0, chansrv_process, chansrv_stdout)
     wait_for_peer_marker(client, client_log_path,
-                         "PEER_INITIAL_FORMAT_LIST_SENT", 10.0)
+                         f"PEER_INITIAL_FORMAT_LIST_SENT text=13 dib=8 "
+                         f"png={NAMED_PNG_FORMAT_ID}", 10.0)
 
-    original_png = start_clipboard_requestor(
-        helper, source_display, "image/png", allow_refusal=True)
+    generation_match = re.search(r"generation=(\d+)", initial_list)
+    if generation_match is None:
+        raise AssertionError(f"initial image offer has no generation: {initial_list!r}")
+    initial_generation = int(generation_match.group(1))
+    owner_log = wait_for_chansrv_selection_owner_install(
+        chansrv_logs, initial_generation, 10.0,
+        chansrv_process, chansrv_stdout)
+    owner_match = re.search(
+        rf"event=selection-owner-install generation={initial_generation} "
+        r"owner=(0x[0-9a-fA-F]+) chansrv_window=(0x[0-9a-fA-F]+) "
+        r"selection_time=\d+ result=installed", owner_log)
+    if owner_match is None or owner_match.group(1).lower() != owner_match.group(2).lower():
+        raise AssertionError(
+            f"initial image generation lacks a verified owner:\n{owner_log}")
+
+    probe_path = helper.with_name("clipboard-remote-image-probe")
+    probe_environment = os.environ.copy()
+    probe_environment["DISPLAY"] = source_display
+    original_png = subprocess.Popen(
+        [str(probe_path), "--once", "--only-png", "--expected-owner",
+         owner_match.group(1), "--timeout-ms", "20000",
+         "--request-timeout-ms", "15000"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        env=probe_environment, start_new_session=True)
+    if original_png.stdout is None:
+        raise AssertionError("remote-image probe has no output pipe")
     duplicate_png: subprocess.Popen[bytes] | None = None
     try:
         wait_for_chansrv_pattern(
@@ -2369,12 +2467,35 @@ def assert_clipboard_inflight_png_format_list_session(
             r"png_format_id=-1",
             10.0, chansrv_process, chansrv_stdout)
 
-        original_result = finish_clipboard_requestor(
-            original_png, 10.0, chansrv_logs)
-        if "RESULT target=image/png refused" not in original_result:
+        try:
+            original_output_bytes, _ = original_png.communicate(timeout=10.0)
+        except subprocess.TimeoutExpired:
+            stop_process(original_png)
             raise AssertionError(
-                "old-generation PNG request was not refused when the new "
-                f"format list arrived: {original_result!r}\n[chansrv]\n"
+                "remote-image probe did not retire its outstanding PNG "
+                "request after generation replacement")
+        original_output = original_output_bytes.decode(
+            "utf-8", errors="replace")
+        original_events = parse_clipboard_remote_image_events(original_output)
+        old_generation_selection = next((
+            event for event in original_events
+            if event.get("event") == "selection_result" and
+            event.get("target") == "image/png"), None)
+        old_generation_notify = next((
+            event for event in original_events
+            if event.get("event") == "selection_notify" and
+            event.get("target") == "image/png"), None)
+        if (original_png.returncode != 0 or
+                old_generation_selection is None or
+                old_generation_selection.get("result") != "failure" or
+                old_generation_selection.get("reason") !=
+                "selection-notify-none" or
+                old_generation_selection.get("bytes") != 0 or
+                old_generation_notify is None or
+                old_generation_notify.get("result") != "failure"):
+            raise AssertionError(
+                "new CLIPRDR generation did not fail the old probe's pending "
+                f"X11 PNG request cleanly: {original_events!r}\n[chansrv]\n"
                 f"{chansrv_log_text(chansrv_logs)}")
         duplicate_result = finish_clipboard_requestor(
             duplicate_png, 10.0, chansrv_logs)
@@ -2443,7 +2564,7 @@ def assert_clipboard_inflight_png_format_list_session(
         if (f"PEER_PNG_RESPONSE_HELD format_id={NAMED_PNG_FORMAT_ID}"
                 not in peer_log):
             raise AssertionError("FreeRDP peer did not hold the PNG response")
-        if (f"stored_formats=2 dib_format_id=8 "
+        if (f"stored_formats=3 dib_format_id=8 "
                 f"png_format_id={NAMED_PNG_FORMAT_ID}" not in initial_list):
             raise AssertionError(
                 "initial clipboard did not contain both Mac-style image formats:\n"
@@ -3690,31 +3811,78 @@ def assert_clipboard_png_response_failure_session(
         helper: Path, client: subprocess.Popen[object],
         client_log_path: Path, chansrv_process: subprocess.Popen[object],
         chansrv_logs: Path, chansrv_stdout: Path, source_display: str) -> None:
-    """A remote render failure must remain a failed X11 conversion."""
-    wait_for_chansrv_pattern(
+    """The diagnostic probe records an actual CLIPRDR image refusal."""
+    offer = wait_for_chansrv_pattern(
         chansrv_logs,
-        rf"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        rf"event=format-list[^\n]*stored_formats=3 dib_format_id=8 "
         rf"png_format_id={NAMED_PNG_FORMAT_ID} generation=\d+",
         15.0, chansrv_process, chansrv_stdout)
-    requestor = start_clipboard_requestor(
-        helper, source_display, "image/png", allow_refusal=True)
-    try:
-        wait_for_chansrv_pattern(
-            chansrv_logs,
-            rf"event=request format_id={NAMED_PNG_FORMAT_ID} "
-            r"target=image/png attempt=1",
-            10.0, chansrv_process, chansrv_stdout)
-        wait_for_peer_marker(
-            client, client_log_path,
-            "PEER_PNG_FORMAT_RESPONSE_FAIL_SENT", 10.0)
-        result = finish_clipboard_requestor(requestor, 20.0, chansrv_logs)
-    finally:
-        stop_process(requestor)
+    offer_match = re.search(r"generation=(\d+)", offer)
+    if offer_match is None:
+        raise AssertionError(f"failed-image offer has no generation: {offer!r}")
+    generation = int(offer_match.group(1))
+    owner_log = wait_for_chansrv_selection_owner_install(
+        chansrv_logs, generation, 10.0, chansrv_process, chansrv_stdout)
+    owner_match = re.search(
+        rf"event=selection-owner-install generation={generation} "
+        r"owner=(0x[0-9a-fA-F]+) chansrv_window=(0x[0-9a-fA-F]+) "
+        r"selection_time=\d+ result=installed", owner_log)
+    if owner_match is None or owner_match.group(1).lower() != owner_match.group(2).lower():
+        raise AssertionError(
+            f"failed-image offer has no verified chansrv owner:\n{owner_log}")
+    wait_for_peer_marker(
+        client, client_log_path,
+        f"PEER_INITIAL_FORMAT_LIST_SENT text=13 dib=8 "
+        f"png={NAMED_PNG_FORMAT_ID}", 10.0)
 
-    if "RESULT target=image/png refused" not in result:
+    events, probe_output = run_clipboard_remote_image_probe(
+        helper, source_display, image_target="image/png",
+        expected_owner=owner_match.group(1))
+    targets = next((event for event in events
+                    if event.get("event") == "targets_result"), None)
+    image_request = next((event for event in events
+                          if event.get("event") == "selection_request" and
+                          event.get("target") == "image/png"), None)
+    image_notify = next((event for event in events
+                         if event.get("event") == "selection_notify" and
+                         event.get("target") == "image/png"), None)
+    image_result = next((event for event in events
+                         if event.get("event") == "selection_result" and
+                         event.get("target") == "image/png"), None)
+    if any(event is None for event in
+           (targets, image_request, image_notify, image_result)):
+        raise AssertionError(
+            "remote-image probe omitted an X11 event for the failed CLIPRDR "
+            f"response:\n{probe_output}")
+    assert targets is not None and image_request is not None
+    assert image_notify is not None and image_result is not None
+    target_names = targets.get("targets")
+    if (not isinstance(target_names, list) or
+            "UTF8_STRING" not in target_names or
+            "image/png" not in target_names or
+            "image/bmp" not in target_names or
+            image_result.get("result") != "failure" or
+            image_result.get("bytes") != 0 or
+            image_result.get("path") not in ("none", "immediate") or
+            image_notify.get("result") != "failure"):
         raise AssertionError(
             "remote CB_RESPONSE_FAIL was not represented as a failed X11 "
-            f"conversion: {result!r}\n{chansrv_log_text(chansrv_logs)}")
+            f"conversion: {events!r}\n{chansrv_log_text(chansrv_logs)}")
+    wait_for_peer_marker(
+        client, client_log_path,
+        "PEER_PNG_FORMAT_RESPONSE_FAIL_SENT", 10.0)
+    peer_log = read_text(client_log_path)
+    if (not re.search(
+            rf"PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED "
+            rf"format_id={NAMED_PNG_FORMAT_ID} request_generation=1 "
+            r"mono_ns=\d+ msg_type=4", peer_log) or
+            not re.search(
+                rf"PEER_CLIENT_FORMAT_RESPONSE_SENT "
+                rf"format_id={NAMED_PNG_FORMAT_ID} request_generation=1 "
+                r"flags=0x0002 bytes=0 mono_ns=\d+ msg_type=5", peer_log)):
+        raise AssertionError(
+            "synthetic peer did not record the exact failed type-4/type-5 "
+            f"CLIPRDR exchange:\n{peer_log}")
     full_log = chansrv_log_text(chansrv_logs)
     if not re.search(
             rf"event=response status=0x2 bytes=0 "
@@ -3723,10 +3891,47 @@ def assert_clipboard_png_response_failure_session(
             f"chansrv did not observe a zero-length CLIPRDR FAIL:\n{full_log}")
     if ("event=x11-selection-notify-issued path=incr " in full_log or
             "event=x11-incr-announcement " in full_log or
-            "event=x11-delivery-issued path=incr target=image/png" in full_log):
+            "event=x11-delivery-issued path=incr target=image/png" in full_log or
+            re.search(r"event=x11-delivery-issued [^\n]*target=image/png",
+                     full_log)):
         raise AssertionError(
-            "failed remote rendering was committed as a successful X11 INCR "
+            "failed remote rendering was committed as an X11 image delivery "
             f"conversion:\n{full_log}")
+
+    # A subsequent generic request must proceed, proving the failed image
+    # request did not leave the single-outstanding-request slot occupied.
+    text_requestor = start_clipboard_requestor(
+        helper, source_display, "UTF8_STRING")
+    text_result = finish_clipboard_requestor(
+        text_requestor, 10.0, chansrv_logs)
+    if not re.search(r"RESULT target=UTF8_STRING bytes=[1-9]\d* text=",
+                     text_result):
+        raise AssertionError(
+            "text selection did not complete after the failed image request: "
+            f"{text_result!r}\n{chansrv_log_text(chansrv_logs)}")
+    wait_for_peer_marker(
+        client, client_log_path,
+        "PEER_IMAGE_OFFER_TEXT_RESPONSE_SENT", 10.0)
+    peer_log = read_text(client_log_path)
+    exchange_markers = (
+        rf"PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id={NAMED_PNG_FORMAT_ID} "
+        r"request_generation=1 mono_ns=\d+ msg_type=4",
+        rf"PEER_CLIENT_FORMAT_RESPONSE_SENT format_id={NAMED_PNG_FORMAT_ID} "
+        r"request_generation=1 flags=0x0002 bytes=0 mono_ns=\d+ msg_type=5",
+        r"PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id=13 "
+        r"request_generation=1 mono_ns=\d+ msg_type=4",
+        r"PEER_CLIENT_FORMAT_RESPONSE_SENT format_id=13 "
+        r"request_generation=1 flags=0x0001 bytes=[1-9]\d* "
+        r"mono_ns=\d+ msg_type=5",
+    )
+    exchange_positions = [re.search(pattern, peer_log) for pattern in exchange_markers]
+    if any(match is None for match in exchange_positions) or [
+            match.start() for match in exchange_positions if match is not None
+            ] != sorted(match.start() for match in exchange_positions
+                        if match is not None):
+        raise AssertionError(
+            "failed image request was not retired before the subsequent "
+            f"successful text type-4/type-5 exchange:\n{peer_log}")
     if client.poll() is not None or chansrv_process.poll() is not None:
         raise AssertionError(
             "RDP or chansrv disconnected while handling a valid clipboard "
@@ -3915,6 +4120,273 @@ def assert_clipboard_data_response_oracle_session(
             f"unsolicited responses corrupted the current format offer: {targets}")
 
 
+def assert_clipboard_remote_image_probe_session(
+        helper: Path, client: subprocess.Popen[object],
+        client_log_path: Path, log_path: Path,
+        chansrv_process: subprocess.Popen[object], chansrv_logs: Path,
+        chansrv_stdout: Path, source_display: str,
+        image_target: str) -> None:
+    """Prove one filtered X11 image request through pinned CLIPRDR."""
+    if image_target not in ("image/png", "image/bmp"):
+        raise ValueError(f"unsupported remote-image target: {image_target}")
+
+    format_id = NAMED_PNG_FORMAT_ID if image_target == "image/png" else 8
+    initial_peer_list = wait_for_peer_marker(
+        client, client_log_path,
+        f"PEER_INITIAL_FORMAT_LIST_SENT text=13 dib=8 "
+        f"png={NAMED_PNG_FORMAT_ID}", 10.0)
+    if "PEER_FORMAT_LIST_GENERATION generation=1 " not in initial_peer_list:
+        raise AssertionError(
+            f"controlled peer did not offer image generation 1:\n"
+            f"{initial_peer_list}")
+
+    offer_pattern = (
+        rf"event=format-list stored_formats=3 dib_format_id=8 "
+        rf"png_format_id={NAMED_PNG_FORMAT_ID} generation=(\d+)")
+    offer_log = wait_for_chansrv_pattern(
+        chansrv_logs, offer_pattern, 12.0,
+        chansrv_process, chansrv_stdout)
+    offer_match = re.search(offer_pattern, offer_log)
+    if offer_match is None:
+        raise AssertionError(f"pinned chansrv did not install image offer:\n{offer_log}")
+    generation = int(offer_match.group(1))
+
+    owner_log = wait_for_chansrv_selection_owner_install(
+        chansrv_logs, generation, 10.0, chansrv_process, chansrv_stdout)
+    owner_match = re.search(
+        rf"event=selection-owner-install generation={generation} "
+        r"owner=(0x[0-9a-fA-F]+) chansrv_window=(0x[0-9a-fA-F]+) "
+        r"selection_time=\d+ result=installed", owner_log)
+    if owner_match is None or owner_match.group(1).lower() != owner_match.group(2).lower():
+        raise AssertionError(
+            f"image generation {generation} lacks verified chansrv ownership:\n"
+            f"{owner_log}")
+    owner_xid = owner_match.group(1).lower()
+
+    chansrv_lines_before = len(chansrv_log_text(chansrv_logs).splitlines())
+    server_vc_log = read_text(log_path)
+    response_packet_pattern = (
+        r"event=cliprdr-first-fragment direction=client-to-server "
+        r"total_len=\d+ fragment_bytes=\d+ [^\n]*msg_type=5")
+    response_packets_before = len(re.findall(response_packet_pattern, server_vc_log))
+    outbound_request_pattern = (
+        r"event=cliprdr-pdu direction=server-to-client "
+        r"stage=sec-send-success msg_type=4 msg_flags=0x0+ "
+        r"data_len=4 [^\n]*send_status=success")
+    outbound_requests_before = len(re.findall(
+        outbound_request_pattern, server_vc_log))
+    probe_events, probe_output = run_clipboard_remote_image_probe(
+        helper, source_display, timeout_seconds=60.0,
+        image_target=image_target, expected_owner=owner_xid)
+
+    targets_event = next((event for event in probe_events
+                          if event.get("event") == "targets_result"), None)
+    targets_result = next((event for event in probe_events
+                           if event.get("event") == "selection_result" and
+                           event.get("target") == "TARGETS"), None)
+    image_request = next((event for event in probe_events
+                          if event.get("event") == "selection_request" and
+                          event.get("target") == image_target), None)
+    image_notify = next((event for event in probe_events
+                         if event.get("event") == "selection_notify" and
+                         event.get("target") == image_target), None)
+    image_result = next((event for event in probe_events
+                         if event.get("event") == "selection_result" and
+                         event.get("target") == image_target), None)
+    if any(event is None for event in
+           (targets_event, targets_result, image_request,
+            image_notify, image_result)):
+        raise AssertionError(
+            f"filtered {image_target} probe omitted a required X11 event:\n"
+            f"{probe_output}\n[chansrv]\n{chansrv_log_text(chansrv_logs)}")
+    assert targets_event is not None and targets_result is not None
+    assert (image_request is not None and image_notify is not None and
+            image_result is not None)
+    target_names = targets_event.get("targets")
+    if (targets_result.get("result") != "success" or
+            not isinstance(target_names, list) or
+            "UTF8_STRING" not in target_names or
+            "image/png" not in target_names or
+            "image/bmp" not in target_names or
+            image_target not in target_names or
+            str(targets_event.get("owner", "")).lower() != owner_xid or
+            str(image_request.get("owner", "")).lower() != owner_xid or
+            image_notify.get("result") != "success" or
+            image_result.get("result") != "success" or
+            int(image_result.get("bytes", 0)) <= 0):
+        raise AssertionError(
+            f"filtered {image_target} probe disagreed with current owner/offer:\n"
+            f"{probe_output}\nowner={owner_xid} targets={target_names!r}")
+    requestor_xid = str(targets_event.get("requestor", "")).lower()
+    if (not requestor_xid or
+            str(image_request.get("requestor", "")).lower() != requestor_xid or
+            str(image_result.get("requestor", "")).lower() != requestor_xid):
+        raise AssertionError(
+            f"{image_target} X11 request did not use the TARGETS requestor:\n"
+            f"{probe_output}")
+
+    target_request_pattern = (
+        rf"event=x11-request target=TARGETS requestor={re.escape(requestor_xid)} "
+        rf"owner={re.escape(owner_xid)} [^\n]*generation={generation}")
+    target_request_log = wait_for_chansrv_pattern_after_lines(
+        chansrv_logs, target_request_pattern, chansrv_lines_before, 10.0,
+        chansrv_process, chansrv_stdout)
+    targets_count = len(target_names)
+    target_names_csv = ",".join(str(value) for value in target_names)
+    target_response_pattern = (
+        rf"event=targets-response-issued requestor={re.escape(requestor_xid)} "
+        rf"generation={generation} target_count={targets_count} "
+        rf"targets={re.escape(target_names_csv)} truncated=0 result=0")
+    if re.search(target_response_pattern, target_request_log) is None:
+        raise AssertionError(
+            "pinned chansrv's TARGETS response did not match the actual X11 "
+            f"property:\n{target_request_log}\nprobe={probe_output}")
+
+    image_request_pattern = (
+        rf"event=x11-request target={re.escape(image_target)} "
+        rf"requestor={re.escape(requestor_xid)} owner={re.escape(owner_xid)} "
+        rf"selection=0x[0-9a-fA-F]+ property=(0x[0-9a-fA-F]+) "
+        rf"time=\d+ generation={generation} mono_ns=(\d+)")
+    image_request_log = wait_for_chansrv_pattern_after_lines(
+        chansrv_logs, image_request_pattern, chansrv_lines_before, 10.0,
+        chansrv_process, chansrv_stdout)
+    image_request_match = re.search(image_request_pattern, image_request_log)
+    if image_request_match is None:
+        raise AssertionError(
+            f"pinned chansrv did not log the {image_target} SelectionRequest:\n"
+            f"{image_request_log}")
+    property_xid = image_request_match.group(1).lower()
+    chansrv_request_mono_ns = int(image_request_match.group(2))
+
+    format_request_pattern = (
+        rf"event=request format_id={format_id} target={re.escape(image_target)} "
+        r"attempt=1 mono_ns=(\d+)")
+    request_transaction_log = wait_for_chansrv_pattern_after_lines(
+        chansrv_logs, format_request_pattern, chansrv_lines_before, 10.0,
+        chansrv_process, chansrv_stdout)
+    format_request_match = re.search(format_request_pattern, request_transaction_log)
+    if format_request_match is None:
+        raise AssertionError(
+            f"pinned chansrv did not request CLIPRDR format {format_id}:\n"
+            f"{request_transaction_log}")
+    chansrv_format_request_mono_ns = int(format_request_match.group(1))
+
+    peer_log = wait_for_peer_marker(
+        client, client_log_path,
+        f"PEER_CLIENT_FORMAT_RESPONSE_SENT format_id={format_id} ", 20.0)
+    peer_request_pattern = (
+        rf"PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id={format_id} "
+        r"request_generation=(\d+) mono_ns=(\d+) msg_type=4")
+    peer_response_pattern = (
+        rf"PEER_CLIENT_FORMAT_RESPONSE_SENT format_id={format_id} "
+        r"request_generation=(\d+) flags=0x0001 bytes=(\d+) "
+        r"mono_ns=(\d+) msg_type=5")
+    peer_requests = list(re.finditer(peer_request_pattern, peer_log))
+    peer_responses = list(re.finditer(peer_response_pattern, peer_log))
+    if len(peer_requests) != 1 or len(peer_responses) != 1:
+        raise AssertionError(
+            "controlled peer did not observe exactly one type-4 request and "
+            f"successful type-5 response for format {format_id}:\n{peer_log}")
+    peer_request_match = peer_requests[0]
+    peer_response_match = peer_responses[0]
+    if peer_request_match.group(1) != "1" or peer_response_match.group(1) != "1":
+        raise AssertionError(
+            f"CLIPRDR request/response escaped image generation 1:\n{peer_log}")
+    peer_request_mono_ns = int(peer_request_match.group(2))
+    response_bytes = int(peer_response_match.group(2))
+    peer_response_mono_ns = int(peer_response_match.group(3))
+    if (response_bytes <= 0 or
+            not (chansrv_format_request_mono_ns <= peer_request_mono_ns <=
+                 peer_response_mono_ns)):
+        raise AssertionError(
+            "CLIPRDR request/response monotonic ordering or payload length is "
+            f"invalid: request={chansrv_format_request_mono_ns}, "
+            f"peer_request={peer_request_mono_ns}, "
+            f"peer_response={peer_response_mono_ns}, bytes={response_bytes}")
+
+    response_pattern = (
+        rf"event=response status=0x1 bytes={response_bytes} "
+        rf"format_id={format_id} attempt=1 mono_ns=(\d+)")
+    response_log = wait_for_chansrv_pattern_after_lines(
+        chansrv_logs, response_pattern, chansrv_lines_before, 20.0,
+        chansrv_process, chansrv_stdout)
+    response_match = re.search(response_pattern, response_log)
+    if response_match is None:
+        raise AssertionError(
+            f"chansrv did not accept the successful type-5 response:\n"
+            f"{response_log}")
+    chansrv_response_mono_ns = int(response_match.group(1))
+    if chansrv_response_mono_ns < peer_response_mono_ns:
+        raise AssertionError(
+            "chansrv response log predates the peer's type-5 send")
+
+    current_vc_log = read_text(log_path)
+    vc_response_count = len(re.findall(response_packet_pattern, current_vc_log))
+    if vc_response_count <= response_packets_before:
+        raise AssertionError(
+            "successful client type-5 response was not observed at xrdp's VC "
+            f"boundary:\n{xrdp_log_excerpt(log_path)}")
+    if os.environ.get("XRDP_CONSOLE_TEST_EXPECT_OUTBOUND_CLIPRDR") == "1":
+        outbound_request_count = len(re.findall(
+            outbound_request_pattern, current_vc_log))
+        if outbound_request_count <= outbound_requests_before:
+            raise AssertionError(
+                "instrumented xrdp did not report a successful outbound "
+                "CB_FORMAT_DATA_REQUEST type-4 at the VC send boundary:\n"
+                f"{xrdp_log_excerpt(log_path)}")
+
+    image_bytes = int(image_result["bytes"])
+    expected_x11_bytes = response_bytes + (14 if image_target == "image/bmp" else 0)
+    if (str(image_result.get("path")) not in ("immediate", "incr") or
+            image_bytes != expected_x11_bytes):
+        raise AssertionError(
+            f"X11 {image_target} completion has unexpected size: "
+            f"probe={image_result!r}, CLIPRDR bytes={response_bytes}, "
+            f"expected X11 bytes={expected_x11_bytes}")
+    delivery_pattern = (
+        rf"event=x11-delivery-issued path=(direct|incr) "
+        rf"target={re.escape(image_target)} "
+        rf"requestor={re.escape(requestor_xid)} "
+        rf"property={re.escape(property_xid)} bytes={image_bytes} "
+        rf"generation={generation} cache_generation=\d+")
+    delivery_log = wait_for_chansrv_pattern_after_lines(
+        chansrv_logs, delivery_pattern, chansrv_lines_before, 10.0,
+        chansrv_process, chansrv_stdout)
+    delivery_match = re.search(delivery_pattern, delivery_log)
+    expected_path = "direct" if image_result.get("path") == "immediate" else "incr"
+    if delivery_match is None or delivery_match.group(1) != expected_path:
+        raise AssertionError(
+            f"X11 {image_target} delivery path did not complete as probed:\n"
+            f"{delivery_log}\nprobe={image_result!r}")
+    if expected_path == "incr":
+        terminator_pattern = (
+            rf"event=x11-incr-terminator-ack requestor="
+            rf"{re.escape(requestor_xid)} property={re.escape(property_xid)} "
+            rf"terminator_generation={generation} current_generation={generation}")
+        wait_for_chansrv_pattern_after_lines(
+            chansrv_logs, terminator_pattern, chansrv_lines_before, 15.0,
+            chansrv_process, chansrv_stdout)
+        probe_completion = "INCR terminator acknowledged"
+    else:
+        probe_completion = "immediate SelectionNotify/property read completed"
+
+    if clipboard_selection_owner(helper, source_display).lower() != owner_xid:
+        raise AssertionError(
+            f"CLIPBOARD owner changed during generation {generation} probe")
+    all_chansrv = chansrv_log_text(chansrv_logs)
+    generations = [int(value) for value in re.findall(
+        r"event=format-list[^\n]*generation=(\d+)", all_chansrv)]
+    if not generations or max(generations) != generation:
+        raise AssertionError(
+            "a later clipboard generation superseded the image transaction: "
+            f"selected={generation} observed={generations}")
+    print(
+        f"REMOTE_IMAGE_PROBE target={image_target} generation={generation} "
+        f"owner={owner_xid} format_id={format_id} bytes={image_bytes} "
+        f"path={expected_path} completion={probe_completion}",
+        flush=True)
+
+
 def assert_clipboard_named_png_session(
         helper: Path, owner: subprocess.Popen[bytes],
         owner_log_path: Path, client: subprocess.Popen[object],
@@ -3974,29 +4446,49 @@ def assert_clipboard_named_png_session(
         reconnect_client, client_display, window_title, reconnect_log_path,
         log_path, stdout_path)
 
-    # Query the real post-reconnect TARGETS list first, then request PNG just
-    # as a Linux image consumer would after seeing the retained clipboard.
-    targets_request = start_clipboard_requestor(helper, source_display, "TARGETS")
-    targets_result = finish_clipboard_requestor(
-        targets_request, 10.0, chansrv_logs)
-    targets_match = re.search(
-        r"RESULT target=TARGETS requestor=(0x[0-9a-fA-F]+) count=(\d+) "
-        r"png_index=(-?\d+) bmp_index=(-?\d+) targets=([^\s]+)",
-        targets_result)
-    if targets_match is None:
+    # Run the observer against the PNG target this fixture can actually
+    # materialize. Its CF_DIB advertisement is useful for TARGETS fidelity,
+    # but this peer mode intentionally returns an empty DIB payload; BMP's
+    # successful CLIPRDR path is covered by the separate clipboard-session
+    # integration fixture.
+    probe_events, probe_output = run_clipboard_remote_image_probe(
+        helper, source_display, image_target="image/png")
+    targets_event = next((event for event in probe_events
+                          if event.get("event") == "targets_result"), None)
+    targets_result = next((event for event in probe_events
+                           if event.get("event") == "selection_result" and
+                           event.get("target") == "TARGETS"), None)
+    if targets_event is None or targets_result is None:
         raise AssertionError(
-            f"invalid named-PNG X11 TARGETS result: {targets_result!r}\n"
-            f"[chansrv]\n{chansrv_log_text(chansrv_logs)}")
-    target_requestor = targets_match.group(1).lower()
-    target_count = int(targets_match.group(2))
-    png_index = int(targets_match.group(3))
-    bmp_index = int(targets_match.group(4))
-    target_names = targets_match.group(5).split(",")
+            "remote-image probe did not complete its TARGETS query:\n"
+            f"{probe_output}\n[chansrv]\n{chansrv_log_text(chansrv_logs)}")
+    target_requestor = str(targets_event.get("requestor", "")).lower()
+    target_names = targets_event.get("targets", [])
+    if not isinstance(target_names, list) or not all(
+            isinstance(value, str) for value in target_names):
+        raise AssertionError(f"invalid remote-image TARGETS event: {targets_event!r}")
+    target_count = len(target_names)
+    png_index = target_names.index("image/png") if "image/png" in target_names else -1
+    bmp_index = target_names.index("image/bmp") if "image/bmp" in target_names else -1
     if (png_index < 0 or bmp_index < 0 or png_index >= bmp_index or
             "image/png" not in target_names or "image/bmp" not in target_names):
         raise AssertionError(
             "Mac-style TARGETS must advertise PNG before BMP: "
-            f"{targets_result!r}")
+            f"{targets_event!r}")
+    if target_requestor == "":
+        raise AssertionError(f"probe omitted its requestor XID: {targets_event!r}")
+    probe_image_results = {
+        str(event.get("target")): event for event in probe_events
+        if event.get("event") == "selection_result" and
+        event.get("target") in ("image/png", "image/bmp")}
+    if set(probe_image_results) != {"image/png"}:
+        raise AssertionError(
+            f"probe did not resolve the PNG target independently:\n{probe_output}")
+    for image_target, result in probe_image_results.items():
+        if result.get("result") != "success" or result.get("bytes", 0) <= 0:
+            raise AssertionError(
+                f"synthetic {image_target} CLIPRDR/X11 transfer failed: {result!r}\n"
+                f"{probe_output}\n[chansrv]\n{chansrv_log_text(chansrv_logs)}")
 
     target_generation_pattern = (
         rf"event=x11-request target=TARGETS requestor={re.escape(target_requestor)} "
@@ -4104,11 +4596,6 @@ def assert_clipboard_named_png_session(
             "the explicit post-reconnect PNG request should cause exactly one "
             "on-demand CLIPRDR fetch:\n"
             f"PNG fetch count={len(png_fetches)}\n{full_chansrv_log}")
-    if re.search(r"event=request format_id=8 target=image/bmp", full_chansrv_log):
-        raise AssertionError(
-            "consumer selected the BMP fallback after the PNG request:\n"
-            f"{full_chansrv_log}")
-
     # The first real image request has now materialized this generation in
     # chansrv. A second request must be served from that same-generation
     # cache, with no new CLIPRDR request and prompt X11 INCR startup.
@@ -6544,6 +7031,8 @@ def main() -> int:
     cpu_contention = False
     clipboard_stress_mode = False
     clipboard_named_png_mode = False
+    clipboard_remote_image_png_mode = False
+    clipboard_remote_image_bmp_mode = False
     clipboard_filtered_format_list_mode = False
     clipboard_no_server_copy_reconnect_mode = False
     clipboard_inflight_format_list_mode = False
@@ -6571,6 +7060,7 @@ def main() -> int:
     overlap_client: Path | None = None
     clipboard_options = [option for option in (
         "--clipboard-stress", "--clipboard-named-png",
+        "--clipboard-remote-image-png", "--clipboard-remote-image-bmp",
         "--clipboard-filtered-format-list",
         "--clipboard-no-server-copy-reconnect",
         "--clipboard-inflight-format-list",
@@ -6603,6 +7093,10 @@ def main() -> int:
         arguments.pop()
         clipboard_stress_mode = selected_clipboard_mode == "--clipboard-stress"
         clipboard_named_png_mode = selected_clipboard_mode == "--clipboard-named-png"
+        clipboard_remote_image_png_mode = (
+            selected_clipboard_mode == "--clipboard-remote-image-png")
+        clipboard_remote_image_bmp_mode = (
+            selected_clipboard_mode == "--clipboard-remote-image-bmp")
         clipboard_filtered_format_list_mode = (
             selected_clipboard_mode == "--clipboard-filtered-format-list")
         clipboard_no_server_copy_reconnect_mode = (
@@ -6675,6 +7169,7 @@ def main() -> int:
         clipboard_stale_text_generation_mode)
     clipboard_peer_mode = (
         clipboard_inflight_mode or clipboard_png_prefetch_mode or
+        clipboard_remote_image_png_mode or clipboard_remote_image_bmp_mode or
         clipboard_no_server_copy_reconnect_mode or
         clipboard_delayed_png_response_mode or
         clipboard_delayed_png_cancel_mode or
@@ -6683,6 +7178,7 @@ def main() -> int:
         clipboard_data_response_oracle_mode or clipboard_no_png_offer_mode)
     clipboard_enabled = (
         clipboard_stress_mode or clipboard_named_png_mode or
+        clipboard_remote_image_png_mode or clipboard_remote_image_bmp_mode or
         clipboard_filtered_format_list_mode or
         clipboard_inflight_mode or clipboard_png_prefetch_mode or
         clipboard_no_server_copy_reconnect_mode or
@@ -6799,8 +7295,9 @@ def main() -> int:
             "--gfx-h264-randr-resize|"
             "--gfx-h264-randr-resize-no-dynamic-resolution] "
             "[--cpu-contention before the graphics-mode option] "
-            "[clipboard helper [overlap peer] "
-            "--clipboard-stress|--clipboard-named-png|"
+                "[clipboard helper [overlap peer] "
+                "--clipboard-stress|--clipboard-named-png|"
+                "--clipboard-remote-image-png|--clipboard-remote-image-bmp|"
             "--clipboard-inflight-format-list|"
                             "--clipboard-abandoned-incr|"
                             "--clipboard-inflight-png-format-list|"
@@ -6916,6 +7413,8 @@ def main() -> int:
         named_png_fixture_info = (
             write_named_png_fixture(named_png_fixture_path)
             if (clipboard_named_png_mode or clipboard_filtered_format_list_mode or
+                    clipboard_remote_image_png_mode or
+                    clipboard_remote_image_bmp_mode or
                     clipboard_png_prefetch_mode or
                 clipboard_inflight_png_format_list_mode or
                 clipboard_delayed_png_response_mode or
@@ -7153,6 +7652,8 @@ password=smoke
                     if clipboard_inflight_png_format_list_mode:
                         client_environment["XRDP_CONSOLE_TEST_PNG_OVERLAP"] = "1"
                         client_environment[
+                            "XRDP_CONSOLE_TEST_IMAGE_OFFER_WITH_TEXT"] = "1"
+                        client_environment[
                             "XRDP_CONSOLE_TEST_PNG_FILE"] = str(
                                 named_png_fixture_path)
                     if clipboard_stale_text_generation_mode:
@@ -7186,6 +7687,8 @@ password=smoke
                                 named_png_fixture_path)
                     if clipboard_png_response_fail_mode:
                         client_environment[
+                            "XRDP_CONSOLE_TEST_IMAGE_OFFER_WITH_TEXT"] = "1"
+                        client_environment[
                             "XRDP_CONSOLE_TEST_FAIL_PNG_RESPONSE"] = "1"
                     if clipboard_png_malformed_response_mode:
                         client_environment[
@@ -7210,6 +7713,18 @@ password=smoke
                     if clipboard_no_png_offer_mode:
                         client_environment[
                             "XRDP_CONSOLE_TEST_NO_PNG"] = "1"
+                    if (clipboard_remote_image_png_mode or
+                            clipboard_remote_image_bmp_mode):
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_IMAGE_OFFER_WITH_TEXT"] = "1"
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_DELAY_PNG_RESPONSE_MS"] = "0"
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_PNG_FILE"] = str(
+                                named_png_fixture_path)
+                    if clipboard_remote_image_bmp_mode:
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_KEEP_IMAGE_FORMAT_LIST_ON_DIB_REQUEST"] = "1"
                     if clipboard_filtered_format_list_mode:
                         client_environment[
                             "XRDP_CONSOLE_TEST_CLIPRDR_FILES_TO_OFF"] = "1"
@@ -7630,6 +8145,18 @@ password=smoke
                                 clipboard_helper, client, client_log_path,
                                 chansrv_process, chansrv_logs_path,
                                 chansrv_stdout_path, source_display)
+                        elif clipboard_remote_image_png_mode:
+                            assert_clipboard_remote_image_probe_session(
+                                clipboard_helper, client, client_log_path,
+                                log_path, chansrv_process, chansrv_logs_path,
+                                chansrv_stdout_path, source_display,
+                                "image/png")
+                        elif clipboard_remote_image_bmp_mode:
+                            assert_clipboard_remote_image_probe_session(
+                                clipboard_helper, client, client_log_path,
+                                log_path, chansrv_process, chansrv_logs_path,
+                                chansrv_stdout_path, source_display,
+                                "image/bmp")
                         elif clipboard_stress_mode:
                             wait_for_log(
                                 client, client_log_path,

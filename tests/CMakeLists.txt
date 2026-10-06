@@ -7,6 +7,7 @@ set(PYTHON_SOURCES
     ${CMAKE_SOURCE_DIR}/tools/benchmark/helpers/memory_pressure.py
     ${CMAKE_SOURCE_DIR}/tools/benchmark/rfb_v6_v4_proxy.py
     ${CMAKE_SOURCE_DIR}/tools/diagnostics/xrdp_console_episode_sampler.py
+    ${CMAKE_SOURCE_DIR}/tools/diagnostics/xrdp_clipboard_image_capture.py
     ${CMAKE_SOURCE_DIR}/tools/diagnostics/vscode_gpu_probe.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_display_power.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_direct_presentation_geometry.py
@@ -30,6 +31,8 @@ if(TARGET xrdp-console)
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_damage.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_input.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_x11_pointer_position.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_clipboard_remote_image_probe.py
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_image_capture.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_padding.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_install_prefix_state.py
         ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py)
@@ -800,6 +803,7 @@ if(TARGET xrdp-console)
        TARGET x11-pixel-probe AND TARGET x11-latency-stimulus)
         find_package(PkgConfig REQUIRED)
         pkg_check_modules(TEST_X11 REQUIRED IMPORTED_TARGET x11)
+        pkg_check_modules(TEST_XFIXES REQUIRED IMPORTED_TARGET xfixes)
         pkg_check_modules(TEST_PNG REQUIRED IMPORTED_TARGET libpng)
         pkg_check_modules(TEST_XTEST REQUIRED IMPORTED_TARGET xtst)
 
@@ -872,6 +876,38 @@ if(TARGET xrdp-console)
             PkgConfig::TEST_X11 PkgConfig::TEST_PNG)
         target_compile_options(clipboard-x11-session-peer PRIVATE
             -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror)
+        add_executable(clipboard-remote-image-probe
+            helpers/clipboard_remote_image_probe.c)
+        set_target_properties(clipboard-remote-image-probe PROPERTIES
+            C_STANDARD 23
+            C_STANDARD_REQUIRED ON
+            C_EXTENSIONS OFF)
+        target_link_libraries(clipboard-remote-image-probe PRIVATE
+            PkgConfig::TEST_X11 PkgConfig::TEST_XFIXES)
+        target_compile_options(clipboard-remote-image-probe PRIVATE
+            -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Werror)
+        find_program(XVFB_RUN_EXECUTABLE NAMES xvfb-run)
+        if(XVFB_RUN_EXECUTABLE)
+            add_test(NAME clipboard-remote-image-probe
+                COMMAND ${XVFB_RUN_EXECUTABLE} -a
+                -s "-screen 0 1280x800x24"
+                ${Python3_EXECUTABLE} -B
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_clipboard_remote_image_probe.py
+                $<TARGET_FILE:clipboard-remote-image-probe>
+                $<TARGET_FILE:clipboard-x11-session-peer>)
+            set_tests_properties(clipboard-remote-image-probe PROPERTIES
+                ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+                TIMEOUT 60
+                LABELS "clipboard;integration")
+        endif()
+        add_test(NAME xrdp-clipboard-image-capture-window-unit
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_image_capture.py
+            ${CMAKE_SOURCE_DIR}/tools/diagnostics/xrdp_clipboard_image_capture.py)
+        set_tests_properties(xrdp-clipboard-image-capture-window-unit PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 10
+            LABELS "clipboard;unit")
         add_executable(x11-window-damage-counter
             helpers/x11_window_damage_counter.c)
         target_link_libraries(x11-window-damage-counter PRIVATE
@@ -1428,6 +1464,29 @@ if(TARGET xrdp-console)
                 RESOURCE_LOCK xrdp_console_loader_display
                 RUN_SERIAL TRUE
                 LABELS "clipboard;integration")
+            foreach(_image_probe_target IN ITEMS png bmp)
+                add_test(NAME xrdp-loader-clipboard-remote-image-${_image_probe_target}
+                    COMMAND ${Python3_EXECUTABLE} -B
+                    ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+                    $<TARGET_FILE:xrdp-console>
+                    "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+                    "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+                    "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+                    $<TARGET_FILE:x11-pixel-probe>
+                    $<TARGET_FILE:x11-latency-stimulus>
+                    $<TARGET_FILE:clipboard-x11-session-peer>
+                    $<TARGET_FILE:freerdp-cliprdr-overlap-peer>
+                    --gfx-h264
+                    --clipboard-remote-image-${_image_probe_target})
+                set_tests_properties(
+                    xrdp-loader-clipboard-remote-image-${_image_probe_target}
+                    PROPERTIES
+                    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+                    TIMEOUT 180
+                    RESOURCE_LOCK xrdp_console_loader_display
+                    RUN_SERIAL TRUE
+                    LABELS "clipboard;integration")
+            endforeach()
         endif()
         add_test(NAME xrdp-loader-retained-dual-image-reconnect-session
             COMMAND ${Python3_EXECUTABLE} -B
