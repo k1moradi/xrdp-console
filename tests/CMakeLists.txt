@@ -411,6 +411,20 @@ if(TARGET xrdp-console)
     add_test(NAME h264-capture-service-budget-unit
         COMMAND h264-capture-service-budget-unit)
 
+    add_executable(pending-h264-capture-unit
+        test_pending_h264_capture.cpp)
+    set_target_properties(pending-h264-capture-unit PROPERTIES
+        CXX_STANDARD 23
+        CXX_STANDARD_REQUIRED ON
+        CXX_EXTENSIONS OFF)
+    target_include_directories(pending-h264-capture-unit PRIVATE
+        ${CMAKE_SOURCE_DIR}/src)
+    target_compile_options(pending-h264-capture-unit PRIVATE
+        -Wall -Wextra -Wpedantic -Werror
+        -Wconversion -Wsign-conversion)
+    add_test(NAME pending-h264-capture-unit
+        COMMAND pending-h264-capture-unit)
+
     add_executable(gfx-avc420-frame-unit
         test_gfx_avc420_frame.cpp
         ${CMAKE_SOURCE_DIR}/src/rdp/gfx_avc420_frame.cpp
