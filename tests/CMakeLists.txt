@@ -1378,6 +1378,26 @@ if(TARGET xrdp-console)
                 RESOURCE_LOCK xrdp_console_loader_display
                 RUN_SERIAL TRUE
                 LABELS "clipboard;integration")
+            add_test(NAME xrdp-loader-clipboard-dib-response-fail
+                COMMAND ${Python3_EXECUTABLE} -B
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+                $<TARGET_FILE:xrdp-console>
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+                "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+                $<TARGET_FILE:x11-pixel-probe>
+                $<TARGET_FILE:x11-latency-stimulus>
+                $<TARGET_FILE:clipboard-x11-session-peer>
+                $<TARGET_FILE:freerdp-cliprdr-overlap-peer>
+                --gfx-h264
+                --clipboard-dib-response-fail)
+            set_tests_properties(xrdp-loader-clipboard-dib-response-fail
+                PROPERTIES
+                ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+                TIMEOUT 150
+                RESOURCE_LOCK xrdp_console_loader_display
+                RUN_SERIAL TRUE
+                LABELS "clipboard;integration")
             foreach(_response_flags IN ITEMS 0 3)
                 add_test(
                     NAME xrdp-loader-clipboard-png-malformed-response-flags-${_response_flags}

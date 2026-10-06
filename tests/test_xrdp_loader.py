@@ -3807,16 +3807,26 @@ def assert_clipboard_cold_png_waiters_session(
             stop_process(requestor)
 
 
-def assert_clipboard_png_response_failure_session(
+def assert_clipboard_image_response_failure_session(
         helper: Path, client: subprocess.Popen[object],
         client_log_path: Path, chansrv_process: subprocess.Popen[object],
-        chansrv_logs: Path, chansrv_stdout: Path, source_display: str) -> None:
+        chansrv_logs: Path, chansrv_stdout: Path, source_display: str,
+        image_target: str) -> None:
     """The diagnostic probe records an actual CLIPRDR image refusal."""
-    offer = wait_for_chansrv_pattern(
-        chansrv_logs,
+    if image_target not in ("image/png", "image/bmp"):
+        raise ValueError(f"unsupported failed image target: {image_target}")
+    format_id = NAMED_PNG_FORMAT_ID if image_target == "image/png" else 8
+    response_marker = ("PEER_PNG_FORMAT_RESPONSE_FAIL_SENT"
+                       if image_target == "image/png" else
+                       "PEER_DIB_FORMAT_RESPONSE_FAIL_SENT")
+    offer_pattern = (
         rf"event=format-list[^\n]*stored_formats=3 dib_format_id=8 "
-        rf"png_format_id={NAMED_PNG_FORMAT_ID} generation=\d+",
-        15.0, chansrv_process, chansrv_stdout)
+        rf"png_format_id={NAMED_PNG_FORMAT_ID} generation=\d+"
+        if image_target == "image/png" else
+        r"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        r"png_format_id=-1 generation=\d+")
+    offer = wait_for_chansrv_pattern(
+        chansrv_logs, offer_pattern, 15.0, chansrv_process, chansrv_stdout)
     offer_match = re.search(r"generation=(\d+)", offer)
     if offer_match is None:
         raise AssertionError(f"failed-image offer has no generation: {offer!r}")
@@ -3830,25 +3840,28 @@ def assert_clipboard_png_response_failure_session(
     if owner_match is None or owner_match.group(1).lower() != owner_match.group(2).lower():
         raise AssertionError(
             f"failed-image offer has no verified chansrv owner:\n{owner_log}")
-    wait_for_peer_marker(
-        client, client_log_path,
+    initial_offer_marker = (
         f"PEER_INITIAL_FORMAT_LIST_SENT text=13 dib=8 "
-        f"png={NAMED_PNG_FORMAT_ID}", 10.0)
+        f"png={NAMED_PNG_FORMAT_ID}"
+        if image_target == "image/png" else
+        "PEER_INITIAL_FORMAT_LIST_SENT text=13 dib=8")
+    wait_for_peer_marker(
+        client, client_log_path, initial_offer_marker, 10.0)
 
     events, probe_output = run_clipboard_remote_image_probe(
-        helper, source_display, image_target="image/png",
+        helper, source_display, image_target=image_target,
         expected_owner=owner_match.group(1))
     targets = next((event for event in events
                     if event.get("event") == "targets_result"), None)
     image_request = next((event for event in events
                           if event.get("event") == "selection_request" and
-                          event.get("target") == "image/png"), None)
+                          event.get("target") == image_target), None)
     image_notify = next((event for event in events
                          if event.get("event") == "selection_notify" and
-                         event.get("target") == "image/png"), None)
+                         event.get("target") == image_target), None)
     image_result = next((event for event in events
                          if event.get("event") == "selection_result" and
-                         event.get("target") == "image/png"), None)
+                         event.get("target") == image_target), None)
     if any(event is None for event in
            (targets, image_request, image_notify, image_result)):
         raise AssertionError(
@@ -3859,26 +3872,27 @@ def assert_clipboard_png_response_failure_session(
     target_names = targets.get("targets")
     if (not isinstance(target_names, list) or
             "UTF8_STRING" not in target_names or
-            "image/png" not in target_names or
-            "image/bmp" not in target_names or
+            image_target not in target_names or
+            (image_target == "image/png" and
+             "image/bmp" not in target_names) or
             image_result.get("result") != "failure" or
             image_result.get("bytes") != 0 or
             image_result.get("path") not in ("none", "immediate") or
-            image_notify.get("result") != "failure"):
+            image_notify.get("result") != "failure" or
+            image_notify.get("property") != "0x0"):
         raise AssertionError(
             "remote CB_RESPONSE_FAIL was not represented as a failed X11 "
             f"conversion: {events!r}\n{chansrv_log_text(chansrv_logs)}")
     wait_for_peer_marker(
-        client, client_log_path,
-        "PEER_PNG_FORMAT_RESPONSE_FAIL_SENT", 10.0)
+        client, client_log_path, response_marker, 10.0)
     peer_log = read_text(client_log_path)
     if (not re.search(
             rf"PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED "
-            rf"format_id={NAMED_PNG_FORMAT_ID} request_generation=1 "
+            rf"format_id={format_id} request_generation=1 "
             r"mono_ns=\d+ msg_type=4", peer_log) or
             not re.search(
                 rf"PEER_CLIENT_FORMAT_RESPONSE_SENT "
-                rf"format_id={NAMED_PNG_FORMAT_ID} request_generation=1 "
+                rf"format_id={format_id} request_generation=1 "
                 r"flags=0x0002 bytes=0 mono_ns=\d+ msg_type=5", peer_log)):
         raise AssertionError(
             "synthetic peer did not record the exact failed type-4/type-5 "
@@ -3886,13 +3900,13 @@ def assert_clipboard_png_response_failure_session(
     full_log = chansrv_log_text(chansrv_logs)
     if not re.search(
             rf"event=response status=0x2 bytes=0 "
-            rf"format_id={NAMED_PNG_FORMAT_ID} attempt=\d+", full_log):
+            rf"format_id={format_id} attempt=\d+", full_log):
         raise AssertionError(
             f"chansrv did not observe a zero-length CLIPRDR FAIL:\n{full_log}")
     if ("event=x11-selection-notify-issued path=incr " in full_log or
             "event=x11-incr-announcement " in full_log or
-            "event=x11-delivery-issued path=incr target=image/png" in full_log or
-            re.search(r"event=x11-delivery-issued [^\n]*target=image/png",
+            f"event=x11-delivery-issued path=incr target={image_target}" in full_log or
+            re.search(rf"event=x11-delivery-issued [^\n]*target={re.escape(image_target)}",
                      full_log)):
         raise AssertionError(
             "failed remote rendering was committed as an X11 image delivery "
@@ -3914,9 +3928,9 @@ def assert_clipboard_png_response_failure_session(
         "PEER_IMAGE_OFFER_TEXT_RESPONSE_SENT", 10.0)
     peer_log = read_text(client_log_path)
     exchange_markers = (
-        rf"PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id={NAMED_PNG_FORMAT_ID} "
+        rf"PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id={format_id} "
         r"request_generation=1 mono_ns=\d+ msg_type=4",
-        rf"PEER_CLIENT_FORMAT_RESPONSE_SENT format_id={NAMED_PNG_FORMAT_ID} "
+        rf"PEER_CLIENT_FORMAT_RESPONSE_SENT format_id={format_id} "
         r"request_generation=1 flags=0x0002 bytes=0 mono_ns=\d+ msg_type=5",
         r"PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id=13 "
         r"request_generation=1 mono_ns=\d+ msg_type=4",
@@ -7051,6 +7065,7 @@ def main() -> int:
     clipboard_delayed_png_response_mode = False
     clipboard_cold_png_waiters_mode = False
     clipboard_png_response_fail_mode = False
+    clipboard_dib_response_fail_mode = False
     clipboard_png_malformed_response_mode = False
     clipboard_data_response_oracle_mode = False
     clipboard_no_png_offer_mode = False
@@ -7081,6 +7096,7 @@ def main() -> int:
         "--clipboard-delayed-png-disconnect",
         "--clipboard-cold-png-waiters",
         "--clipboard-png-response-fail",
+        "--clipboard-dib-response-fail",
         "--clipboard-png-malformed-response",
         "--clipboard-data-response-oracle",
         "--clipboard-no-png-offer") if option in arguments]
@@ -7147,6 +7163,8 @@ def main() -> int:
             selected_clipboard_mode == "--clipboard-cold-png-waiters")
         clipboard_png_response_fail_mode = (
             selected_clipboard_mode == "--clipboard-png-response-fail")
+        clipboard_dib_response_fail_mode = (
+            selected_clipboard_mode == "--clipboard-dib-response-fail")
         clipboard_png_malformed_response_mode = (
             selected_clipboard_mode == "--clipboard-png-malformed-response")
         clipboard_data_response_oracle_mode = (
@@ -7174,6 +7192,7 @@ def main() -> int:
         clipboard_delayed_png_response_mode or
         clipboard_delayed_png_cancel_mode or
         clipboard_cold_png_waiters_mode or clipboard_png_response_fail_mode or
+        clipboard_dib_response_fail_mode or
         clipboard_png_malformed_response_mode or
         clipboard_data_response_oracle_mode or clipboard_no_png_offer_mode)
     clipboard_enabled = (
@@ -7185,6 +7204,7 @@ def main() -> int:
         clipboard_delayed_png_response_mode or
         clipboard_delayed_png_cancel_mode or
         clipboard_cold_png_waiters_mode or clipboard_png_response_fail_mode or
+        clipboard_dib_response_fail_mode or
         clipboard_png_malformed_response_mode or
         clipboard_data_response_oracle_mode or clipboard_no_png_offer_mode)
     mode_options = [option for option in (
@@ -7690,6 +7710,13 @@ password=smoke
                             "XRDP_CONSOLE_TEST_IMAGE_OFFER_WITH_TEXT"] = "1"
                         client_environment[
                             "XRDP_CONSOLE_TEST_FAIL_PNG_RESPONSE"] = "1"
+                    if clipboard_dib_response_fail_mode:
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_IMAGE_OFFER_WITH_TEXT"] = "1"
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_KEEP_IMAGE_FORMAT_LIST_ON_DIB_REQUEST"] = "1"
+                        client_environment[
+                            "XRDP_CONSOLE_TEST_FAIL_DIB_RESPONSE"] = "1"
                     if clipboard_png_malformed_response_mode:
                         client_environment[
                             "XRDP_CONSOLE_TEST_PNG_RESPONSE_FLAGS"] = os.environ[
@@ -8122,10 +8149,17 @@ password=smoke
                                 chansrv_stdout_path, source_display,
                                 *named_png_fixture_info)
                         elif clipboard_png_response_fail_mode:
-                            assert_clipboard_png_response_failure_session(
+                            assert_clipboard_image_response_failure_session(
                                 clipboard_helper, client, client_log_path,
                                 chansrv_process, chansrv_logs_path,
-                                chansrv_stdout_path, source_display)
+                                chansrv_stdout_path, source_display,
+                                "image/png")
+                        elif clipboard_dib_response_fail_mode:
+                            assert_clipboard_image_response_failure_session(
+                                clipboard_helper, client, client_log_path,
+                                chansrv_process, chansrv_logs_path,
+                                chansrv_stdout_path, source_display,
+                                "image/bmp")
                         elif clipboard_png_malformed_response_mode:
                             assert_clipboard_png_malformed_response_session(
                                 clipboard_helper, client, client_log_path,

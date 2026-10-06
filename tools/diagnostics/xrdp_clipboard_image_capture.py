@@ -727,6 +727,8 @@ def build_sealed_transaction_report(
 
     probe_requests = [event for event in probe_events
                       if event.get("event") == "selection_request"]
+    probe_notifies = [event for event in probe_events
+                      if event.get("event") == "selection_notify"]
     probe_results = [event for event in probe_events
                      if event.get("event") == "selection_result"]
     all_x11 = [entry for entry in chansrv.get("x11_selection_requests", [])
@@ -788,6 +790,9 @@ def build_sealed_transaction_report(
         x11_request_ns = _integer(x11_fields.get("mono_ns"))
         property_xid = x11_fields.get("property")
         probe_result = next((event for event in probe_results
+                             if _probe_event_matches(
+                                 event, target, requestor)), None)
+        probe_notify = next((event for event in probe_notifies
                              if _probe_event_matches(
                                  event, target, requestor)), None)
 
@@ -960,6 +965,14 @@ def build_sealed_transaction_report(
                          if isinstance(probe_result, dict) else None)
         result_bytes = (_integer(probe_result.get("bytes"))
                         if isinstance(probe_result, dict) else None)
+        first_byte_ns = (_integer(probe_result.get("first_byte_monotonic_ns"))
+                         if isinstance(probe_result, dict) else None)
+        request_started_ns = (_integer(probe_result.get("request_started_ns"))
+                              if isinstance(probe_result, dict) else None)
+        completed_ns = (_integer(probe_result.get("completed_monotonic_ns"))
+                        if isinstance(probe_result, dict) else None)
+        if first_byte_ns == 0:
+            first_byte_ns = None
         result_path = (probe_result.get("path")
                        if isinstance(probe_result, dict) else None)
         successful_cliprdr_response = any(
@@ -999,6 +1012,7 @@ def build_sealed_transaction_report(
             "chansrv_x11_selection_request": (
                 _public_chansrv_event(x11_request)
                 if isinstance(x11_request, dict) else None),
+            "probe_selection_notify": probe_notify,
             "chansrv_request_attempts": attempts,
             "chansrv_x11_delivery": [
                 _public_chansrv_event(entry) for entry in delivery_matches],
@@ -1006,6 +1020,9 @@ def build_sealed_transaction_report(
                 _public_chansrv_event(entry) for entry in incr_matches],
             "probe_result": probe_result,
             "result_bytes": result_bytes,
+            "request_started_monotonic_ns": request_started_ns,
+            "first_byte_monotonic_ns": first_byte_ns,
+            "completed_monotonic_ns": completed_ns,
             "completion_or_failure_reason": completion_reason,
         })
 
@@ -1023,8 +1040,9 @@ def build_sealed_transaction_report(
         event for event in probe_events
         if ((event.get("event") == "clipboard_owner" and
              str(event.get("owner", "")).lower() == owner_normalized) or
-            (event.get("event") in ("selection_request", "selection_result",
-                                     "targets_result", "probe_timeout") and
+            (event.get("event") in ("selection_request", "selection_notify",
+                                     "selection_result", "targets_result",
+                                     "probe_timeout") and
              _integer(event.get("request_serial")) in selected_serials and
              str(event.get("requestor", "")).lower() ==
              (targets_requestor or "")))

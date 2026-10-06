@@ -86,6 +86,7 @@ struct PeerContext
     bool pngPrefetchFail;
     bool pngResponseDelayEnabled;
     bool pngResponseFail;
+    bool dibResponseFail;
     bool pngResponseFlagsEnabled;
     bool pngResponseFailWithPayload;
     UINT16 pngResponseFlags;
@@ -662,6 +663,10 @@ UINT on_monitor_ready(CliprdrClientContext* cliprdr,
             std::printf("PEER_INITIAL_FORMAT_LIST_SENT text=13 dib=8 png=%u\n",
                         peer->pngFormatId);
         }
+        else if (peer->imageOfferWithText)
+        {
+            std::puts("PEER_INITIAL_FORMAT_LIST_SENT text=13 dib=8");
+        }
         else if (advertisePng)
         {
             std::printf("PEER_INITIAL_FORMAT_LIST_SENT dib=8 png=%u\n",
@@ -940,7 +945,8 @@ UINT on_server_format_data_request(
         return status;
     }
 
-    if (peer->imageOfferWithText && peer->pngResponseFail &&
+    if (peer->imageOfferWithText &&
+        (peer->pngResponseFail || peer->dibResponseFail) &&
         request->requestedFormatId == kCfUnicodeText)
     {
         static const BYTE text[] = {
@@ -1027,6 +1033,18 @@ UINT on_server_format_data_request(
                         peer->pendingClientFormatGeneration));
         std::fflush(stdout);
         return CHANNEL_RC_OK;
+    }
+
+    if (request->requestedFormatId == kCfDib && peer->dibResponseFail)
+    {
+        const UINT status = send_pending_client_format_response(
+            peer, CB_RESPONSE_FAIL, nullptr, 0U);
+        if (status == CHANNEL_RC_OK)
+        {
+            std::puts("PEER_DIB_FORMAT_RESPONSE_FAIL_SENT");
+            std::fflush(stdout);
+        }
+        return status;
     }
 
     if (request->requestedFormatId == kCfDib && !peer->overlapFormatsSent)
@@ -1978,6 +1996,7 @@ int main(int argc, char** argv)
     peer->pngPrefetchFail = false;
     peer->pngResponseDelayEnabled = false;
     peer->pngResponseFail = false;
+    peer->dibResponseFail = false;
     peer->pngResponseFlagsEnabled = false;
     peer->pngResponseFailWithPayload = false;
     peer->pngResponseFlags = 0U;
@@ -2050,6 +2069,20 @@ int main(int argc, char** argv)
     }
     peer->pngResponseFail = pngResponseFailText != nullptr &&
         std::strcmp(pngResponseFailText, "1") == 0;
+    const char* dibResponseFailText = std::getenv(
+        "XRDP_CONSOLE_TEST_FAIL_DIB_RESPONSE");
+    if (dibResponseFailText != nullptr &&
+        std::strcmp(dibResponseFailText, "0") != 0 &&
+        std::strcmp(dibResponseFailText, "1") != 0)
+    {
+        std::fputs("invalid synthetic DIB failure configuration\n", stderr);
+        freerdp_disconnect(context->instance);
+        freerdp_client_stop(context);
+        freerdp_client_context_free(context);
+        return 2;
+    }
+    peer->dibResponseFail = dibResponseFailText != nullptr &&
+        std::strcmp(dibResponseFailText, "1") == 0;
     const char* pngResponseFlagsText = std::getenv(
         "XRDP_CONSOLE_TEST_PNG_RESPONSE_FLAGS");
     peer->pngResponseFlagsEnabled = pngResponseFlagsText != nullptr;

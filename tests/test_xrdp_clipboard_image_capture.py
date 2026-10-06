@@ -366,6 +366,10 @@ class ClipboardCaptureTests(unittest.TestCase):
                 {"event": "selection_request", "requestor": requestor,
                  "owner": owner, "request_serial": 1, "target": "TARGETS",
                  "monotonic_ns": 1_003_000},
+                {"event": "selection_notify", "requestor": requestor,
+                 "owner": owner, "request_serial": 1, "target": "TARGETS",
+                 "result": "success", "property": "0x3000",
+                 "monotonic_ns": 1_003_250},
                 {"event": "targets_result", "requestor": requestor,
                  "owner": owner, "request_serial": 1,
                  "targets": ["TARGETS", "UTF8_STRING", "image/png",
@@ -374,18 +378,30 @@ class ClipboardCaptureTests(unittest.TestCase):
                 {"event": "selection_request", "requestor": requestor,
                  "owner": owner, "request_serial": 2,
                  "target": "image/png", "monotonic_ns": 1_004_000},
+                {"event": "selection_notify", "requestor": requestor,
+                 "owner": owner, "request_serial": 2, "target": "image/png",
+                 "result": "success", "property": "0x3001",
+                 "monotonic_ns": 1_004_500},
                 {"event": "selection_result", "requestor": requestor,
                  "owner": owner, "request_serial": 2,
                  "target": "image/png", "result": "success",
                  "path": "immediate", "bytes": 70,
+                 "request_started_ns": 1_004_000,
+                 "first_byte_monotonic_ns": 1_004_700,
                  "completed_monotonic_ns": 1_008_000},
                 {"event": "selection_request", "requestor": requestor,
                  "owner": owner, "request_serial": 3,
                  "target": "image/bmp", "monotonic_ns": 1_010_000},
+                {"event": "selection_notify", "requestor": requestor,
+                 "owner": owner, "request_serial": 3, "target": "image/bmp",
+                 "result": "success", "property": "0x3002",
+                 "monotonic_ns": 1_010_500},
                 {"event": "selection_result", "requestor": requestor,
                  "owner": owner, "request_serial": 3,
                  "target": "image/bmp", "result": "success",
                  "path": "incr", "bytes": 114,
+                 "request_started_ns": 1_010_000,
+                 "first_byte_monotonic_ns": 1_010_900,
                  "completed_monotonic_ns": 1_016_000},
             ]
 
@@ -443,6 +459,12 @@ class ClipboardCaptureTests(unittest.TestCase):
                 "inbound_vc_type5"]["data_len"], 100)
             self.assertEqual(bmp["chansrv_x11_incr_events"][-1]["fields"][
                 "event"], "x11-incr-terminator-ack")
+            self.assertEqual(png["probe_selection_notify"]["property"],
+                             "0x3001")
+            self.assertEqual(png["first_byte_monotonic_ns"], 1_004_700)
+            self.assertEqual(png["completed_monotonic_ns"], 1_008_000)
+            self.assertEqual(bmp["probe_selection_notify"]["property"],
+                             "0x3002")
             self.assertEqual(png["completion_or_failure_reason"],
                              "image-transfer-completed")
             self.assertEqual(bmp["completion_or_failure_reason"],
@@ -527,6 +549,9 @@ class ClipboardCaptureTests(unittest.TestCase):
                  "targets": ["TARGETS", "image/png"], "result": "success"},
                 {"event": "selection_request", "requestor": requestor,
                  "owner": owner, "request_serial": 2, "target": "image/png"},
+                {"event": "selection_notify", "requestor": requestor,
+                 "owner": owner, "request_serial": 2, "target": "image/png",
+                 "result": "failure", "property": "0x0"},
                 {"event": "selection_result", "requestor": requestor,
                  "owner": owner, "request_serial": 2, "target": "image/png",
                  "result": "failure", "reason": "selection-notify-none",
@@ -566,6 +591,10 @@ class ClipboardCaptureTests(unittest.TestCase):
             self.assertFalse(attempt["successful_CLIPRDR_image_response"])
             self.assertEqual(png["completion_or_failure_reason"],
                              "client-returned-CB_FORMAT_DATA_RESPONSE-FAIL")
+            self.assertEqual(png["probe_selection_notify"]["result"],
+                             "failure")
+            self.assertEqual(png["probe_selection_notify"]["property"],
+                             "0x0")
             self.assertEqual([entry["fields"]["generation"] for entry in
                               report["protocol_summary"]["chansrv"]["format_lists"]],
                              ["80"])
