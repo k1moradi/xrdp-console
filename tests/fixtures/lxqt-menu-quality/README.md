@@ -2,6 +2,27 @@
 
 These P6 images calibrate the test oracle, not the production encoder.
 
+Run the real-menu stress case from a configured build that has `lxqt-panel`,
+`dbus-run-session`, the built FreeRDP client, and an X11 virtual display:
+
+```sh
+ctest --test-dir build-direct-console \
+    -R '^xrdp-loader-gfx-h264-lxqt-menu-stress$' \
+    --output-on-failure
+```
+
+Replace `build-direct-console` with the configured build directory. The test
+is registered when CMake finds `lxqt-panel` and `dbus-run-session`; reconfigure
+after installing either dependency if the test is absent from `ctest -N`.
+
+The test opens the LXQt menu five times while a changing 20 Hz desktop image
+and a CPU worker run. Every cycle must deliver the menu within 1000 ms, pass a
+sparse fast-response check and a full menu-region image comparison, remain
+visually stable for three further captures, then prove the client image left
+the previous menu before the next open. Artifacts and per-cycle timings are
+saved under the build's
+`test-artifacts/xrdp-loader-gfx-h264-lxqt-menu-stress` directory.
+
 - `source-menu.ppm` and `client-01.ppm` through `client-04.ppm` are four
   distinct decoded-client captures from successful cycles 2 through 5 of the
   2026-10-06, five-cycle H.264 LXQt run on this project. The source menu is
@@ -16,6 +37,13 @@ These P6 images calibrate the test oracle, not the production encoder.
   source has clean favorite rows while the decoded client image has overlapping
   rows. The test reports fast outliers of 30.556% and a full-region maximum
   32x32 block mean error of 74.282 for this pair.
+- `source-ui-corrupt.ppm` is a source menu captured against the clean `789b648`
+  runtime on 2026-10-06 while the LXQt test was also opening its generic
+  synthetic popup. The captured source has help text over favorite rows 12 and
+  13. Comparing this frame to itself passes the old source-to-client pixel
+  oracle, so the test now disables the extra popup and separately checks source
+  favorite rows against the clean source fixture. The source-row oracle rejects
+  this capture at a maximum per-row mean RGB error of 29.99 (limit 8).
 
 The calibration test requires the identity image and all four captured H.264
 pairs to pass both the sparse fast check and full-region check. It requires
@@ -24,10 +52,22 @@ blank pixels, and deliberately corrupted favorite rows to fail both checks.
 It reports p50, p95, maximum channel error,
 outlier percentage, source luma range, and sample count for each pair.
 
-The calibrated limits are deliberately fixed at 20% fast-sample outliers with
-p95 <= 96, and full-region mean RGB error <= 20, p95 <= 96, outliers <= 10%,
-and maximum 32x32 block mean <= 50. The good captured fast pairs have 15.278%
-to 16.667% outliers and p95=93; the shifted and corrupted cases fail both
-oracles without changing those limits. The fixtures are evidence from one
-FreeRDP/X11 environment and do not substitute for Microsoft Remote Desktop
-client validation.
+The fast gate allows at most 20% outliers with p95 <= 96. The full-region
+check uses tighter calibrated limits: mean RGB error <= 10, p95 <= 72,
+outliers <= 5%, and maximum 32x32 block mean <= 35. The clean captured
+full-region pairs measure mean error around 6.3, p95 54-55, outliers around
+3.4%, and maximum block mean around 27.8; the retained corrupted pair exceeds
+the block limit. These are measurable lossy-H.264 acceptance bounds, not a
+claim of zero pixel error. The fixtures come from one FreeRDP/X11 environment
+and do not substitute for Microsoft Remote Desktop client validation.
+
+Source validity uses the existing clean menu capture as a row-by-row visual
+reference for the 18-pixel favorite row pitch. The source-layout check compares
+favorite rows against the fixture and excludes the category pane so system
+menu-cache differences do not mask or create favorite-row failures. Before
+closing each menu, the test hashes an opaque area of its client-side favorite
+list. After the source menu unmaps, it requires the same client area to change
+before reopening. This prevents a retained frame of the same static menu from
+counting as a fresh response. This LXQt source fixture expects the test's
+configured panel/menu layout; the H.264 pixel calibration is not a Windows
+client or arbitrary desktop-theme compatibility claim.

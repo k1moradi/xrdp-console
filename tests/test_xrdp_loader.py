@@ -25,6 +25,15 @@ from datetime import datetime
 from pathlib import Path
 
 from h264_frame_coherence import coherence_problem, parse_frame_sample
+from test_lxqt_menu_quality_calibration import (
+    favorite_source_rows_compare,
+    read_ppm,
+)
+from lxqt_menu_quality_protocol import (
+    parse_done_record,
+    parse_protocol_fields,
+    validate_capture_correlation,
+)
 
 PLANAR_PIXEL_LIMIT = 128 * 1024
 COHERENCE_SOURCE_WIDTH = 512
@@ -4814,19 +4823,24 @@ def start_generation_stimulus(stimulus_path: Path, display: str,
 
 def start_popup_ui_stimulus(stimulus_path: Path, display: str,
                             environment: dict[str, str],
-                            source_width: int, source_height: int
+                            source_width: int, source_height: int,
+                            background_only: bool = False
                             ) -> subprocess.Popen[bytes]:
+    command = [str(stimulus_path), display]
+    if background_only:
+        command.append("--background-only")
     process = subprocess.Popen(
-        [str(stimulus_path), display], stdin=subprocess.DEVNULL,
+        command, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=environment,
         bufsize=0, start_new_session=True)
     if process.stdout is None:
         stop_process(process)
         raise AssertionError("popup stress stimulus stdout was not created")
     ready = read_line(process.stdout, 5.0)
+    trigger = "background-only" if background_only else "taskbar-button"
     expected_ready = (
-        f"READY source={source_width}x{source_height} "
-        "trigger=taskbar-button background_fps=20\n").encode("ascii")
+        f"READY source={source_width}x{source_height} trigger={trigger} "
+        "background_fps=20\n").encode("ascii")
     if ready != expected_ready:
         stop_process(process)
         details = process.stderr.read().decode(errors="replace") if process.stderr else ""
@@ -4920,9 +4934,12 @@ def start_lxqt_panel_stress(display: str, test_root: Path,
 
 def find_lxqt_fancy_menu(display: str) -> tuple[str, int, int, int, int] | None:
     """Find the mapped Fancy Menu popup by its panel-owned X11 window."""
-    result = subprocess.run(
-        ["xwininfo", "-display", display, "-root", "-tree"],
-        capture_output=True, text=True, check=False, timeout=1.0)
+    try:
+        result = subprocess.run(
+            ["xwininfo", "-display", display, "-root", "-tree"],
+            capture_output=True, text=True, check=False, timeout=0.100)
+    except subprocess.TimeoutExpired:
+        return None
     if result.returncode != 0:
         return None
     pattern = re.compile(
@@ -4967,24 +4984,42 @@ def lxqt_panel_process_snapshot(
     return matching
 
 
-def parse_helper_fields(line: bytes) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    for item in line.decode("ascii", errors="replace").split()[1:]:
-        key, separator, value = item.partition("=")
-        if separator:
-            fields[key] = value
-    return fields
-
-
 def menu_quality_probe_capture(
-        process: subprocess.Popen[bytes], timeout: float) -> list[bytes]:
-    """Ask the persistent observer for one capture over its stdout pipe."""
+        process: subprocess.Popen[bytes], source_window: str,
+        sequence: int, timeout: float,
+        force_full_after_fast_wait: bool = False) -> list[bytes]:
+    """Ask for one capture and return as soon as its fast verdict arrives."""
     if process.stdin is None or process.stdout is None:
         raise AssertionError("LXQt quality observer pipes were not created")
-    process.stdin.write(b"capture\n")
+    operation = "capture-full" if force_full_after_fast_wait else "capture"
+    process.stdin.write(
+        f"{operation} {source_window} {sequence}\n".encode())
     process.stdin.flush()
     deadline = time.monotonic() + timeout
     lines: list[bytes] = []
+    while time.monotonic() < deadline:
+        line = read_line(process.stdout, min(0.050, deadline - time.monotonic()))
+        if line:
+            normalized = line.strip()
+            lines.append(normalized)
+            if (normalized.startswith(b"MENU_FAST ") or
+                    normalized.startswith(b"MENU_DONE ")):
+                return lines
+        elif process.poll() is not None:
+            break
+    raise AssertionError(
+        "persistent LXQt quality observer did not finish a capture: "
+        + " | ".join(line.decode(errors="replace") for line in lines))
+
+
+def menu_quality_probe_finish_capture(
+        process: subprocess.Popen[bytes], initial_lines: list[bytes],
+        timeout: float) -> list[bytes]:
+    """Collect the full verdict and completion record after MENU_FAST."""
+    if process.stdout is None:
+        raise AssertionError("LXQt quality observer stdout was not created")
+    lines = list(initial_lines)
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         line = read_line(process.stdout, min(0.050, deadline - time.monotonic()))
         if line:
@@ -4995,7 +5030,7 @@ def menu_quality_probe_capture(
         elif process.poll() is not None:
             break
     raise AssertionError(
-        "persistent LXQt quality observer did not finish a capture: "
+        "LXQt observer did not finish the capture after its fast verdict: "
         + " | ".join(line.decode(errors="replace") for line in lines))
 
 
@@ -5026,6 +5061,15 @@ def assert_lxqt_menu_stress_session(
         if not 1 <= cycles <= 20:
             raise AssertionError(
                 "XRDP_CONSOLE_LXQT_MENU_STRESS_CYCLES must be between 1 and 20")
+    try:
+        stability_samples = int(os.environ.get(
+            "XRDP_CONSOLE_LXQT_STABILITY_SAMPLES", "1"))
+    except ValueError as error:
+        raise AssertionError(
+            "XRDP_CONSOLE_LXQT_STABILITY_SAMPLES must be an integer") from error
+    if not 0 <= stability_samples <= 3:
+        raise AssertionError(
+            "XRDP_CONSOLE_LXQT_STABILITY_SAMPLES must be between 0 and 3")
 
     client_window = find_window(client_display, window_title, 8.0)
     probe = subprocess.Popen(
@@ -5047,16 +5091,22 @@ def assert_lxqt_menu_stress_session(
     run_dir = artifact_dir / f"run-{time.time_ns()}"
     run_dir.mkdir()
     summary_path = artifact_dir / "lxqt-menu-stress-summary.txt"
+    source_reference = read_ppm(
+        Path(__file__).resolve().parent / "fixtures" / "lxqt-menu-quality" /
+        "source-menu.ppm")
     click_x, click_y = map_source_point_to_client(
         16, source_height - 16, source_width, source_height,
         client_width, client_height)
     latencies: list[float] = []
     quality_metrics: list[str] = []
+    source_layout_metrics: list[str] = []
     cycle_trace: list[str] = []
     last_quality = "not sampled"
     failed_cycle: int | None = None
     active_quality_probe: subprocess.Popen[bytes] | None = None
     previous_menu_window: str | None = None
+    fast_sequence = 0
+    stability_sequence = 1000
 
     def fail(message: str) -> None:
         try:
@@ -5079,12 +5129,14 @@ def assert_lxqt_menu_stress_session(
         summary_path.write_text(
             "XRDP_CONSOLE_LXQT_MENU_STRESS\n"
             "status=FAIL\n"
+            "background_stimulus=background-only\n"
             f"reason={' '.join(message.splitlines())}\n"
             f"failed_cycle={failed_cycle if failed_cycle is not None else 'none'}\n"
             f"completed_cycles={len(latencies)}\n"
             "latencies_ms=" + ",".join(f"{item:.1f}" for item in latencies) +
             "\n" + f"last_quality={last_quality}\n" +
             "quality_samples=" + " | ".join(quality_metrics) + "\n" +
+            "source_layout_samples=" + " | ".join(source_layout_metrics) + "\n" +
             "cycle_trace:\n" + "\n".join(cycle_trace) + "\n" +
             "retained_logs=" + ",".join(retained_logs) + "\n" +
             f"remote_frame_dump={remote_dump.decode(errors='replace').strip()}\n" +
@@ -5098,7 +5150,63 @@ def assert_lxqt_menu_stress_session(
             f"[FreeRDP client]\n{read_text(client_log_path)}\n"
             f"[xrdp stdout]\n{read_text(stdout_path)}")
 
+    def check_source_layout(sequence: int, label: str) -> str:
+        directory_name = (f"stability-{sequence - 1000:04d}"
+                          if sequence >= 1001 else
+                          f"capture-{sequence:04d}")
+        capture_dir = run_dir / directory_name
+        source_path = next((candidate for candidate in (
+            capture_dir / "lxqt-menu-source.ppm",
+            capture_dir / "lxqt-menu-source-failure.ppm",
+            capture_dir / "lxqt-menu-source-mismatch.ppm",
+            capture_dir / "lxqt-menu-source-loading.ppm")
+            if candidate.is_file()), None)
+        if source_path is None:
+            fail(f"{label}: observer did not preserve the source menu image")
+        if source_path.name.endswith("-loading.ppm"):
+            report = f"{label}: source menu still loading; layout=WAIT"
+            source_layout_metrics.append(report)
+            cycle_trace.append(report)
+            return report
+        try:
+            actual_source = read_ppm(source_path)
+        except (OSError, ValueError) as error:
+            fail(f"{label}: could not read source menu image: {error}")
+        metrics = favorite_source_rows_compare(
+            source_reference, actual_source)
+        report = metrics.describe(label)
+        source_layout_metrics.append(report)
+        cycle_trace.append(report)
+        if not metrics.passed:
+            fail(
+                f"{label}: source LXQt menu rows do not match the clean "
+                f"reference: {report}; source={source_path}")
+        return report
+
     try:
+        observer_process_start_ns = time.monotonic_ns()
+        active_quality_probe = subprocess.Popen(
+            [str(menu_quality_probe_path), source_display, client_display,
+             client_window, str(source_width), str(source_height),
+             str(run_dir), "--interactive"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, bufsize=0, start_new_session=True)
+        if (active_quality_probe.stdin is None or
+                active_quality_probe.stdout is None):
+            fail("LXQt quality observer pipes were not created")
+        probe_start_line = read_line(active_quality_probe.stdout, 5.0).strip()
+        probe_ready_line = read_line(active_quality_probe.stdout, 5.0).strip()
+        if (not probe_start_line.startswith(b"MENU_PROBE_START ") or
+                not probe_ready_line.startswith(b"MENU_PROBE_READY ")):
+            fail(
+                "persistent LXQt quality observer did not initialize: "
+                f"{probe_start_line!r} {probe_ready_line!r}")
+        cycle_trace.append(
+            f"observer_process_start_ns={observer_process_start_ns} "
+            f"started_before_first_click=1 "
+            f"probe_start={probe_start_line.decode(errors='replace')} "
+            f"probe_ready={probe_ready_line.decode(errors='replace')}")
+
         preopen_path = run_dir / "pre-open-client-full.ppm"
         preopen_result = popup_probe_command(
             probe, f"dump {preopen_path}", 5.0)
@@ -5123,9 +5231,9 @@ def assert_lxqt_menu_stress_session(
             if not cpu_contention and cpu_spinner is not None and \
                     cpu_spinner.poll() is None:
                 fail(f"unexpected CPU contention spinner at cycle {cycle}")
-            if (active_quality_probe is not None and
-                    active_quality_probe.poll() is None):
-                fail(f"previous pixel observer survived cycle {cycle - 1}")
+            if (active_quality_probe is None or
+                    active_quality_probe.poll() is not None):
+                fail(f"persistent pixel observer exited before cycle {cycle}")
             if (previous_menu_window is not None and
                     lxqt_fancy_menu_is_visible(
                         source_display, previous_menu_window)):
@@ -5144,8 +5252,6 @@ def assert_lxqt_menu_stress_session(
             except ValueError:
                 fail(f"invalid click timestamp: {click_result!r}")
             deadline_ns = invocation_ns + int(freshness_budget_ms * 1_000_000)
-            cycle_dir = run_dir / f"cycle-{cycle:02d}"
-            cycle_dir.mkdir()
             menu_window: str | None = None
             menu_discovery_ns: int | None = None
             passed = False
@@ -5159,118 +5265,143 @@ def assert_lxqt_menu_stress_session(
                 if found is None:
                     time.sleep(0.010)
                     continue
-                menu_window, _width, _height, _x, _y = found
+                menu_window, menu_width, menu_height, menu_x, menu_y = found
                 menu_discovery_ns = time.monotonic_ns()
-            if menu_window is not None:
-                probe_process_start_ns = time.monotonic_ns()
-                active_quality_probe = subprocess.Popen(
-                    [str(menu_quality_probe_path), source_display,
-                     menu_window, client_display, client_window,
-                     str(source_width), str(source_height),
-                     str(cycle_dir), "--interactive"],
-                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT, bufsize=0,
-                    start_new_session=True)
-                if (active_quality_probe.stdin is None or
-                        active_quality_probe.stdout is None):
-                    stop_process(active_quality_probe)
-                    fail("LXQt quality observer pipes were not created")
-                probe_start_line = read_line(
-                    active_quality_probe.stdout, 5.0).strip()
-                probe_ready_line = read_line(
-                    active_quality_probe.stdout, 5.0).strip()
-                if (not probe_start_line.startswith(b"MENU_PROBE_START ") or
-                        not probe_ready_line.startswith(b"MENU_PROBE_READY ")):
-                    fail(
-                        "persistent LXQt quality observer did not initialize: "
-                        f"{probe_start_line!r} {probe_ready_line!r}")
-                cycle_trace.append(
-                    f"cycle={cycle} invocation_ns={invocation_ns} "
-                    f"menu_window_discovery_ns={menu_discovery_ns} "
-                    f"probe_process_start_ns={probe_process_start_ns} "
-                    f"probe_start={probe_start_line.decode(errors='replace')} "
-                    f"probe_ready={probe_ready_line.decode(errors='replace')}")
+            cycle_trace.append(
+                f"cycle={cycle} invocation_ns={invocation_ns} "
+                f"menu_window_discovery_ns={menu_discovery_ns} "
+                f"observer_was_running_before_click=1")
 
+            if menu_window is not None:
                 while time.monotonic_ns() < deadline_ns:
                     if client.poll() is not None:
                         fail(
                             "FreeRDP disconnected while opening LXQt Fancy "
                             f"Menu at cycle {cycle}")
                     attempt += 1
+                    fast_sequence += 1
                     observer_request_ns = time.monotonic_ns()
+                    remaining_seconds = max(
+                        0.001, (deadline_ns - observer_request_ns) /
+                        1_000_000_000.0)
                     try:
-                        helper_lines = menu_quality_probe_capture(
-                            active_quality_probe, 30.0)
+                        fast_lines = menu_quality_probe_capture(
+                            active_quality_probe, menu_window, fast_sequence,
+                            min(0.250, remaining_seconds))
                     except AssertionError as error:
                         fail(f"LXQt quality observer failed: {error}")
                     fast_line = next(
-                        (line for line in helper_lines
+                        (line for line in fast_lines
                          if line.startswith(b"MENU_FAST ")), b"")
                     done_line = next(
-                        (line for line in helper_lines
+                        (line for line in fast_lines
                          if line.startswith(b"MENU_DONE ")), b"")
                     if not fast_line:
                         last_quality = "\n".join(
                             line.decode(errors="replace")
-                            for line in helper_lines)
-                        cycle_trace.append(
-                            f"cycle={cycle} attempt={attempt} "
-                            f"observer_request_ns={observer_request_ns} "
-                            f"observer_result={last_quality.replace(' ', '_')}")
+                            for line in fast_lines)
                         fail(
                             "LXQt pixel observer returned no fast verdict: "
                             f"{last_quality}")
 
                     fast_text = fast_line.decode(errors="replace").strip()
-                    fields = parse_helper_fields(fast_line)
-                    fast_status = fast_line.decode(
-                        "ascii", errors="replace").split()[1]
                     try:
+                        fields = parse_protocol_fields(fast_line)
+                        fast_status = fields["status"]
                         sample_ns = int(fields["sample_ns"])
                         capture_request_ns = int(fields["capture_request_ns"])
-                    except (KeyError, ValueError):
+                    except (KeyError, ValueError) as error:
                         fail(
-                            "fast oracle omitted monotonic timestamps: "
-                            f"{fast_text}")
+                            "fast oracle omitted valid status/timestamps: "
+                            f"{fast_text}; {error}")
                     latency_ms = (sample_ns - invocation_ns) / 1_000_000.0
-                    done_status = parse_helper_fields(done_line).get(
-                        "status", "ERROR")
-                    full_quality = next(
-                        (line.decode(errors="replace") for line in helper_lines
-                         if line.startswith(b"MENU_QUALITY ")), "")
-                    full_timing = next(
-                        (line.decode(errors="replace") for line in helper_lines
-                         if line.startswith(b"MENU_TIMING ")), "")
+                    # Latency is timestamped at the client capture. The cycle
+                    # is counted only after the correlated full-image verdict
+                    # also passes, so image analysis cannot improve its time.
+
+                    try:
+                        helper_lines = menu_quality_probe_finish_capture(
+                            active_quality_probe, fast_lines,
+                            5.0 if fast_status == "PASS" else 0.500)
+                    except AssertionError as error:
+                        fail(f"LXQt quality observer failed: {error}")
+                    done_line = next(
+                        (line for line in helper_lines
+                         if line.startswith(b"MENU_DONE ")), b"")
+                    if not done_line:
+                        fail(f"observer omitted MENU_DONE: {helper_lines!r}")
+                    try:
+                        request_ns, sequence = validate_capture_correlation(
+                            fast_line, done_line)
+                        done_fields = parse_done_record(done_line)
+                    except ValueError as error:
+                        fail(f"uncorrelated observer result: {error}")
+
+                    capture_dirname = f"capture-{sequence:04d}"
+                    full_quality_line = next(
+                        (line for line in helper_lines
+                         if line.startswith(b"MENU_QUALITY ")), b"")
+                    full_timing_line = next(
+                        (line for line in helper_lines
+                         if line.startswith(b"MENU_TIMING ")), b"")
+                    full_quality = full_quality_line.decode(
+                        errors="replace").strip()
+                    full_timing = full_timing_line.decode(
+                        errors="replace").strip()
                     last_quality = "\n".join(
                         line.decode(errors="replace") for line in helper_lines)
                     attempt_trace = (
                         f"cycle={cycle} attempt={attempt} "
                         f"invocation_ns={invocation_ns} "
                         f"menu_window_discovery_ns={menu_discovery_ns} "
-                        f"probe_process_start_ns={probe_process_start_ns} "
                         f"observer_request_ns={observer_request_ns} "
-                        f"capture_request_ns={capture_request_ns} "
-                        f"latency_ms={latency_ms:.3f} helper_output={fast_text}")
+                        f"capture_request_ns={request_ns} sequence={sequence} "
+                        f"latency_ms={latency_ms:.3f} fast={fast_text}")
                     if full_timing:
                         attempt_trace += f" {full_timing}"
                     cycle_trace.append(attempt_trace)
 
                     if fast_status == "PASS":
-                        if (done_status != "PASS" or
-                                "MENU_QUALITY PASS" not in full_quality):
+                        check_source_layout(
+                            sequence,
+                            f"cycle={cycle} attempt={attempt} source")
+                        quality_fields = parse_protocol_fields(
+                            full_quality_line)
+                        timing_fields = parse_protocol_fields(
+                            full_timing_line)
+                        if (quality_fields.get("capture_request_ns") !=
+                                str(request_ns) or
+                                quality_fields.get("sequence") != str(sequence) or
+                                timing_fields.get("capture_request_ns") !=
+                                str(request_ns) or
+                                timing_fields.get("sequence") != str(sequence)):
                             fail(
-                                "LXQt menu failed full-region quality "
-                                f"comparison on its first visible frame at "
-                                f"cycle {cycle}: {last_quality}")
-                        quality_metrics.append(last_quality)
-                        if latency_ms > freshness_budget_ms:
+                                "LXQt full-region verdict did not match its "
+                                f"capture at cycle {cycle}: "
+                                f"{last_quality}")
+                        if (quality_fields.get("status") == "ERROR" or
+                                done_fields["status"] == "ERROR"):
                             fail(
-                                f"LXQt menu exceeded freshness budget at "
-                                f"cycle {cycle}: {latency_ms:.1f} ms")
-                        latencies.append(latency_ms)
-                        passed = True
-                        break
-                    if fast_status != "WAIT" or done_status != "WAIT":
+                                "LXQt quality observer returned an error "
+                                f"at cycle {cycle}: {last_quality}")
+                        if (done_fields["status"] == "PASS" and
+                                quality_fields.get("status") == "PASS"):
+                            if latency_ms > freshness_budget_ms:
+                                fail(
+                                    f"LXQt menu exceeded freshness budget at "
+                                    f"cycle {cycle}: {latency_ms:.1f} ms")
+                            latencies.append(latency_ms)
+                            quality_metrics.append(last_quality)
+                            passed = True
+                            break
+                        if (done_fields["status"] !=
+                                quality_fields.get("status") or
+                                done_fields["status"] not in ("PASS", "WAIT")):
+                            fail(
+                                "LXQt full-region quality and completion "
+                                f"disagreed at cycle {cycle}: "
+                                f"{last_quality}")
+                    elif done_fields["status"] != "WAIT":
                         fail(
                             "persistent fast oracle returned an unexpected "
                             f"result: {last_quality}")
@@ -5288,33 +5419,51 @@ def assert_lxqt_menu_stress_session(
             # Keep the popup open while the changing background continues.
             # The first coherent frame is the freshness verdict; these later
             # captures detect partial redraws or corruption after that frame.
-            for stable_index in range(1, 4):
+            for stable_index in range(1, stability_samples + 1):
                 time.sleep(0.150)
                 if not lxqt_fancy_menu_is_visible(source_display, menu_window):
                     fail(
                         f"LXQt Fancy Menu disappeared during its stability "
                         f"window at cycle {cycle}, sample {stable_index}")
-                stable_dir = cycle_dir / f"stability-{stable_index:02d}"
-                stable_dir.mkdir()
+                stability_sequence += 1
                 stable_start_ns = time.monotonic_ns()
                 try:
-                    stable_result = subprocess.run(
-                        [str(menu_quality_probe_path), source_display,
-                         menu_window, client_display, client_window,
-                         str(source_width), str(source_height), str(stable_dir)],
-                        capture_output=True, text=True, check=False, timeout=30.0)
-                except subprocess.TimeoutExpired:
+                    stable_fast_lines = menu_quality_probe_capture(
+                        active_quality_probe, menu_window, stability_sequence,
+                        1.0, force_full_after_fast_wait=True)
+                    stable_lines = menu_quality_probe_finish_capture(
+                        active_quality_probe, stable_fast_lines, 5.0)
+                except AssertionError as error:
                     fail(
-                        f"LXQt stability quality probe timed out in cycle "
-                        f"{cycle}, sample {stable_index}")
+                        f"LXQt stability quality probe failed in cycle "
+                        f"{cycle}, sample {stable_index}: {error}")
                 stable_end_ns = time.monotonic_ns()
-                stable_lines = stable_result.stdout.splitlines()
-                stable_quality = next(
+                stable_fast = next(
                     (line for line in stable_lines
-                     if line.startswith("MENU_QUALITY ")), "")
-                stable_timing = next(
+                     if line.startswith(b"MENU_FAST ")), b"")
+                stable_done = next(
                     (line for line in stable_lines
-                     if line.startswith("MENU_TIMING ")), "")
+                     if line.startswith(b"MENU_DONE ")), b"")
+                stable_quality_line = next(
+                    (line for line in stable_lines
+                     if line.startswith(b"MENU_QUALITY ")), b"")
+                stable_timing_line = next(
+                    (line for line in stable_lines
+                     if line.startswith(b"MENU_TIMING ")), b"")
+                stable_quality = stable_quality_line.decode(
+                    errors="replace").strip()
+                stable_timing = stable_timing_line.decode(
+                    errors="replace").strip()
+                try:
+                    stable_request_ns, stable_request_sequence = (
+                        validate_capture_correlation(stable_fast, stable_done))
+                    stable_quality_fields = parse_protocol_fields(
+                        stable_quality_line)
+                    stable_timing_fields = parse_protocol_fields(
+                        stable_timing_line)
+                    stable_done_fields = parse_done_record(stable_done)
+                except ValueError as error:
+                    fail(f"uncorrelated stability capture: {error}")
                 cycle_trace.append(
                     f"cycle={cycle} stability_sample={stable_index} "
                     f"observer_start_ns={stable_start_ns} "
@@ -5322,16 +5471,58 @@ def assert_lxqt_menu_stress_session(
                     f"observer_elapsed_ms="
                     f"{(stable_end_ns - stable_start_ns) / 1_000_000.0:.3f} "
                     f"quality={stable_quality} {stable_timing}")
-                if (stable_result.returncode != 0 or
-                        "MENU_QUALITY PASS" not in stable_quality):
+                if (stable_fast.split()[1:2] not in ([b"PASS"], [b"WAIT"]) or
+                        stable_done_fields["status"] != "PASS" or
+                        stable_quality_fields.get("status") != "PASS" or
+                        stable_quality_fields.get("capture_request_ns") !=
+                        str(stable_request_ns) or
+                        stable_quality_fields.get("sequence") !=
+                        str(stable_request_sequence) or
+                        stable_timing_fields.get("capture_request_ns") !=
+                        str(stable_request_ns) or
+                        stable_timing_fields.get("sequence") !=
+                        str(stable_request_sequence)):
                     fail(
                         "LXQt menu lost full-region image quality while it "
                         f"remained open at cycle {cycle}, sample "
-                        f"{stable_index}: {stable_result.stdout.strip()} "
-                        f"{stable_result.stderr.strip()}")
+                        f"{stable_index}: {stable_lines!r}")
                 quality_metrics.append(
                     f"cycle={cycle} stability={stable_index} "
                     f"{stable_quality} {stable_timing}")
+                check_source_layout(
+                    stable_request_sequence,
+                    f"cycle={cycle} stability={stable_index} source")
+
+            # Hash an opaque section of the favorite list immediately before
+            # closing it. Rechecking the same remote pixels after unmapping
+            # proves the client left this exact popup frame before the next
+            # static menu can be opened.
+            region_left_x, region_top_y = map_source_point_to_client(
+                menu_x + 8, menu_y + 40, source_width, source_height,
+                client_width, client_height)
+            region_right_x, region_bottom_y = map_source_point_to_client(
+                menu_x + min(205, menu_width - 4),
+                menu_y + min(500, menu_height - 4),
+                source_width, source_height, client_width, client_height)
+            hash_region_x = region_left_x
+            hash_region_y = region_top_y
+            hash_region_width = region_right_x - region_left_x
+            hash_region_height = region_bottom_y - region_top_y
+            if hash_region_width <= 0 or hash_region_height <= 0:
+                fail(
+                    f"invalid client hash region for menu cycle {cycle}: "
+                    f"{hash_region_width}x{hash_region_height}")
+            before_close_result = popup_probe_command(
+                probe,
+                f"hash-region {hash_region_x} {hash_region_y} "
+                f"{hash_region_width} {hash_region_height}",
+                1.0).split()
+            if len(before_close_result) < 2 or \
+                    before_close_result[0] != b"REGION_HASH":
+                fail(
+                    "could not hash the visible menu before close at cycle "
+                    f"{cycle}: {before_close_result!r}")
+            before_close_hash = before_close_result[1]
 
             button_state = popup_probe_command(
                 probe, "buttons-released", 2.0).strip()
@@ -5351,22 +5542,72 @@ def assert_lxqt_menu_stress_session(
                 time.sleep(0.010)
             if lxqt_fancy_menu_is_visible(source_display, menu_window):
                 fail(f"LXQt Fancy Menu did not unmap at cycle {cycle}")
-            previous_menu_window = menu_window
-            stop_process(active_quality_probe)
-            if active_quality_probe.poll() is None:
-                fail(f"LXQt quality observer survived cycle {cycle}")
-            active_quality_probe = None
 
+            # Before reopening, prove the client actually left the previous
+            # popup image. This prevents a retained frame of the same static
+            # menu from satisfying the next cycle's pixel comparison.
+            clear_deadline = time.monotonic() + 1.0
+            cleared = False
+            after_close_hash = before_close_hash
+            while time.monotonic() < clear_deadline:
+                remaining = max(0.050, clear_deadline - time.monotonic())
+                try:
+                    hash_result = popup_probe_command(
+                        probe,
+                        f"hash-region {hash_region_x} {hash_region_y} "
+                        f"{hash_region_width} {hash_region_height}",
+                        min(0.500, remaining)).split()
+                    if len(hash_result) < 2 or \
+                            hash_result[0] != b"REGION_HASH":
+                        fail(
+                            "could not hash client after menu close at cycle "
+                            f"{cycle}: {hash_result!r}")
+                    after_close_hash = hash_result[1]
+                except (AssertionError, ValueError) as error:
+                    fail(f"could not inspect client menu-close frame: {error}")
+                cycle_trace.append(
+                    f"cycle={cycle} menu_close_hash={after_close_hash.decode()} "
+                    f"previous_hash={before_close_hash.decode()}")
+                if after_close_hash != before_close_hash:
+                    cleared = True
+                    break
+                time.sleep(0.030)
+            if not cleared:
+                fail(
+                    "client still shows the previous menu image after it "
+                    f"closed at cycle {cycle}; region hash remained "
+                    f"{before_close_hash.decode()}")
+            previous_menu_window = menu_window
+
+        if active_quality_probe.stdin is None:
+            fail("LXQt quality observer stdin disappeared")
+        active_quality_probe.stdin.close()
+        try:
+            observer_exit = active_quality_probe.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            fail("persistent LXQt quality observer did not exit after EOF")
+        if observer_exit != 0:
+            fail(
+                "persistent LXQt quality observer failed on EOF: "
+                f"exit={observer_exit}")
+        active_quality_probe = None
+
+        ordered_latencies = sorted(latencies)
+        p95_index = max(0, math.ceil(len(ordered_latencies) * 0.95) - 1)
         summary_path.write_text(
             "XRDP_CONSOLE_LXQT_MENU_STRESS\n"
             "status=PASS\n"
+            "background_stimulus=background-only\n"
             f"source={source_width}x{source_height}\n"
             f"presentation={client_width}x{client_height}\n"
             f"freshness_budget_ms={freshness_budget_ms:.0f}\n"
+            f"stability_samples_per_cycle={stability_samples}\n"
             f"completed_cycles={len(latencies)}\n"
             f"max_latency_ms={max(latencies):.1f}\n"
+            f"p95_latency_ms={ordered_latencies[p95_index]:.1f}\n"
             "latencies_ms=" + ",".join(f"{item:.1f}" for item in latencies) +
             "\n" + "quality_samples=" + " | ".join(quality_metrics) +
+            "\nsource_layout_samples=" + " | ".join(source_layout_metrics) +
             "\ncycle_trace:\n" + "\n".join(cycle_trace) +
             "\n" + "\n".join(popup_h264_profile_metrics(log_path)) + "\n",
             encoding="utf-8")
@@ -5417,7 +5658,18 @@ def popup_probe_command(probe: subprocess.Popen[bytes], command: str,
     setattr(probe, "_xrdp_popup_pending_command", command)
     line = read_line(probe.stdout, timeout)
     if not line:
-        raise AssertionError(f"popup UI probe returned no result for {command}")
+        stderr_tail = b""
+        if probe.stderr is not None:
+            ready, _, _ = select.select([probe.stderr], [], [], 0)
+            if ready:
+                try:
+                    stderr_tail = os.read(probe.stderr.fileno(), 4096)
+                except OSError:
+                    pass
+        raise AssertionError(
+            f"popup UI probe returned no result for {command}; "
+            f"process_status={probe.poll()}; "
+            f"stderr={stderr_tail.decode(errors='replace').strip()}")
     setattr(probe, "_xrdp_popup_pending_command", None)
     return line
 
@@ -7575,9 +7827,11 @@ password=smoke
                     stimulus_path, source_display, popup_environment,
                     source_width, source_height)
             elif lxqt_menu_stress_mode:
+                # The real LXQt menu is the popup under test. Do not also map
+                # the generic synthetic popup, which can cover its window.
                 stimulus = start_popup_ui_stimulus(
                     stimulus_path, source_display, os.environ.copy(),
-                    source_width, source_height)
+                    source_width, source_height, background_only=True)
             elif startup_current_state_mode:
                 stimulus = start_generation_stimulus(
                     stimulus_path, source_display, os.environ.copy(),

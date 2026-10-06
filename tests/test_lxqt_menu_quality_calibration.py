@@ -20,10 +20,11 @@ FAST_ERROR_LIMIT = 64
 FAST_OUTLIER_LIMIT_PERCENT = 20.0
 FAST_P95_LIMIT = 96
 FULL_ERROR_LIMIT = 64
-FULL_MEAN_LIMIT = 20.0
-FULL_P95_LIMIT = 96
-FULL_OUTLIER_LIMIT_PERCENT = 10.0
-FULL_BLOCK_MEAN_LIMIT = 50.0
+FULL_MEAN_LIMIT = 10.0
+FULL_P95_LIMIT = 72
+FULL_OUTLIER_LIMIT_PERCENT = 5.0
+FULL_BLOCK_MEAN_LIMIT = 35.0
+SOURCE_FAVORITE_ROW_MEAN_LIMIT = 8.0
 
 
 @dataclass(frozen=True)
@@ -69,6 +70,23 @@ class Metrics:
                 f"samples={self.samples} "
                 f"mean_abs_rgb={self.mean_rgb_error:.3f} "
                 f"max_block_mean={self.maximum_block_mean:.3f}")
+
+
+@dataclass(frozen=True)
+class SourceLayoutMetrics:
+    passed: bool
+    row_means: tuple[float, ...]
+    failed_rows: tuple[int, ...]
+    error: str = ""
+
+    def describe(self, name: str) -> str:
+        if self.error:
+            return f"{name}: FAIL {self.error}"
+        return (f"{name}: {'PASS' if self.passed else 'FAIL'} "
+                f"rows={len(self.row_means)} "
+                f"max_row_mean_abs_rgb={max(self.row_means, default=0.0):.3f} "
+                f"row_mean_limit={SOURCE_FAVORITE_ROW_MEAN_LIMIT:.1f} "
+                f"failed_rows={','.join(map(str, self.failed_rows)) or 'none'}")
 
 
 def read_ppm(path: Path) -> Ppm:
@@ -238,6 +256,45 @@ def full_compare(source: Ppm, client: Ppm, mapping: Mapping) -> Metrics:
                    maximum_block_mean)
 
 
+def favorite_source_rows_compare(reference: Ppm,
+                                 actual: Ppm) -> SourceLayoutMetrics:
+    """Reject a corrupt source menu even when the client copies it exactly.
+
+    The fixture uses a stable 18-pixel favorite-row pitch. Compare the text
+    column row by row against a known clean LXQt Fancy Menu capture. This is
+    intentionally separate from remote frame quality, whose source is the
+    live menu and could itself contain a tooltip or overlapping text.
+    """
+    if (reference.width != actual.width or
+            reference.height != actual.height):
+        return SourceLayoutMetrics(
+            False, (), (),
+            f"geometry {actual.width}x{actual.height} does not match "
+            f"reference {reference.width}x{reference.height}")
+    if reference.width < 235 or reference.height < 504:
+        return SourceLayoutMetrics(
+            False, (), (),
+            f"reference geometry {reference.width}x{reference.height} "
+            "cannot contain favorite rows")
+    row_means: list[float] = []
+    failed_rows: list[int] = []
+    for index, y0 in enumerate(range(36, 504, 18)):
+        total = 0
+        pixels = 0
+        for y in range(y0, y0 + 18):
+            for x in range(235):
+                expected = reference.pixel(x, y)
+                observed = actual.pixel(x, y)
+                total += sum(abs(a - b) for a, b in zip(expected, observed))
+                pixels += 1
+        mean = total / (pixels * 3)
+        row_means.append(mean)
+        if mean > SOURCE_FAVORITE_ROW_MEAN_LIMIT:
+            failed_rows.append(index)
+    return SourceLayoutMetrics(
+        not failed_rows, tuple(row_means), tuple(failed_rows))
+
+
 def scaled_mapping(source_width: int, source_height: int,
                    client_width: int, client_height: int,
                    source_x: int, source_y: int,
@@ -270,6 +327,8 @@ class LxqtMenuQualityCalibration(unittest.TestCase):
             FIXTURES / "live-corrupt-source.ppm")
         cls.live_corrupt_client = read_ppm(
             FIXTURES / "live-corrupt-client.ppm")
+        cls.source_ui_corrupt = read_ppm(
+            FIXTURES / "source-ui-corrupt.ppm")
         cls.blank = Ppm(cls.positive_pairs[0][1].width,
                         cls.positive_pairs[0][1].height,
                         bytes((24, 32, 40)) *
@@ -303,6 +362,22 @@ class LxqtMenuQualityCalibration(unittest.TestCase):
     def test_live_corrupt_h264_frame_is_rejected_by_both_oracles(self) -> None:
         self.assert_pair("live-corrupt", self.live_corrupt_client, False,
                          source=self.live_corrupt_source)
+
+    def test_source_menu_corruption_cannot_self_validate(self) -> None:
+        identity = scaled_mapping(
+            self.source_ui_corrupt.width, self.source_ui_corrupt.height,
+            self.source_ui_corrupt.width, self.source_ui_corrupt.height,
+            0, 0, 0, 0)
+        copied_corrupt_frame = full_compare(
+            self.source_ui_corrupt, self.source_ui_corrupt, identity)
+        self.assertTrue(
+            copied_corrupt_frame.passed,
+            copied_corrupt_frame.describe("corrupt source compared to itself"))
+        source_quality = favorite_source_rows_compare(
+            self.source, self.source_ui_corrupt)
+        self.assertFalse(source_quality.passed, source_quality.describe(
+            "source UI corruption"))
+        print(source_quality.describe("source UI corruption"))
 
     def test_shifted_client_image_is_rejected_by_both_oracles(self) -> None:
         client = self.positive_pairs[0][1]

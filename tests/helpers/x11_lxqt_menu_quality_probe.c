@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -25,6 +26,13 @@ typedef struct
     int source_x;
     int source_y;
 } presentation_map;
+
+typedef struct
+{
+    Window source_window;
+    unsigned int sequence;
+    int continue_full_after_fast_wait;
+} capture_request;
 
 static int capture_x_error_code;
 
@@ -57,12 +65,87 @@ parse_window(const char *text, Window *window)
 
     errno = 0;
     value = strtoul(text, &end, 0);
-    if (errno != 0 || end == text || *end != '\0')
+    if (errno != 0 || end == text || *end != '\0' || value == 0UL)
     {
         return 0;
     }
     *window = (Window)value;
+    return (unsigned long)*window == value;
+}
+
+static int
+parse_capture_request(const char *line, capture_request *request)
+{
+    char operation[16];
+    char xid_text[32];
+    char sequence_text[32];
+    char trailing;
+    char *end = NULL;
+    unsigned long xid;
+    unsigned long sequence;
+    Window window;
+
+    if (sscanf(line, "%15s %31s %31s %c", operation, xid_text,
+               sequence_text, &trailing) != 3 ||
+        (strcmp(operation, "capture") != 0 &&
+         strcmp(operation, "capture-full") != 0))
+    {
+        return 0;
+    }
+    errno = 0;
+    xid = strtoul(xid_text, &end, 0);
+    if (errno != 0 || end == xid_text || *end != '\0' || xid == 0UL)
+    {
+        return 0;
+    }
+    window = (Window)xid;
+    if ((unsigned long)window != xid)
+    {
+        return 0;
+    }
+    errno = 0;
+    end = NULL;
+    sequence = strtoul(sequence_text, &end, 10);
+    if (errno != 0 || end == sequence_text || *end != '\0' ||
+        sequence == 0UL || sequence > UINT_MAX)
+    {
+        return 0;
+    }
+    request->source_window = window;
+    request->sequence = (unsigned int)sequence;
+    request->continue_full_after_fast_wait =
+        strcmp(operation, "capture-full") == 0;
     return 1;
+}
+
+static int
+make_capture_artifact_directory(const char *root, unsigned int sequence,
+                                char *path, size_t path_size)
+{
+    char leaf[64];
+    int leaf_length;
+    int path_length;
+
+    if (sequence >= 1001U)
+    {
+        leaf_length = snprintf(leaf, sizeof(leaf), "stability-%04u",
+                               sequence - 1000U);
+    }
+    else
+    {
+        leaf_length = snprintf(leaf, sizeof(leaf), "capture-%04u",
+                               sequence);
+    }
+    if (leaf_length < 0 || (size_t)leaf_length >= sizeof(leaf))
+    {
+        return 0;
+    }
+    path_length = snprintf(path, path_size, "%s/%s", root, leaf);
+    if (path_length < 0 || (size_t)path_length >= path_size)
+    {
+        return 0;
+    }
+    return mkdir(path, 0700) == 0;
 }
 
 static unsigned int
@@ -345,7 +428,9 @@ capture_and_compare(Display *source_display, Window source_window,
                     Display *client_display, Window client_window,
                     int source_width, int source_height,
                     const char *artifact_dir, int fast_mode,
-                    uint64_t capture_request_ns)
+                    uint64_t capture_request_ns,
+                    unsigned int sequence,
+                    int continue_full_after_fast_wait)
 {
     XWindowAttributes source_attributes;
     XWindowAttributes client_attributes;
@@ -500,13 +585,28 @@ capture_and_compare(Display *source_display, Window source_window,
     {
         if (fast_mode)
         {
+            const uint64_t sample_ns = client_capture_end_ns != 0U ?
+                                       client_capture_end_ns : monotonic_ns();
+
             printf("MENU_FAST WAIT sample_ns=%" PRIu64
                    " matched=0/0 p95_max_channel=255 outlier_pct=100.00 "
                    "max_channel_error=255 source_unique_samples=0 "
-                   "source_luma_range=0 capture_error=%d "
-                   "capture_request_ns=%" PRIu64 "\n",
-                   monotonic_ns(), capture_x_error_code,
-                   capture_request_ns);
+                   "source_luma_range=0 capture_error=%d sequence=%u "
+                   "capture_request_ns=%" PRIu64
+                   " source_capture_start_ns=%" PRIu64
+                   " source_capture_end_ns=%" PRIu64
+                   " client_capture_start_ns=%" PRIu64
+                   " client_capture_end_ns=%" PRIu64
+                   " client_capture_duration_us=%" PRIu64 "\n",
+                   sample_ns, capture_x_error_code, sequence,
+                   capture_request_ns, source_capture_start_ns,
+                   source_capture_end_ns, client_capture_start_ns,
+                   client_capture_end_ns,
+                   client_capture_start_ns == 0U ||
+                           client_capture_end_ns < client_capture_start_ns ?
+                       0U :
+                       (client_capture_end_ns - client_capture_start_ns) /
+                           1000U);
             fflush(stdout);
             if (source_image != NULL)
             {
@@ -650,22 +750,29 @@ capture_and_compare(Display *source_display, Window source_window,
             printf("MENU_FAST %s sample_ns=%" PRIu64
                    " matched=%u/%u p95_max_channel=%u outlier_pct=%.2f "
                    "max_channel_error=%u source_unique_samples=%u "
-                   "source_luma_range=%u capture_request_ns=%" PRIu64
+                   "source_luma_range=%u sequence=%u "
+                   "capture_request_ns=%" PRIu64
                    " source_capture_start_ns=%" PRIu64
                    " source_capture_end_ns=%" PRIu64
+                   " source_capture_duration_us=%" PRIu64
                    " client_capture_start_ns=%" PRIu64
                    " client_capture_end_ns=%" PRIu64
+                   " client_capture_duration_us=%" PRIu64
                    " fast_compare_start_ns=%" PRIu64
                    " fast_compare_end_ns=%" PRIu64 "\n",
-                   passed ? "PASS" : "WAIT", fast_compare_end_ns,
+                   passed ? "PASS" : "WAIT", client_capture_end_ns,
                    matches, samples,
                    sample_p95,
                    samples == 0U ? 100.0 :
                        (double)outliers * 100.0 / samples,
-                   maximum_error, distinct_count, luma_range,
+                   maximum_error, distinct_count, luma_range, sequence,
                    capture_request_ns,
                    source_capture_start_ns, source_capture_end_ns,
+                   (source_capture_end_ns - source_capture_start_ns) /
+                       1000U,
                    client_capture_start_ns, client_capture_end_ns,
+                   (client_capture_end_ns - client_capture_start_ns) /
+                       1000U,
                    fast_compare_start_ns, fast_compare_end_ns);
             fflush(stdout);
             if (!passed)
@@ -689,9 +796,12 @@ capture_and_compare(Display *source_display, Window source_window,
                     (void)write_image(client_wait_path, client_image,
                                       client_attributes.visual);
                 }
-                XDestroyImage(source_image);
-                XDestroyImage(client_image);
-                return 1;
+                if (!continue_full_after_fast_wait)
+                {
+                    XDestroyImage(source_image);
+                    XDestroyImage(client_image);
+                    return 1;
+                }
             }
         }
     }
@@ -821,21 +931,23 @@ capture_and_compare(Display *source_display, Window source_window,
                                    (double)pixels;
         const unsigned int luma_range = max_luma - min_luma;
         const int populated = unique_samples >= 16U && luma_range >= 35U;
-        const int passed = populated && mean_error <= 20.0 && p95 <= 96U &&
-                           outlier_pct <= 10.0 &&
-                           maximum_block_mean <= 50.0;
+        const int passed = populated && mean_error <= 10.0 && p95 <= 72U &&
+                           outlier_pct <= 5.0 &&
+                           maximum_block_mean <= 35.0;
 
         printf("MENU_QUALITY %s source=%dx%d at=%d,%d destination=%dx%d "
                "roi=%d,%d mean_abs_rgb=%.3f p95_max_channel=%u "
                "outlier_pct=%.3f max_block_mean_abs_rgb=%.3f "
-               "source_unique_samples=%u source_luma_range=%u\n",
+               "source_unique_samples=%u source_luma_range=%u "
+               "capture_request_ns=%" PRIu64 " sequence=%u\n",
                passed ? "PASS" : "WAIT", source_image->width,
                source_image->height, source_x, source_y,
                target_width, target_height, target_x, target_y,
                mean_error, p95, outlier_pct, maximum_block_mean,
-               unique_samples, luma_range);
+               unique_samples, luma_range, capture_request_ns, sequence);
         fflush(stdout);
         printf("MENU_TIMING capture_request_ns=%" PRIu64
+               " sequence=%u"
                " source_capture_start_ns=%" PRIu64
                " source_capture_end_ns=%" PRIu64
                " source_capture_us=%" PRIu64
@@ -848,7 +960,7 @@ capture_and_compare(Display *source_display, Window source_window,
                " full_compare_start_ns=%" PRIu64
                " full_compare_end_ns=%" PRIu64
                " full_compare_us=%" PRIu64 "\n",
-               capture_request_ns, source_capture_start_ns,
+               capture_request_ns, sequence, source_capture_start_ns,
                source_capture_end_ns,
                (source_capture_end_ns - source_capture_start_ns) / 1000U,
                client_capture_start_ns, client_capture_end_ns,
@@ -915,7 +1027,8 @@ main(int argc, char **argv)
     uint64_t client_display_open_end_ns;
     Display *source_display;
     Display *client_display;
-    Window source_window;
+    const char *client_display_name;
+    Window source_window = 0;
     Window client_window;
     int interactive_mode = 0;
     int fast_mode = 0;
@@ -926,9 +1039,22 @@ main(int argc, char **argv)
         return self_test_mapping();
     }
 
-    if ((argc != 8 && argc != 9) ||
-        !parse_window(argv[2], &source_window) ||
-        !parse_window(argv[4], &client_window))
+    if (argc == 8 && strcmp(argv[7], "--interactive") == 0)
+    {
+        interactive_mode = 1;
+        fast_mode = 1;
+        if (!parse_window(argv[3], &client_window))
+        {
+            fprintf(stderr,
+                    "usage: %s SOURCE_DISPLAY CLIENT_DISPLAY CLIENT_WINDOW "
+                    "SOURCE_WIDTH SOURCE_HEIGHT ARTIFACT_ROOT --interactive\n",
+                    argv[0]);
+            return 2;
+        }
+    }
+    else if ((argc != 8 && argc != 9) ||
+             !parse_window(argv[2], &source_window) ||
+             !parse_window(argv[4], &client_window))
     {
         fprintf(stderr,
                 "usage: %s SOURCE_DISPLAY SOURCE_WINDOW CLIENT_DISPLAY "
@@ -937,13 +1063,10 @@ main(int argc, char **argv)
                 argv[0]);
         return 2;
     }
+    client_display_name = interactive_mode ? argv[2] : argv[3];
     if (argc == 9 && strcmp(argv[8], "--fast") == 0)
     {
         fast_mode = 1;
-    }
-    else if (argc == 9 && strcmp(argv[8], "--interactive") == 0)
-    {
-        interactive_mode = 1;
     }
     else if (argc == 9)
     {
@@ -957,7 +1080,7 @@ main(int argc, char **argv)
     source_display = XOpenDisplay(argv[1]);
     source_display_open_end_ns = monotonic_ns();
     client_display_open_start_ns = monotonic_ns();
-    client_display = XOpenDisplay(argv[3]);
+    client_display = XOpenDisplay(client_display_name);
     client_display_open_end_ns = monotonic_ns();
     printf("MENU_PROBE_READY source_display_open_start_ns=%" PRIu64
            " source_display_open_end_ns=%" PRIu64
@@ -988,27 +1111,44 @@ main(int argc, char **argv)
         {
             char *newline;
             uint64_t capture_request_ns;
+            capture_request request;
+            char artifact_dir[PATH_MAX];
 
             newline = strpbrk(command, "\r\n");
             if (newline != NULL)
             {
                 *newline = '\0';
             }
-            if (strcmp(command, "capture") != 0)
+            capture_request_ns = monotonic_ns();
+            if (!parse_capture_request(command, &request))
             {
                 fputs("MENU_QUALITY_ERROR invalid-command\n", stdout);
-                puts("MENU_DONE status=ERROR");
+                printf("MENU_DONE status=ERROR request_ns=%" PRIu64
+                       " sequence=0\n", capture_request_ns);
                 fflush(stdout);
                 continue;
             }
-            capture_request_ns = monotonic_ns();
+            if (!make_capture_artifact_directory(
+                    argv[6], request.sequence, artifact_dir,
+                    sizeof(artifact_dir)))
+            {
+                fputs("MENU_QUALITY_ERROR artifact-directory\n", stdout);
+                printf("MENU_DONE status=ERROR request_ns=%" PRIu64
+                       " sequence=%u\n", capture_request_ns,
+                       request.sequence);
+                fflush(stdout);
+                continue;
+            }
             result = capture_and_compare(
-                source_display, source_window, client_display, client_window,
-                atoi(argv[5]), atoi(argv[6]), argv[7], 1,
-                capture_request_ns);
-            printf("MENU_DONE status=%s request_ns=%" PRIu64 "\n",
+                source_display, request.source_window,
+                client_display, client_window,
+                atoi(argv[4]), atoi(argv[5]), artifact_dir, 1,
+                capture_request_ns, request.sequence,
+                request.continue_full_after_fast_wait);
+            printf("MENU_DONE status=%s request_ns=%" PRIu64
+                   " sequence=%u\n",
                    result == 0 ? "PASS" : result == 1 ? "WAIT" : "ERROR",
-                   capture_request_ns);
+                   capture_request_ns, request.sequence);
             fflush(stdout);
         }
         result = 0;
@@ -1018,7 +1158,7 @@ main(int argc, char **argv)
         result = capture_and_compare(source_display, source_window,
                                      client_display, client_window,
                                      atoi(argv[5]), atoi(argv[6]), argv[7],
-                                     fast_mode, helper_start_ns);
+                                     fast_mode, helper_start_ns, 0U, 0);
     }
     XCloseDisplay(source_display);
     XCloseDisplay(client_display);

@@ -175,6 +175,52 @@ capture_roi(Probe *probe)
     return probe->last_roi != NULL;
 }
 
+static int
+hash_region(Probe *probe, int x, int y, int width, int height,
+            uint64_t *hash)
+{
+    XImage *image;
+    uint64_t value = UINT64_C(14695981039346656037);
+
+    if (width <= 0 || height <= 0 || x < 0 || y < 0 ||
+        x + width > probe->attributes.width ||
+        y + height > probe->attributes.height)
+    {
+        return 0;
+    }
+    image = XGetImage(probe->display, probe->window, x, y,
+                      (unsigned int)width, (unsigned int)height,
+                      AllPlanes, ZPixmap);
+    if (image == NULL)
+    {
+        return 0;
+    }
+    for (int row = 0; row < height; ++row)
+    {
+        for (int column = 0; column < width; ++column)
+        {
+            const unsigned long pixel = XGetPixel(image, column, row);
+            const unsigned char rgb[3] = {
+                (unsigned char)component(
+                    pixel, probe->attributes.visual->red_mask),
+                (unsigned char)component(
+                    pixel, probe->attributes.visual->green_mask),
+                (unsigned char)component(
+                    pixel, probe->attributes.visual->blue_mask),
+            };
+
+            for (unsigned int channel = 0U; channel < 3U; ++channel)
+            {
+                value ^= rgb[channel];
+                value *= UINT64_C(1099511628211);
+            }
+        }
+    }
+    XDestroyImage(image);
+    *hash = value;
+    return 1;
+}
+
 static unsigned int
 count_bright_text(const Probe *probe, int left, int top, int right, int bottom)
 {
@@ -857,6 +903,39 @@ main(int argc, char **argv)
 
             printf("INPUT_STATE buttons_released=%u\n",
                    (unsigned int)(query_ok && (mask & button_mask) == 0U));
+            fflush(stdout);
+        }
+        else if (strncmp(command, "hash-region ", 12) == 0)
+        {
+            int x;
+            int y;
+            int width;
+            int height;
+            char x_text[16];
+            char y_text[16];
+            char width_text[16];
+            char height_text[16];
+            char trailing;
+            uint64_t hash;
+
+            if (sscanf(command + 12, "%15s %15s %15s %15s %c",
+                       x_text, y_text, width_text, height_text,
+                       &trailing) != 4 ||
+                !parse_integer(x_text, &x) ||
+                !parse_integer(y_text, &y) ||
+                !parse_integer(width_text, &width) ||
+                !parse_integer(height_text, &height) ||
+                !hash_region(&probe, x, y, width, height, &hash))
+            {
+                puts("ERROR hash-region");
+            }
+            else
+            {
+                printf("REGION_HASH %016" PRIx64 " pixels=%" PRIu64
+                       " captured_ns=%" PRId64 "\n", hash,
+                       (uint64_t)width * (uint64_t)height,
+                       monotonic_nanoseconds());
+            }
             fflush(stdout);
         }
         else if (strncmp(command, "dump ", 5) == 0)

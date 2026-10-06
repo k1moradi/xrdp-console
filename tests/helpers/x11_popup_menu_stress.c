@@ -31,6 +31,7 @@ typedef struct
     unsigned int background_phase;
     int popup_open;
     int background_paused;
+    int background_only;
     const char *closed_reference_path;
 } Scene;
 
@@ -396,9 +397,10 @@ main(int argc, char **argv)
     const char *reference_path;
     struct timespec frame_interval = {0, 50000000L};
 
-    if (argc != 2)
+    if ((argc != 2 && argc != 3) ||
+        (argc == 3 && strcmp(argv[2], "--background-only") != 0))
     {
-        fprintf(stderr, "usage: %s DISPLAY\n", argv[0]);
+        fprintf(stderr, "usage: %s DISPLAY [--background-only]\n", argv[0]);
         return 2;
     }
     display = XOpenDisplay(argv[1]);
@@ -421,6 +423,7 @@ main(int argc, char **argv)
     memset(&scene, 0, sizeof(scene));
     scene.display = display;
     scene.root = RootWindow(display, screen);
+    scene.background_only = argc == 3;
     scene.panel_y = POPUP_SOURCE_HEIGHT - POPUP_PANEL_HEIGHT -
                     POPUP_PANEL_BOTTOM_MARGIN;
     scene.colors[0] = allocate_rgb(display, 26, 34, 47);
@@ -438,34 +441,38 @@ main(int argc, char **argv)
     scene.background = XCreateSimpleWindow(
         display, scene.root, 0, 0, (unsigned int)width,
         (unsigned int)height, 0, scene.colors[0], scene.colors[0]);
-    scene.popup = XCreateSimpleWindow(
-        display, scene.root, POPUP_PANEL_X, scene.panel_y,
-        POPUP_PANEL_WIDTH, POPUP_PANEL_HEIGHT, 1, scene.colors[7],
-        scene.colors[0]);
     attributes.override_redirect = True;
     XChangeWindowAttributes(display, scene.background, CWOverrideRedirect,
-                            &attributes);
-    XChangeWindowAttributes(display, scene.popup, CWOverrideRedirect,
                             &attributes);
     XSelectInput(display, scene.background,
                  KeyPressMask | ButtonPressMask | ExposureMask);
     scene.background_gc = XCreateGC(display, scene.background, 0, NULL);
-    scene.popup_gc = XCreateGC(display, scene.popup, 0, NULL);
-    scene.font = XLoadQueryFont(display, "10x20");
-    if (scene.font == NULL)
+    if (!scene.background_only)
     {
-        scene.font = XLoadQueryFont(display, "fixed");
+        scene.popup = XCreateSimpleWindow(
+            display, scene.root, POPUP_PANEL_X, scene.panel_y,
+            POPUP_PANEL_WIDTH, POPUP_PANEL_HEIGHT, 1, scene.colors[7],
+            scene.colors[0]);
+        XChangeWindowAttributes(display, scene.popup, CWOverrideRedirect,
+                                &attributes);
+        scene.popup_gc = XCreateGC(display, scene.popup, 0, NULL);
+        scene.font = XLoadQueryFont(display, "10x20");
+        if (scene.font == NULL)
+        {
+            scene.font = XLoadQueryFont(display, "fixed");
+        }
+        if (scene.font == NULL)
+        {
+            fputs("could not load a core X11 font\n", stderr);
+            goto cleanup;
+        }
+        XSetFont(display, scene.popup_gc, scene.font->fid);
     }
-    if (scene.font == NULL)
-    {
-        fputs("could not load a core X11 font\n", stderr);
-        goto cleanup;
-    }
-    XSetFont(display, scene.popup_gc, scene.font->fid);
     reference_path = getenv("XRDP_CONSOLE_POPUP_REFERENCE");
     scene.closed_reference_path =
         getenv("XRDP_CONSOLE_POPUP_CLOSED_REFERENCE");
-    if (reference_path != NULL && reference_path[0] != '\0' &&
+    if (!scene.background_only && reference_path != NULL &&
+        reference_path[0] != '\0' &&
         !write_reference_image(&scene, reference_path))
     {
         fprintf(stderr, "could not write popup reference image: %s\n",
@@ -477,8 +484,9 @@ main(int argc, char **argv)
                    CurrentTime);
     draw_background(&scene);
     XSync(display, False);
-    printf("READY source=%dx%d trigger=taskbar-button background_fps=20\n",
-           width, height);
+    printf("READY source=%dx%d trigger=%s background_fps=20\n",
+           width, height,
+           scene.background_only ? "background-only" : "taskbar-button");
     fflush(stdout);
 
     x_fd = ConnectionNumber(display);
@@ -501,7 +509,7 @@ main(int argc, char **argv)
         while (XPending(display) > 0)
         {
             XNextEvent(display, &event);
-            if (event.type == KeyPress &&
+            if (!scene.background_only && event.type == KeyPress &&
                 XLookupKeysym(&event.xkey, 0) == XK_Super_L)
             {
                 if (!toggle_popup(&scene, "keyboard",
@@ -510,7 +518,7 @@ main(int argc, char **argv)
                     goto cleanup;
                 }
             }
-            else if (event.type == ButtonPress &&
+            else if (!scene.background_only && event.type == ButtonPress &&
                      event.xbutton.x >= 0 && event.xbutton.x < 82 &&
                      event.xbutton.y >= POPUP_SOURCE_HEIGHT - 48)
             {
