@@ -3,17 +3,24 @@ Subject: [DIAGNOSTIC-ONLY] xrdp: log outbound CLIPRDR PDU header metadata
 
 Apply after the repository's pinned xrdp patch series, including patch 0043.
 This patch is not part of patches/xrdp/series and must not be deployed without
-explicit authorization. It logs only the decoded CLIPRDR common header and
-virtual-channel fragment metadata after xrdp_sec_send succeeds. Payload bytes
-are never logged or copied.
+explicit authorization. It decodes only an uncompressed first-fragment
+CLIPRDR common header before channel framing, then logs the decoded metadata
+only after xrdp_sec_send succeeds. Payload bytes are never logged or copied.
 
+diff --git a/libxrdp/xrdp_channel.c b/libxrdp/xrdp_channel.c
+index 6e9331d..7fcfc67 100644
 --- a/libxrdp/xrdp_channel.c
 +++ b/libxrdp/xrdp_channel.c
-@@ -115,0 +116,3 @@
+@@ -114,2 +114,5 @@ xrdp_channel_send(struct xrdp_channel *self, struct stream *s, int channel_id,
+ {
 +    struct xrdp_cliprdr_diagnostic_header clip_header;
 +    int cliprdr_header_available = 0;
 +    int cliprdr_fragment_bytes = 0;
-@@ -158,0 +162,13 @@
+     struct mcs_channel_item *channel;
+@@ -133,3 +136,14 @@ xrdp_channel_send(struct xrdp_channel *self, struct stream *s, int channel_id,
+     }
+-
++    if (xrdp_channel_is_cliprdr(channel) &&
 +            (flags & XR_CHANNEL_FLAG_FIRST) != 0 &&
 +            (flags & XR_CHANNEL_PACKET_COMPRESSED) == 0)
 +    {
@@ -25,9 +32,11 @@ are never logged or copied.
 +            cliprdr_header_available = 1;
 +        }
 +    }
-+
-+    if (xrdp_channel_is_cliprdr(channel) &&
-@@ -178,0 +194,12 @@
+     s_pop_layer(s, channel_hdr);
+@@ -178,3 +192,15 @@ xrdp_channel_send(struct xrdp_channel *self, struct stream *s, int channel_id,
+     }
+-
++    /* Log the decoded header only after the secure-layer send succeeds. */
 +    if (cliprdr_header_available)
 +    {
 +        LOG(LOG_LEVEL_INFO,
@@ -40,3 +49,4 @@ are never logged or copied.
 +            clip_header.data_length, total_data_len, cliprdr_fragment_bytes,
 +            flags, (flags & XR_CHANNEL_FLAG_LAST) != 0);
 +    }
+     return 0;

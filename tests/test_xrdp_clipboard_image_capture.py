@@ -142,6 +142,8 @@ class ClipboardCaptureTests(unittest.TestCase):
             ])
             self.assertEqual(events[1]["response_status"], "SUCCESS")
             self.assertEqual(events[3]["response_status"], "FAIL")
+            self.assertEqual([event["msg_flags"] for event in events],
+                             [0, 1, 0, 2])
             self.assertEqual(events[0]["direction"], "server-to-client")
             self.assertEqual(events[0]["send_status"], "success")
             self.assertEqual(events[0]["data_len"], 4)
@@ -479,11 +481,17 @@ class ClipboardCaptureTests(unittest.TestCase):
             self.assertEqual(png["chansrv_request_attempts"][0][
                 "outbound_vc_type4"]["msg_type"], 4)
             self.assertEqual(png["chansrv_request_attempts"][0][
+                "outbound_vc_type4"]["msg_flags"], 0)
+            self.assertEqual(png["chansrv_request_attempts"][0][
                 "inbound_vc_type5"]["response_status"], "SUCCESS")
+            self.assertEqual(png["chansrv_request_attempts"][0][
+                "inbound_vc_type5"]["msg_flags"], 1)
             self.assertTrue(png["chansrv_request_attempts"][0][
                 "successful_CLIPRDR_image_response"])
             self.assertEqual(bmp["chansrv_request_attempts"][0][
                 "inbound_vc_type5"]["data_len"], 100)
+            self.assertEqual(bmp["chansrv_request_attempts"][0][
+                "inbound_vc_type5"]["msg_flags"], 1)
             self.assertEqual(bmp["chansrv_x11_incr_events"][-1]["fields"][
                 "event"], "x11-incr-terminator-ack")
             self.assertEqual(png["probe_selection_notify"]["property"],
@@ -614,6 +622,7 @@ class ClipboardCaptureTests(unittest.TestCase):
             attempt = png["chansrv_request_attempts"][0]
             self.assertEqual(attempt["inbound_vc_type5"]["response_status"],
                              "FAIL")
+            self.assertEqual(attempt["inbound_vc_type5"]["msg_flags"], 2)
             self.assertEqual(attempt["inbound_vc_type5"]["data_len"], 0)
             self.assertFalse(attempt["successful_CLIPRDR_image_response"])
             self.assertEqual(png["completion_or_failure_reason"],

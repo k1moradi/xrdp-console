@@ -4349,6 +4349,14 @@ def assert_clipboard_remote_image_probe_session(
     vc_type5_fields = dict(re.findall(
         r"([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)",
         vc_response_lines[response_packets_before]))
+    if (vc_type5_fields.get("msg_type") != "5" or
+            vc_type5_fields.get("direction") != "client-to-server" or
+            vc_type5_fields.get("msg_flags") != "0x0001" or
+            int(vc_type5_fields.get("data_len", "0"), 0) != response_bytes):
+        raise AssertionError(
+            "xrdp's actual VC receive boundary did not show a successful, "
+            "nonempty CB_FORMAT_DATA_RESPONSE type-5 header: "
+            f"{vc_type5_fields!r}\n{xrdp_log_excerpt(log_path)}")
     outbound_request_lines = [
         line for line in current_vc_log.splitlines()
         if re.search(outbound_request_pattern, line)]
@@ -4362,6 +4370,15 @@ def assert_clipboard_remote_image_probe_session(
         vc_type4_fields = dict(re.findall(
             r"([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)",
             outbound_request_lines[outbound_requests_before]))
+        if (vc_type4_fields.get("direction") != "server-to-client" or
+                vc_type4_fields.get("stage") != "sec-send-success" or
+                vc_type4_fields.get("msg_type") != "4" or
+                vc_type4_fields.get("msg_flags") != "0x0000" or
+                vc_type4_fields.get("data_len") != "4" or
+                vc_type4_fields.get("send_status") != "success"):
+            raise AssertionError(
+                "instrumented xrdp outbound type-4 header metadata was "
+                f"incomplete or unexpected: {vc_type4_fields!r}")
     else:
         vc_type4_fields = {}
 
@@ -4432,13 +4449,13 @@ def assert_clipboard_remote_image_probe_session(
         "xrdp_vc": {
             "server_to_client_type4_after_send_success": {
                 key: vc_type4_fields.get(key)
-                for key in ("direction", "stage", "msg_type", "data_len",
-                            "send_status")
+                for key in ("direction", "stage", "msg_type", "msg_flags",
+                            "data_len", "send_status")
             },
             "client_to_server_type5_received": {
                 key: vc_type5_fields.get(key)
-                for key in ("direction", "msg_type", "data_len", "total_len",
-                            "fragment_bytes")
+                for key in ("direction", "msg_type", "msg_flags", "data_len",
+                            "total_len", "fragment_bytes")
             },
         },
         "controlled_peer": {
