@@ -421,6 +421,8 @@ if(TARGET xrdp-console)
         CXX_EXTENSIONS OFF)
     target_include_directories(gfx-avc420-frame-unit PRIVATE
         ${CMAKE_SOURCE_DIR}/src)
+    target_compile_options(gfx-avc420-frame-unit PRIVATE
+        -Wall -Wextra -Wpedantic -Werror)
     add_test(NAME gfx-avc420-frame-unit
         COMMAND gfx-avc420-frame-unit)
 
