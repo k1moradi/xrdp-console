@@ -17,7 +17,8 @@ set(PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/test_lxqt_menu_quality_calibration.py)
 list(APPEND PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/lxqt_menu_quality_protocol.py
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_lxqt_menu_quality_protocol.py)
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_lxqt_menu_quality_protocol.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_popup_background_epoch_xvfb.py)
 
 if(TARGET xrdp-console)
     add_test(NAME xrdp-clipboard-padding-source-contract
@@ -970,6 +971,16 @@ if(TARGET xrdp-console)
                 ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
                 TIMEOUT 30
                 LABELS "unit;integration;quality;lxqt")
+            add_test(NAME popup-background-epoch-xvfb
+                COMMAND ${Python3_EXECUTABLE} -B
+                ${CMAKE_CURRENT_SOURCE_DIR}/test_popup_background_epoch_xvfb.py
+                $<TARGET_FILE:x11-popup-ui-probe>
+                $<TARGET_FILE:x11-popup-menu-stress>
+                "${XVFB_EXECUTABLE}")
+            set_tests_properties(popup-background-epoch-xvfb PROPERTIES
+                ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+                TIMEOUT 20
+                LABELS "integration;quality;popup")
             add_test(NAME clipboard-png-owner-firstchunk-delay
                 COMMAND ${Python3_EXECUTABLE} -B
                 ${CMAKE_CURRENT_SOURCE_DIR}/test_clipboard_x11_owner_delay.py

@@ -10,6 +10,7 @@ full live comparisons on that same C helper.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 import math
 import unittest
@@ -181,6 +182,23 @@ def luma(pixel: tuple[int, int, int]) -> int:
     return (77 * red + 150 * green + 29 * blue + 128) >> 8
 
 
+@lru_cache(maxsize=8)
+def expected_pixels_for_compare(source: Ppm, mapping: Mapping,
+                                target_width: int,
+                                target_height: int) -> bytes:
+    """Cache area-weighted expected pixels reused by all corpus checks."""
+    expected = bytearray(target_width * target_height * 3)
+    for y in range(target_height):
+        for x in range(target_width):
+            destination_x = mapping.target_x + x
+            destination_y = mapping.target_y + y
+            pixel = source_pixel_for_destination(
+                source, mapping, destination_x, destination_y)
+            offset = (y * target_width + x) * 3
+            expected[offset:offset + 3] = bytes(pixel)
+    return bytes(expected)
+
+
 def percentile(values: list[int], percent: float) -> int:
     ordered = sorted(values)
     return ordered[max(0, math.ceil(len(ordered) * percent / 100.0) - 1)]
@@ -217,6 +235,8 @@ def fast_compare(source: Ppm, client: Ppm, mapping: Mapping) -> Metrics:
 
 
 def full_compare(source: Ppm, client: Ppm, mapping: Mapping) -> Metrics:
+    expected_pixels = expected_pixels_for_compare(
+        source, mapping, client.width, client.height)
     errors: list[int] = []
     lumas: list[int] = []
     unique: set[tuple[int, int, int]] = set()
@@ -232,9 +252,11 @@ def full_compare(source: Ppm, client: Ppm, mapping: Mapping) -> Metrics:
         for x in range(client.width):
             dest_x = mapping.target_x + x
             dest_y = mapping.target_y + y
-            expected = source_pixel_for_destination(source, mapping, dest_x, dest_y)
             actual = client.pixel(x, y)
-            differences = [abs(a - b) for a, b in zip(expected, actual)]
+            expected_offset = (y * client.width + x) * 3
+            differences = [
+                abs(expected_pixels[expected_offset + channel] - actual[channel])
+                for channel in range(3)]
             errors.append(max(differences))
             total_channel_error += sum(differences)
             key = (x * 32 // client.width, y * 32 // client.height)
@@ -317,11 +339,21 @@ class LxqtMenuQualityCalibration(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = read_ppm(FIXTURES / "source-menu.ppm")
+        cls.stress_source = read_ppm(
+            FIXTURES / "source-menu-stress.ppm")
         cls.mapping = scaled_mapping(1920, 1080, 1512, 949, 0, 498, 0, 442)
-        cls.positive_pairs = [
-            (name, read_ppm(FIXTURES / f"client-{index:02d}.ppm"))
-            for index, name in enumerate(("h264-1", "h264-2", "h264-3", "h264-4"), 1)
-        ]
+        cls.positive_pairs = []
+        for index in range(1, 15):
+            # The ten new captures retain their matching source frame. Most
+            # share source-menu-stress.ppm; captures 4, 10, and 15 match the
+            # original source-menu.ppm byte for byte.
+            source = (
+                cls.source if index <= 4 or index in (6, 10, 14) else
+                cls.stress_source)
+            cls.positive_pairs.append((
+                f"h264-{index}",
+                read_ppm(FIXTURES / f"client-{index:02d}.ppm"),
+                source))
         cls.preopen = read_ppm(FIXTURES / "preopen-roi.ppm")
         cls.live_corrupt_source = read_ppm(
             FIXTURES / "live-corrupt-source.ppm")
@@ -353,8 +385,15 @@ class LxqtMenuQualityCalibration(unittest.TestCase):
         self.assertTrue(full_compare(self.source, self.source, identity).passed)
 
     def test_saved_h264_pairs_pass_both_oracles(self) -> None:
-        for name, client in self.positive_pairs:
-            self.assert_pair(name, client, True)
+        self.assertEqual(len(self.positive_pairs), 14)
+        self.assertEqual(
+            len({client.rgb for _, client, _ in self.positive_pairs}), 14,
+            "positive corpus must contain distinct decoded client frames")
+        for name, client, source in self.positive_pairs:
+            source_layout = favorite_source_rows_compare(self.source, source)
+            self.assertTrue(source_layout.passed,
+                            source_layout.describe(name + " source layout"))
+            self.assert_pair(name, client, True, source=source)
 
     def test_preopen_background_is_rejected_by_both_oracles(self) -> None:
         self.assert_pair("preopen", self.preopen, False)

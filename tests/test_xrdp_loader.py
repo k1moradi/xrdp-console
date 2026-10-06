@@ -4851,11 +4851,16 @@ def start_popup_ui_stimulus(stimulus_path: Path, display: str,
             f"popup stress stimulus did not become ready: {ready!r} {details}")
     if epoch_controlled:
         epoch_ready = read_line(process.stdout, 1.0)
-        if epoch_ready != b"EPOCH_CONTROL_READY\n":
+        epoch_match = re.fullmatch(
+            rb"EPOCH_CONTROL_READY window=(0x[0-9a-fA-F]+)\n",
+            epoch_ready)
+        if epoch_match is None:
             stop_process(process)
             raise AssertionError(
                 "popup stimulus did not enable epoch control: "
                 f"{epoch_ready!r}")
+        setattr(process, "_xrdp_background_window",
+                epoch_match.group(1).decode("ascii"))
     return process
 
 
@@ -5057,18 +5062,12 @@ def lxqt_panel_process_snapshot(
 
 def menu_quality_probe_capture(
         process: subprocess.Popen[bytes], source_window: str,
-        sequence: int, timeout: float,
-        force_full_after_fast_wait: bool = False,
-        fast_only: bool = False) -> list[bytes]:
-    """Ask for one capture and return as soon as its fast verdict arrives."""
+        sequence: int, timeout: float) -> list[bytes]:
+    """Request one capture and return at its pixel-time fast verdict."""
     if process.stdin is None or process.stdout is None:
         raise AssertionError("LXQt quality observer pipes were not created")
-    if force_full_after_fast_wait and fast_only:
-        raise ValueError("fast-only capture cannot force a full comparison")
-    operation = ("capture-full" if force_full_after_fast_wait else
-                 "capture-fast" if fast_only else "capture")
     process.stdin.write(
-        f"{operation} {source_window} {sequence}\n".encode())
+        f"capture {source_window} {sequence}\n".encode())
     process.stdin.flush()
     deadline = time.monotonic() + timeout
     lines: list[bytes] = []
@@ -5085,30 +5084,6 @@ def menu_quality_probe_capture(
     raise AssertionError(
         "persistent LXQt quality observer did not finish a capture: "
         + " | ".join(line.decode(errors="replace") for line in lines))
-
-
-def menu_quality_probe_send_capture(
-        process: subprocess.Popen[bytes], source_window: str,
-        sequence: int, operation: str) -> None:
-    if operation not in ("capture", "capture-fast", "capture-full"):
-        raise ValueError(f"invalid LXQt quality operation: {operation}")
-    if process.stdin is None or process.poll() is not None:
-        raise AssertionError("LXQt quality observer is not ready for a capture")
-    process.stdin.write(
-        f"{operation} {source_window} {sequence}\n".encode())
-    process.stdin.flush()
-
-
-def menu_quality_probe_read_available(
-        process: subprocess.Popen[bytes]) -> list[bytes]:
-    if process.stdout is None:
-        raise AssertionError("LXQt quality observer stdout was not created")
-    lines: list[bytes] = []
-    while True:
-        line = read_line(process.stdout, 0.0)
-        if not line:
-            return lines
-        lines.append(line.strip())
 
 
 def menu_quality_probe_finish_capture(
@@ -5143,7 +5118,7 @@ def assert_lxqt_menu_stress_session(
         artifact_dir: Path, panel_process: subprocess.Popen[bytes],
         stimulus: subprocess.Popen[bytes],
         cpu_spinner: subprocess.Popen[bytes] | None,
-        cpu_contention: bool, cycles: int = 5,
+        cpu_contention: bool, cycles: int = 20,
         freshness_budget_ms: float = 1000.0) -> None:
     """Check actual LXQt menu samples and full-frame quality under load."""
     if not menu_quality_probe_path.is_file():
@@ -5162,13 +5137,25 @@ def assert_lxqt_menu_stress_session(
                 "XRDP_CONSOLE_LXQT_MENU_STRESS_CYCLES must be between 1 and 20")
     try:
         stability_samples = int(os.environ.get(
-            "XRDP_CONSOLE_LXQT_STABILITY_SAMPLES", "1"))
+            "XRDP_CONSOLE_LXQT_STABILITY_SAMPLES", "3"))
     except ValueError as error:
         raise AssertionError(
             "XRDP_CONSOLE_LXQT_STABILITY_SAMPLES must be an integer") from error
     if not 0 <= stability_samples <= 3:
         raise AssertionError(
             "XRDP_CONSOLE_LXQT_STABILITY_SAMPLES must be between 0 and 3")
+    try:
+        minimum_stress_seconds = float(os.environ.get(
+            "XRDP_CONSOLE_LXQT_MIN_STRESS_SECONDS", "75"))
+    except ValueError as error:
+        raise AssertionError(
+            "XRDP_CONSOLE_LXQT_MIN_STRESS_SECONDS must be a number") from error
+    if (not math.isfinite(minimum_stress_seconds) or
+            not 0.0 <= minimum_stress_seconds <= 110.0):
+        raise AssertionError(
+            "XRDP_CONSOLE_LXQT_MIN_STRESS_SECONDS must be between 0 and 110")
+    maximum_cycles = min(
+        240, max(cycles, cycles + math.ceil(minimum_stress_seconds * 2.0)))
 
     client_window = find_window(client_display, window_title, 8.0)
     probe = subprocess.Popen(
@@ -5205,10 +5192,66 @@ def assert_lxqt_menu_stress_session(
     last_quality = "not sampled"
     failed_cycle: int | None = None
     active_quality_probe: subprocess.Popen[bytes] | None = None
-    active_fast_quality_probe: subprocess.Popen[bytes] | None = None
     previous_menu_window: str | None = None
-    fast_sequence = 0
-    stability_sequence = 1000
+    capture_sequence = 0
+    observer_startup_ms: float | None = None
+    source_capture_ms: list[float] = []
+    client_capture_ms: list[float] = []
+    fast_compare_ms: list[float] = []
+    full_compare_ms: list[float] = []
+    stress_started_ns: int | None = None
+
+    def percentile95(values: list[float]) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        return ordered[max(0, math.ceil(len(ordered) * 0.95) - 1)]
+
+    def timing_summary_lines() -> list[str]:
+        lines: list[str] = []
+        if observer_startup_ms is not None:
+            lines.append(f"observer_startup_ms={observer_startup_ms:.3f}")
+        for name, values in (
+                ("source_capture", source_capture_ms),
+                ("client_capture", client_capture_ms),
+                ("fast_compare", fast_compare_ms),
+                ("full_compare", full_compare_ms)):
+            if values:
+                lines.append(
+                    f"{name}_p50_ms={statistics.median(values):.3f}")
+                lines.append(
+                    f"{name}_p95_ms={percentile95(values):.3f}")
+        return lines
+
+    def stress_duration_summary_lines() -> list[str]:
+        lines = [
+            f"minimum_stress_duration_seconds={minimum_stress_seconds:.3f}",
+            f"minimum_open_cycles={cycles}",
+            f"maximum_open_cycles={maximum_cycles}",
+        ]
+        if stress_started_ns is not None:
+            elapsed = (time.monotonic_ns() - stress_started_ns) / 1_000_000_000.0
+            lines.append(f"actual_stress_duration_seconds={elapsed:.3f}")
+        return lines
+
+    def record_fast_timing(fields: dict[str, str]) -> None:
+        try:
+            source_capture_ms.append(
+                int(fields["source_capture_duration_us"]) / 1000.0)
+            client_capture_ms.append(
+                int(fields["client_capture_duration_us"]) / 1000.0)
+            compare_us = (
+                int(fields["fast_compare_end_ns"]) -
+                int(fields["fast_compare_start_ns"])) / 1000.0
+            fast_compare_ms.append(compare_us / 1000.0)
+        except (KeyError, ValueError):
+            fail("LXQt fast record omitted source/client/compare durations")
+
+    def record_full_timing(fields: dict[str, str]) -> None:
+        try:
+            full_compare_ms.append(int(fields["full_compare_us"]) / 1000.0)
+        except (KeyError, ValueError) as error:
+            fail(f"LXQt full timing record omitted compare duration: {error}")
 
     def fail(message: str) -> None:
         try:
@@ -5228,13 +5271,20 @@ def assert_lxqt_menu_stress_session(
                 destination = run_dir / label
                 shutil.copyfile(path, destination)
                 retained_logs.append(destination.name)
+        failure_latency_lines: list[str] = []
+        if latencies:
+            failure_latency_lines.extend((
+                f"max_latency_ms={max(latencies):.1f}",
+                f"p95_latency_ms={percentile95(latencies):.1f}"))
         summary_path.write_text(
             "XRDP_CONSOLE_LXQT_MENU_STRESS\n"
             "status=FAIL\n"
             "background_stimulus=background-only\n"
+            + "\n".join(stress_duration_summary_lines()) + "\n"
             f"reason={' '.join(message.splitlines())}\n"
             f"failed_cycle={failed_cycle if failed_cycle is not None else 'none'}\n"
             f"completed_cycles={len(latencies)}\n"
+            + "\n".join(failure_latency_lines) + "\n"
             "latencies_ms=" + ",".join(f"{item:.1f}" for item in latencies) +
             "\n" + f"last_quality={last_quality}\n" +
             f"fast_observation_count={len(fast_observations)}\n" +
@@ -5245,6 +5295,7 @@ def assert_lxqt_menu_stress_session(
             "cycle_trace:\n" + "\n".join(cycle_trace) + "\n" +
             "retained_logs=" + ",".join(retained_logs) + "\n" +
             f"remote_frame_dump={remote_dump.decode(errors='replace').strip()}\n" +
+            "\n".join(timing_summary_lines()) + "\n" +
             "\n".join(popup_h264_profile_metrics(log_path)) + "\n",
             encoding="utf-8")
         raise AssertionError(
@@ -5256,9 +5307,7 @@ def assert_lxqt_menu_stress_session(
             f"[xrdp stdout]\n{read_text(stdout_path)}")
 
     def check_source_layout(sequence: int, label: str) -> str:
-        directory_name = (f"stability-{sequence - 1000:04d}"
-                          if sequence >= 1001 else
-                          f"capture-{sequence:04d}")
+        directory_name = f"capture-{sequence:06d}"
         capture_dir = run_dir / directory_name
         source_path = next((candidate for candidate in (
             capture_dir / "lxqt-menu-source.ppm",
@@ -5306,33 +5355,35 @@ def assert_lxqt_menu_stress_session(
             fail(
                 "persistent LXQt quality observer did not initialize: "
                 f"{probe_start_line!r} {probe_ready_line!r}")
-        active_fast_quality_probe = subprocess.Popen(
-            [str(menu_quality_probe_path), source_display, client_display,
-             client_window, str(source_width), str(source_height),
-             str(run_dir), "--interactive"],
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, bufsize=0, start_new_session=True)
-        if (active_fast_quality_probe.stdin is None or
-                active_fast_quality_probe.stdout is None):
-            fail("LXQt fast quality observer pipes were not created")
-        fast_probe_start_line = read_line(
-            active_fast_quality_probe.stdout, 5.0).strip()
-        fast_probe_ready_line = read_line(
-            active_fast_quality_probe.stdout, 5.0).strip()
-        if (not fast_probe_start_line.startswith(b"MENU_PROBE_START ") or
-                not fast_probe_ready_line.startswith(b"MENU_PROBE_READY ")):
+        observer_ready_ns = time.monotonic_ns()
+        observer_startup_ms = (
+            observer_ready_ns - observer_process_start_ns) / 1_000_000.0
+        ready_fields = parse_protocol_fields(probe_ready_line)
+        try:
+            source_open_ms = (
+                int(ready_fields["source_display_open_end_ns"]) -
+                int(ready_fields["source_display_open_start_ns"])) / 1_000_000.0
+            client_open_ms = (
+                int(ready_fields["client_display_open_end_ns"]) -
+                int(ready_fields["client_display_open_start_ns"])) / 1_000_000.0
+            ready_width = int(ready_fields["client_window_width"])
+            ready_height = int(ready_fields["client_window_height"])
+        except (KeyError, ValueError) as error:
+            fail(f"persistent observer READY record is incomplete: {error}")
+        if ready_width != client_width or ready_height != client_height:
             fail(
-                "LXQt fast quality observer did not initialize: "
-                f"{fast_probe_start_line!r} {fast_probe_ready_line!r}")
+                "persistent observer validated the wrong client window size: "
+                f"{ready_width}x{ready_height}, expected "
+                f"{client_width}x{client_height}")
         cycle_trace.append(
             f"observer_process_start_ns={observer_process_start_ns} "
             f"started_before_first_click=1 "
             f"probe_start={probe_start_line.decode(errors='replace')} "
-            f"probe_ready={probe_ready_line.decode(errors='replace')} "
-            f"fast_probe_start="
-            f"{fast_probe_start_line.decode(errors='replace')} "
-            f"fast_probe_ready="
-            f"{fast_probe_ready_line.decode(errors='replace')}")
+            f"observer_ready_ns={observer_ready_ns} "
+            f"observer_startup_ms={observer_startup_ms:.3f} "
+            f"source_display_open_ms={source_open_ms:.3f} "
+            f"client_display_open_ms={client_open_ms:.3f} "
+            f"probe_ready={probe_ready_line.decode(errors='replace')}")
 
         preopen_path = run_dir / "pre-open-client-full.ppm"
         preopen_result = popup_probe_command(
@@ -5340,7 +5391,13 @@ def assert_lxqt_menu_stress_session(
         if preopen_result != b"DUMPED\n":
             fail(f"could not save pre-open client frame: {preopen_result!r}")
 
-        for cycle in range(1, cycles + 1):
+        stress_started_ns = time.monotonic_ns()
+        minimum_duration_ns = int(minimum_stress_seconds * 1_000_000_000)
+        for cycle in range(1, maximum_cycles + 1):
+            if (cycle > cycles and
+                    time.monotonic_ns() - stress_started_ns >=
+                    minimum_duration_ns):
+                break
             failed_cycle = cycle
             if panel_process.poll() is not None:
                 fail(f"LXQt panel fixture exited before cycle {cycle}")
@@ -5361,9 +5418,6 @@ def assert_lxqt_menu_stress_session(
             if (active_quality_probe is None or
                     active_quality_probe.poll() is not None):
                 fail(f"persistent pixel observer exited before cycle {cycle}")
-            if (active_fast_quality_probe is None or
-                    active_fast_quality_probe.poll() is not None):
-                fail(f"persistent fast pixel observer exited before cycle {cycle}")
             if (previous_menu_window is not None and
                     lxqt_fancy_menu_is_visible(
                         source_display, previous_menu_window)):
@@ -5400,9 +5454,6 @@ def assert_lxqt_menu_stress_session(
             menu_discovery_ns: int | None = None
             passed = False
             attempt = 0
-            full_pending_sequence: int | None = None
-            full_pending_lines: list[bytes] = []
-            full_collection_deadline_ns = deadline_ns + 3_000_000_000
             while time.monotonic_ns() < deadline_ns and menu_window is None:
                 if client.poll() is not None:
                     fail(
@@ -5420,284 +5471,194 @@ def assert_lxqt_menu_stress_session(
                 f"observer_was_running_before_click=1")
 
             if menu_window is not None:
-                while (time.monotonic_ns() < deadline_ns or
-                       (full_pending_sequence is not None and
-                        time.monotonic_ns() < full_collection_deadline_ns)):
-                    now_ns = time.monotonic_ns()
-                    if full_pending_sequence is not None:
-                        try:
-                            full_pending_lines.extend(
-                                menu_quality_probe_read_available(
-                                    active_quality_probe))
-                        except AssertionError as error:
-                            fail(f"LXQt full quality observer failed: {error}")
-                        full_done_line = next(
-                            (line for line in full_pending_lines
-                             if line.startswith(b"MENU_DONE ")), b"")
-                        if full_done_line:
-                            full_fast_line = next(
-                                (line for line in full_pending_lines
-                                 if line.startswith(b"MENU_FAST ")), b"")
-                            full_quality_line = next(
-                                (line for line in full_pending_lines
-                                 if line.startswith(b"MENU_QUALITY ")), b"")
-                            full_timing_line = next(
-                                (line for line in full_pending_lines
-                                 if line.startswith(b"MENU_TIMING ")), b"")
-                            if not full_fast_line:
-                                fail(
-                                    "asynchronous full comparison omitted a "
-                                    f"verdict: {full_pending_lines!r}")
-                            full_fast_fields = parse_protocol_fields(
-                                full_fast_line)
-                            if ("capture_error" in full_fast_fields and
-                                    not full_quality_line and
-                                    not full_timing_line):
-                                last_quality = "\n".join(
-                                    line.decode(errors="replace")
-                                    for line in full_pending_lines)
-                                cycle_trace.append(
-                                    f"cycle={cycle} full_capture_error="
-                                    f"sequence={full_pending_sequence} "
-                                    f"{last_quality}")
-                                full_pending_sequence = None
-                                full_pending_lines = []
-                                if now_ns >= deadline_ns:
-                                    break
-                            elif not (full_quality_line and full_timing_line):
-                                fail(
-                                    "asynchronous full comparison omitted a "
-                                    f"verdict: {full_pending_lines!r}")
-                            else:
-                                full_quality = full_quality_line.decode(
-                                    errors="replace").strip()
-                                full_timing = full_timing_line.decode(
-                                    errors="replace").strip()
-                                last_quality = "\n".join(
-                                    line.decode(errors="replace")
-                                    for line in full_pending_lines)
-                                try:
-                                    full_request_ns, full_sequence = (
-                                        validate_capture_correlation(
-                                            full_fast_line, full_done_line))
-                                    full_done_fields = parse_done_record(
-                                        full_done_line)
-                                    full_quality_fields = (
-                                        parse_protocol_fields(
-                                            full_quality_line))
-                                    full_timing_fields = (
-                                        parse_protocol_fields(
-                                            full_timing_line))
-                                    full_sample_ns = int(
-                                        full_timing_fields[
-                                            "client_capture_end_ns"])
-                                except (KeyError, ValueError) as error:
-                                    fail(
-                                        "invalid asynchronous full comparison "
-                                        f"response: {last_quality}; {error}")
-                                if (full_sequence != full_pending_sequence or
-                                        full_quality_fields.get(
-                                            "capture_request_ns") !=
-                                        str(full_request_ns) or
-                                        full_quality_fields.get("sequence") !=
-                                        str(full_sequence) or
-                                        full_timing_fields.get(
-                                            "capture_request_ns") !=
-                                        str(full_request_ns) or
-                                        full_timing_fields.get("sequence") !=
-                                        str(full_sequence)):
-                                    fail(
-                                        "asynchronous full verdict did not "
-                                        f"match its request: {last_quality}")
-                                if (full_done_fields["status"] !=
-                                        full_quality_fields.get("status") or
-                                        full_done_fields["status"] not in
-                                        ("PASS", "WAIT", "ERROR")):
-                                    fail(
-                                        "full quality and completion statuses "
-                                        f"disagreed: {last_quality}")
-                                full_latency_ms = (
-                                    full_sample_ns - invocation_ns) / 1_000_000.0
-                                cycle_trace.append(
-                                    f"cycle={cycle} full_check="
-                                    f"sequence={full_sequence} "
-                                    f"sample_latency_ms={full_latency_ms:.3f} "
-                                    f"{full_timing} {full_quality}")
-                                if full_done_fields["status"] == "ERROR":
-                                    fail(
-                                        "LXQt full quality observer returned "
-                                        f"an error: {last_quality}")
-                                if (full_done_fields["status"] == "PASS" and
-                                        full_latency_ms < 0.0):
-                                    fail(
-                                        "full client sample predates the actual "
-                                        f"menu click: {last_quality}")
-                                if (full_done_fields["status"] == "PASS" and
-                                        full_latency_ms <= freshness_budget_ms):
-                                    check_source_layout(
-                                        full_sequence,
-                                        f"cycle={cycle} full source")
-                                    latencies.append(full_latency_ms)
-                                    quality_metrics.append(last_quality)
-                                    passed = True
-                                    break
-                                full_pending_sequence = None
-                                full_pending_lines = []
-                                if now_ns >= deadline_ns:
-                                    break
-
-                    if time.monotonic_ns() >= deadline_ns:
-                        if full_pending_sequence is None:
-                            break
-                        time.sleep(0.005)
-                        continue
+                while time.monotonic_ns() < deadline_ns:
                     if client.poll() is not None:
                         fail(
                             "FreeRDP disconnected while opening LXQt Fancy "
                             f"Menu at cycle {cycle}")
                     attempt += 1
-                    fast_sequence += 1
+                    capture_sequence += 1
                     observer_request_ns = time.monotonic_ns()
                     remaining_seconds = max(
                         0.001, (deadline_ns - observer_request_ns) /
                         1_000_000_000.0)
                     try:
-                        fast_lines = menu_quality_probe_capture(
-                            active_fast_quality_probe, menu_window,
-                            fast_sequence,
-                            remaining_seconds, fast_only=True)
+                        capture_lines = menu_quality_probe_capture(
+                            active_quality_probe, menu_window,
+                            capture_sequence, remaining_seconds)
                     except AssertionError as error:
-                        if time.monotonic_ns() >= deadline_ns:
-                            cycle_trace.append(
-                                f"cycle={cycle} fast_capture_deadline="
-                                f"attempt={attempt} detail="
-                                f"{' '.join(str(error).splitlines())}")
-                            if (active_fast_quality_probe is None or
-                                    active_fast_quality_probe.stdout is None):
-                                fail(
-                                    "fast quality observer disappeared at "
-                                    "the deadline")
-                            late_line = read_line(
-                                active_fast_quality_probe.stdout, 2.0).strip()
-                            if not late_line.startswith(b"MENU_FAST "):
-                                fail(
-                                    "fast quality observer did not finish its "
-                                    f"deadline capture: {late_line!r}")
-                            late_text = late_line.decode(
-                                errors="replace").strip()
-                            try:
-                                late_fields = parse_protocol_fields(late_line)
-                                late_sample_ns = int(
-                                    late_fields["sample_ns"])
-                                late_status = late_fields["status"]
-                            except (KeyError, ValueError) as parse_error:
-                                fail(
-                                    "invalid late fast capture response: "
-                                    f"{late_text}; {parse_error}")
-                            late_latency_ms = (
-                                late_sample_ns - invocation_ns) / 1_000_000.0
-                            fast_observations.append(
-                                f"cycle={cycle} attempt={attempt} "
-                                f"status=LATE_{late_status} "
-                                f"latency_ms={late_latency_ms:.3f} "
-                                f"sample_ns={late_sample_ns}")
-                            cycle_trace.append(
-                                f"cycle={cycle} late_fast_result={late_text}")
-                            if full_pending_sequence is not None:
-                                continue
-                            break
-                        fail(f"LXQt fast quality observer failed: {error}")
+                        cycle_trace.append(
+                            f"cycle={cycle} capture_timeout="
+                            f"attempt={attempt} detail="
+                            f"{' '.join(str(error).splitlines())}")
+                        fail(
+                            "LXQt menu pixels were not observed before the "
+                            f"{freshness_budget_ms:.0f} ms deadline: {error}")
                     fast_line = next(
-                        (line for line in fast_lines
+                        (line for line in capture_lines
                          if line.startswith(b"MENU_FAST ")), b"")
                     if not fast_line:
                         last_quality = "\n".join(
                             line.decode(errors="replace")
-                            for line in fast_lines)
+                            for line in capture_lines)
                         fail(
                             "LXQt pixel observer returned no fast verdict: "
                             f"{last_quality}")
-
                     fast_text = fast_line.decode(errors="replace").strip()
                     try:
-                        fields = parse_protocol_fields(fast_line)
-                        fast_status = fields["status"]
-                        sample_ns = int(fields["sample_ns"])
-                        capture_request_ns = int(fields["capture_request_ns"])
+                        fast_fields = parse_protocol_fields(fast_line)
+                        fast_status = fast_fields["status"]
+                        sample_ns = int(fast_fields["sample_ns"])
+                        request_ns = int(fast_fields["capture_request_ns"])
+                        observed_sequence = int(fast_fields["sequence"])
                         client_capture_end_ns = int(
-                            fields["client_capture_end_ns"])
-                        capture_error = fields.get("capture_error")
+                            fast_fields["client_capture_end_ns"])
+                        capture_error = fast_fields.get("capture_error")
                     except (KeyError, ValueError) as error:
+                        fail(f"invalid MENU_FAST record: {fast_text}; {error}")
+                    if observed_sequence != capture_sequence:
                         fail(
-                            "fast oracle omitted valid status/timestamps: "
-                            f"{fast_text}; {error}")
-                    if capture_error is not None:
-                        fast_observations.append(
-                            f"cycle={cycle} attempt={attempt} "
-                            f"status=CAPTURE_ERROR code={capture_error}")
-                        cycle_trace.append(
-                            f"cycle={cycle} attempt={attempt} "
-                            f"capture_error={capture_error} fast={fast_text}")
-                        if (time.monotonic_ns() >= deadline_ns and
-                                full_pending_sequence is None):
-                            break
-                        time.sleep(0.005)
-                        continue
+                            "observer returned the wrong capture sequence: "
+                            f"expected={capture_sequence} "
+                            f"observed={observed_sequence}")
                     if sample_ns != client_capture_end_ns:
                         fail(
-                            "freshness timestamp differs from client pixel "
-                            f"capture end: {fast_text}")
+                            "freshness timestamp is not the end of the "
+                            f"decoded-client pixel capture: {fast_text}")
                     latency_ms = (sample_ns - invocation_ns) / 1_000_000.0
-                    fast_observations.append(
-                        f"cycle={cycle} attempt={attempt} status="
-                        f"{'OVER_BUDGET_' if latency_ms > freshness_budget_ms else ''}"
-                        f"{fast_status} "
-                        f"latency_ms={latency_ms:.3f} sample_ns={sample_ns}")
                     if latency_ms < 0.0:
                         fail(
                             "client sample predates the actual menu click: "
                             f"{fast_text}")
-                    try:
-                        sequence = int(fields["sequence"])
-                    except (KeyError, ValueError) as error:
-                        fail(f"invalid fast capture sequence: {error}")
-                    request_ns = capture_request_ns
-                    if sequence != fast_sequence:
-                        fail(
-                            "fast-only observer returned the wrong sequence: "
-                            f"expected={fast_sequence} observed={sequence}")
-                    attempt_trace = (
+                    fast_observations.append(
+                        f"cycle={cycle} attempt={attempt} "
+                        f"status={'OVER_BUDGET_' if latency_ms > freshness_budget_ms else ''}"
+                        f"{fast_status} latency_ms={latency_ms:.3f} "
+                        f"sample_ns={sample_ns}")
+                    cycle_trace.append(
                         f"cycle={cycle} attempt={attempt} "
                         f"invocation_ns={invocation_ns} "
                         f"menu_window_discovery_ns={menu_discovery_ns} "
                         f"observer_request_ns={observer_request_ns} "
-                        f"capture_request_ns={request_ns} sequence={sequence} "
+                        f"capture_request_ns={request_ns} "
+                        f"sequence={observed_sequence} "
                         f"latency_ms={latency_ms:.3f} fast={fast_text}")
-                    cycle_trace.append(attempt_trace)
-                    if (latency_ms <= freshness_budget_ms and
-                            fast_status == "PASS" and
-                            full_pending_sequence is None):
-                        full_sequence = fast_sequence + 10_000
-                        try:
-                            menu_quality_probe_send_capture(
-                                active_quality_probe, menu_window,
-                                full_sequence, "capture-full")
-                        except AssertionError as error:
+                    if capture_error is not None:
+                        completed_lines = menu_quality_probe_finish_capture(
+                            active_quality_probe, capture_lines, 0.5)
+                        done_line = next(
+                            (line for line in completed_lines
+                             if line.startswith(b"MENU_DONE ")), b"")
+                        if not done_line:
                             fail(
-                                "could not start asynchronous full quality "
-                                f"check: {error}")
-                        full_pending_sequence = full_sequence
-                        full_pending_lines = []
+                                "capture error did not have a completion "
+                                f"record: {completed_lines!r}")
+                        try:
+                            validate_capture_correlation(fast_line, done_line)
+                            done_fields = parse_done_record(done_line)
+                        except ValueError as error:
+                            fail(f"uncorrelated capture error: {error}")
+                        if done_fields["status"] != "WAIT":
+                            fail(
+                                "pixel capture error returned an unexpected "
+                                f"status: {completed_lines!r}")
+                        last_quality = fast_text
                         cycle_trace.append(
-                            f"cycle={cycle} full_check_queued="
-                            f"sequence={full_sequence} "
-                            f"fast_sequence={fast_sequence} "
-                            f"fast_sample_ns={sample_ns}")
-                    if sample_ns >= deadline_ns:
-                        if full_pending_sequence is None:
+                            f"cycle={cycle} capture_error={capture_error}")
+                        continue
+                    record_fast_timing(fast_fields)
+                    if fast_status not in ("PASS", "WAIT"):
+                        fail(f"unexpected fast status: {fast_text}")
+                    done_timeout = 10.0 if fast_status == "PASS" else 0.5
+                    try:
+                        completed_lines = menu_quality_probe_finish_capture(
+                            active_quality_probe, capture_lines, done_timeout)
+                    except AssertionError as error:
+                        fail(f"same-frame quality check did not finish: {error}")
+                    done_line = next(
+                        (line for line in completed_lines
+                         if line.startswith(b"MENU_DONE ")), b"")
+                    if not done_line:
+                        fail(
+                            "capture completed without MENU_DONE: "
+                            f"{completed_lines!r}")
+                    try:
+                        capture_request_ns, done_sequence = (
+                            validate_capture_correlation(fast_line, done_line))
+                        done_fields = parse_done_record(done_line)
+                    except ValueError as error:
+                        fail(f"uncorrelated observer response: {error}")
+                    if (capture_request_ns != request_ns or
+                            done_sequence != capture_sequence):
+                        fail(
+                            "completion belongs to a different capture: "
+                            f"{completed_lines!r}")
+                    if done_fields["status"] != fast_status:
+                        fail(
+                            "fast and completion statuses disagree: "
+                            f"{completed_lines!r}")
+                    last_quality = "\n".join(
+                        line.decode(errors="replace")
+                        for line in completed_lines)
+                    if fast_status == "WAIT":
+                        if (time.monotonic_ns() >= deadline_ns or
+                                sample_ns >= deadline_ns):
                             break
                         continue
-                    time.sleep(0.005)
+
+                    quality_line = next(
+                        (line for line in completed_lines
+                         if line.startswith(b"MENU_QUALITY ")), b"")
+                    timing_line = next(
+                        (line for line in completed_lines
+                         if line.startswith(b"MENU_TIMING ")), b"")
+                    if not quality_line or not timing_line:
+                        fail(
+                            "MENU_FAST PASS did not lead to a full check of "
+                            f"the same source/client images: {completed_lines!r}")
+                    quality_fields = parse_protocol_fields(quality_line)
+                    timing_fields = parse_protocol_fields(timing_line)
+                    if (quality_fields.get("capture_request_ns") !=
+                            str(capture_request_ns) or
+                            quality_fields.get("sequence") !=
+                            str(done_sequence) or
+                            timing_fields.get("capture_request_ns") !=
+                            str(capture_request_ns) or
+                            timing_fields.get("sequence") !=
+                            str(done_sequence) or
+                            int(timing_fields.get(
+                                "client_capture_end_ns", "-1")) != sample_ns):
+                        fail(
+                            "full quality was not measured from the same "
+                            f"capture as MENU_FAST: {completed_lines!r}")
+                    record_full_timing(timing_fields)
+                    if (quality_fields.get("status") != "PASS" or
+                            done_fields["status"] != "PASS"):
+                        fail(
+                            "a fast-visible menu frame failed the full-region "
+                            f"quality check: {completed_lines!r}")
+                    if latency_ms > freshness_budget_ms:
+                        fast_observations[-1] = (
+                            f"cycle={cycle} attempt={attempt} "
+                            f"status=LATE_PASS latency_ms={latency_ms:.3f} "
+                            f"sample_ns={sample_ns}")
+                        break
+                    quality_text = quality_line.decode(
+                        errors="replace").strip()
+                    timing_text = timing_line.decode(
+                        errors="replace").strip()
+                    check_source_layout(
+                        done_sequence, f"cycle={cycle} full source")
+                    latencies.append(latency_ms)
+                    quality_metrics.append(
+                        f"cycle={cycle} {quality_text} {timing_text}")
+                    cycle_trace.append(
+                        f"cycle={cycle} same_frame_quality="
+                        f"sequence={done_sequence} "
+                        f"latency_ms={latency_ms:.3f} "
+                        f"{timing_text} {quality_text}")
+                    passed = True
+                    break
 
             if not passed or menu_window is None:
                 fail(
@@ -5715,22 +5676,32 @@ def assert_lxqt_menu_stress_session(
                     fail(
                         f"LXQt Fancy Menu disappeared during its stability "
                         f"window at cycle {cycle}, sample {stable_index}")
-                stability_sequence += 1
+                capture_sequence += 1
                 stable_start_ns = time.monotonic_ns()
                 try:
                     stable_fast_lines = menu_quality_probe_capture(
-                        active_quality_probe, menu_window, stability_sequence,
-                        1.0, force_full_after_fast_wait=True)
+                        active_quality_probe, menu_window, capture_sequence,
+                        2.0)
+                    stable_fast = next(
+                        (line for line in stable_fast_lines
+                         if line.startswith(b"MENU_FAST ")), b"")
+                    if not stable_fast:
+                        fail(
+                            "stability capture returned no MENU_FAST record: "
+                            f"{stable_fast_lines!r}")
+                    stable_fast_fields = parse_protocol_fields(stable_fast)
+                    if stable_fast_fields.get("status") != "PASS":
+                        fail(
+                            "LXQt menu failed the sparse stability check: "
+                            f"{stable_fast_lines!r}")
                     stable_lines = menu_quality_probe_finish_capture(
-                        active_quality_probe, stable_fast_lines, 5.0)
+                        active_quality_probe, stable_fast_lines, 10.0)
                 except AssertionError as error:
                     fail(
                         f"LXQt stability quality probe failed in cycle "
                         f"{cycle}, sample {stable_index}: {error}")
                 stable_end_ns = time.monotonic_ns()
-                stable_fast = next(
-                    (line for line in stable_lines
-                     if line.startswith(b"MENU_FAST ")), b"")
+                record_fast_timing(stable_fast_fields)
                 stable_done = next(
                     (line for line in stable_lines
                      if line.startswith(b"MENU_DONE ")), b"")
@@ -5754,6 +5725,16 @@ def assert_lxqt_menu_stress_session(
                     stable_done_fields = parse_done_record(stable_done)
                 except ValueError as error:
                     fail(f"uncorrelated stability capture: {error}")
+                stable_fast_sample_ns = int(stable_fast_fields["sample_ns"])
+                if (stable_request_sequence != capture_sequence or
+                        stable_fast_sample_ns != int(
+                            stable_fast_fields["client_capture_end_ns"]) or
+                        int(stable_timing_fields.get(
+                            "client_capture_end_ns", "-1")) !=
+                        stable_fast_sample_ns):
+                    fail(
+                        "stability quality and sparse verdict did not use "
+                        f"the same client frame: {stable_lines!r}")
                 cycle_trace.append(
                     f"cycle={cycle} stability_sample={stable_index} "
                     f"observer_start_ns={stable_start_ns} "
@@ -5771,11 +5752,14 @@ def assert_lxqt_menu_stress_session(
                         stable_timing_fields.get("capture_request_ns") !=
                         str(stable_request_ns) or
                         stable_timing_fields.get("sequence") !=
-                        str(stable_request_sequence)):
+                        str(stable_request_sequence) or
+                        stable_done_fields["status"] !=
+                        stable_quality_fields.get("status")):
                     fail(
                         "LXQt menu lost full-region image quality while it "
                         f"remained open at cycle {cycle}, sample "
                         f"{stable_index}: {stable_lines!r}")
+                record_full_timing(stable_timing_fields)
                 quality_metrics.append(
                     f"cycle={cycle} stability={stable_index} "
                     f"{stable_quality} {stable_timing}")
@@ -5820,24 +5804,26 @@ def assert_lxqt_menu_stress_session(
                                ",".join(close_epoch_samples))
             previous_menu_window = menu_window
 
-        for observer_name, observer in (
-                ("full", active_quality_probe),
-                ("fast", active_fast_quality_probe)):
-            if observer is None or observer.stdin is None:
-                fail(f"LXQt {observer_name} observer stdin disappeared")
-            observer.stdin.close()
-            try:
-                observer_exit = observer.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                fail(
-                    f"persistent LXQt {observer_name} quality observer "
-                    "did not exit after EOF")
-            if observer_exit != 0:
-                fail(
-                    f"persistent LXQt {observer_name} observer failed on "
-                    f"EOF: exit={observer_exit}")
+        actual_stress_ns = time.monotonic_ns() - stress_started_ns
+        if actual_stress_ns < minimum_duration_ns:
+            fail(
+                "LXQt stress campaign reached its cycle cap before the "
+                f"minimum duration: cycles={len(latencies)} "
+                f"duration_ms={actual_stress_ns / 1_000_000.0:.1f} "
+                f"minimum_ms={minimum_stress_seconds * 1000.0:.1f}")
+
+        if active_quality_probe is None or active_quality_probe.stdin is None:
+            fail("persistent LXQt quality observer stdin disappeared")
+        active_quality_probe.stdin.close()
+        try:
+            observer_exit = active_quality_probe.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            fail("persistent LXQt quality observer did not exit after EOF")
+        if observer_exit != 0:
+            fail(
+                "persistent LXQt quality observer failed on EOF: "
+                f"exit={observer_exit}")
         active_quality_probe = None
-        active_fast_quality_probe = None
 
         ordered_latencies = sorted(latencies)
         p95_index = max(0, math.ceil(len(ordered_latencies) * 0.95) - 1)
@@ -5845,6 +5831,7 @@ def assert_lxqt_menu_stress_session(
             "XRDP_CONSOLE_LXQT_MENU_STRESS\n"
             "status=PASS\n"
             "background_stimulus=background-only\n"
+            + "\n".join(stress_duration_summary_lines()) + "\n"
             f"source={source_width}x{source_height}\n"
             f"presentation={client_width}x{client_height}\n"
             f"freshness_budget_ms={freshness_budget_ms:.0f}\n"
@@ -5854,6 +5841,7 @@ def assert_lxqt_menu_stress_session(
             f"max_latency_ms={max(latencies):.1f}\n"
             f"p95_latency_ms={ordered_latencies[p95_index]:.1f}\n"
             "latencies_ms=" + ",".join(f"{item:.1f}" for item in latencies) +
+            "\n" + "\n".join(timing_summary_lines()) +
             "\nfast_observations=" + " | ".join(fast_observations) +
             "\n" + "quality_samples=" + " | ".join(quality_metrics) +
             "\nsource_layout_samples=" + " | ".join(source_layout_metrics) +
@@ -5863,7 +5851,6 @@ def assert_lxqt_menu_stress_session(
             encoding="utf-8")
     finally:
         stop_process(active_quality_probe)
-        stop_process(active_fast_quality_probe)
         stop_process(probe)
 
 
@@ -8210,6 +8197,11 @@ password=smoke
                     client_command.append("/gfx:AVC420:on")
                     if randr_resize_dynamic_resolution:
                         client_command.append("+dynamic-resolution")
+                    elif randr_resize_mode:
+                        # FreeRDP may enable this capability by default. Make
+                        # the negative RandR case explicit so it cannot resize
+                        # the RDP monitor after the source display changes.
+                        client_command.append("-dynamic-resolution")
                 else:
                     client_command.append("-gfx")
                 with client_log_path.open("w", encoding="utf-8") as client_log:
@@ -8553,19 +8545,27 @@ password=smoke
                                 "old_source=1024x768 new_source=1920x1080 "
                                 "result=updated",
                                 8.0, stdout_path, client_log_path)
+                            expected_resize_request = (
+                                "already-matching"
+                                if (presentation_width, presentation_height) ==
+                                (1920, 1080) else "queued")
                             wait_for_log(
                                 server, log_path,
-                                "XRDP_CONSOLE_GEOMETRY event=remote-resize-request "
+                                "XRDP_CONSOLE_GEOMETRY "
+                                "event=remote-resize-request "
                                 "target=1920x1080 result=" +
-                                ("already-matching"
-                                 if (presentation_width, presentation_height) ==
-                                 (1920, 1080) else "queued"),
+                                expected_resize_request,
                                 8.0, stdout_path, client_log_path)
                             wait_for_log(
                                 server, log_path,
                                 "XRDP_CONSOLE_GEOMETRY event=resize "
-                                "source=1920x1080 requested_presentation=1920x1080",
+                                "source=1920x1080 requested_presentation="
+                                "1920x1080",
                                 8.0, stdout_path, client_log_path)
+                            # The resize is initiated by the server after the
+                            # source RandR change. FreeRDP accepts that request
+                            # even when client-driven dynamic resolution is
+                            # explicitly disabled.
                             wait_for_window_size(
                                 os.environ["DISPLAY"], window_title,
                                 1920, 1080, 8.0)

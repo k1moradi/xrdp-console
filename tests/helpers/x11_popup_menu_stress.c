@@ -543,7 +543,8 @@ main(int argc, char **argv)
            scene.background_only ? "background-only" : "taskbar-button");
     if (scene.epoch_controlled)
     {
-        fputs("EPOCH_CONTROL_READY\n", stdout);
+        printf("EPOCH_CONTROL_READY window=0x%lx\n",
+               (unsigned long)scene.background);
     }
     fflush(stdout);
 

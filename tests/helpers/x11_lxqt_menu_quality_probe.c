@@ -31,8 +31,6 @@ typedef struct
 {
     Window source_window;
     unsigned int sequence;
-    int fast_only;
-    int continue_full_after_fast_wait;
 } capture_request;
 
 static int capture_x_error_code;
@@ -88,9 +86,7 @@ parse_capture_request(const char *line, capture_request *request)
 
     if (sscanf(line, "%15s %31s %31s %c", operation, xid_text,
                sequence_text, &trailing) != 3 ||
-        (strcmp(operation, "capture") != 0 &&
-         strcmp(operation, "capture-fast") != 0 &&
-         strcmp(operation, "capture-full") != 0))
+        strcmp(operation, "capture") != 0)
     {
         return 0;
     }
@@ -115,9 +111,6 @@ parse_capture_request(const char *line, capture_request *request)
     }
     request->source_window = window;
     request->sequence = (unsigned int)sequence;
-    request->fast_only = strcmp(operation, "capture-fast") == 0;
-    request->continue_full_after_fast_wait =
-        strcmp(operation, "capture-full") == 0;
     return 1;
 }
 
@@ -129,16 +122,7 @@ make_capture_artifact_directory(const char *root, unsigned int sequence,
     int leaf_length;
     int path_length;
 
-    if (sequence >= 1001U)
-    {
-        leaf_length = snprintf(leaf, sizeof(leaf), "stability-%04u",
-                               sequence - 1000U);
-    }
-    else
-    {
-        leaf_length = snprintf(leaf, sizeof(leaf), "capture-%04u",
-                               sequence);
-    }
+    leaf_length = snprintf(leaf, sizeof(leaf), "capture-%06u", sequence);
     if (leaf_length < 0 || (size_t)leaf_length >= sizeof(leaf))
     {
         return 0;
@@ -432,9 +416,7 @@ capture_and_compare(Display *source_display, Window source_window,
                     int source_width, int source_height,
                     const char *artifact_dir, int fast_mode,
                     uint64_t capture_request_ns,
-                    unsigned int sequence,
-                    int fast_only,
-                    int continue_full_after_fast_wait)
+                    unsigned int sequence)
 {
     XWindowAttributes source_attributes;
     XWindowAttributes client_attributes;
@@ -800,18 +782,9 @@ capture_and_compare(Display *source_display, Window source_window,
                     (void)write_image(client_wait_path, client_image,
                                       client_attributes.visual);
                 }
-                if (!continue_full_after_fast_wait)
-                {
-                    XDestroyImage(source_image);
-                    XDestroyImage(client_image);
-                    return 1;
-                }
-            }
-            else if (fast_only)
-            {
                 XDestroyImage(source_image);
                 XDestroyImage(client_image);
-                return 0;
+                return 1;
             }
         }
     }
@@ -1038,6 +1011,7 @@ main(int argc, char **argv)
     Display *source_display;
     Display *client_display;
     const char *client_display_name;
+    XWindowAttributes client_attributes;
     Window source_window = 0;
     Window client_window;
     int interactive_mode = 0;
@@ -1092,13 +1066,6 @@ main(int argc, char **argv)
     client_display_open_start_ns = monotonic_ns();
     client_display = XOpenDisplay(client_display_name);
     client_display_open_end_ns = monotonic_ns();
-    printf("MENU_PROBE_READY source_display_open_start_ns=%" PRIu64
-           " source_display_open_end_ns=%" PRIu64
-           " client_display_open_start_ns=%" PRIu64
-           " client_display_open_end_ns=%" PRIu64 "\n",
-           source_display_open_start_ns, source_display_open_end_ns,
-           client_display_open_start_ns, client_display_open_end_ns);
-    fflush(stdout);
     if (source_display == NULL || client_display == NULL)
     {
         fputs("MENU_QUALITY_ERROR display-open\n", stdout);
@@ -1113,6 +1080,31 @@ main(int argc, char **argv)
         return 2;
     }
     (void)XSetErrorHandler(capture_x_error_handler);
+    capture_x_error_code = 0;
+    if (!XGetWindowAttributes(client_display, client_window,
+                              &client_attributes))
+    {
+        capture_x_error_code = capture_x_error_code == 0 ? 1 :
+                               capture_x_error_code;
+    }
+    XSync(client_display, False);
+    if (capture_x_error_code != 0 || client_attributes.width <= 0 ||
+        client_attributes.height <= 0)
+    {
+        fputs("MENU_QUALITY_ERROR client-window\n", stdout);
+        XCloseDisplay(source_display);
+        XCloseDisplay(client_display);
+        return 2;
+    }
+    printf("MENU_PROBE_READY source_display_open_start_ns=%" PRIu64
+           " source_display_open_end_ns=%" PRIu64
+           " client_display_open_start_ns=%" PRIu64
+           " client_display_open_end_ns=%" PRIu64
+           " client_window_width=%d client_window_height=%d\n",
+           source_display_open_start_ns, source_display_open_end_ns,
+           client_display_open_start_ns, client_display_open_end_ns,
+           client_attributes.width, client_attributes.height);
+    fflush(stdout);
     if (interactive_mode)
     {
         char command[PATH_MAX + 16];
@@ -1153,18 +1145,13 @@ main(int argc, char **argv)
                 source_display, request.source_window,
                 client_display, client_window,
                 atoi(argv[4]), atoi(argv[5]), artifact_dir, 1,
-                capture_request_ns, request.sequence,
-                request.fast_only,
-                request.continue_full_after_fast_wait);
-            if (!request.fast_only)
-            {
-                printf("MENU_DONE status=%s request_ns=%" PRIu64
-                       " sequence=%u\n",
-                       result == 0 ? "PASS" :
-                           result == 1 ? "WAIT" : "ERROR",
-                       capture_request_ns, request.sequence);
-                fflush(stdout);
-            }
+                capture_request_ns, request.sequence);
+            printf("MENU_DONE status=%s request_ns=%" PRIu64
+                   " sequence=%u\n",
+                   result == 0 ? "PASS" :
+                       result == 1 ? "WAIT" : "ERROR",
+                   capture_request_ns, request.sequence);
+            fflush(stdout);
         }
         result = 0;
     }
@@ -1173,7 +1160,7 @@ main(int argc, char **argv)
         result = capture_and_compare(source_display, source_window,
                                      client_display, client_window,
                                      atoi(argv[5]), atoi(argv[6]), argv[7],
-                                     fast_mode, helper_start_ns, 0U, 0, 0);
+                                     fast_mode, helper_start_ns, 0U);
     }
     XCloseDisplay(source_display);
     XCloseDisplay(client_display);

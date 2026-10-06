@@ -133,12 +133,12 @@ def read_record(process: subprocess.Popen[bytes], prefix: bytes,
         + " | ".join(line.decode(errors="replace") for line in prior))
 
 
-def wait_records(process: subprocess.Popen[bytes], sequence: tuple[str, int],
-                 timeout: float, operation: str = "capture") -> list[bytes]:
+def wait_records(process: subprocess.Popen[bytes],
+                 sequence: tuple[str, int], timeout: float) -> list[bytes]:
     if process.stdin is None or process.stdout is None:
         raise AssertionError("observer pipes are unavailable")
     process.stdin.write(
-        f"{operation} {sequence[0]} {sequence[1]}\n".encode())
+        f"capture {sequence[0]} {sequence[1]}\n".encode())
     process.stdin.flush()
     records: list[bytes] = []
     fast = read_record(process, b"MENU_FAST ", timeout, records)
@@ -179,10 +179,10 @@ def run_interactive_protocol_test(helper: Path, artifact_root: Path,
         xvfb.terminate()
         xvfb.wait(timeout=2.0)
         raise AssertionError(f"cannot open X display {display_name}")
-    source_window = 0
     client_window = 0
-    source_gc = None
     client_gc = None
+    source_windows: list[int] = []
+    source_gcs: list[int] = []
     process: subprocess.Popen[bytes] | None = None
     artifact_root.mkdir(parents=True, exist_ok=True)
     run_artifacts = Path(tempfile.mkdtemp(
@@ -190,18 +190,13 @@ def run_interactive_protocol_test(helper: Path, artifact_root: Path,
     try:
         screen = xlib.XDefaultScreen(display)
         root = xlib.XRootWindow(display, screen)
-        source_window = xlib.XCreateSimpleWindow(
-            display, root, 0, 0, 160, 160, 0, 0, 0)
         client_window = xlib.XCreateSimpleWindow(
             display, root, 180, 5, 160, 160, 0, 0, 0)
-        source_gc = xlib.XCreateGC(display, source_window, 0, None)
         client_gc = xlib.XCreateGC(display, client_window, 0, None)
-        if not source_gc or not client_gc:
+        if not client_gc:
             raise AssertionError("could not create X11 drawing contexts")
-        xlib.XMapWindow(display, source_window)
         xlib.XMapWindow(display, client_window)
         xlib.XSync(display, 0)
-        draw_pattern(xlib, display, source_gc, source_window, True)
         draw_pattern(xlib, display, client_gc, client_window, False)
         xlib.XSync(display, 0)
 
@@ -215,16 +210,31 @@ def run_interactive_protocol_test(helper: Path, artifact_root: Path,
             stderr=subprocess.STDOUT, bufsize=0)
         startup: list[bytes] = []
         read_record(process, b"MENU_PROBE_START ", 5.0, startup)
-        read_record(process, b"MENU_PROBE_READY ", 5.0, startup)
+        ready = read_record(process, b"MENU_PROBE_READY ", 5.0, startup)
+        ready_fields = parse_protocol_fields(ready)
+        if (ready_fields.get("client_window_width") != "160" or
+                ready_fields.get("client_window_height") != "160"):
+            raise AssertionError(
+                f"observer did not validate the client window: {ready!r}")
+
+        source_a = xlib.XCreateSimpleWindow(
+            display, root, 0, 0, 160, 160, 0, 0, 0)
+        source_gc_a = xlib.XCreateGC(display, source_a, 0, None)
+        if not source_gc_a:
+            raise AssertionError("could not create source A drawing context")
+        source_windows.append(source_a)
+        source_gcs.append(source_gc_a)
+        xlib.XMapWindow(display, source_a)
+        draw_pattern(xlib, display, source_gc_a, source_a, True)
+        xlib.XSync(display, 0)
 
         first = wait_records(
-            process, (f"0x{source_window:x}", 1), 2.0)
+            process, (f"0x{source_a:x}", 1), 2.0)
         first_fast = next(line for line in first
                           if line.startswith(b"MENU_FAST "))
         first_done = next(line for line in first
                           if line.startswith(b"MENU_DONE "))
         first_fields = parse_protocol_fields(first_fast)
-        first_done_fields = parse_done_record(first_done)
         if first_fields.get("status") != "WAIT":
             raise AssertionError(f"mismatching client did not return WAIT: {first}")
         validate_capture_correlation(first_fast, first_done)
@@ -234,7 +244,7 @@ def run_interactive_protocol_test(helper: Path, artifact_root: Path,
         draw_pattern(xlib, display, client_gc, client_window, True)
         xlib.XSync(display, 0)
         second = wait_records(
-            process, (f"0x{source_window:x}", 2), 2.0)
+            process, (f"0x{source_a:x}", 2), 2.0)
         second_fast = next(line for line in second
                            if line.startswith(b"MENU_FAST "))
         second_done = next(line for line in second
@@ -274,63 +284,106 @@ def run_interactive_protocol_test(helper: Path, artifact_root: Path,
         if int(second_timing_fields.get("client_capture_us", "-1")) < 0:
             raise AssertionError(f"bad client capture duration: {second_timing!r}")
 
-        draw_pattern(xlib, display, client_gc, client_window, False)
+        xlib.XDestroyWindow(display, source_a)
         xlib.XSync(display, 0)
-        third = wait_records(
-            process, (f"0x{source_window:x}", 3), 5.0,
-            operation="capture-full")
-        third_fast = next(line for line in third
-                          if line.startswith(b"MENU_FAST "))
-        third_done = next(line for line in third
-                          if line.startswith(b"MENU_DONE "))
-        third_quality = next((line for line in third
-                              if line.startswith(b"MENU_QUALITY ")), b"")
-        third_timing = next((line for line in third
-                             if line.startswith(b"MENU_TIMING ")), b"")
-        if (third_fast.split()[1:2] != [b"WAIT"] or
-                not third_quality or not third_timing or
-                third_quality.split()[1:2] != [b"WAIT"] or
-                parse_done_record(third_done)["status"] != "WAIT"):
+        source_windows.remove(source_a)
+        source_b = xlib.XCreateSimpleWindow(
+            display, root, 0, 0, 160, 160, 0, 0, 0)
+        source_gc_b = xlib.XCreateGC(display, source_b, 0, None)
+        if not source_gc_b:
+            raise AssertionError("could not create source B drawing context")
+        if source_b == source_a:
+            raise AssertionError("Xvfb reused the destroyed source XID")
+        source_windows.append(source_b)
+        source_gcs.append(source_gc_b)
+        xlib.XMapWindow(display, source_b)
+        draw_pattern(xlib, display, source_gc_b, source_b, True)
+        xlib.XSync(display, 0)
+
+        process.stdin.write(b"capture not-a-window 99\n")
+        process.stdin.flush()
+        malformed: list[bytes] = []
+        malformed_error = read_record(
+            process, b"MENU_QUALITY_ERROR invalid-command", 1.0,
+            malformed)
+        malformed_done = read_record(
+            process, b"MENU_DONE ", 1.0, malformed)
+        malformed_fields = parse_done_record(malformed_done)
+        if (malformed_error != b"MENU_QUALITY_ERROR invalid-command" or
+                malformed_fields["status"] != "ERROR" or
+                malformed_fields["sequence"] != "0"):
             raise AssertionError(
-                "capture-full did not run and correlate the full comparison "
-                f"after a sparse WAIT: {third!r}")
-        third_request_ns, third_sequence = validate_capture_correlation(
-            third_fast, third_done)
-        third_quality_fields = parse_protocol_fields(third_quality)
-        if (third_quality_fields.get("capture_request_ns") !=
-                str(third_request_ns) or
-                third_quality_fields.get("sequence") != str(third_sequence)):
+                f"malformed capture command was not rejected: {malformed}")
+        if process.poll() is not None:
+            raise AssertionError("observer exited after malformed command")
+
+        process.stdin.write(f"capture 0x{source_a:x} 3\n".encode())
+        process.stdin.flush()
+        stale: list[bytes] = []
+        stale_error = read_record(
+            process, b"MENU_QUALITY_ERROR window-attributes", 1.0, stale)
+        stale_done = read_record(process, b"MENU_DONE ", 1.0, stale)
+        stale_done_fields = parse_done_record(stale_done)
+        if (stale_error != b"MENU_QUALITY_ERROR window-attributes" or
+                stale_done_fields["status"] != "ERROR" or
+                stale_done_fields["sequence"] != "3"):
+            raise AssertionError(f"stale source XID was not rejected: {stale}")
+        if process.poll() is not None:
+            raise AssertionError("observer exited after stale source XID")
+
+        fourth = wait_records(process, (f"0x{source_b:x}", 4), 5.0)
+        fourth_fast = next(line for line in fourth
+                           if line.startswith(b"MENU_FAST "))
+        fourth_done = next(line for line in fourth
+                           if line.startswith(b"MENU_DONE "))
+        fourth_quality = next((line for line in fourth
+                               if line.startswith(b"MENU_QUALITY ")), b"")
+        fourth_timing = next((line for line in fourth
+                              if line.startswith(b"MENU_TIMING ")), b"")
+        fourth_fast_fields = parse_protocol_fields(fourth_fast)
+        fourth_done_fields = parse_done_record(fourth_done)
+        if (fourth_fast_fields.get("status") != "PASS" or
+                fourth_done_fields["status"] != "PASS" or
+                not fourth_quality or not fourth_timing):
             raise AssertionError(
-                "forced full verdict did not describe the same request: "
-                f"{third_quality!r}")
+                f"observer did not recover with source B: {fourth}")
+        fourth_request_ns, fourth_sequence = validate_capture_correlation(
+            fourth_fast, fourth_done)
+        fourth_quality_fields = parse_protocol_fields(fourth_quality)
+        fourth_timing_fields = parse_protocol_fields(fourth_timing)
+        for fields in (fourth_quality_fields, fourth_timing_fields):
+            if (fields.get("capture_request_ns") != str(fourth_request_ns) or
+                    fields.get("sequence") != str(fourth_sequence)):
+                raise AssertionError(
+                    f"source B result lost request correlation: {fourth}")
+        if (fourth_sequence != 4 or
+                int(fourth_fast_fields["sample_ns"]) != int(
+                    fourth_fast_fields["client_capture_end_ns"]) or
+                fourth_timing_fields.get("client_capture_end_ns") !=
+                fourth_fast_fields["client_capture_end_ns"]):
+            raise AssertionError(
+                f"source B result did not use its decoded-client frame: {fourth}")
 
         artifact_dirs = sorted(path for path in run_artifacts.iterdir()
                                if path.is_dir())
-        expected_dirs = {"capture-0001", "capture-0002", "capture-0003"}
+        expected_dirs = {f"capture-{index:06d}" for index in range(1, 5)}
         if {path.name for path in artifact_dirs} != expected_dirs:
             raise AssertionError(
                 f"capture requests overwrote/missed artifacts: {artifact_dirs}")
-        if not (run_artifacts / "capture-0001" /
+        if not (run_artifacts / "capture-000001" /
                 "lxqt-menu-source-mismatch.ppm").is_file():
             raise AssertionError("WAIT capture did not preserve its source image")
-        if not (run_artifacts / "capture-0002" /
+        if not (run_artifacts / "capture-000002" /
                 "lxqt-menu-source.ppm").is_file():
             raise AssertionError("PASS capture did not preserve its source image")
-        if not (run_artifacts / "capture-0003" /
-                "lxqt-menu-source-mismatch.ppm").is_file():
-            raise AssertionError(
-                "forced full WAIT did not preserve its source image")
-
-        process.stdin.write(b"not-a-capture\n")
-        process.stdin.flush()
-        malformed: list[bytes] = []
-        malformed_done = read_record(
-            process, b"MENU_DONE ", 1.0, malformed)
-        if parse_done_record(malformed_done)["status"] != "ERROR":
-            raise AssertionError(
-                f"malformed command was not rejected: {malformed_done!r}")
+        if (run_artifacts / "capture-000003" /
+                "lxqt-menu-source.ppm").exists():
+            raise AssertionError("stale XID unexpectedly produced a source image")
+        if not (run_artifacts / "capture-000004" /
+                "lxqt-menu-source.ppm").is_file():
+            raise AssertionError("source B capture did not preserve its image")
         if process.poll() is not None:
-            raise AssertionError("observer exited after malformed command")
+            raise AssertionError("observer exited before EOF")
         process.stdin.close()
         if process.wait(timeout=2.0) != 0:
             raise AssertionError("observer did not exit cleanly on EOF")
@@ -342,11 +395,11 @@ def run_interactive_protocol_test(helper: Path, artifact_root: Path,
         if process is not None:
             process.kill()
             process.wait(timeout=2.0)
-        if source_gc:
-            xlib.XFreeGC(display, source_gc)
+        for source_gc in source_gcs:
+            xlib.XFreeGC(display, ctypes.c_void_p(source_gc))
         if client_gc:
             xlib.XFreeGC(display, client_gc)
-        if source_window:
+        for source_window in source_windows:
             xlib.XDestroyWindow(display, source_window)
         if client_window:
             xlib.XDestroyWindow(display, client_window)

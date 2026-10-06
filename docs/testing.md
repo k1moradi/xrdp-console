@@ -89,6 +89,7 @@ they do not exercise or provide a production display transport.
 | `x11-input-integration` | authenticated-Xvfb XTest keyboard and pointer event delivery to a focused X11 window, including held-key typematic with duplicate makes and teardown release of held keys/buttons |
 | `module-lifecycle` | C++23 XCB module construction, authenticated-Xvfb connect/reconnect, fd-0 handling, geometry setup, dead-server failure, teardown, and wait-state preservation |
 | `interaction-priority-unit` | pointer/focus bounds, scroll clearing of cursor-local priority, and keyboard-focus priority recovery |
+| `popup-background-epoch-unit` | strict decoding of test-controlled background epochs, including stale, malformed, and partially filtered markers |
 | `h264-latest-frame-unit` | generation-safe H.264 tile scheduling, including a mixed-age page-scroll reproduction and the scroll-priority regression |
 | `client-scaled-output-plan-unit` / `scaled-output-capability-policy-unit` | gated client-scale eligibility, geometry planning, and safe fallback decisions |
 | `scroll-motion-observer-unit` / `scroll-copy-plan-unit` | bounded scroll-motion observation and conservative copy-run classification |
@@ -98,9 +99,11 @@ they do not exercise or provide a production display transport.
 | `xrdp-loader-gfx-h264-odd-scaled-smoke` | standard H.264 GFX AVC420 loader/pixel smoke at odd scaled presentation geometry; CMake requires the selected FreeRDP's H.264 decoder before registering the test |
 | `xrdp-loader-gfx-h264-fullhd-source-cpu-contention` | scaled 1920x1080-to-1512x949 H.264 full-screen update burst while the client/server share one CPU; requires the latest drawn color to reach the FreeRDP framebuffer within 1000 ms |
 | `xrdp-loader-gfx-h264-popup-ui-stress` | repeatedly opens and closes a synthetic launcher popup with remote taskbar clicks over scaled H.264, one-CPU contention, and a changing 20 Hz full-screen scene; each opening must show the expected generation and match a source-side popup reference within measured color-error limits in 1000 ms, then remain coherent during 250 ms of sampled updates |
-| `lxqt-menu-quality-calibration-unit` | calibrates the fast and full pixel oracles against identical, saved-good H.264, pre-open, saved live-corruption, shifted, blank, and deliberately corrupted menu images |
+| `lxqt-menu-quality-calibration-unit` | calibrates the fast and full pixel oracles against fourteen distinct saved-good H.264 captures plus pre-open, saved live-corruption, shifted, blank, and deliberately corrupted menu images |
 | `lxqt-menu-quality-mapping-unit` | checks the shared area-weighted pixel mapping for identity, 1366-to-1364 scaling, downscaling, and viewport offsets |
-| `xrdp-loader-gfx-h264-lxqt-menu-stress` | opens the real LXQt Fancy Menu over scaled H.264 with 32 deterministic favorite applications, one-CPU contention, and a changing 20 Hz background; actual menu pixels must appear within 1000 ms, pass full-region checks on that same capture, and remain coherent during three later full-region captures |
+| `lxqt-menu-quality-interactive-protocol` | exercises the persistent menu observer before a source exists, source-window replacement, fresh capture IDs, rejection/recovery, and shutdown |
+| `popup-background-epoch-xvfb` | draws distinct background epochs on Xvfb and verifies their decoded XGetImage samples appear within one second |
+| `xrdp-loader-gfx-h264-lxqt-menu-stress` | opens the real LXQt Fancy Menu at least 20 times over scaled H.264 and runs for at least 75 seconds by default under one-CPU contention and a changing 20 Hz background; each opening must pass same-frame full-region quality within 1000 ms and remain coherent during three later full-region captures |
 | `xrdp-loader-gfx-h264-randr-resize` | changes the X11 source from 1024x768 to 1920x1080 during an H.264 session, then checks the queued remote resize, FreeRDP window geometry, rendered pixels, and connection; requires Xephyr and is skipped when it is unavailable |
 | `xrdp-loader-gfx-h264-randr-resize-no-dynamic-resolution` | repeats the source RandR resize without enabling FreeRDP's client-driven Dynamic Resolution option, while checking the same server-initiated resize result |
 | `xrdp-loader-gfx-h264-coherence*` | repeated whole-client-frame H.264 coherence checks under normal/contended CPU and a four-arm scroll/cache A/B; preserves first torn-frame screenshots and server/client diagnostics |
@@ -143,10 +146,14 @@ source menu against their mapped pixels in the decoded client frame. If they
 match, the probe runs the full-region quality checks on those same captured
 images, so a later recovered frame cannot mask a broken first rendering. It
 then keeps the menu open for three additional full-region captures to detect
-later partial redraws or corruption. The five-cycle run uses one-CPU
-contention while a 20 Hz background is updating. Saved-image calibration
-runs independently of LXQt and keeps thresholds fixed across known-good and
-known-bad pairs. The test is registered when both `lxqt-panel` and
+later partial redraws or corruption. The default endurance campaign runs at
+least 20 open/close cycles over at least 75 seconds, with one-CPU contention
+and a 20 Hz background update. A unique test-controlled background epoch must
+reach the decoded client before each open and return within one second after
+each close. A missing epoch is retained as a failure with the decoded screen,
+timings, source/client captures, and server/client logs. Saved-image
+calibration runs independently of LXQt and keeps thresholds fixed across
+known-good and known-bad pairs. The test is registered when both `lxqt-panel` and
 `dbus-run-session` are installed. Install `lxqt-panel` on another machine if
 CMake does not register this test there. It uses the project-built FreeRDP
 client on the same host; it does not reproduce Microsoft Remote Desktop's
@@ -156,12 +163,20 @@ source/client PPM captures and summary are written to
 For each cycle, the first loading frame and the first populated-but-mismatched
 frame are saved as paired source/client PPMs, when those states occur.
 Set `XRDP_CONSOLE_LXQT_MENU_STRESS_CYCLES` to a value from 1 to 20 for a longer
-stress run; the default is five cycles.
+stress run; this sets the minimum cycle count. The test also runs for at least
+`XRDP_CONSOLE_LXQT_MIN_STRESS_SECONDS` seconds, defaulting to 75. Set that
+value to 0 only for short debugging runs. `XRDP_CONSOLE_LXQT_STABILITY_SAMPLES`
+controls the extra full-region captures per open menu and defaults to 3.
 
 The calibration fixture provenance and measured threshold distributions are
 documented in `tests/fixtures/lxqt-menu-quality/README.md`. The saved pairs
 calibrate the oracle for the project-built FreeRDP/X11 path; they do not
 establish behavior in the Microsoft Windows App or macOS Remote Desktop.
+
+The RandR resize cases require Xephyr and xrandr. On Debian/Ubuntu install
+`xserver-xephyr` and `x11-xserver-utils`, then reconfigure the build so CTest
+refreshes its test registry. If Xephyr is unavailable, the RandR tests are
+reported as skipped rather than executed.
 
 Build and run the real-menu stress test with:
 
