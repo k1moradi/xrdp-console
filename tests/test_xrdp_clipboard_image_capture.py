@@ -261,7 +261,7 @@ class ClipboardCaptureTests(unittest.TestCase):
         self.assertEqual(selected["generation"], 72)
         self.assertIsNone(replaced_by)
 
-    def test_sealed_image_transaction_excludes_later_text_generation(self) -> None:
+    def test_sealed_report_correlates_only_image_transaction(self) -> None:
         with tempfile.TemporaryDirectory(prefix="clipboard-sealed-transaction-") as raw:
             root = Path(raw)
             source = root / "chansrv.log"
@@ -270,7 +270,21 @@ class ClipboardCaptureTests(unittest.TestCase):
             capture = load_capture_module(Path(sys.argv[1]))
             window = capture.FileWindow(source)
             begin_ns = 1_000_000
-            image_records = [
+            test_id = "c4ca4238-a0b9-4b12-ae01-234567890abc"
+            owner = "0x1200002"
+            requestor = "0x2400011"
+            source_lines = [
+                # Unrelated pre-image text activity inside the evidence window.
+                "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=format-list "
+                "stored_formats=1 dib_format_id=-1 png_format_id=-1 "
+                "generation=59",
+                "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE "
+                "event=selection-owner-install generation=59 owner=0x1200002 "
+                "chansrv_window=0x1200002 result=installed",
+                "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-request "
+                "target=UTF8_STRING requestor=0x2400099 owner=0x1200002 "
+                "generation=59 mono_ns=1001000",
+                # The active screenshot offer and owner install use the same XID.
                 "[debug] clipboard_process_format_announce: formatId "
                 "0x0000000d wszFormatName [CF_UNICODETEXT] clip_msg_len 36",
                 "[debug] clipboard_process_format_announce: formatId "
@@ -284,11 +298,16 @@ class ClipboardCaptureTests(unittest.TestCase):
                 "event=selection-owner-install generation=60 owner=0x1200002 "
                 "chansrv_window=0x1200002 result=installed",
                 "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-request "
-                "target=TARGETS requestor=0x2400011 "
-                "owner=0x1200002 generation=60",
+                "target=TARGETS requestor=0x2400011 owner=0x1200002 "
+                "generation=60 mono_ns=1003000",
+                "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE "
+                "event=targets-response-issued requestor=0x2400011 "
+                "generation=60 target_count=4 targets=TARGETS,UTF8_STRING "
+                "image/png,image/bmp truncated=0 result=0",
                 "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-request "
-                "target=image/png requestor=0x2400011 "
-                "owner=0x1200002 generation=60",
+                "target=image/png requestor=0x2400011 owner=0x1200002 "
+                "selection=0x1 property=0x3001 time=0 generation=60 "
+                "mono_ns=1004000",
                 "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=request "
                 "format_id=40005 target=image/png attempt=1 "
                 "mono_ns=1005000",
@@ -296,66 +315,263 @@ class ClipboardCaptureTests(unittest.TestCase):
                 "status=0x1 bytes=70 format_id=40005 attempt=1 "
                 "mono_ns=1007000",
                 "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-delivery-issued "
-                "path=direct target=image/png "
-                "requestor=0x2400011 bytes=70 generation=60 "
-                "cache_generation=60",
+                "path=direct target=image/png requestor=0x2400011 "
+                "property=0x3001 bytes=70 generation=60 cache_generation=60",
+                "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-request "
+                "target=image/bmp requestor=0x2400011 owner=0x1200002 "
+                "selection=0x1 property=0x3002 time=0 generation=60 "
+                "mono_ns=1010000",
+                "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=request "
+                "format_id=8 target=image/bmp attempt=1 mono_ns=1012000",
+                "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=response "
+                "status=0x1 bytes=100 format_id=8 attempt=1 mono_ns=1015000",
+                "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-delivery-issued "
+                "path=incr target=image/bmp requestor=0x2400011 "
+                "property=0x3002 bytes=114 generation=60 cache_generation=60",
+                "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-incr-announcement "
+                "target=image/bmp requestor=0x2400011 property=0x3002 "
+                "generation=60 total_bytes=114",
+                "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-incr-terminator-ack "
+                "target=image/bmp requestor=0x2400011 property=0x3002 "
+                "terminator_generation=60 current_generation=60",
             ]
             with source.open("a", encoding="utf-8") as output:
-                output.write("\n".join(image_records) + "\n")
+                output.write("\n".join(source_lines) + "\n")
                 output.flush()
-            journal_records = []
-            for mono_us, message in (
-                    (1000, "event=cliprdr-first-fragment direction=client-to-server msg_type=2 msg_flags=0 data_len=40"),
-                    (1005, "event=cliprdr-pdu direction=server-to-client stage=sec-send-success msg_type=4 msg_flags=0 data_len=4 vc_total_len=12 vc_fragment_bytes=12 vc_flags=0x00000003 vc_first=1 vc_last=1 send_status=success"),
-                    (1007, "event=cliprdr-first-fragment direction=client-to-server msg_type=5 msg_flags=1 data_len=70")):
-                journal_records.append(json.dumps({
-                    "MESSAGE": message,
-                    "__MONOTONIC_TIMESTAMP": str(mono_us),
-                    "__REALTIME_TIMESTAMP": str(2_000_000 + mono_us),
-                }))
-            journal.write_text("\n".join(journal_records) + "\n",
-                               encoding="utf-8")
 
-            sealed_mono_ns = 1_008_000
+            journal_messages = (
+                # Unrelated text exchange before the screenshot image request.
+                (1002, "event=cliprdr-pdu direction=server-to-client stage=sec-send-success msg_type=4 msg_flags=0 data_len=4 vc_total_len=12 vc_fragment_bytes=12 vc_flags=0x00000003 vc_first=1 vc_last=1 send_status=success"),
+                (1003, "event=cliprdr-first-fragment direction=client-to-server msg_type=5 msg_flags=1 data_len=24"),
+                # PNG image transaction.
+                (1005, "event=cliprdr-pdu direction=server-to-client stage=sec-send-success msg_type=4 msg_flags=0 data_len=4 vc_total_len=12 vc_fragment_bytes=12 vc_flags=0x00000003 vc_first=1 vc_last=1 send_status=success"),
+                (1007, "event=cliprdr-first-fragment direction=client-to-server msg_type=5 msg_flags=1 data_len=70"),
+                # BMP image transaction, completed through X11 INCR.
+                (1012, "event=cliprdr-pdu direction=server-to-client stage=sec-send-success msg_type=4 msg_flags=0 data_len=4 vc_total_len=12 vc_fragment_bytes=12 vc_flags=0x00000003 vc_first=1 vc_last=1 send_status=success"),
+                (1015, "event=cliprdr-first-fragment direction=client-to-server msg_type=5 msg_flags=1 data_len=100"),
+                # Unrelated text exchange after both image probes but before seal.
+                (1017, "event=cliprdr-pdu direction=server-to-client stage=sec-send-success msg_type=4 msg_flags=0 data_len=4 vc_total_len=12 vc_fragment_bytes=12 vc_flags=0x00000003 vc_first=1 vc_last=1 send_status=success"),
+                (1019, "event=cliprdr-first-fragment direction=client-to-server msg_type=5 msg_flags=1 data_len=36"),
+            )
+            journal.write_text("\n".join(json.dumps({
+                "MESSAGE": message,
+                "__MONOTONIC_TIMESTAMP": str(mono_us),
+                "__REALTIME_TIMESTAMP": str(2_000_000 + mono_us),
+            }) for mono_us, message in journal_messages) + "\n",
+                encoding="utf-8")
+
+            probe_events = [
+                {"event": "clipboard_owner", "owner": owner,
+                 "source": "xfixes", "monotonic_ns": 1_002_000},
+                {"event": "selection_request", "requestor": requestor,
+                 "owner": owner, "request_serial": 1, "target": "TARGETS",
+                 "monotonic_ns": 1_003_000},
+                {"event": "targets_result", "requestor": requestor,
+                 "owner": owner, "request_serial": 1,
+                 "targets": ["TARGETS", "UTF8_STRING", "image/png",
+                             "image/bmp"], "result": "success",
+                 "monotonic_ns": 1_003_500},
+                {"event": "selection_request", "requestor": requestor,
+                 "owner": owner, "request_serial": 2,
+                 "target": "image/png", "monotonic_ns": 1_004_000},
+                {"event": "selection_result", "requestor": requestor,
+                 "owner": owner, "request_serial": 2,
+                 "target": "image/png", "result": "success",
+                 "path": "immediate", "bytes": 70,
+                 "completed_monotonic_ns": 1_008_000},
+                {"event": "selection_request", "requestor": requestor,
+                 "owner": owner, "request_serial": 3,
+                 "target": "image/bmp", "monotonic_ns": 1_010_000},
+                {"event": "selection_result", "requestor": requestor,
+                 "owner": owner, "request_serial": 3,
+                 "target": "image/bmp", "result": "success",
+                 "path": "incr", "bytes": 114,
+                 "completed_monotonic_ns": 1_016_000},
+            ]
+
+            sealed_ns = 1_020_000
             frozen = window.freeze(0)
             with source.open("a", encoding="utf-8") as output:
                 output.write(
                     "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=format-list "
-                    "stored_formats=1 dib_format_id=-1 "
-                    "png_format_id=-1 generation=61\n")
+                    "stored_formats=1 dib_format_id=-1 png_format_id=-1 "
+                    "generation=61\n")
                 output.flush()
             metadata = capture.FileWindow.capture(frozen, root / "sealed")
-            captured_dir = root / "sealed"
-            summary = capture.chansrv_summary(captured_dir)
-            filtered = capture.filter_chansrv_summary(
-                summary, 60, {"8", "40005"})
-            image_lists = filtered["format_lists"]
-            self.assertEqual(len(image_lists), 1)
-            self.assertEqual(image_lists[0]["fields"]["generation"], "60")
-            self.assertEqual(image_lists[0]["advertised_formats"], [
+            raw_chansrv = capture.chansrv_summary(root / "sealed")
+            all_packets = capture.cliprdr_events(journal, begin_ns, sealed_ns)
+            begin_marker = {
+                "test_id": test_id, "realtime": "2026-10-06T10:00:00Z",
+                "realtime_ns": 2_000_000, "monotonic_ns": begin_ns,
+            }
+            end_marker = {
+                "test_id": test_id, "realtime": "2026-10-06T10:00:01Z",
+                "realtime_ns": 3_000_000, "monotonic_ns": sealed_ns,
+            }
+            report = capture.build_sealed_transaction_report(
+                test_id=test_id, generation=60, owner=owner,
+                begin_marker=begin_marker, end_marker=end_marker,
+                chansrv=raw_chansrv, probe_events=probe_events,
+                cliprdr_packets=all_packets,
+                journal_window_path=root / "journal-window.jsonl")
+            capture.discard_raw_capture_artifacts(metadata, root / "sealed")
+
+            transaction = report["clipboard_transaction"]
+            self.assertEqual(report["markers"]["TEST_BEGIN"]["test_id"], test_id)
+            self.assertEqual(report["markers"]["TEST_END"]["test_id"], test_id)
+            self.assertEqual(transaction["active_clipboard_generation"], 60)
+            self.assertEqual(transaction["x11_owner_xid"], owner)
+            self.assertEqual(transaction["targets"]["targets"], [
+                "TARGETS", "UTF8_STRING", "image/png", "image/bmp"])
+            self.assertEqual(transaction["advertised_formats"], [
                 {"id": "0x0000000d", "name": "CF_UNICODETEXT"},
                 {"id": "0x00000008", "name": "CF_DIB"},
                 {"id": "0x00009c45", "name": "PNG"},
             ])
-            self.assertTrue(
-                image_lists[0]["advertised_format_details_complete"])
-            self.assertEqual(len(filtered["format_data_requests"]), 1)
-            self.assertEqual(
-                filtered["format_data_requests"][0]["fields"]["format_id"],
-                "40005")
-            self.assertEqual(len(filtered["format_data_responses"]), 1)
-            self.assertEqual(len(filtered["x11_selection_requests"]), 2)
-            self.assertEqual(len(filtered["x11_deliveries"]), 1)
-            artifact = captured_dir / metadata["sources"][0]["artifact"]
-            captured_text = artifact.read_text(encoding="utf-8")
-            self.assertNotIn("generation=61", captured_text)
-            packets = capture.cliprdr_events(
-                journal, begin_ns, sealed_mono_ns)
-            self.assertEqual([packet["msg_type"] for packet in packets],
-                             [2, 4, 5])
-            self.assertEqual(packets[1]["event"], "cliprdr-pdu")
-            self.assertEqual(packets[1]["stage"], "sec-send-success")
-            self.assertEqual(packets[-1]["response_status"], "SUCCESS")
+            png, bmp = transaction["image_transactions"]
+            self.assertEqual((png["target"], png["requested_format_id"]),
+                             ("image/png", 40005))
+            self.assertEqual((bmp["target"], bmp["requested_format_id"]),
+                             ("image/bmp", 8))
+            self.assertEqual(png["chansrv_request_attempts"][0][
+                "outbound_vc_type4"]["msg_type"], 4)
+            self.assertEqual(png["chansrv_request_attempts"][0][
+                "inbound_vc_type5"]["response_status"], "SUCCESS")
+            self.assertTrue(png["chansrv_request_attempts"][0][
+                "successful_CLIPRDR_image_response"])
+            self.assertEqual(bmp["chansrv_request_attempts"][0][
+                "inbound_vc_type5"]["data_len"], 100)
+            self.assertEqual(bmp["chansrv_x11_incr_events"][-1]["fields"][
+                "event"], "x11-incr-terminator-ack")
+            self.assertEqual(png["completion_or_failure_reason"],
+                             "image-transfer-completed")
+            self.assertEqual(bmp["completion_or_failure_reason"],
+                             "image-transfer-completed")
+
+            retained_packets = report["protocol_summary"]["cliprdr_packets"]
+            self.assertEqual([packet["msg_type"] for packet in retained_packets],
+                             [4, 5, 4, 5])
+            self.assertEqual([packet["monotonic_ns"] for packet in retained_packets],
+                             [1_005_000, 1_007_000, 1_012_000, 1_015_000])
+            journal_artifact = (root / "journal-window.jsonl").read_text(
+                encoding="utf-8")
+            self.assertNotIn("1002", journal_artifact)
+            self.assertNotIn("1017", journal_artifact)
+            self.assertNotIn("generation=59", json.dumps(report))
+            self.assertNotIn("generation=61", json.dumps(report))
+            self.assertFalse((root / "sealed").exists())
+
+    def test_sealed_report_records_failed_response_and_generation_replacement(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="clipboard-sealed-failure-") as raw:
+            root = Path(raw)
+            capture = load_capture_module(Path(sys.argv[1]))
+            test_id = "c4ca4238-a0b9-4b12-ae01-234567890def"
+            owner = "0x1200002"
+            requestor = "0x2400011"
+            active_offer = {
+                "fields": {"generation": "80", "dib_format_id": "-1",
+                           "dibv5_format_id": "-1",
+                           "png_format_id": "49341"},
+                "recognized_formats": [{"id": 49341, "name": "PNG"}],
+                "advertised_formats": [{"id": "0x0000c11d", "name": "PNG"}],
+                "advertised_format_details_complete": True,
+            }
+            chansrv = {
+                "format_lists": [
+                    active_offer,
+                    {"fields": {"generation": "81", "dib_format_id": "-1",
+                                "png_format_id": "-1"},
+                     "advertised_formats": [],
+                     "recognized_formats": []},
+                ],
+                "selection_owner_installs": [
+                    {"fields": {"generation": "80", "owner": owner,
+                                "chansrv_window": owner,
+                                "result": "installed"}},
+                    {"fields": {"generation": "81", "owner": owner,
+                                "chansrv_window": owner,
+                                "result": "installed"}},
+                ],
+                "x11_selection_requests": [
+                    {"fields": {"generation": "80", "target": "TARGETS",
+                                "requestor": requestor, "owner": owner,
+                                "mono_ns": "8001000"}},
+                    {"fields": {"generation": "80", "target": "image/png",
+                                "requestor": requestor, "owner": owner,
+                                "property": "0x3001", "mono_ns": "8002000"}},
+                ],
+                "format_data_requests": [
+                    {"fields": {"event": "request", "format_id": "49341",
+                                "target": "image/png", "attempt": "1",
+                                "mono_ns": "8003000"}},
+                ],
+                "format_data_responses": [
+                    {"fields": {"event": "response", "status": "0x2",
+                                "bytes": "0", "format_id": "49341",
+                                "attempt": "1", "mono_ns": "8005000"}},
+                ],
+                "x11_targets_responses": [
+                    {"fields": {"event": "targets-response-issued",
+                                "generation": "80", "requestor": requestor,
+                                "result": "0"}},
+                ],
+                "x11_deliveries": [],
+                "x11_incr_events": [],
+                "generic_request_correlation": "single outstanding request",
+            }
+            probe_events = [
+                {"event": "selection_request", "requestor": requestor,
+                 "owner": owner, "request_serial": 1, "target": "TARGETS"},
+                {"event": "targets_result", "requestor": requestor,
+                 "owner": owner, "request_serial": 1,
+                 "targets": ["TARGETS", "image/png"], "result": "success"},
+                {"event": "selection_request", "requestor": requestor,
+                 "owner": owner, "request_serial": 2, "target": "image/png"},
+                {"event": "selection_result", "requestor": requestor,
+                 "owner": owner, "request_serial": 2, "target": "image/png",
+                 "result": "failure", "reason": "selection-notify-none",
+                 "path": "none", "bytes": 0},
+            ]
+            packets = [
+                {"msg_type": 4, "msg_name": "CB_FORMAT_DATA_REQUEST",
+                 "direction": "server-to-client", "send_status": "success",
+                 "data_len": 4, "monotonic_ns": 8_003_000},
+                {"msg_type": 5, "msg_name": "CB_FORMAT_DATA_RESPONSE",
+                 "direction": "client-to-server", "msg_flags": 2,
+                 "response_status": "FAIL", "data_len": 0,
+                 "monotonic_ns": 8_005_000},
+            ]
+            markers = {
+                "test_id": test_id, "realtime": "2026-10-06T10:01:00Z",
+                "realtime_ns": 4_000_000, "monotonic_ns": 8_000_000,
+            }
+            report = capture.build_sealed_transaction_report(
+                test_id=test_id, generation=80, owner=owner,
+                begin_marker=markers, end_marker={
+                    **markers, "monotonic_ns": 8_010_000},
+                chansrv=chansrv, probe_events=probe_events,
+                cliprdr_packets=packets,
+                journal_window_path=root / "journal-window.jsonl",
+                generation_replaced_during_window=True)
+
+            transaction = report["clipboard_transaction"]
+            png = transaction["image_transactions"][0]
+            self.assertEqual(transaction["active_clipboard_generation"], 80)
+            self.assertTrue(transaction["generation_replaced_during_window"])
+            self.assertEqual(png["requested_format_id"], 49341)
+            attempt = png["chansrv_request_attempts"][0]
+            self.assertEqual(attempt["inbound_vc_type5"]["response_status"],
+                             "FAIL")
+            self.assertEqual(attempt["inbound_vc_type5"]["data_len"], 0)
+            self.assertFalse(attempt["successful_CLIPRDR_image_response"])
+            self.assertEqual(png["completion_or_failure_reason"],
+                             "client-returned-CB_FORMAT_DATA_RESPONSE-FAIL")
+            self.assertEqual([entry["fields"]["generation"] for entry in
+                              report["protocol_summary"]["chansrv"]["format_lists"]],
+                             ["80"])
+            self.assertEqual([packet["msg_type"] for packet in
+                              report["protocol_summary"]["cliprdr_packets"]],
+                             [4, 5])
 
 
 if __name__ == "__main__":

@@ -562,6 +562,7 @@ def chansrv_summary(directory: Path) -> dict[str, object]:
     requests: list[dict[str, object]] = []
     responses: list[dict[str, object]] = []
     x11_requests: list[dict[str, object]] = []
+    targets_responses: list[dict[str, object]] = []
     deliveries: list[dict[str, object]] = []
     owner_installs: list[dict[str, object]] = []
     incr_events: list[dict[str, object]] = []
@@ -623,10 +624,13 @@ def chansrv_summary(directory: Path) -> dict[str, object]:
                 })
             elif "event=selection-owner-install" in line:
                 owner_installs.append({"fields": fields, "raw_line": line})
-            elif "event=request format_id=" in line:
+            elif ("event=request format_id=" in line or
+                  "event=retry format_id=" in line):
                 requests.append({"fields": fields, "raw_line": line})
             elif "event=response " in line and "format_id=" in line:
                 responses.append({"fields": fields, "raw_line": line})
+            elif "event=targets-response-issued " in line:
+                targets_responses.append({"fields": fields, "raw_line": line})
             elif "event=x11-request " in line:
                 x11_requests.append({"fields": fields, "raw_line": line})
             elif "event=x11-delivery-issued " in line:
@@ -639,6 +643,7 @@ def chansrv_summary(directory: Path) -> dict[str, object]:
         "format_data_requests": requests,
         "format_data_responses": responses,
         "x11_selection_requests": x11_requests,
+        "x11_targets_responses": targets_responses,
         "x11_deliveries": deliveries,
         "x11_incr_events": incr_events,
         "generic_request_correlation": (
@@ -649,30 +654,456 @@ def chansrv_summary(directory: Path) -> dict[str, object]:
     }
 
 
-def filter_chansrv_summary(summary: dict[str, object], generation: int,
-                           image_format_ids: set[str]) -> dict[str, object]:
-    """Retain one image generation, including ID-correlated CLIPRDR fetches."""
-    filtered = dict(summary)
+def _metadata_fields(entry: object) -> dict[str, str]:
+    if not isinstance(entry, dict):
+        return {}
+    fields = entry.get("fields")
+    if not isinstance(fields, dict):
+        return {}
+    return {str(key): str(value) for key, value in fields.items()}
+
+
+def _integer(value: object) -> int | None:
+    try:
+        return int(str(value), 0)
+    except (TypeError, ValueError):
+        try:
+            return int(str(value), 10)
+        except (TypeError, ValueError):
+            return None
+
+
+def _public_chansrv_event(entry: dict[str, object]) -> dict[str, object]:
+    """Drop the source line after retaining its allow-listed parsed fields."""
+    return {key: value for key, value in entry.items() if key != "raw_line"}
+
+
+def _probe_event_matches(event: dict[str, object], target: str,
+                         requestor: str | None) -> bool:
+    return (event.get("target") == target and
+            (requestor is None or
+             str(event.get("requestor", "")).lower() == requestor.lower()))
+
+
+def build_sealed_transaction_report(
+        *, test_id: str, generation: int, owner: str,
+        begin_marker: dict[str, object], end_marker: dict[str, object],
+        chansrv: dict[str, object], probe_events: list[dict[str, object]],
+        cliprdr_packets: list[dict[str, object]],
+        journal_window_path: Path,
+        generation_replaced_during_window: bool = False) -> dict[str, object]:
+    """Correlate and persist only the active image-generation transaction.
+
+    The CLIPRDR wire messages do not carry a format or generation identifier.
+    They are associated with a chansrv format request by monotonic order and
+    the protocol's single-outstanding-request invariant. Chansrv's logged
+    format ID, target, attempt and generation remain the authoritative mapping.
+    """
     generation_text = str(generation)
-    for key, value in summary.items():
-        if not isinstance(value, list):
-            continue
-        retained: list[dict[str, object]] = []
-        for entry in value:
-            if not isinstance(entry, dict):
-                continue
-            fields = entry.get("fields")
-            if not isinstance(fields, dict):
-                continue
-            if any(fields.get(name) == generation_text for name in (
+    owner_normalized = owner.lower()
+    format_lists = [entry for entry in chansrv.get("format_lists", [])
+                    if _metadata_fields(entry).get("generation") ==
+                    generation_text]
+    selected_format_list = format_lists[-1] if format_lists else None
+    offer_fields = _metadata_fields(selected_format_list)
+    advertised_format_names = (
+        selected_format_list.get("advertised_formats", [])
+        if isinstance(selected_format_list, dict) else [])
+    recognized_formats = (
+        selected_format_list.get("recognized_formats", [])
+        if isinstance(selected_format_list, dict) else [])
+
+    targets_events = [event for event in probe_events
+                      if event.get("event") == "targets_result" and
+                      str(event.get("owner", "")).lower() == owner_normalized]
+    targets_result = targets_events[-1] if targets_events else None
+    target_names = (targets_result.get("targets", [])
+                    if isinstance(targets_result, dict) else [])
+    if not isinstance(target_names, list):
+        target_names = []
+    target_names = [str(value) for value in target_names]
+    targets_requestor = (str(targets_result.get("requestor", "")).lower()
+                         if isinstance(targets_result, dict) else None)
+
+    probe_requests = [event for event in probe_events
+                      if event.get("event") == "selection_request"]
+    probe_results = [event for event in probe_events
+                     if event.get("event") == "selection_result"]
+    all_x11 = [entry for entry in chansrv.get("x11_selection_requests", [])
+               if _metadata_fields(entry).get("generation") == generation_text]
+    all_format_requests = [entry for entry in
+                           chansrv.get("format_data_requests", [])]
+    all_format_responses = [entry for entry in
+                            chansrv.get("format_data_responses", [])]
+    all_deliveries = [entry for entry in chansrv.get("x11_deliveries", [])]
+    all_incr_events = [entry for entry in chansrv.get("x11_incr_events", [])]
+    all_targets_responses = [entry for entry in
+                             chansrv.get("x11_targets_responses", [])]
+
+    wire_packets = sorted(
+        (packet for packet in cliprdr_packets
+         if packet.get("msg_type") in (4, 5)),
+        key=lambda packet: int(packet.get("monotonic_ns", 0)))
+    used_wire_indexes: set[int] = set()
+    retained_wire_packets: list[dict[str, object]] = []
+    image_transactions: list[dict[str, object]] = []
+    retained_chansrv: dict[str, list[dict[str, object]]] = {
+        "format_lists": [], "selection_owner_installs": [],
+        "format_data_requests": [], "format_data_responses": [],
+        "x11_selection_requests": [], "x11_targets_responses": [],
+        "x11_deliveries": [], "x11_incr_events": [],
+    }
+    retained_chansrv["format_lists"] = [
+        _public_chansrv_event(entry) for entry in format_lists]
+    retained_chansrv["selection_owner_installs"] = [
+        _public_chansrv_event(entry)
+        for entry in chansrv.get("selection_owner_installs", [])
+        if _metadata_fields(entry).get("generation") == generation_text]
+
+    image_targets = ("image/png", "image/bmp")
+    target_format_ids = {
+        "image/png": _integer(offer_fields.get("png_format_id")),
+        "image/bmp": (_integer(offer_fields.get("dib_format_id"))
+                       if _integer(offer_fields.get("dib_format_id")) is not None
+                       and _integer(offer_fields.get("dib_format_id")) >= 0
+                       else _integer(offer_fields.get("dibv5_format_id"))),
+    }
+
+    for target in image_targets:
+        format_id = target_format_ids[target]
+        if format_id is not None and format_id < 0:
+            format_id = None
+        probe_request = next((event for event in probe_requests
+                              if _probe_event_matches(
+                                  event, target, targets_requestor)), None)
+        requestor = (str(probe_request.get("requestor", "")).lower()
+                     if isinstance(probe_request, dict) else None)
+        x11_request = next((entry for entry in all_x11
+                            if _metadata_fields(entry).get("target") == target
+                            and _metadata_fields(entry).get("requestor", "").lower()
+                            == (requestor or "")
+                            and _metadata_fields(entry).get("owner", "").lower()
+                            == owner_normalized), None)
+        x11_fields = _metadata_fields(x11_request)
+        x11_request_ns = _integer(x11_fields.get("mono_ns"))
+        property_xid = x11_fields.get("property")
+        probe_result = next((event for event in probe_results
+                             if _probe_event_matches(
+                                 event, target, requestor)), None)
+
+        matched_requests: list[tuple[dict[str, object], int, str]] = []
+        if format_id is not None and x11_request is not None:
+            for entry in all_format_requests:
+                fields = _metadata_fields(entry)
+                entry_format_id = _integer(fields.get("format_id"))
+                entry_target = fields.get("target", target)
+                request_ns = _integer(fields.get("mono_ns"))
+                attempt_number = _integer(fields.get("attempt"))
+                request_time_source = "request-marker"
+                if (request_ns is None and fields.get("event") == "retry" and
+                        attempt_number is not None):
+                    previous_response = next((item for item in all_format_responses
+                                              if _integer(_metadata_fields(item).get(
+                                                  "format_id")) == format_id and
+                                              _integer(_metadata_fields(item).get(
+                                                  "attempt")) == attempt_number - 1),
+                                             None)
+                    if isinstance(previous_response, dict):
+                        # The diagnostic retry marker has no timestamp. The
+                        # previous response is the lower bound; the retry's
+                        # own type-4/type-5 pair is then identified by ordered
+                        # single-outstanding protocol traffic.
+                        request_ns = _integer(_metadata_fields(
+                            previous_response).get("mono_ns"))
+                        request_time_source = (
+                            "previous-attempt-response-lower-bound")
+                if (entry_format_id == format_id and entry_target == target and
+                        request_ns is not None and x11_request_ns is not None and
+                        request_ns >= x11_request_ns and
+                        fields.get("event") in ("request", "retry")):
+                    matched_requests.append(
+                        (entry, request_ns, request_time_source))
+        matched_requests.sort(key=lambda item: (
+            item[1], _integer(_metadata_fields(item[0]).get("attempt")) or 0))
+
+        attempts: list[dict[str, object]] = []
+        for request_entry, request_ns, request_time_source in matched_requests:
+            request_fields = _metadata_fields(request_entry)
+            attempt = request_fields.get("attempt", "1")
+            response_entry = next((entry for entry in all_format_responses
+                                   if _integer(_metadata_fields(entry).get(
+                                       "format_id")) == format_id and
+                                   _integer(_metadata_fields(entry).get(
+                                       "attempt")) == _integer(attempt) and
+                                   (_integer(_metadata_fields(entry).get("mono_ns"))
+                                    or 0) >= (request_ns or 0)), None)
+            response_fields = _metadata_fields(response_entry)
+            response_ns = _integer(response_fields.get("mono_ns"))
+
+            type4_index: int | None = None
+            type5_index: int | None = None
+            if request_ns is not None:
+                upper_ns = response_ns if response_ns is not None else None
+                for index, packet in enumerate(wire_packets):
+                    packet_ns = _integer(packet.get("monotonic_ns"))
+                    if (index in used_wire_indexes or packet_ns is None or
+                            packet_ns < request_ns - 1_000 or
+                            (upper_ns is not None and packet_ns > upper_ns + 1_000)):
+                        continue
+                    if (packet.get("msg_type") == 4 and
+                            packet.get("direction") == "server-to-client" and
+                            packet.get("send_status") == "success"):
+                        type4_index = index
+                        break
+                if type4_index is not None:
+                    type4_ns = _integer(
+                        wire_packets[type4_index].get("monotonic_ns")) or 0
+                    for index, packet in enumerate(wire_packets):
+                        packet_ns = _integer(packet.get("monotonic_ns"))
+                        if (index in used_wire_indexes or packet_ns is None or
+                                packet_ns <= type4_ns or
+                                (upper_ns is not None and
+                                 packet_ns > upper_ns + 1_000)):
+                            continue
+                        if (packet.get("msg_type") == 5 and
+                                packet.get("direction") == "client-to-server"):
+                            type5_index = index
+                            break
+                for index in (type4_index, type5_index):
+                    if index is not None:
+                        used_wire_indexes.add(index)
+                        retained_wire_packets.append(wire_packets[index])
+
+            attempt_report: dict[str, object] = {
+                "attempt": _integer(attempt),
+                "requested_format_id": format_id,
+                "chansrv_request_monotonic_ns": request_ns,
+                "request_time_source": request_time_source,
+                "chansrv_request": _public_chansrv_event(request_entry),
+                "outbound_vc_type4": (
+                    wire_packets[type4_index] if type4_index is not None else None),
+                "inbound_vc_type5": (
+                    wire_packets[type5_index] if type5_index is not None else None),
+                "chansrv_response": (
+                    _public_chansrv_event(response_entry)
+                    if isinstance(response_entry, dict) else None),
+                "successful_CLIPRDR_image_response": (
+                    type4_index is not None and type5_index is not None and
+                    wire_packets[type5_index].get("response_status") == "SUCCESS" and
+                    _integer(wire_packets[type5_index].get("data_len")) is not None and
+                    (_integer(wire_packets[type5_index].get("data_len")) or 0) > 0 and
+                    response_fields.get("status") in ("0x1", "1") and
+                    (_integer(response_fields.get("bytes")) or 0) > 0),
+            }
+            attempts.append(attempt_report)
+            retained_chansrv["format_data_requests"].append(
+                _public_chansrv_event(request_entry))
+            if isinstance(response_entry, dict):
+                retained_chansrv["format_data_responses"].append(
+                    _public_chansrv_event(response_entry))
+
+        if isinstance(probe_request, dict):
+            target_probe_requestor = str(probe_request.get("requestor", "")).lower()
+            for entry in all_x11:
+                fields = _metadata_fields(entry)
+                if (fields.get("target") == target and
+                        fields.get("requestor", "").lower() == target_probe_requestor and
+                        fields.get("owner", "").lower() == owner_normalized):
+                    retained_chansrv["x11_selection_requests"].append(
+                        _public_chansrv_event(entry))
+
+        if target == "image/png" and targets_requestor is not None:
+            for entry in all_x11:
+                fields = _metadata_fields(entry)
+                if (fields.get("target") == "TARGETS" and
+                        fields.get("requestor", "").lower() == targets_requestor and
+                        fields.get("owner", "").lower() == owner_normalized):
+                    retained_chansrv["x11_selection_requests"].append(
+                        _public_chansrv_event(entry))
+            for entry in all_targets_responses:
+                fields = _metadata_fields(entry)
+                if (fields.get("generation") == generation_text and
+                        fields.get("requestor", "").lower() == targets_requestor):
+                    retained_chansrv["x11_targets_responses"].append(
+                        _public_chansrv_event(entry))
+
+        delivery_matches: list[dict[str, object]] = []
+        incr_matches: list[dict[str, object]] = []
+        if requestor is not None:
+            for entry in all_deliveries:
+                fields = _metadata_fields(entry)
+                if (fields.get("generation") == generation_text and
+                        fields.get("target") == target and
+                        fields.get("requestor", "").lower() == requestor and
+                        (property_xid is None or
+                         fields.get("property", "").lower() ==
+                         property_xid.lower())):
+                    delivery_matches.append(entry)
+                    retained_chansrv["x11_deliveries"].append(
+                        _public_chansrv_event(entry))
+            for entry in all_incr_events:
+                fields = _metadata_fields(entry)
+                event_generation = next((fields.get(name) for name in (
                     "generation", "start_generation", "current_generation",
-                    "terminator_generation")):
-                retained.append(entry)
-            elif (key in ("format_data_requests", "format_data_responses") and
-                  fields.get("format_id") in image_format_ids):
-                retained.append(entry)
-        filtered[key] = retained
-    return filtered
+                    "terminator_generation") if fields.get(name) is not None), None)
+                if (event_generation == generation_text and
+                        fields.get("target", target) in (target, "-") and
+                        fields.get("requestor", "").lower() == requestor and
+                        (property_xid is None or
+                         fields.get("property", "").lower() ==
+                         property_xid.lower())):
+                    incr_matches.append(entry)
+                    retained_chansrv["x11_incr_events"].append(
+                        _public_chansrv_event(entry))
+
+        result_status = (probe_result.get("result")
+                         if isinstance(probe_result, dict) else None)
+        result_bytes = (_integer(probe_result.get("bytes"))
+                        if isinstance(probe_result, dict) else None)
+        result_path = (probe_result.get("path")
+                       if isinstance(probe_result, dict) else None)
+        successful_cliprdr_response = any(
+            bool(attempt.get("successful_CLIPRDR_image_response"))
+            for attempt in attempts)
+        if target not in target_names:
+            completion_reason = "image-target-not-advertised-in-X11-TARGETS"
+        elif probe_request is None:
+            completion_reason = "probe-did-not-issue-image-SelectionRequest"
+        elif not attempts:
+            completion_reason = "chansrv-image-FORMAT_DATA_REQUEST-not-observed"
+        elif result_status == "success" and result_bytes is not None and result_bytes > 0:
+            if not successful_cliprdr_response:
+                completion_reason = (
+                    "X11-image-delivery-succeeded-but-successful-CLIPRDR-"
+                    "response-was-not-proven")
+            elif result_path == "incr" and not any(
+                    _metadata_fields(entry).get("event") ==
+                    "x11-incr-terminator-ack" for entry in incr_matches):
+                completion_reason = "INCR-data-read-but-terminator-ack-not-observed"
+            else:
+                completion_reason = "image-transfer-completed"
+        elif any(attempt.get("inbound_vc_type5", {}).get("response_status") ==
+                 "FAIL" for attempt in attempts
+                 if isinstance(attempt.get("inbound_vc_type5"), dict)):
+            completion_reason = "client-returned-CB_FORMAT_DATA_RESPONSE-FAIL"
+        elif isinstance(probe_result, dict):
+            completion_reason = str(probe_result.get("reason", "image-probe-failed"))
+        else:
+            completion_reason = "image-probe-result-not-observed"
+
+        image_transactions.append({
+            "target": target,
+            "target_in_X11_TARGETS": target in target_names,
+            "requested_format_id": format_id,
+            "probe_selection_request": probe_request,
+            "chansrv_x11_selection_request": (
+                _public_chansrv_event(x11_request)
+                if isinstance(x11_request, dict) else None),
+            "chansrv_request_attempts": attempts,
+            "chansrv_x11_delivery": [
+                _public_chansrv_event(entry) for entry in delivery_matches],
+            "chansrv_x11_incr_events": [
+                _public_chansrv_event(entry) for entry in incr_matches],
+            "probe_result": probe_result,
+            "result_bytes": result_bytes,
+            "completion_or_failure_reason": completion_reason,
+        })
+
+    # Keep one TARGETS result and only this helper's requests/results for the
+    # two image targets. Other clipboard activity in the bounded wait window is
+    # intentionally excluded from both the report and retained packet journal.
+    selected_serials = {
+        serial for event in probe_requests
+        if event.get("target") in ("TARGETS", *image_targets) and
+        str(event.get("requestor", "")).lower() == (targets_requestor or "") and
+        str(event.get("owner", "")).lower() == owner_normalized and
+        (serial := _integer(event.get("request_serial"))) is not None
+    }
+    selected_probe_events = [
+        event for event in probe_events
+        if ((event.get("event") == "clipboard_owner" and
+             str(event.get("owner", "")).lower() == owner_normalized) or
+            (event.get("event") in ("selection_request", "selection_result",
+                                     "targets_result", "probe_timeout") and
+             _integer(event.get("request_serial")) in selected_serials and
+             str(event.get("requestor", "")).lower() ==
+             (targets_requestor or "")))
+    ]
+
+    retained_wire_packets.sort(
+        key=lambda packet: int(packet.get("monotonic_ns", 0)))
+    with journal_window_path.open("w", encoding="utf-8") as output:
+        for packet in retained_wire_packets:
+            output.write(json.dumps({
+                "test_id": test_id,
+                "packet": packet,
+            }, sort_keys=True, separators=(",", ":")) + "\n")
+
+    protocol_chansrv: dict[str, object] = {
+        **retained_chansrv,
+        "generic_request_correlation": chansrv.get(
+            "generic_request_correlation"),
+    }
+    return {
+        "markers": {"TEST_BEGIN": begin_marker, "TEST_END": end_marker},
+        "clipboard_transaction": {
+            "active_clipboard_generation": generation,
+            "advertised_formats": advertised_format_names,
+            "advertised_format_details_complete": (
+                selected_format_list.get(
+                    "advertised_format_details_complete", False)
+                if isinstance(selected_format_list, dict) else False),
+            "recognized_format_ids": recognized_formats,
+            "x11_owner_xid": owner,
+            "targets": targets_result,
+            "image_transactions": image_transactions,
+            "generation_replaced_during_window": (
+                generation_replaced_during_window),
+            "generic_request_correlation": protocol_chansrv[
+                "generic_request_correlation"],
+        },
+        "probe_events": selected_probe_events,
+        "protocol_summary": {
+            "cliprdr_packets": retained_wire_packets,
+            "chansrv": protocol_chansrv,
+        },
+    }
+
+
+def discard_raw_capture_artifacts(metadata: dict[str, object],
+                                  directory: Path) -> dict[str, object]:
+    """Remove captured broad-window source files after transaction filtering."""
+    sources = metadata.get("sources", [])
+    removed = 0
+    artifact_count = 0
+    if isinstance(sources, list):
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            artifact = source.get("artifact")
+            if not isinstance(artifact, str):
+                continue
+            artifact_count += 1
+            path = directory / artifact
+            try:
+                path.resolve().relative_to(directory.resolve())
+                path.unlink(missing_ok=True)
+                removed += 1
+            except (OSError, ValueError):
+                continue
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
+    source_records = sources if isinstance(sources, list) else []
+    return {
+        "source_count": len(source_records),
+        "capture_truncated": any(
+            isinstance(source, dict) and bool(source.get("truncated"))
+            for source in source_records),
+        "raw_metadata_artifacts_retained": removed < artifact_count,
+        "raw_metadata_artifacts_removed": removed,
+    }
 
 
 def stop_process(process: subprocess.Popen[bytes] | None) -> None:
@@ -776,6 +1207,12 @@ def main() -> int:
 
     chansrv_window.arm()
     begin_realtime, begin_realtime_ns, begin_mono_ns = now_pair()
+    begin_marker = {
+        "test_id": test_id,
+        "realtime": begin_realtime,
+        "realtime_ns": begin_realtime_ns,
+        "monotonic_ns": begin_mono_ns,
+    }
     emit_marker(run_directory / "markers.log", "TEST_BEGIN", test_id,
                 begin_realtime, begin_realtime_ns, begin_mono_ns)
     helper_environment = os.environ.copy()
@@ -802,11 +1239,9 @@ def main() -> int:
                 active_trigger, generation_replaced_by = select_current_trigger(
                     triggers, trigger_reader.latest_generation)
                 if generation_replaced_by is not None:
-                    triggered_generation = int(active_trigger["generation"])
                     capture_error = (
                         "clipboard generation replaced before the probe could "
-                        f"start: {triggered_generation} -> "
-                        f"{generation_replaced_by}")
+                        "start")
                 break
             if chansrv_window.monitor_truncated:
                 capture_error = "chansrv trigger monitor exceeded its byte bound"
@@ -844,8 +1279,7 @@ def main() -> int:
                         generation_replaced_by = trigger_reader.latest_generation
                         capture_error = (
                             "clipboard generation replaced while image probe "
-                            f"was active: {generation} -> "
-                            f"{generation_replaced_by}")
+                            "was active")
                         stop_process(helper_process)
                         break
                     if chansrv_window.monitor_truncated:
@@ -862,22 +1296,21 @@ def main() -> int:
         capture_error = str(error)
         stop_process(helper_process)
 
-    if active_trigger is not None:
-        trigger_reader.consume_many(chansrv_window.read_appended_lines())
-        active_generation = int(active_trigger["generation"])
-        if (generation_replaced_by is None and
-                trigger_reader.latest_generation > active_generation):
-            generation_replaced_by = trigger_reader.latest_generation
-            capture_error = (
-                "clipboard generation replaced before evidence seal: "
-                f"{active_generation} -> {generation_replaced_by}")
-
-    # Freeze source file offsets before TEST_END. Later normal RDP/Mac activity
-    # can append to the live logs without entering this run.
-    frozen_chansrv = chansrv_window.freeze(begin_realtime_ns)
+    # Mark the end as soon as the deliberate probe stops. Do not drain the
+    # trigger monitor again here: user clipboard activity after probe completion
+    # belongs outside this sealed interval.
     end_realtime, end_realtime_ns, end_mono_ns = now_pair()
+    end_marker = {
+        "test_id": test_id,
+        "realtime": end_realtime,
+        "realtime_ns": end_realtime_ns,
+        "monotonic_ns": end_mono_ns,
+    }
     emit_marker(run_directory / "markers.log", "TEST_END", test_id,
                 end_realtime, end_realtime_ns, end_mono_ns)
+    # Freeze file offsets immediately after the boundary. Any bytes appended
+    # in this tiny interval are still transaction-filtered before retention.
+    frozen_chansrv = chansrv_window.freeze(begin_realtime_ns)
     journal_exit_status = (journal_process.poll()
                            if journal_process is not None else None)
     stop_process(journal_process)
@@ -887,99 +1320,53 @@ def main() -> int:
         journal_capture.join(3.0)
     chansrv_metadata = FileWindow.capture(
         frozen_chansrv, run_directory / "chansrv-window")
-    if journal_started:
-        filtered_path = run_directory / "journal-window.jsonl"
-        retained = 0
-        with journal_path.open("r", encoding="utf-8", errors="replace") as source, \
-                filtered_path.open("w", encoding="utf-8") as target:
-            for line in source:
-                try:
-                    entry = json.loads(line)
-                    mono_us = int(entry.get("__MONOTONIC_TIMESTAMP", "-1"))
-                except (json.JSONDecodeError, TypeError, ValueError):
-                    continue
-                mono_ns = mono_us * 1000
-                if begin_mono_ns <= mono_ns <= end_mono_ns:
-                    target.write(line)
-                    retained += 1
-    else:
-        filtered_path = run_directory / "journal-window.jsonl"
-        filtered_path.write_text("", encoding="utf-8")
-        retained = 0
-    protocol = {
-        "cliprdr_packets": cliprdr_events(
-            filtered_path, begin_mono_ns, end_mono_ns),
-        "chansrv": chansrv_summary(run_directory / "chansrv-window"),
-    }
     probe_path = run_directory / "x11-probe.jsonl"
     probe_events = parse_probe_events(probe_path)
-    chansrv_protocol = protocol["chansrv"]
-    trigger_offer = (active_trigger.get("format_list")
-                     if active_trigger is not None else None)
-    offer_fields = (trigger_offer.get("fields", {})
-                    if isinstance(trigger_offer, dict) else {})
-    advertised_format_ids: list[dict[str, object]] = []
-    if isinstance(offer_fields, dict):
-        for field, label in (("dib_format_id", "CF_DIB"),
-                             ("dibv5_format_id", "CF_DIBV5"),
-                             ("png_format_id", "PNG")):
-            try:
-                format_id = int(offer_fields[field], 0)
-            except (KeyError, TypeError, ValueError):
-                continue
-            if format_id >= 0:
-                advertised_format_ids.append({"id": format_id, "name": label})
-    if active_trigger is not None and isinstance(chansrv_protocol, dict):
-        active_image_ids = {str(item["id"]) for item in advertised_format_ids}
-        protocol["chansrv"] = filter_chansrv_summary(
-            chansrv_protocol, int(active_trigger["generation"]),
-            active_image_ids)
-        chansrv_protocol = protocol["chansrv"]
-    image_results = [
-        event for event in probe_events
-        if event.get("event") == "selection_result" and
-        event.get("target") in ("image/png", "image/bmp")]
-    cliprdr_data_packets = [
-        event for event in protocol["cliprdr_packets"]
-        if event.get("msg_type") in (4, 5)]
-    image_requests = [
-        entry for entry in chansrv_protocol.get("format_data_requests", [])
-        if isinstance(entry, dict)] if isinstance(chansrv_protocol, dict) else []
-    selected_format_list = next((
-        entry for entry in chansrv_protocol.get("format_lists", [])
-        if isinstance(entry, dict) and
-        entry.get("fields", {}).get("generation") ==
-        str(active_trigger.get("generation"))
-    ), None) if active_trigger is not None and isinstance(
-        chansrv_protocol, dict) else None
-    probe_transaction = {
-        "active_clipboard_generation": (
-            active_trigger.get("generation") if active_trigger else None),
-        "advertised_format_ids": advertised_format_ids,
-        "advertised_formats": (
-            selected_format_list.get("advertised_formats", [])
-            if selected_format_list is not None else []),
-        "advertised_format_details_complete": (
-            selected_format_list.get(
-                "advertised_format_details_complete", False)
-            if selected_format_list is not None else False),
-        "x11_owner_xid": active_trigger.get("owner") if active_trigger else None,
-        "targets": next((event.get("targets") for event in probe_events
-                         if event.get("event") == "targets_result"), None),
-        "requested_x11_targets": [
-            event.get("target") for event in probe_events
-            if event.get("event") == "selection_request"],
-        "cliprdr_requested_format_ids": [
-            entry.get("fields", {}).get("format_id")
-            for entry in image_requests],
-        "cliprdr_data_packets": cliprdr_data_packets,
-        "image_results": image_results,
-        "generation_replaced_by": generation_replaced_by,
-        "completion_or_failure_reason": capture_error or (
-            "both-advertised-image-probes-completed"
-            if helper_process is not None and helper_process.returncode == 0
-            else "probe-failed-or-incomplete"),
-    }
+    all_cliprdr_packets = (cliprdr_events(
+        journal_path, begin_mono_ns, end_mono_ns) if journal_started else [])
+    raw_chansrv_protocol = chansrv_summary(
+        run_directory / "chansrv-window")
+    journal_window_path = run_directory / "journal-window.jsonl"
+    if active_trigger is not None:
+        sealed_protocol = build_sealed_transaction_report(
+            test_id=test_id,
+            generation=int(active_trigger["generation"]),
+            owner=str(active_trigger["owner"]),
+            begin_marker=begin_marker,
+            end_marker=end_marker,
+            chansrv=raw_chansrv_protocol,
+            probe_events=probe_events,
+            cliprdr_packets=all_cliprdr_packets,
+            journal_window_path=journal_window_path,
+            generation_replaced_during_window=(generation_replaced_by is not None))
+    else:
+        journal_window_path.write_text("", encoding="utf-8")
+        sealed_protocol = {
+            "markers": {"TEST_BEGIN": begin_marker, "TEST_END": end_marker},
+            "clipboard_transaction": {
+                "active_clipboard_generation": None,
+                "advertised_formats": [],
+                "x11_owner_xid": None,
+                "targets": None,
+                "image_transactions": [],
+                "generation_replaced_during_window": (
+                    generation_replaced_by is not None),
+                "completion_or_failure_reason": capture_error,
+            },
+            "probe_events": [],
+            "protocol_summary": {
+                "cliprdr_packets": [],
+                "chansrv": {},
+            },
+        }
+    if journal_path.exists():
+        journal_path.unlink()
+    chansrv_metadata = discard_raw_capture_artifacts(
+        chansrv_metadata, run_directory / "chansrv-window")
+    protocol = sealed_protocol["protocol_summary"]
+    retained_probe_events = sealed_protocol["probe_events"]
+    retained = len(protocol["cliprdr_packets"])
+    transaction = sealed_protocol["clipboard_transaction"]
     summary = {
         "test_id": test_id,
         "boot_id": read_boot_id(),
@@ -998,12 +1385,13 @@ def main() -> int:
         "journal_error": (journal_error_path.read_text(
             encoding="utf-8", errors="replace")
             if journal_error_path.exists() else ""),
-        "journal_records_in_window": retained,
+        "journal_image_packet_count": retained,
         "journal_capture_truncated": bool(
             journal_capture and journal_capture.truncated),
         "chansrv_capture": chansrv_metadata,
-        "clipboard_transaction": probe_transaction,
-        "probe_events": probe_events,
+        "markers": sealed_protocol["markers"],
+        "clipboard_transaction": transaction,
+        "probe_events": retained_probe_events,
         "protocol_summary": protocol,
         "post_window_user_activity_included": False,
     }
@@ -1021,17 +1409,20 @@ def main() -> int:
             {key: event.get(key) for key in (
                 "event", "target", "result", "reason", "path", "bytes",
                 "owner_observation", "owner") if key in event}
-            for event in probe_events
+            for event in retained_probe_events
             if event.get("event") in ("clipboard_owner", "targets_result",
                                        "selection_result", "probe_timeout")],
-        "cliprdr_packet_count": len(protocol["cliprdr_packets"]),
+        "cliprdr_image_packet_count": len(protocol["cliprdr_packets"]),
         "capture_error": capture_error,
     }, indent=2), flush=True)
     if (capture_error is not None or active_trigger is None or not journal_started or
             journal_exit_status is not None or
+            bool(chansrv_metadata.get("capture_truncated")) or
+            bool(chansrv_metadata.get("raw_metadata_artifacts_retained")) or
             chansrv_window.monitor_truncated or
             (helper_capture is not None and helper_capture.truncated) or
-            (journal_capture is not None and journal_capture.truncated)):
+            (journal_capture is not None and journal_capture.truncated) or
+            (helper_process is not None and helper_process.returncode != 0)):
         return 2
     return 0
 
