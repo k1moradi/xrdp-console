@@ -13,8 +13,9 @@ are never logged or copied.
 +    struct xrdp_cliprdr_diagnostic_header clip_header;
 +    int cliprdr_header_available = 0;
 +    int cliprdr_fragment_bytes = 0;
-@@ -158,0 +162,12 @@
-+            (flags & XR_CHANNEL_FLAG_FIRST) != 0)
+@@ -158,0 +162,13 @@
++            (flags & XR_CHANNEL_FLAG_FIRST) != 0 &&
++            (flags & XR_CHANNEL_PACKET_COMPRESSED) == 0)
 +    {
 +        cliprdr_fragment_bytes = (int)(s->end - s->p);
 +        if (xrdp_vc_diagnostic_decode_cliprdr_header(
@@ -26,9 +27,7 @@ are never logged or copied.
 +    }
 +
 +    if (xrdp_channel_is_cliprdr(channel) &&
-@@ -177,0 +193,13 @@
-+    }
-+
+@@ -178,0 +194,12 @@
 +    if (cliprdr_header_available)
 +    {
 +        LOG(LOG_LEVEL_INFO,
@@ -40,3 +39,4 @@ are never logged or copied.
 +            clip_header.message_type, clip_header.message_flags,
 +            clip_header.data_length, total_data_len, cliprdr_fragment_bytes,
 +            flags, (flags & XR_CHANNEL_FLAG_LAST) != 0);
++    }
