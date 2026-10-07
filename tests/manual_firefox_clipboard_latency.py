@@ -178,15 +178,13 @@ def observation_window_seconds(consume_current: bool, delay_ms: int) -> float:
 
 
 def browser_page_url(page: Path, consume_current: bool) -> str:
-    """Return a probe URL reachable by the selected Firefox execution mode.
+    """Return an in-memory probe URL reachable by Snap-confined Firefox.
 
-    Snap-confined Firefox cannot necessarily resolve a host /tmp file:// path
-    used by a detached worktree. Consumer-only mode therefore embeds the
-    static local probe document in a data: URL. Synthetic mode keeps the
-    historical file:// behavior.
+    Both consumer and synthetic modes embed the same static local probe
+    document in a data: URL. This keeps page loading independent of the host
+    path used by a detached worktree and avoids a file:// namespace confound.
     """
-    if not consume_current:
-        return page.resolve().as_uri()
+    del consume_current
     document = page.read_text(encoding="utf-8")
     return "data:text/html;charset=utf-8," + urllib.parse.quote(
         document, safe="")
