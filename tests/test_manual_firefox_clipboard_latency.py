@@ -104,13 +104,16 @@ class FirefoxClipboardClassificationTests(unittest.TestCase):
             encoded = url.split(",", 1)[1]
             self.assertEqual(urllib.parse.unquote(encoded), document)
 
-    def test_synthetic_page_url_remains_file_uri(self) -> None:
+    def test_synthetic_page_url_is_also_embedded(self) -> None:
         with tempfile.TemporaryDirectory(prefix="firefox-page-url-") as raw:
             page = Path(raw) / "probe.html"
-            page.write_text("<html></html>", encoding="utf-8")
-            self.assertEqual(
-                self.module.browser_page_url(page, False),
-                page.resolve().as_uri())
+            document = "<html><div id=\"paste-target\"></div></html>"
+            page.write_text(document, encoding="utf-8")
+            url = self.module.browser_page_url(page, False)
+            self.assertTrue(url.startswith("data:text/html;charset=utf-8,"))
+            self.assertNotIn(str(page), url)
+            encoded = url.split(",", 1)[1]
+            self.assertEqual(urllib.parse.unquote(encoded), document)
 
 
     def test_files_without_file_item_remain_pending(self) -> None:
