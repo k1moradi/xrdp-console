@@ -1,7 +1,7 @@
 diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 --- a/sesman/chansrv/clipboard.c
 +++ b/sesman/chansrv/clipboard.c
-@@ -383,6 +383,33 @@ clipboard_monotonic_time_ns(void)
+@@ -409,6 +409,33 @@
      return (unsigned long long)now.tv_sec * 1000000000ULL +
             (unsigned long long)now.tv_nsec;
  }
@@ -35,17 +35,32 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
  struct clipboard_selection_retry
  {
      struct clipboard_retry_policy policy;
-@@ -523,4 +550,4 @@ clipboard_init(void)
+@@ -567,7 +594,7 @@
+ 
+     xfuse_init();
+     xcommon_init();
 -    g_incr_max_req_size = XMaxRequestSize(g_display) * 4 - 24;
 +    g_incr_max_req_size = clipboard_x11_max_property_bytes();
      g_memset(&g_clip_c2s, 0, sizeof(g_clip_c2s));
      g_memset(&g_clip_s2c, 0, sizeof(g_clip_s2c));
-     clipboard_png_digest_reset();
-@@ -3368,19 +3395,41 @@ clipboard_event_selection_request(XEvent *xevent)
+     g_memset(&g_pending_format_data_request, 0,
+@@ -3766,12 +3793,7 @@
+ {
+     XSelectionRequestEvent *lxev;
+     Atom atom_buf[10];
+-    Atom type;
+     int atom_count;
+-    int fmt;
+-    int n_items;
+-    int xdata_size;
+-    char *xdata;
+     char target_names[256];
+     int target_names_length;
+     int target_names_remaining;
+@@ -3788,6 +3810,20 @@
                g_wnd, lxev->requestor, lxev->owner, lxev->selection,
                get_atom_text(lxev->selection),
                lxev->target, lxev->property);
- 
 +    /*
 +     * Follow the same selection-owner invariants as Qt.  X should normally
 +     * deliver requests only to the current owner, but deferred remote format
@@ -60,6 +75,10 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +        return 0;
 +    }
 +
+     if (lxev->property != None)
+     {
+         LOG(LOG_LEVEL_INFO,
+@@ -3899,9 +3935,11 @@
      if (lxev->property == None)
      {
          LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: "
@@ -69,12 +88,11 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +        lxev->property = lxev->target;
      }
 -    else if (lxev->target == g_targets_atom)
-+
 +    if (lxev->target == g_targets_atom)
      {
          LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: g_targets_atom");
          /* requestor is asking what the selection can be converted to */
-         LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: "
+@@ -3909,8 +3947,13 @@
                    "g_targets_atom");
          atom_buf[0] = g_targets_atom;
          atom_buf[1] = g_timestamp_atom;
@@ -87,20 +105,10 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +         * Format Data Request with no protocol request ID.
 +         */
 +        atom_count = 2;
-@@ -3354,12 +3354,7 @@ clipboard_event_selection_request(XEvent *xevent)
- {
-     XSelectionRequestEvent *lxev;
-     Atom atom_buf[10];
--    Atom type;
-     int atom_count;
--    int fmt;
--    int n_items;
--    int xdata_size;
--    char *xdata;
-     char target_names[256];
-     int target_names_length;
-     int target_names_remaining;
-@@ -3578,20 +3600,10 @@ clipboard_event_selection_request(XEvent *xevent)
+ 
+         /* Only announce text if the client is advertising text, or
+          * a file list */
+@@ -4006,20 +4049,10 @@
      }
      else if (lxev->target == g_multiple_atom)
      {
