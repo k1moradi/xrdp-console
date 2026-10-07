@@ -518,7 +518,7 @@ new file mode 100644
 index 0000000..daad931
 --- /dev/null
 +++ b/sesman/chansrv/clipboard_image_formats.h
-@@ -0,0 +1,186 @@
+@@ -0,0 +1,364 @@
 +/*
 + * Small, allocation-free helpers for the CLIPRDR image formats supported by
 + * chansrv. Kept separate so the format and DIB bounds can be unit tested.
