@@ -25,6 +25,16 @@ def load_capture_module(path: Path):
 
 
 class ClipboardCaptureTests(unittest.TestCase):
+    def test_default_trigger_window_covers_delayed_macos_publication(self) -> None:
+        capture = load_capture_module(Path(sys.argv[1]))
+        self.assertEqual(capture.DEFAULT_TIMEOUT_SECONDS, 300)
+        self.assertGreater(
+            capture.DEFAULT_TIMEOUT_SECONDS,
+            211,
+            "the observed macOS image Format List arrived about 211 seconds "
+            "after the earlier capture began",
+        )
+
     def test_screenshot_wait_and_image_transaction_deadlines_are_independent(self) -> None:
         capture = load_capture_module(Path(sys.argv[1]))
         begin_ns = 10_000_000_000
