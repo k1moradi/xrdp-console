@@ -137,7 +137,8 @@ MARKER_RE = re.compile(
     r"XRDP_CONSOLE_CLIPBOARD_IMAGE\s+event=([a-z0-9-]{1,64})\b"
 )
 VC_MARKER_RE = re.compile(
-    r"^XRDP_CONSOLE_RDP_VC\s+event=([a-z0-9-]{1,64})\b"
+    r"^(?:\[(?:INFO|DEBUG|WARN|ERROR|FATAL)\s*\]\s+)?"
+    r"XRDP_CONSOLE_RDP_VC\s+event=([a-z0-9-]{1,64})\b"
 )
 KEY_VALUE_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)")
 JOURNAL_CURSOR_RE = re.compile(r"^-- cursor: (.+)$", re.MULTILINE)

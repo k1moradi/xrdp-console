@@ -276,6 +276,32 @@ class ClipboardPublicationWatchTests(unittest.TestCase):
         self.assertEqual(result["cliprdr_channel_id"], "1004")
         self.assertFalse(collector.journal_reader_failed)
 
+    def test_journald_info_prefixed_vc_message_is_classified(self) -> None:
+        journal_entry = {
+            "MESSAGE": (
+                "[INFO ] XRDP_CONSOLE_RDP_VC event=cliprdr-first-fragment "
+                "direction=client-to-server total_len=32 fragment_bytes=32 "
+                "flags=0x00000013 compressed=0 msg_type=2 msg_flags=0x0000 "
+                "data_len=24 payload_bytes_in_fragment=24"
+            ),
+            "__REALTIME_TIMESTAMP": "1791363946070751",
+            "__MONOTONIC_TIMESTAMP": "111045255719",
+            "_PID": "579007",
+            "_BOOT_ID": "0c646397-9b04-483b-8b7c-eca3b5f89329",
+        }
+        collector = self.observer.MetadataCollector()
+        collector.add_journal_chunk(
+            json.dumps(journal_entry).encode("utf-8") + b"\n"
+        )
+
+        self.assertEqual(len(collector.events), 1)
+        event = collector.events[0]
+        self.assertEqual(event["event"], "cliprdr-first-fragment")
+        self.assertEqual(event["fields"]["msg_type"], "2")
+        self.assertEqual(event["realtime_usec"], "1791363946070751")
+        self.assertEqual(event["pid"], "579007")
+        self.assertFalse(collector.journal_reader_failed)
+
     def test_malformed_journal_input_invalidates_capture(self) -> None:
         collector = self.observer.MetadataCollector()
         collector.add_journal_chunk(b"not-json\n")
