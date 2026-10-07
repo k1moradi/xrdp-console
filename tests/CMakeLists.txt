@@ -920,6 +920,14 @@ if(TARGET xrdp-console)
             ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
             TIMEOUT 10
             LABELS "clipboard;unit")
+        add_test(NAME firefox-current-clipboard-classification-unit
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_manual_firefox_clipboard_latency.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/manual_firefox_clipboard_latency.py)
+        set_tests_properties(firefox-current-clipboard-classification-unit PROPERTIES
+            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            TIMEOUT 10
+            LABELS "clipboard;unit")
         add_executable(x11-window-damage-counter
             helpers/x11_window_damage_counter.c)
         target_link_libraries(x11-window-damage-counter PRIVATE
