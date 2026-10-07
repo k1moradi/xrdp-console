@@ -935,10 +935,13 @@ def build_sealed_transaction_report(
         probe_notify = next((event for event in probe_notifies
                              if _probe_event_matches(
                                  event, target, requestor)), None)
-        probe_property_xid = (
+        probe_property_value = (
             str(probe_notify.get("property", "")).lower()
             if isinstance(probe_notify, dict) and
-            probe_notify.get("property") is not None else None)
+            probe_notify.get("property") is not None else "")
+        probe_property_xid = (
+            probe_property_value
+            if probe_property_value not in ("", "0", "0x0") else None)
         result_end_ns = (_integer(probe_result.get(
             "completed_monotonic_ns"))
             if isinstance(probe_result, dict) else None)
