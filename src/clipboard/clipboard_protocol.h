@@ -36,6 +36,44 @@ struct PduView
     std::span<const std::uint8_t> payload{};
 };
 
+enum class PngValidationError : std::uint8_t
+{
+    None,
+    TooShort,
+    InvalidSignature,
+    InvalidChunkBounds,
+    InvalidChunkCrc,
+    MissingIhdr,
+    InvalidIhdr,
+    InvalidChunkOrder,
+    UnsupportedCriticalChunk,
+    MissingIdat,
+    MissingIend,
+    TrailingData,
+};
+
+struct PngInfo
+{
+    std::uint32_t width{};
+    std::uint32_t height{};
+    std::size_t idatChunks{};
+};
+
+struct DibInfo
+{
+    std::uint32_t pixelOffset{};
+    std::uint16_t bitCount{};
+    std::uint32_t compression{};
+};
+
+[[nodiscard]] bool validatePng(std::span<const std::uint8_t> bytes,
+                               PngInfo &info,
+                               PngValidationError *error = nullptr) noexcept;
+
+[[nodiscard]] bool wrapDibAsBmp(std::span<const std::uint8_t> dib,
+                                std::vector<std::uint8_t> &bmp,
+                                DibInfo *info = nullptr) noexcept;
+
 [[nodiscard]] bool decodePdu(std::span<const std::uint8_t> bytes,
                              PduView &pdu) noexcept;
 
