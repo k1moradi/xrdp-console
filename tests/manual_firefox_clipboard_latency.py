@@ -25,6 +25,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, BinaryIO
 
+CURRENT_CLIPBOARD_OBSERVATION_SECONDS = 30.0
+
 
 class WebDriver:
     def __init__(self, base_url: str) -> None:
@@ -139,6 +141,40 @@ def paste_events_have_valid_png(events: object) -> bool:
     return isinstance(events, list) and any(
         isinstance(event, dict) and event_has_valid_png_file(event)
         for event in events)
+
+
+def paste_events_have_pending_file_delivery(events: object) -> bool:
+    """Return true while a paste advertises Files without terminal file data."""
+    if not isinstance(events, list):
+        return False
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        types = event.get("types", [])
+        items = event.get("items", [])
+        if not isinstance(types, list):
+            types = []
+        if not isinstance(items, list):
+            items = []
+        file_items = [
+            item for item in items
+            if isinstance(item, dict) and item.get("kind") == "file"
+        ]
+        if "Files" in types and not file_items:
+            return True
+        for item in file_items:
+            file_info = item.get("file")
+            if not isinstance(file_info, dict):
+                return True
+            if file_info.get("readback") == "pending":
+                return True
+    return False
+
+
+def observation_window_seconds(consume_current: bool, delay_ms: int) -> float:
+    minimum = (CURRENT_CLIPBOARD_OBSERVATION_SECONDS
+               if consume_current else 10.0)
+    return max(minimum, delay_ms / 1000.0 + 5.0)
 
 
 def browser_page_url(page: Path, consume_current: bool) -> str:
@@ -328,8 +364,8 @@ def main() -> int:
         last_observation: str | None = None
         last_change = time.monotonic()
         quiet_seconds = max(1.5, args.delay_ms / 1000.0 + 0.5)
-        event_deadline = time.monotonic() + max(
-            10.0, args.delay_ms / 1000.0 + 5.0)
+        event_deadline = time.monotonic() + observation_window_seconds(
+            args.consume_current, args.delay_ms)
         while time.monotonic() < event_deadline:
             result = driver.command(
                 "POST", f"/session/{session_id}/execute/sync", {
@@ -343,16 +379,9 @@ def main() -> int:
             if paste_log != "[]":
                 try:
                     event_data = json.loads(paste_log)
-                    file_items = [
-                        item.get("file")
-                        for event in event_data
-                        for item in event.get("items", [])
-                        if item.get("kind") == "file" and item.get("file")
-                    ]
-                    all_readbacks_complete = all(
-                        item.get("readback") != "pending"
-                        for item in file_items)
-                    if (all_readbacks_complete and
+                    pending_file_delivery = (
+                        paste_events_have_pending_file_delivery(event_data))
+                    if (not pending_file_delivery and
                             time.monotonic() - last_change >= quiet_seconds):
                         break
                 except json.JSONDecodeError:
@@ -388,6 +417,7 @@ def main() -> int:
                           f"paste_wall_time={event.get('wallTime')} "
                           f"trusted={event.get('trusted')} "
                           f"types={event.get('types')!r} "
+                          f"items={event.get('items')!r} "
                           f"files={event.get('files')!r}")
                     for item_index, item in enumerate(event.get("items", [])):
                         file_item = item.get("file")
