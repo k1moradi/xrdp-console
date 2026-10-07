@@ -1,41 +1,49 @@
 diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 --- a/sesman/chansrv/clipboard.c
 +++ b/sesman/chansrv/clipboard.c
-@@ -409,6 +409,33 @@
+@@ -409,6 +409,41 @@
      return (unsigned long long)now.tv_sec * 1000000000ULL +
             (unsigned long long)now.tv_nsec;
  }
 +
 +/*
-+ * Match Qt's XCB clipboard sizing policy: use the largest request size the
-+ * X server actually negotiated, including BIG-REQUESTS when available.
-+ * XChangeProperty request overhead is six 32-bit units (24 bytes).
++ * Use X11's negotiated normal request limit, but do not send giant
++ * BIG-REQUESTS-sized clipboard properties.  A single ~16 MiB chunk held
++ * the requestor for too long and broke otherwise valid multi-chunk INCR
++ * transfers.  Bound each chunk to 256 KiB for fair, incremental progress.
 + */
 +static int
 +clipboard_x11_max_property_bytes(void)
 +{
-+    long request_units;
++    long request_units = XMaxRequestSize(g_display);
 +
-+    request_units = XExtendedMaxRequestSize(g_display);
-+    if (request_units <= 0)
-+    {
-+        request_units = XMaxRequestSize(g_display);
-+    }
 +    if (request_units <= 6)
 +    {
 +        return 1;
 +    }
-+    if (request_units > ((long)INT_MAX + 24L) / 4L)
++    request_units -= 6; /* XChangeProperty header, in 32-bit units */
++    if (request_units > (256L * 1024L / 4L))
 +    {
-+        return INT_MAX;
++        request_units = 256L * 1024L / 4L;
 +    }
-+    return (int)(request_units * 4L - 24L);
++    return (int)(request_units * 4L);
++}
++
++static int
++clipboard_request_predates_selection(Time request_time, Time owner_time)
++{
++    if (request_time == CurrentTime || owner_time == CurrentTime)
++    {
++        return 0;
++    }
++    /* X11 times are 32-bit sequence numbers, including wraparound. */
++    return (uint32_t)(request_time - owner_time) >= 0x80000000U;
 +}
 +
  struct clipboard_selection_retry
  {
      struct clipboard_retry_policy policy;
-@@ -567,7 +594,7 @@
+@@ -567,7 +602,7 @@
  
      xfuse_init();
      xcommon_init();
@@ -44,7 +52,7 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
      g_memset(&g_clip_c2s, 0, sizeof(g_clip_c2s));
      g_memset(&g_clip_s2c, 0, sizeof(g_clip_s2c));
      g_memset(&g_pending_format_data_request, 0,
-@@ -3766,12 +3793,7 @@
+@@ -3766,12 +3801,7 @@
  {
      XSelectionRequestEvent *lxev;
      Atom atom_buf[10];
@@ -57,7 +65,7 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
      char target_names[256];
      int target_names_length;
      int target_names_remaining;
-@@ -3788,6 +3810,20 @@
+@@ -3788,6 +3818,19 @@
                g_wnd, lxev->requestor, lxev->owner, lxev->selection,
                get_atom_text(lxev->selection),
                lxev->target, lxev->property);
@@ -67,9 +75,8 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 +     * publication makes rejecting stale requests explicitly worthwhile.
 +     */
 +    if (lxev->selection != g_clipboard_atom || lxev->owner != g_wnd ||
-+            (lxev->time != CurrentTime &&
-+             g_selection_time != CurrentTime &&
-+             lxev->time < g_selection_time))
++            clipboard_request_predates_selection(lxev->time,
++                                                  g_selection_time))
 +    {
 +        clipboard_refuse_selection(lxev);
 +        return 0;
@@ -78,7 +85,7 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
      if (lxev->property != None)
      {
          LOG(LOG_LEVEL_INFO,
-@@ -3899,9 +3935,11 @@
+@@ -3899,9 +3942,11 @@
      if (lxev->property == None)
      {
          LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: "
@@ -92,7 +99,7 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
      {
          LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: g_targets_atom");
          /* requestor is asking what the selection can be converted to */
-@@ -3909,8 +3947,13 @@
+@@ -3909,8 +3954,13 @@
                    "g_targets_atom");
          atom_buf[0] = g_targets_atom;
          atom_buf[1] = g_timestamp_atom;
@@ -108,7 +115,7 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
  
          /* Only announce text if the client is advertising text, or
           * a file list */
-@@ -4006,20 +4049,10 @@
+@@ -4006,20 +4056,10 @@
      }
      else if (lxev->target == g_multiple_atom)
      {
