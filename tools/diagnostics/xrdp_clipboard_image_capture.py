@@ -21,7 +21,7 @@ from typing import BinaryIO
 
 MAX_CAPTURE_BYTES = 64 * 1024 * 1024
 MAX_TRACKED_GENERATIONS = 64
-DEFAULT_TIMEOUT_SECONDS = 120
+DEFAULT_TIMEOUT_SECONDS = 300
 DEFAULT_TRANSACTION_TIMEOUT_SECONDS = 60
 DEFAULT_REQUEST_TIMEOUT_MS = 20_000
 MIN_TRANSACTION_TIMEOUT_SECONDS = 5
@@ -1495,11 +1495,14 @@ def main() -> int:
     transaction_deadline_ns: int | None = None
     fallback_control_sent = False
     try:
-        print("PROBE_READY: take one fresh screenshot. Waiting for a new "
+        print("PROBE_READY: take one fresh screenshot and do not replace "
+              "the Mac clipboard. Waiting up to five minutes for a new "
               "image-bearing chansrv Format List and its successful "
               "owner-install marker; XFixes owner changes are supporting "
-              "evidence only. After image probes complete or the bounded "
-              "window seals, continue normal Mac/RDP clipboard use.", flush=True)
+              "evidence only. As soon as that generation is installed, the "
+              "deterministic X11 probe requests image/png. After the image "
+              "transaction completes or the bounded window seals, continue "
+              "normal Mac/RDP clipboard use.", flush=True)
         while True:
             appended_lines = chansrv_window.read_appended_lines()
             observed_incr_acks.update(
