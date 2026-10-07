@@ -22,6 +22,7 @@
 #define MAX_IMAGE_BYTES (64U * 1024U * 1024U)
 #define DEFAULT_TIMEOUT_MS 60000U
 #define DEFAULT_REQUEST_TIMEOUT_MS 15000U
+#define PNG_SIGNATURE_BYTES 8U
 
 enum request_kind
 {
@@ -79,6 +80,8 @@ struct probe
     bool failed;
     uint64_t image_bytes;
     uint64_t incr_announced_bytes;
+    unsigned char image_prefix[PNG_SIGNATURE_BYTES];
+    size_t image_prefix_bytes;
     uint64_t clipboard_generation;
     uint64_t png_owner_observation;
 };
@@ -171,6 +174,40 @@ request_kind_name(enum request_kind kind)
         default:
             return "none";
     }
+}
+
+static void
+capture_image_prefix(struct probe *probe, const unsigned char *data,
+                     size_t byte_count)
+{
+    size_t remaining;
+    size_t copy_bytes;
+
+    if (probe == NULL || data == NULL ||
+            probe->image_prefix_bytes >= PNG_SIGNATURE_BYTES)
+    {
+        return;
+    }
+    remaining = PNG_SIGNATURE_BYTES - probe->image_prefix_bytes;
+    copy_bytes = byte_count < remaining ? byte_count : remaining;
+    if (copy_bytes != 0U)
+    {
+        memcpy(probe->image_prefix + probe->image_prefix_bytes,
+               data, copy_bytes);
+        probe->image_prefix_bytes += copy_bytes;
+    }
+}
+
+static bool
+png_signature_valid(const struct probe *probe)
+{
+    static const unsigned char signature[PNG_SIGNATURE_BYTES] = {
+        0x89U, 0x50U, 0x4eU, 0x47U, 0x0dU, 0x0aU, 0x1aU, 0x0aU
+    };
+
+    return probe != NULL &&
+           probe->image_prefix_bytes == PNG_SIGNATURE_BYTES &&
+           memcmp(probe->image_prefix, signature, PNG_SIGNATURE_BYTES) == 0;
 }
 
 static char *
@@ -270,6 +307,8 @@ finish_request(struct probe *probe, bool success, const char *reason,
     probe->incr_active = false;
     probe->image_bytes = 0U;
     probe->incr_announced_bytes = 0U;
+    memset(probe->image_prefix, 0, sizeof(probe->image_prefix));
+    probe->image_prefix_bytes = 0U;
     probe->first_byte_ns = 0U;
 
 }
@@ -284,14 +323,40 @@ finish_image_request(struct probe *probe, bool success, const char *reason,
                      uint64_t byte_count)
 {
     const enum request_kind completed_kind = probe->request_kind;
-    finish_request(probe, success, reason, path, type, format, byte_count);
+    bool validated_success = success;
+    const char *validated_reason = reason;
+
+    if (completed_kind == REQUEST_PNG && success)
+    {
+        const bool signature_valid = png_signature_valid(probe);
+        log_prefix("image_validation");
+        printf(",\"requestor\":\"0x%lx\",\"owner\":\"0x%lx\""
+               ",\"owner_observation\":%llu,\"request_serial\":%llu"
+               ",\"target\":\"image/png\",\"bytes\":%llu"
+               ",\"png_signature_valid\":%s,\"prefix_bytes\":%zu}\n",
+               probe->window, probe->owner,
+               (unsigned long long)probe->owner_observation,
+               (unsigned long long)probe->request_serial,
+               (unsigned long long)byte_count,
+               signature_valid ? "true" : "false",
+               probe->image_prefix_bytes);
+        fflush(stdout);
+        if (!signature_valid)
+        {
+            validated_success = false;
+            validated_reason = "invalid-png-signature";
+        }
+    }
+
+    finish_request(probe, validated_success, validated_reason, path, type,
+                   format, byte_count);
     if (probe->done)
     {
         return;
     }
     if (completed_kind == REQUEST_PNG && probe->png_first_fallback_bmp)
     {
-        if (success && byte_count != 0U)
+        if (validated_success && byte_count != 0U)
         {
             probe->done = true;
             return;
@@ -383,6 +448,8 @@ cancel_active_request(struct probe *probe, const char *reason)
     probe->incr_active = false;
     probe->image_bytes = 0U;
     probe->incr_announced_bytes = 0U;
+    memset(probe->image_prefix, 0, sizeof(probe->image_prefix));
+    probe->image_prefix_bytes = 0U;
 }
 
 static void
@@ -397,6 +464,8 @@ begin_selection_request(struct probe *probe, enum request_kind kind,
     probe->first_byte_ns = 0U;
     probe->image_bytes = 0U;
     probe->incr_announced_bytes = 0U;
+    memset(probe->image_prefix, 0, sizeof(probe->image_prefix));
+    probe->image_prefix_bytes = 0U;
     probe->waiting_notify = true;
     probe->incr_active = false;
     ++probe->request_serial;
@@ -655,6 +724,11 @@ handle_selection_notify(struct probe *probe,
                     if (byte_count != 0U)
                     {
                         probe->first_byte_ns = notified_ns;
+                        if (actual_format == 8 && property_data != NULL)
+                        {
+                            capture_image_prefix(
+                                probe, property_data, (size_t)byte_count);
+                        }
                     }
                     finish_image_request(probe, true, "complete", "immediate",
                                          actual_type, actual_format,
@@ -722,6 +796,10 @@ handle_incr_chunk(struct probe *probe)
         if (probe->first_byte_ns == 0U)
         {
             probe->first_byte_ns = monotonic_ns();
+        }
+        if (actual_format == 8 && property_data != NULL)
+        {
+            capture_image_prefix(probe, property_data, (size_t)chunk_bytes);
         }
         probe->image_bytes += chunk_bytes;
         log_prefix("incr_chunk");
