@@ -950,6 +950,10 @@ def build_sealed_transaction_report(
         probe_notify = next((event for event in probe_notifies
                              if _probe_event_matches(
                                  event, target, requestor)), None)
+        probe_validation = next((
+            event for event in probe_events
+            if event.get("event") == "image_validation" and
+            _probe_event_matches(event, target, requestor)), None)
 
         matched_requests: list[tuple[dict[str, object], int, str]] = []
         if format_id is not None and x11_request is not None:
@@ -1114,19 +1118,24 @@ def build_sealed_transaction_report(
                 if fields.get("event") == "x11-incr-terminator-ack":
                     # The transfer's start generation may differ after a
                     # replacement. The final acknowledgement belongs to the
-                    # terminator/current generation recorded together.
+                    # terminator/current generation recorded together. The
+                    # target Atom name is deliberately not part of the ack
+                    # identity: after the zero-length terminator chansrv can
+                    # legitimately log it as an unknown numeric Atom.
                     event_generation = fields.get("terminator_generation")
                     ack_is_current = (
                         fields.get("current_generation") == generation_text)
+                    target_matches = True
                 else:
                     event_generation = next((fields.get(name) for name in (
                         "generation", "start_generation", "current_generation",
                         "terminator_generation")
                         if fields.get(name) is not None), None)
                     ack_is_current = True
+                    target_matches = fields.get("target", target) in (
+                        target, "-")
                 if (event_generation == generation_text and
-                        ack_is_current and
-                        fields.get("target", target) in (target, "-") and
+                        ack_is_current and target_matches and
                         fields.get("requestor", "").lower() == requestor and
                         (property_xid is None or
                          fields.get("property", "").lower() ==
@@ -1196,6 +1205,11 @@ def build_sealed_transaction_report(
                 _public_chansrv_event(report_x11_request)
                 if isinstance(report_x11_request, dict) else None),
             "probe_selection_notify": probe_notify,
+            "probe_image_validation": probe_validation,
+            "png_signature_valid": (
+                probe_validation.get("png_signature_valid")
+                if target == "image/png" and
+                isinstance(probe_validation, dict) else None),
             "chansrv_request_attempts": attempts,
             "chansrv_x11_delivery": [
                 _public_chansrv_event(entry) for entry in delivery_matches],
@@ -1225,7 +1239,7 @@ def build_sealed_transaction_report(
              str(event.get("owner", "")).lower() == owner_normalized) or
             (event.get("event") in ("selection_request", "selection_notify",
                                      "selection_result", "targets_result",
-                                     "probe_timeout") and
+                                     "image_validation", "probe_timeout") and
              _integer(event.get("request_serial")) in selected_serials and
              str(event.get("requestor", "")).lower() ==
              (targets_requestor or "")))
@@ -1360,9 +1374,15 @@ def parse_probe_events(path: Path) -> list[dict[str, object]]:
 
 def required_incr_terminator_acks(
         events: list[dict[str, object]], generation: int
-        ) -> set[tuple[str, str, str, int]]:
-    """Return successful X11 INCR transfers whose final delete must be seen."""
-    required: set[tuple[str, str, str, int]] = set()
+        ) -> set[tuple[str, str, int]]:
+    """Return stable identities for successful INCR terminator acknowledgements.
+
+    Chansrv may no longer be able to resolve the target Atom name by the time
+    the requestor deletes the zero-length terminator. Requestor XID, property
+    Atom and clipboard generation remain stable for the transfer and are
+    sufficient to identify the final acknowledgement.
+    """
+    required: set[tuple[str, str, int]] = set()
     for result in events:
         if (result.get("event") != "selection_result" or
                 result.get("target") not in ("image/png", "image/bmp") or
@@ -1380,14 +1400,14 @@ def required_incr_terminator_acks(
         property_xid = (str(notify.get("property", "")).lower()
                         if isinstance(notify, dict) else "")
         if requestor and property_xid:
-            required.add((target, requestor, property_xid, generation))
+            required.add((requestor, property_xid, generation))
     return required
 
 
 def incr_terminator_ack_identity(
         line: str
-        ) -> tuple[str, str, str, int] | None:
-    """Parse only metadata required to match one INCR terminator ack."""
+        ) -> tuple[str, str, int] | None:
+    """Parse the stable identity of one current-generation INCR terminator ack."""
     if "event=x11-incr-terminator-ack" not in line:
         return None
     fields = ChansrvFormatListTrigger._fields(line)
@@ -1396,12 +1416,12 @@ def incr_terminator_ack_identity(
         current_generation = int(fields["current_generation"], 0)
     except (KeyError, ValueError):
         return None
-    if terminator_generation != current_generation:
+    requestor = fields.get("requestor", "").lower()
+    property_xid = fields.get("property", "").lower()
+    if (terminator_generation != current_generation or
+            not requestor or not property_xid):
         return None
-    return (fields.get("target", ""),
-            fields.get("requestor", "").lower(),
-            fields.get("property", "").lower(),
-            terminator_generation)
+    return (requestor, property_xid, terminator_generation)
 
 
 def parse_args() -> argparse.Namespace:
@@ -1818,19 +1838,19 @@ def main() -> int:
         "clipboard_transaction": transaction,
         "incr_terminator_ack_audit": {
             "required": [
-                {"target": target, "requestor": requestor,
-                 "property": property_xid, "generation": generation}
-                for target, requestor, property_xid, generation
+                {"requestor": requestor, "property": property_xid,
+                 "generation": generation}
+                for requestor, property_xid, generation
                 in sorted(required_acks)],
             "observed_for_required": [
-                {"target": target, "requestor": requestor,
-                 "property": property_xid, "generation": generation}
-                for target, requestor, property_xid, generation
+                {"requestor": requestor, "property": property_xid,
+                 "generation": generation}
+                for requestor, property_xid, generation
                 in sorted(required_acks & observed_incr_acks)],
             "pending": [
-                {"target": target, "requestor": requestor,
-                 "property": property_xid, "generation": generation}
-                for target, requestor, property_xid, generation
+                {"requestor": requestor, "property": property_xid,
+                 "generation": generation}
+                for requestor, property_xid, generation
                 in sorted(pending_acks)],
         },
         "probe_events": retained_probe_events,
