@@ -338,16 +338,16 @@ class ClipboardCaptureTests(unittest.TestCase):
         ]
         required = capture.required_incr_terminator_acks(events, 60)
         self.assertEqual(required, {
-            ("image/bmp", "0x2400011", "0x3002", 60)})
+            ("0x2400011", "0x3002", 60)})
         self.assertIsNone(capture.incr_terminator_ack_identity(
             "event=x11-incr-terminator-ack target=image/bmp "
             "requestor=0x2400011 property=0x3002 "
             "terminator_generation=59 current_generation=60"))
         self.assertEqual(capture.incr_terminator_ack_identity(
-            "event=x11-incr-terminator-ack target=image/bmp "
+            "event=x11-incr-terminator-ack target=unknown "
             "requestor=0x2400011 property=0x3002 "
             "terminator_generation=60 current_generation=60"),
-            ("image/bmp", "0x2400011", "0x3002", 60))
+            ("0x2400011", "0x3002", 60))
 
     def test_trigger_history_is_bounded_and_generation_reset_is_handled(self) -> None:
         capture = load_capture_module(Path(sys.argv[1]))
@@ -489,7 +489,7 @@ class ClipboardCaptureTests(unittest.TestCase):
                 "target=image/bmp requestor=0x2400011 property=0x3002 "
                 "generation=60 total_bytes=114",
                 "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-incr-terminator-ack "
-                "target=image/bmp requestor=0x2400011 property=0x3002 "
+                "target=unknown atom=0x00000242 requestor=0x2400011 property=0x3002 "
                 "terminator_generation=60 current_generation=60 "
                 "start_generation=59",
             ]
@@ -547,6 +547,11 @@ class ClipboardCaptureTests(unittest.TestCase):
                  "request_started_ns": 1_004_000,
                  "first_byte_monotonic_ns": 1_004_700,
                  "completed_monotonic_ns": 1_008_000},
+                {"event": "image_validation", "requestor": requestor,
+                 "owner": owner, "request_serial": 2,
+                 "target": "image/png", "bytes": 70,
+                 "png_signature_valid": True, "prefix_bytes": 8,
+                 "monotonic_ns": 1_007_900},
                 {"event": "selection_request", "requestor": requestor,
                  "owner": owner, "request_serial": 3,
                  "target": "image/bmp", "monotonic_ns": 1_010_000},
@@ -627,6 +632,9 @@ class ClipboardCaptureTests(unittest.TestCase):
                              "0x3001")
             self.assertEqual(png["first_byte_monotonic_ns"], 1_004_700)
             self.assertEqual(png["completed_monotonic_ns"], 1_008_000)
+            self.assertTrue(png["png_signature_valid"])
+            self.assertEqual(
+                png["probe_image_validation"]["prefix_bytes"], 8)
             self.assertEqual(bmp["probe_selection_notify"]["property"],
                              "0x3002")
             self.assertEqual(png["completion_or_failure_reason"],
