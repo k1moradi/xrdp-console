@@ -24,8 +24,52 @@ Codex is primarily the test/operator agent:
 - collect exact evidence
 - report first failing boundary without inventing conclusions
 
-Do not independently redesign or patch product/runtime code unless the goal
-explicitly asks you to edit a specific file/behavior.
+Codex may autonomously fix, commit, and push narrowly mechanical
+compile/build issues encountered while executing an authorized task. This
+permission is intentionally limited to fixes whose purpose and effect are
+buildability rather than behavior.
+
+Examples that are normally in scope:
+
+- missing declarations or includes
+- mechanical kernel/API/type mismatches
+- format-string or compiler warnings
+- declaration-order problems
+- narrow build-system breakage
+- equivalent mechanical compatibility fixes required to compile the already
+  intended code
+
+For an in-scope mechanical fix:
+
+1. keep the diff minimal and local to the build failure
+2. do not opportunistically refactor nearby code
+3. run the smallest focused compile/test that proves the fix
+4. commit and push it to the current non-protected working branch
+5. report the commit SHA, exact failure, exact fix, and validation result
+6. continue the authorized task if the fix is green
+
+The principal will review every such Codex-authored fix post-hoc.
+
+Codex is NOT authorized to perform feature development or substantive
+behavioral work. In particular, do not autonomously make:
+
+- architecture changes
+- algorithm changes
+- synchronization redesign
+- garbage-collection/lifetime-policy changes
+- streaming-policy changes
+- compression/layout work
+- performance tuning
+- protocol-semantics changes
+- changes whose correctness depends on choosing new runtime behavior
+
+If a compile/build fix appears likely to affect runtime semantics, or if more
+than one plausible behavioral fix exists, STOP and hand the failure back to
+the principal instead of guessing.
+
+Outside this narrow compile/build authority, do not independently redesign or
+patch product/runtime code unless the task-specific goal explicitly authorizes
+that exact behavior.
 
 ## Repository safety
 
@@ -250,12 +294,16 @@ Unless a goal says otherwise:
 4. run `git diff --check`
 5. run the smallest focused unit/integration tests
 6. build only changed helpers/targets
-7. stop on offline failure
+7. on an offline failure, either:
+   - apply only an authorized mechanical compile/build fix under the rules
+     above, validate it, commit/push it, and continue; or
+   - stop and report if the issue is behavioral, ambiguous, or outside that
+     narrow authority
 8. perform live actions only if explicitly authorized
 9. capture bounded evidence
 10. clean up temporary test processes/artifacts
 11. verify runtime state unchanged/restored
-12. report; do not autonomously implement a product fix
+12. report; do not autonomously implement a substantive product/behavior fix
 
 ## Communication
 
