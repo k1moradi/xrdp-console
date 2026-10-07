@@ -210,6 +210,12 @@ class ClipboardPublicationWatchTests(unittest.TestCase):
         result = observer.summarize_publication(baseline, collector.events)
         self.assertEqual(result["baseline_owner"], "0x1200008")
         self.assertEqual(result["new_generation"], 61)
+        self.assertEqual(
+            [item["generation"] for item in result["new_generation_observations"]],
+            [61],
+        )
+        self.assertFalse(result["causal_attribution_supported"])
+        self.assertIn("window observations", result["causal_attribution_note"])
         self.assertTrue(result["owner_install_seen"])
         self.assertEqual(result["image_format_ids"]["png_format_id"], "40005")
         self.assertEqual(result["image_format_ids"]["dib_format_id"], "8")
@@ -272,6 +278,16 @@ class ClipboardPublicationWatchTests(unittest.TestCase):
             observer.baseline_from_lines([format_line(80)]), collector.events
         )
         self.assertTrue(result["inbound_type2_seen"])
+        self.assertEqual(
+            result["inbound_type2_observations"],
+            [{
+                "realtime_usec": "1000001",
+                "monotonic_usec": "500001",
+                "pid": None,
+                "total_len": "32",
+                "data_len": "24",
+            }],
+        )
         self.assertTrue(result["cliprdr_channel_seen"])
         self.assertEqual(result["cliprdr_channel_id"], "1004")
         self.assertFalse(collector.journal_reader_failed)
@@ -300,6 +316,14 @@ class ClipboardPublicationWatchTests(unittest.TestCase):
         self.assertEqual(event["fields"]["msg_type"], "2")
         self.assertEqual(event["realtime_usec"], "1791363946070751")
         self.assertEqual(event["pid"], "579007")
+        result = self.observer.summarize_publication(
+            self.observer.baseline_from_lines([format_line(80)]),
+            collector.events,
+        )
+        self.assertEqual(
+            result["inbound_type2_observations"][0]["realtime_usec"],
+            "1791363946070751",
+        )
         self.assertFalse(collector.journal_reader_failed)
 
     def test_malformed_journal_input_invalidates_capture(self) -> None:
