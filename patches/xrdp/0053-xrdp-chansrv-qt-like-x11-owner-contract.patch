@@ -1,0 +1,89 @@
+diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -383,6 +383,29 @@ clipboard_monotonic_time_ns(void)
+     return (unsigned long long)now.tv_sec * 1000000000ULL +
+            (unsigned long long)now.tv_nsec;
+ }
++
++/*
++ * Match Qt's XCB clipboard sizing policy: use the largest request size the
++ * X server actually negotiated, including BIG-REQUESTS when available.
++ * XChangeProperty request overhead is six 32-bit units (24 bytes).
++ */
++static int
++clipboard_x11_max_property_bytes(void)
++{
++    long request_units;
++
++    request_units = XExtendedMaxRequestSize(g_display);
++    if (request_units <= 0)
++    {
++        request_units = XMaxRequestSize(g_display);
++    }
++    if (request_units <= 6)
++    {
++        return 1;
++    }
++    if (request_units > ((long)INT_MAX + 24L) / 4L)
++    {
++        return INT_MAX;
++    }
++    return (int)(request_units * 4L - 24L);
++}
++
+ struct clipboard_selection_retry
+ {
+     struct clipboard_retry_policy policy;
+@@ -523,7 +546,7 @@ clipboard_init(void)
+-    g_incr_max_req_size = XMaxRequestSize(g_display) * 4 - 24;
++    g_incr_max_req_size = clipboard_x11_max_property_bytes();
+     g_memset(&g_clip_c2s, 0, sizeof(g_clip_c2s));
+     g_memset(&g_clip_s2c, 0, sizeof(g_clip_s2c));
+     clipboard_png_digest_reset();
+@@ -3368,15 +3391,35 @@ clipboard_event_selection_request(XEvent *xevent)
+               g_wnd, lxev->requestor, lxev->owner, lxev->selection,
+               get_atom_text(lxev->selection),
+               lxev->target, lxev->property);
+ 
++    /*
++     * Follow the same selection-owner invariants as Qt.  X should normally
++     * deliver requests only to the current owner, but deferred remote format
++     * publication makes rejecting stale requests explicitly worthwhile.
++     */
++    if (lxev->selection != g_clipboard_atom || lxev->owner != g_wnd ||
++            (lxev->time != CurrentTime &&
++             g_selection_time != CurrentTime &&
++             lxev->time < g_selection_time))
++    {
++        clipboard_refuse_selection(lxev);
++        return 0;
++    }
++
+     if (lxev->property == None)
+     {
+         LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: "
+-                  "lxev->property is None");
++                  "lxev->property is None; using target property");
++        /* ICCCM compatibility used by Qt for obsolete requestors. */
++        lxev->property = lxev->target;
+     }
+-    else if (lxev->target == g_targets_atom)
++
++    if (lxev->target == g_targets_atom)
+     {
+         LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: g_targets_atom");
+         /* requestor is asking what the selection can be converted to */
+         LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: "
+                   "g_targets_atom");
+         atom_buf[0] = g_targets_atom;
+         atom_buf[1] = g_timestamp_atom;
+-        atom_buf[2] = g_multiple_atom;
+-        atom_count = 3;
++        /*
++         * Do not advertise MULTIPLE until the delayed CLIPRDR owner can
++         * actually service multiple remote conversions.  Qt advertises it
++         * because its QMimeData is already local; chansrv has one outstanding
++         * Format Data Request with no protocol request ID.
++         */
++        atom_count = 2;
