@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import importlib.util
+import tempfile
 import sys
 import unittest
+import urllib.parse
 from pathlib import Path
 
 
@@ -89,6 +91,26 @@ class FirefoxClipboardClassificationTests(unittest.TestCase):
                 "file": {"readback": "pending"},
             }],
         }]))
+
+
+    def test_consumer_page_url_embeds_probe_without_file_path(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="firefox-page-url-") as raw:
+            page = Path(raw) / "probe.html"
+            document = "<!doctype html><title>probe</title><div id=\"paste-target\"></div>"
+            page.write_text(document, encoding="utf-8")
+            url = self.module.browser_page_url(page, True)
+            self.assertTrue(url.startswith("data:text/html;charset=utf-8,"))
+            self.assertNotIn(str(page), url)
+            encoded = url.split(",", 1)[1]
+            self.assertEqual(urllib.parse.unquote(encoded), document)
+
+    def test_synthetic_page_url_remains_file_uri(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="firefox-page-url-") as raw:
+            page = Path(raw) / "probe.html"
+            page.write_text("<html></html>", encoding="utf-8")
+            self.assertEqual(
+                self.module.browser_page_url(page, False),
+                page.resolve().as_uri())
 
 
 if __name__ == "__main__":
