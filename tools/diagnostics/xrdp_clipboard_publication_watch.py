@@ -36,6 +36,8 @@ MAX_EVENT_BYTES = 4096
 MAX_BASELINE_BYTES = 128 * 1024
 READ_CHUNK_BYTES = 8192
 POST_ACTION_SECONDS = 5.0
+MIN_ACTION_TIMEOUT_SECONDS = 5.0
+MAX_ACTION_TIMEOUT_SECONDS = 300.0
 NANOSECONDS_PER_SECOND = 1_000_000_000
 
 CHANSRV_EVENT_FIELDS: dict[str, frozenset[str]] = {
@@ -148,6 +150,10 @@ def now_pair() -> tuple[str, int, int]:
         realtime_ns / NANOSECONDS_PER_SECOND, tz=dt.timezone.utc
     ).isoformat(timespec="microseconds")
     return realtime, realtime_ns, monotonic_ns
+
+
+def valid_action_timeout_seconds(value: float) -> bool:
+    return MIN_ACTION_TIMEOUT_SECONDS <= value <= MAX_ACTION_TIMEOUT_SECONDS
 
 
 def _safe_fields(
@@ -551,8 +557,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--action-timeout-seconds", type=float, default=30.0)
     parser.add_argument("--output-root", type=Path, default=Path("/var/tmp"))
     args = parser.parse_args(argv)
-    if not 5.0 <= args.action_timeout_seconds <= 60.0:
-        parser.error("--action-timeout-seconds must be in 5..60")
+    if not valid_action_timeout_seconds(args.action_timeout_seconds):
+        parser.error("--action-timeout-seconds must be in 5..300")
     if not args.journal_unit or args.journal_unit.startswith("-"):
         parser.error("--journal-unit must be a nonempty systemd unit name")
 

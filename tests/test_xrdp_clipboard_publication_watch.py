@@ -56,6 +56,14 @@ class ClipboardPublicationWatchTests(unittest.TestCase):
         self.assertEqual(result["new_generations"], [41, 42])
         self.assertEqual(result["new_generation"], 42)
 
+    def test_action_timeout_is_bounded_to_five_minutes(self) -> None:
+        valid = self.observer.valid_action_timeout_seconds
+        self.assertTrue(valid(5.0))
+        self.assertTrue(valid(60.0))
+        self.assertTrue(valid(300.0))
+        self.assertFalse(valid(4.99))
+        self.assertFalse(valid(300.01))
+
     def test_partial_line_is_emitted_once_after_newline(self) -> None:
         collector = self.observer.MetadataCollector()
         line = (format_line(43) + "\n").encode()
