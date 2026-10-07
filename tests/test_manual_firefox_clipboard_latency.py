@@ -113,6 +113,68 @@ class FirefoxClipboardClassificationTests(unittest.TestCase):
                 page.resolve().as_uri())
 
 
+    def test_files_without_file_item_remain_pending(self) -> None:
+        events = [{
+            "trusted": True,
+            "types": ["Files"],
+            "items": [],
+            "files": [],
+        }]
+        self.assertTrue(
+            self.module.paste_events_have_pending_file_delivery(events))
+
+    def test_null_or_pending_file_remains_pending(self) -> None:
+        null_file = [{
+            "trusted": True,
+            "types": ["Files"],
+            "items": [{
+                "kind": "file",
+                "type": "image/png",
+                "file": None,
+            }],
+        }]
+        pending_readback = [{
+            "trusted": True,
+            "types": ["Files"],
+            "items": [{
+                "kind": "file",
+                "type": "image/png",
+                "file": {"readback": "pending"},
+            }],
+        }]
+        self.assertTrue(
+            self.module.paste_events_have_pending_file_delivery(null_file))
+        self.assertTrue(
+            self.module.paste_events_have_pending_file_delivery(
+                pending_readback))
+
+    def test_completed_file_delivery_is_not_pending(self) -> None:
+        events = [{
+            "trusted": True,
+            "types": ["Files"],
+            "items": [{
+                "kind": "file",
+                "type": "image/png",
+                "file": {
+                    "readback": {
+                        "bytes": 123,
+                        "pngSignature": "89504e470d0a1a0a",
+                    },
+                },
+            }],
+        }]
+        self.assertFalse(
+            self.module.paste_events_have_pending_file_delivery(events))
+
+    def test_current_clipboard_observation_window_is_longer(self) -> None:
+        self.assertEqual(
+            self.module.observation_window_seconds(True, 0), 30.0)
+        self.assertEqual(
+            self.module.observation_window_seconds(False, 0), 10.0)
+        self.assertEqual(
+            self.module.observation_window_seconds(True, 40_000), 45.0)
+
+
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         raise SystemExit(f"usage: {sys.argv[0]} SCRIPT")
