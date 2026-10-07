@@ -2,6 +2,11 @@
 
 #include "clipboard/clipboard_protocol.h"
 
+// The canonical build uses Release/NDEBUG. Keep test predicates (including
+// side-effecting encode/decode calls) active in every build configuration.
+#ifdef NDEBUG
+#undef NDEBUG
+#endif
 #include <cassert>
 #include <cstdint>
 #include <string>
