@@ -8,6 +8,7 @@ set(PYTHON_SOURCES
     ${CMAKE_SOURCE_DIR}/tools/benchmark/rfb_v6_v4_proxy.py
     ${CMAKE_SOURCE_DIR}/tools/diagnostics/xrdp_console_episode_sampler.py
     ${CMAKE_SOURCE_DIR}/tools/diagnostics/xrdp_clipboard_image_capture.py
+    ${CMAKE_SOURCE_DIR}/tools/diagnostics/xrdp_clipboard_publication_watch.py
     ${CMAKE_SOURCE_DIR}/tools/diagnostics/vscode_gpu_probe.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_display_power.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_direct_presentation_geometry.py
@@ -80,10 +81,21 @@ if(TARGET xrdp-codec-bench)
         ${CMAKE_CURRENT_SOURCE_DIR}/test_rfx_codec_bench.py)
 endif()
 
+list(APPEND PYTHON_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_publication_watch.py)
 add_test(NAME python-syntax
     COMMAND ${Python3_EXECUTABLE} -B -m py_compile ${PYTHON_SOURCES})
 set_tests_properties(python-syntax PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+add_test(NAME xrdp-clipboard-publication-watch-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_publication_watch.py
+    ${CMAKE_SOURCE_DIR}/tools/diagnostics/xrdp_clipboard_publication_watch.py)
+set_tests_properties(xrdp-clipboard-publication-watch-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 10
+    LABELS "clipboard;unit")
 
 add_test(NAME build-direct-console-script-unit
     COMMAND ${Python3_EXECUTABLE} -B
