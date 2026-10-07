@@ -10,6 +10,11 @@ Run with Python 3, for example::
 After WATCH_READY, perform only the named clipboard action, then send DONE on
 stdin. The observer records five more seconds and seals a private evidence
 directory. It never persists raw log lines or clipboard payload contents.
+
+A generation reported by this tool is an observation within the armed window,
+not proof that a particular human clipboard action caused it. The tool does not
+measure the clipboard-action instant; correlate journal timestamps or a
+deliberately retrieved unique test payload before making causal claims.
 """
 
 from __future__ import annotations
@@ -365,11 +370,18 @@ def summarize_publication(
         if event["source"] == "chansrv" and event["event"] == "format-list"
     ]
     generations: list[int] = []
+    generation_observations: list[dict[str, Any]] = []
     for event in format_events:
         generation = int(event["fields"]["generation"])
         if (baseline_generation is None or generation > baseline_generation) and \
                 generation not in generations:
             generations.append(generation)
+            generation_observations.append({
+                "generation": generation,
+                "observer_seen_realtime": event.get("observed_realtime"),
+                "observer_seen_realtime_ns": event.get("observed_realtime_ns"),
+                "observer_seen_monotonic_ns": event.get("observed_monotonic_ns"),
+            })
 
     newest_generation = generations[-1] if generations else None
     newest_format: dict[str, Any] | None = None
@@ -386,13 +398,24 @@ def summarize_publication(
         for event in events
     ) if newest_generation is not None else False
 
-    inbound_type2 = any(
-        event["source"] == "journal" and
+    inbound_type2_events = [
+        event for event in events
+        if event["source"] == "journal" and
         event["event"] == "cliprdr-first-fragment" and
         event["fields"].get("direction") == "client-to-server" and
         event["fields"].get("msg_type") == "2"
-        for event in events
-    )
+    ]
+    inbound_type2 = bool(inbound_type2_events)
+    inbound_type2_observations = [
+        {
+            "realtime_usec": event.get("realtime_usec"),
+            "monotonic_usec": event.get("monotonic_usec"),
+            "pid": event.get("pid"),
+            "total_len": event["fields"].get("total_len"),
+            "data_len": event["fields"].get("data_len"),
+        }
+        for event in inbound_type2_events
+    ]
     compressed_unknown = any(
         event["source"] == "journal" and
         event["event"] == "cliprdr-first-fragment" and
@@ -416,6 +439,7 @@ def summarize_publication(
         "baseline_generation": baseline_generation,
         "baseline_owner": baseline.get("owner"),
         "inbound_type2_seen": inbound_type2_value,
+        "inbound_type2_observations": inbound_type2_observations,
         "compressed_cliprdr_observed": compressed_unknown,
         "cliprdr_channel_seen": bool(channel_events),
         "cliprdr_channel_id": (
@@ -424,6 +448,14 @@ def summarize_publication(
         "chansrv_format_list_seen": bool(format_events),
         "new_generations": generations,
         "new_generation": newest_generation,
+        "new_generation_observations": generation_observations,
+        "causal_attribution_supported": False,
+        "causal_attribution_note": (
+            "New generations are window observations only. The observer does not "
+            "measure the clipboard-action instant; correlate an exact protocol "
+            "timestamp or deliberately retrieved unique test payload before "
+            "attributing a generation to a human action."
+        ),
         "owner_install_seen": owner_install_seen,
         "image_format_ids": None if newest_format is None else {
             key: newest_format["fields"].get(key)
