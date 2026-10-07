@@ -895,7 +895,7 @@ index e3fcbc3..8ecb7cd 100644
  #include <stdarg.h>
  #include <stddef.h>
  #include <stdint.h>
-@@ -672,15 +673,115 @@ test_console_dirty_gfx_is_held_during_resize(void **state)
+@@ -672,15 +673,148 @@ test_console_dirty_gfx_is_held_during_resize(void **state)
  {
      UNUSED(state);
  
@@ -1013,10 +1013,43 @@ index e3fcbc3..8ecb7cd 100644
 +    assert_int_equal(0, xrdp_clipboard_png_signature_valid(
 +                            invalid_png_prefix, sizeof(invalid_png_prefix)));
 +    assert_int_equal(0, xrdp_clipboard_png_signature_valid(NULL, 8));
++
++    /* Exercise the production PNG chunk/CRC parser, not just its prefix. */
++    {
++        static const unsigned char valid_png[] =
++        {
++            0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,
++            0x00,0x00,0x00,0x0d,0x49,0x48,0x44,0x52,
++            0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,
++            0x08,0x06,0x00,0x00,0x00,0x1f,0x15,0xc4,0x89,
++            0x00,0x00,0x00,0x0d,0x49,0x44,0x41,0x54,
++            0x78,0x9c,0x63,0xf8,0xcf,0xc0,0xf0,0x1f,0x00,
++            0x05,0x00,0x01,0xff,0x89,0x99,0x3d,0x1d,
++            0x00,0x00,0x00,0x00,0x49,0x45,0x4e,0x44,
++            0xae,0x42,0x60,0x82
++        };
++        unsigned char corrupt_png[sizeof(valid_png)];
++        uint32_t width = 0;
++        uint32_t height = 0;
++
++        assert_int_equal(1, xrdp_clipboard_png_valid(
++                                valid_png, sizeof(valid_png),
++                                &width, &height));
++        assert_int_equal(1, width);
++        assert_int_equal(1, height);
++        assert_int_equal(0, xrdp_clipboard_png_valid(
++                                valid_png, sizeof(valid_png) - 1,
++                                NULL, NULL));
++        g_memcpy(corrupt_png, valid_png, sizeof(valid_png));
++        corrupt_png[48] ^= 1; /* Tamper with IDAT without fixing its CRC. */
++        assert_int_equal(0, xrdp_clipboard_png_valid(
++                                corrupt_png, sizeof(corrupt_png),
++                                NULL, NULL));
++    }
  }
  
  START_TEST(execute_suite)
-@@ -702,6 +803,9 @@ START_TEST(execute_suite)
+@@ -702,6 +836,9 @@ START_TEST(execute_suite)
          cmocka_unit_test(test_console_interaction_priority_state),
          cmocka_unit_test(test_console_generic_encoder_policy),
          cmocka_unit_test(test_console_dirty_gfx_is_held_during_resize),
