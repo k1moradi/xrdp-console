@@ -461,18 +461,19 @@ class ClipboardCaptureTests(unittest.TestCase):
                 "event=targets-response-issued requestor=0x2400011 "
                 "generation=60 target_count=4 targets=TARGETS,UTF8_STRING "
                 "image/png,image/bmp truncated=0 result=0",
+                # Real chansrv can lose the target Atom name before metadata
+                # logging while requestor/property/generation remain stable.
                 "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-request "
-                "target=image/png requestor=0x2400011 owner=0x1200002 "
-                "selection=0x1 property=0x3001 time=0 generation=60 "
-                "mono_ns=1004000",
+                "target=unknown atom=0x00000242 requestor=0x2400011 "
+                "owner=0x1200002 selection=0x1 property=0x3001 time=0 "
+                "generation=60 mono_ns=1004000",
                 "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=request "
-                "format_id=40005 target=image/png attempt=1 "
-                "mono_ns=1005000",
+                "format_id=40005 target=unknown attempt=1 mono_ns=1005000",
                 "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=response "
                 "status=0x1 bytes=70 format_id=40005 attempt=1 "
                 "mono_ns=1007000",
                 "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-delivery-issued "
-                "path=direct target=image/png requestor=0x2400011 "
+                "path=direct target=unknown requestor=0x2400011 "
                 "property=0x3001 bytes=70 generation=60 cache_generation=60",
                 "[info] XRDP_CONSOLE_CLIPBOARD_IMAGE event=x11-request "
                 "target=image/bmp requestor=0x2400011 owner=0x1200002 "
@@ -630,6 +631,16 @@ class ClipboardCaptureTests(unittest.TestCase):
                 "event"], "x11-incr-terminator-ack")
             self.assertEqual(png["probe_selection_notify"]["property"],
                              "0x3001")
+            self.assertEqual(
+                png["chansrv_x11_selection_request"]["fields"]["target"],
+                "unknown")
+            self.assertEqual(
+                png["chansrv_request_attempts"][0][
+                    "chansrv_request"]["fields"]["target"],
+                "unknown")
+            self.assertEqual(
+                png["chansrv_x11_delivery"][0]["fields"]["target"],
+                "unknown")
             self.assertEqual(png["first_byte_monotonic_ns"], 1_004_700)
             self.assertEqual(png["completed_monotonic_ns"], 1_008_000)
             self.assertTrue(png["png_signature_valid"])
