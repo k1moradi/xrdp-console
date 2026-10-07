@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run one isolated Firefox paste against a staged X11 PNG owner.
+"""Run one bounded Firefox clipboard paste diagnostic.
 
-This is a manual diagnostic, not a CTest: it starts a private Xvfb and a fresh
-geckodriver-managed Firefox profile, so it does not attach to the user's
-desktop browser or modify its clipboard.
+Synthetic mode starts a private Xvfb and staged X11 PNG owner. Consumer-only
+mode launches a fresh geckodriver-managed Firefox on the existing DISPLAY and
+uses the current X11 clipboard without changing its owner. Neither mode
+attaches to the user's existing Firefox profile.
 """
 
 from __future__ import annotations
@@ -111,15 +112,48 @@ def wait_for_webdriver(driver: WebDriver, process: subprocess.Popen[bytes],
     raise TimeoutError("geckodriver did not become ready")
 
 
+def event_has_valid_png_file(event: dict[str, Any]) -> bool:
+    if event.get("trusted") is not True:
+        return False
+    items = event.get("items", [])
+    if not isinstance(items, list):
+        return False
+    for item in items:
+        if not isinstance(item, dict) or item.get("kind") != "file" or \
+                item.get("type") != "image/png":
+            continue
+        file_info = item.get("file")
+        if not isinstance(file_info, dict):
+            continue
+        readback = file_info.get("readback")
+        if (isinstance(readback, dict) and
+                isinstance(readback.get("bytes"), int) and
+                readback["bytes"] > 0 and
+                readback.get("pngSignature") == "89504e470d0a1a0a"):
+            return True
+    return False
+
+
+def paste_events_have_valid_png(events: object) -> bool:
+    return isinstance(events, list) and any(
+        isinstance(event, dict) and event_has_valid_png_file(event)
+        for event in events)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("helper", type=Path)
-    parser.add_argument("png", type=Path)
-    parser.add_argument("--stage", choices=("before-notify", "after-notify"),
-                        required=True)
+    parser.add_argument("helper", type=Path, nargs="?")
+    parser.add_argument("png", type=Path, nargs="?")
+    parser.add_argument(
+        "--consume-current", action="store_true",
+        help="use the current DISPLAY clipboard without starting an X11 owner")
+    parser.add_argument(
+        "--expect-png", action="store_true",
+        help="exit nonzero unless Firefox exposes a readable image/png file")
+    parser.add_argument("--stage", choices=("before-notify", "after-notify"))
     parser.add_argument("--delivery", choices=("incr", "direct"),
                         default="incr")
-    parser.add_argument("--delay-ms", type=int, required=True)
+    parser.add_argument("--delay-ms", type=int, default=0)
     parser.add_argument("--press-count", type=int, default=1,
                         help="number of distinct Ctrl+V key presses (default: 1)")
     parser.add_argument("--press-interval-ms", type=int, default=250,
@@ -138,12 +172,36 @@ def main() -> int:
         parser.error("--press-count must be in 1..8")
     if not 0 <= args.press_interval_ms <= 10000:
         parser.error("--press-interval-ms must be in 0..10000")
-    if args.delivery == "direct" and args.stage != "before-notify":
-        parser.error("direct delivery is available only with before-notify delay")
-    for name in ("xvfb", "geckodriver", "firefox"):
+
+    if args.consume_current:
+        if args.helper is not None or args.png is not None:
+            parser.error(
+                "--consume-current does not accept the synthetic helper/PNG "
+                "positional arguments")
+        if args.stage is not None:
+            parser.error("--consume-current does not use --stage")
+        if not os.environ.get("DISPLAY"):
+            parser.error("--consume-current requires DISPLAY in the environment")
+    else:
+        if args.helper is None or args.png is None or args.stage is None:
+            parser.error(
+                "synthetic mode requires HELPER PNG --stage and --delay-ms")
+        if args.delivery == "direct" and args.stage != "before-notify":
+            parser.error(
+                "direct delivery is available only with before-notify delay")
+
+    required_programs = ("geckodriver", "firefox") if args.consume_current else (
+        "xvfb", "geckodriver", "firefox")
+    for name in required_programs:
         if getattr(args, name) is None:
             parser.error(f"could not find {name}; pass its path explicitly")
-    for file_path in (args.helper, args.png, args.page):
+
+    required_files = [args.page]
+    if not args.consume_current:
+        assert args.helper is not None
+        assert args.png is not None
+        required_files.extend((args.helper, args.png))
+    for file_path in required_files:
         if not file_path.is_file():
             parser.error(f"file does not exist: {file_path}")
 
@@ -155,35 +213,43 @@ def main() -> int:
     owner_prefix: list[str] = []
 
     try:
-        xvfb = subprocess.Popen(
-            [str(args.xvfb), "-displayfd", "1", "-screen", "0",
-             "1024x768x24", "-nolisten", "tcp", "-ac"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
-        assert xvfb.stdout is not None
-        display_number = read_line(xvfb.stdout, 5.0)
         environment = os.environ.copy()
-        environment["DISPLAY"] = f":{display_number}"
         environment["MOZ_ENABLE_WAYLAND"] = "0"
 
-        if args.delivery == "direct":
-            owner_mode = "owner-png-file-direct-xrdp-targets-prenotify-delay"
-        elif args.stage == "before-notify":
-            owner_mode = "owner-png-file-incr-xrdp-targets-prenotify-delay"
-        else:
-            owner_mode = "owner-png-file-incr-xrdp-targets-delay"
-        owner = subprocess.Popen(
-            [str(args.helper), owner_mode, str(args.png),
-             str(args.delay_ms)],
-            env=environment, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, bufsize=0)
-        assert owner.stdout is not None
-        owner_prefix = wait_for_marker(
-            owner.stdout, b"PNG_FILE_OWNER_READY", 10.0)
-        if args.delivery == "direct" and not any(
-                "delivery=direct" in line for line in owner_prefix):
-            raise RuntimeError(
-                "X server does not support direct delivery of this PNG; "
-                f"owner output={owner_prefix!r}")
+        if not args.consume_current:
+            assert args.xvfb is not None
+            assert args.helper is not None
+            assert args.png is not None
+            assert args.stage is not None
+            xvfb = subprocess.Popen(
+                [str(args.xvfb), "-displayfd", "1", "-screen", "0",
+                 "1024x768x24", "-nolisten", "tcp", "-ac"],
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+            assert xvfb.stdout is not None
+            display_number = read_line(xvfb.stdout, 5.0)
+            environment["DISPLAY"] = f":{display_number}"
+
+            if args.delivery == "direct":
+                owner_mode = (
+                    "owner-png-file-direct-xrdp-targets-prenotify-delay")
+            elif args.stage == "before-notify":
+                owner_mode = (
+                    "owner-png-file-incr-xrdp-targets-prenotify-delay")
+            else:
+                owner_mode = "owner-png-file-incr-xrdp-targets-delay"
+            owner = subprocess.Popen(
+                [str(args.helper), owner_mode, str(args.png),
+                 str(args.delay_ms)],
+                env=environment, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, bufsize=0)
+            assert owner.stdout is not None
+            owner_prefix = wait_for_marker(
+                owner.stdout, b"PNG_FILE_OWNER_READY", 10.0)
+            if args.delivery == "direct" and not any(
+                    "delivery=direct" in line for line in owner_prefix):
+                raise RuntimeError(
+                    "X server does not support direct delivery of this PNG; "
+                    f"owner output={owner_prefix!r}")
 
         port = choose_port()
         geckodriver = subprocess.Popen(
@@ -278,18 +344,28 @@ def main() -> int:
             time.sleep(0.05)
 
         elapsed = time.monotonic() - start
-        print(f"stage={args.stage} delay_ms={args.delay_ms} "
+        stage_label = "current-clipboard" if args.consume_current else args.stage
+        print(f"stage={stage_label} delay_ms={args.delay_ms} "
               f"delivery={args.delivery} press_count={args.press_count} "
               f"press_interval_ms={args.press_interval_ms} "
               f"paste_observation_s={elapsed:.3f}")
-        payload_sha256 = hashlib.sha256(args.png.read_bytes()).hexdigest()
+
+        payload_sha256: str | None = None
+        payload_size: int | None = None
+        if args.png is not None:
+            payload_sha256 = hashlib.sha256(args.png.read_bytes()).hexdigest()
+            payload_size = args.png.stat().st_size
+
+        valid_png = False
         if paste_log == "[]":
             print("RESULT no DOM paste event observed")
         else:
             try:
                 event_data = json.loads(paste_log)
+                valid_png = paste_events_have_valid_png(event_data)
                 print(f"RESULT dom_paste_event_count={len(event_data)} "
-                      f"requested_keypress_count={args.press_count}")
+                      f"requested_keypress_count={args.press_count} "
+                      f"valid_png_file={valid_png}")
                 for event_index, event in enumerate(event_data, start=1):
                     print(f"RESULT event={event_index} "
                           f"paste_monotonic_ms={event.get('monotonicMs')} "
@@ -302,19 +378,28 @@ def main() -> int:
                         if not file_item:
                             continue
                         readback = file_item.get("readback")
-                        exact = (
-                            isinstance(readback, dict) and
-                            readback.get("bytes") == args.png.stat().st_size and
-                            readback.get("pngSignature") == "89504e470d0a1a0a" and
-                            readback.get("sha256") == payload_sha256
-                        )
-                        print(f"RESULT event={event_index} item={item_index} "
-                              f"exact_png={exact} "
-                              f"source_sha256={payload_sha256} "
-                              f"browser_readback={readback!r}")
+                        if payload_sha256 is not None and payload_size is not None:
+                            exact = (
+                                isinstance(readback, dict) and
+                                readback.get("bytes") == payload_size and
+                                readback.get("pngSignature") ==
+                                    "89504e470d0a1a0a" and
+                                readback.get("sha256") == payload_sha256
+                            )
+                            print(
+                                f"RESULT event={event_index} item={item_index} "
+                                f"exact_png={exact} "
+                                f"source_sha256={payload_sha256} "
+                                f"browser_readback={readback!r}")
+                        else:
+                            print(
+                                f"RESULT event={event_index} item={item_index} "
+                                f"browser_readback={readback!r}")
             except json.JSONDecodeError:
                 print("RESULT paste event logged but could not parse event JSON")
 
+        if args.expect_png and not valid_png:
+            return 1
         return 0
     finally:
         if driver is not None and session_id is not None:
