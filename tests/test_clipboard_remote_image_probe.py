@@ -200,9 +200,12 @@ def validate_png_first_fallback(probe: Path, peer: Path) -> None:
             requests = [event.get("target") for event in events
                         if event.get("event") == "selection_request"]
             png = result_for(events, "image/png")
+            png_validation = validation_for(events, "image/png")
             if (status != 0 or requests != ["TARGETS", "image/png"] or
                     png.get("result") != "success" or png.get("path") != "incr" or
                     png.get("bytes", 0) <= 0 or
+                    png_validation.get("png_signature_valid") is not True or
+                    png_validation.get("prefix_bytes") != 8 or
                     "PNG_FILE_OWNER_INCR_TERMINATOR_ACK" not in
                     "".join(owner_output)):
                 raise AssertionError(
@@ -336,6 +339,16 @@ def result_for(events: list[dict[str, object]], target: str) -> dict[str, object
     return matches[-1]
 
 
+def validation_for(events: list[dict[str, object]], target: str) -> dict[str, object]:
+    matches = [event for event in events
+               if event.get("event") == "image_validation" and
+               event.get("target") == target]
+    if not matches:
+        raise AssertionError(
+            f"probe has no image validation for {target}: {events!r}")
+    return matches[-1]
+
+
 def selection_owner_xid(peer: Path) -> str:
     result = subprocess.run(
         [str(peer), "selection-owner"], check=False,
@@ -374,9 +387,16 @@ def validate_direct_and_incr(probe: Path, peer: Path) -> None:
             raise AssertionError(f"probe did not enumerate both image targets:\n{output}")
         png = result_for(events, "image/png")
         bmp = result_for(events, "image/bmp")
+        png_validation = validation_for(events, "image/png")
         if (png.get("result") != "success" or png.get("path") != "immediate" or
                 png.get("bytes") != 70):
             raise AssertionError(f"expected immediate PNG result, got {png!r}")
+        if (png_validation.get("png_signature_valid") is not True or
+                png_validation.get("prefix_bytes") != 8 or
+                png_validation.get("bytes") != 70):
+            raise AssertionError(
+                f"immediate PNG signature validation failed: "
+                f"{png_validation!r}")
         if (bmp.get("result") != "success" or bmp.get("path") != "incr" or
                 bmp.get("bytes", 0) <= 0):
             raise AssertionError(f"expected completed BMP INCR result, got {bmp!r}")
@@ -675,8 +695,14 @@ def validate_failure_and_timeout(probe: Path, peer: Path) -> None:
             if status != 0:
                 raise AssertionError(f"probe failed for standalone PNG INCR:\n{output}")
             png = result_for(events, "image/png")
+            png_validation = validation_for(events, "image/png")
             if png.get("result") != "success" or png.get("path") != "incr":
                 raise AssertionError(f"standalone PNG INCR was not completed: {png!r}")
+            if (png_validation.get("png_signature_valid") is not True or
+                    png_validation.get("prefix_bytes") != 8):
+                raise AssertionError(
+                    f"standalone PNG signature validation failed: "
+                    f"{png_validation!r}")
             if any(event.get("target") == "image/bmp"
                    for event in events
                    if event.get("event") == "selection_request"):
