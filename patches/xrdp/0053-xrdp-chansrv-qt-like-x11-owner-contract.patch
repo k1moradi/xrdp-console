@@ -1,7 +1,7 @@
 diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
 --- a/sesman/chansrv/clipboard.c
 +++ b/sesman/chansrv/clipboard.c
-@@ -383,6 +383,29 @@ clipboard_monotonic_time_ns(void)
+@@ -383,6 +383,33 @@ clipboard_monotonic_time_ns(void)
      return (unsigned long long)now.tv_sec * 1000000000ULL +
             (unsigned long long)now.tv_nsec;
  }
@@ -35,13 +35,13 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
  struct clipboard_selection_retry
  {
      struct clipboard_retry_policy policy;
-@@ -523,7 +546,7 @@ clipboard_init(void)
+@@ -523,4 +550,4 @@ clipboard_init(void)
 -    g_incr_max_req_size = XMaxRequestSize(g_display) * 4 - 24;
 +    g_incr_max_req_size = clipboard_x11_max_property_bytes();
      g_memset(&g_clip_c2s, 0, sizeof(g_clip_c2s));
      g_memset(&g_clip_s2c, 0, sizeof(g_clip_s2c));
      clipboard_png_digest_reset();
-@@ -3368,15 +3391,35 @@ clipboard_event_selection_request(XEvent *xevent)
+@@ -3368,19 +3395,41 @@ clipboard_event_selection_request(XEvent *xevent)
                g_wnd, lxev->requestor, lxev->owner, lxev->selection,
                get_atom_text(lxev->selection),
                lxev->target, lxev->property);
