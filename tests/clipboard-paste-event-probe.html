@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Clipboard paste-event probe</title>
+  <style>
+    :root { color-scheme: light dark; font: 16px/1.45 system-ui, sans-serif; }
+    body { max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+    #paste-target {
+      min-height: 5rem; padding: 1rem; border: 2px solid #687080;
+      border-radius: .5rem; outline-offset: 3px;
+    }
+    #paste-target:focus { border-color: #3578d4; }
+    #events {
+      min-height: 8rem; max-height: 55vh; overflow: auto;
+      padding: 1rem; border-radius: .5rem; background: #20242b;
+      color: #e8edf4; white-space: pre-wrap; overflow-wrap: anywhere;
+    }
+    button { margin: 1rem 0; padding: .5rem .8rem; }
+    code { overflow-wrap: anywhere; }
+  </style>
+</head>
+<body>
+  <h1>Firefox clipboard paste-event probe</h1>
+  <p>
+    Click the box, press <kbd>Ctrl+V</kbd> once, and wait for the result.
+    This page records trusted DOM paste events and the MIME types/files Firefox
+    exposes to the page. It prevents insertion, makes no network requests, and
+    does not change clipboard ownership.
+  </p>
+  <p>
+    To test repeated-key behavior, clear the log, then press <kbd>Ctrl+V</kbd>
+    the number of times you intend to test. Each recorded event is numbered.
+  </p>
+  <div id="paste-target" contenteditable="true" tabindex="0"
+       aria-label="Paste test area">Click here before pasting.</div>
+  <button id="clear" type="button">Clear event log</button>
+  <h2>Observed events</h2>
+  <pre id="events" aria-live="polite">No paste events observed.</pre>
+  <script>
+    "use strict";
+
+    const eventLog = document.getElementById("events");
+    let pasteCount = 0;
+    const observedEvents = [];
+    window.__clipboardPasteProbeEvents = observedEvents;
+
+    function renderEvents() {
+      eventLog.textContent = observedEvents.length === 0
+        ? "No paste events observed."
+        : observedEvents.map((detail) => JSON.stringify(detail, null, 2)).join("\n\n");
+    }
+
+    document.addEventListener("paste", (event) => {
+      pasteCount += 1;
+      const clipboard = event.clipboardData;
+      const items = clipboard ? Array.from(clipboard.items) : [];
+      const files = clipboard ? Array.from(clipboard.files) : [];
+      const detail = {
+        event: pasteCount,
+        wallTime: new Date().toISOString(),
+        monotonicMs: Number(performance.now().toFixed(3)),
+        trusted: event.isTrusted,
+        target: event.target instanceof Element
+          ? `${event.target.tagName.toLowerCase()}${event.target.id ? `#${event.target.id}` : ""}`
+          : String(event.target),
+        types: clipboard ? Array.from(clipboard.types) : [],
+        items: items.map((item) => {
+          const itemInfo = { kind: item.kind, type: item.type };
+          if (item.kind === "file") {
+            const file = item.getAsFile();
+            itemInfo.file = file ? {
+              name: file.name,
+              type: file.type,
+              size: file.size,
+              readback: "pending"
+            } : null;
+            if (file) {
+              file.arrayBuffer().then(async (buffer) => {
+                const data = new Uint8Array(buffer);
+                const signature = Array.from(data.slice(0, 8),
+                  (byte) => byte.toString(16).padStart(2, "0")).join("");
+                let sha256 = null;
+                if (crypto.subtle) {
+                  const digest = await crypto.subtle.digest("SHA-256", buffer);
+                  sha256 = Array.from(new Uint8Array(digest),
+                    (byte) => byte.toString(16).padStart(2, "0")).join("");
+                }
+                itemInfo.file.readback = {
+                  bytes: data.length,
+                  pngSignature: signature,
+                  sha256
+                };
+                renderEvents();
+              }).catch((error) => {
+                itemInfo.file.readback = { error: String(error) };
+                renderEvents();
+              });
+            }
+          }
+          return itemInfo;
+        }),
+        files: files.map((file) => ({
+          name: file.name,
+          type: file.type,
+          size: file.size
+        }))
+      };
+
+      event.preventDefault();
+      observedEvents.push(detail);
+      renderEvents();
+    }, true);
+
+    document.getElementById("clear").addEventListener("click", () => {
+      pasteCount = 0;
+      observedEvents.length = 0;
+      renderEvents();
+      document.getElementById("paste-target").focus();
+    });
+  </script>
+</body>
+</html>
