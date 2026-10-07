@@ -20,6 +20,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, BinaryIO
@@ -138,6 +139,21 @@ def paste_events_have_valid_png(events: object) -> bool:
     return isinstance(events, list) and any(
         isinstance(event, dict) and event_has_valid_png_file(event)
         for event in events)
+
+
+def browser_page_url(page: Path, consume_current: bool) -> str:
+    """Return a probe URL reachable by the selected Firefox execution mode.
+
+    Snap-confined Firefox cannot necessarily resolve a host /tmp file:// path
+    used by a detached worktree. Consumer-only mode therefore embeds the
+    static local probe document in a data: URL. Synthetic mode keeps the
+    historical file:// behavior.
+    """
+    if not consume_current:
+        return page.resolve().as_uri()
+    document = page.read_text(encoding="utf-8")
+    return "data:text/html;charset=utf-8," + urllib.parse.quote(
+        document, safe="")
 
 
 def main() -> int:
@@ -276,7 +292,7 @@ def main() -> int:
 
         start = time.monotonic()
         driver.command("POST", f"/session/{session_id}/url", {
-            "url": args.page.resolve().as_uri(),
+            "url": browser_page_url(args.page, args.consume_current),
         })
         element = driver.command("POST", f"/session/{session_id}/element", {
             "using": "css selector",
