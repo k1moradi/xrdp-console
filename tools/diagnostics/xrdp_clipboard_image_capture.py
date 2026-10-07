@@ -809,6 +809,26 @@ def _probe_event_matches(event: dict[str, object], target: str,
              str(event.get("requestor", "")).lower() == requestor.lower()))
 
 
+def _x11_event_matches_probe(
+        entry: object, *, target: str, requestor: str | None,
+        owner: str, property_xid: str | None) -> bool:
+    """Match one chansrv X11 event to the probe using stable X11 identity.
+
+    XGetAtomName() can fail after a request has completed, so diagnostic logs
+    may render the target as "unknown" even though requestor, property, owner
+    and clipboard generation still identify the transaction. Prefer the
+    property Atom when the probe supplied one; fall back to the target name
+    only when no property is available.
+    """
+    fields = _metadata_fields(entry)
+    if (fields.get("requestor", "").lower() != (requestor or "") or
+            fields.get("owner", "").lower() != owner.lower()):
+        return False
+    if property_xid:
+        return fields.get("property", "").lower() == property_xid.lower()
+    return fields.get("target") == target
+
+
 def build_sealed_transaction_report(
         *, test_id: str, generation: int, owner: str,
         begin_marker: dict[str, object], end_marker: dict[str, object],
@@ -912,6 +932,13 @@ def build_sealed_transaction_report(
         probe_result = next((event for event in probe_results
                              if _probe_event_matches(
                                  event, target, requestor)), None)
+        probe_notify = next((event for event in probe_notifies
+                             if _probe_event_matches(
+                                 event, target, requestor)), None)
+        probe_property_xid = (
+            str(probe_notify.get("property", "")).lower()
+            if isinstance(probe_notify, dict) and
+            probe_notify.get("property") is not None else None)
         result_end_ns = (_integer(probe_result.get(
             "completed_monotonic_ns"))
             if isinstance(probe_result, dict) else None)
@@ -920,17 +947,14 @@ def build_sealed_transaction_report(
         request_upper_ns = result_end_ns or transaction_end_ns
         matching_x11_requests = [
             entry for entry in all_x11
-            if _metadata_fields(entry).get("target") == target
-            and _metadata_fields(entry).get("requestor", "").lower() ==
-            (requestor or "")
-            and _metadata_fields(entry).get("owner", "").lower() ==
-            owner_normalized]
-        x11_request = next((entry for entry in generation_x11
-                            if _metadata_fields(entry).get("target") == target
-                            and _metadata_fields(entry).get("requestor", "").lower()
-                            == (requestor or "")
-                            and _metadata_fields(entry).get("owner", "").lower()
-                            == owner_normalized), None)
+            if _x11_event_matches_probe(
+                entry, target=target, requestor=requestor,
+                owner=owner_normalized, property_xid=probe_property_xid)]
+        x11_request = next((
+            entry for entry in generation_x11
+            if _x11_event_matches_probe(
+                entry, target=target, requestor=requestor,
+                owner=owner_normalized, property_xid=probe_property_xid)), None)
         replaced_x11_request = None
         if probe_request_ns is not None and request_upper_ns is not None:
             for entry in matching_x11_requests:
@@ -946,10 +970,7 @@ def build_sealed_transaction_report(
             generation_replaced_by_x11_request = True
         x11_fields = _metadata_fields(x11_request)
         x11_request_ns = _integer(x11_fields.get("mono_ns"))
-        property_xid = x11_fields.get("property")
-        probe_notify = next((event for event in probe_notifies
-                             if _probe_event_matches(
-                                 event, target, requestor)), None)
+        property_xid = x11_fields.get("property") or probe_property_xid
         probe_validation = next((
             event for event in probe_events
             if event.get("event") == "image_validation" and
@@ -960,7 +981,6 @@ def build_sealed_transaction_report(
             for entry in all_format_requests:
                 fields = _metadata_fields(entry)
                 entry_format_id = _integer(fields.get("format_id"))
-                entry_target = fields.get("target", target)
                 request_ns = _integer(fields.get("mono_ns"))
                 attempt_number = _integer(fields.get("attempt"))
                 request_time_source = "request-marker"
@@ -981,7 +1001,7 @@ def build_sealed_transaction_report(
                             previous_response).get("mono_ns"))
                         request_time_source = (
                             "previous-attempt-response-lower-bound")
-                if (entry_format_id == format_id and entry_target == target and
+                if (entry_format_id == format_id and
                         request_ns is not None and x11_request_ns is not None and
                         request_ns >= x11_request_ns and
                         fields.get("event") in ("request", "retry")):
@@ -1075,9 +1095,11 @@ def build_sealed_transaction_report(
                           *((replaced_x11_request,)
                             if replaced_x11_request is not None else ())):
                 fields = _metadata_fields(entry)
-                if (fields.get("target") == target and
-                        fields.get("requestor", "").lower() == target_probe_requestor and
-                        fields.get("owner", "").lower() == owner_normalized):
+                if _x11_event_matches_probe(
+                        entry, target=target,
+                        requestor=target_probe_requestor,
+                        owner=owner_normalized,
+                        property_xid=probe_property_xid):
                     public_entry = _public_chansrv_event(entry)
                     if public_entry not in retained_chansrv[
                             "x11_selection_requests"]:
@@ -1105,11 +1127,12 @@ def build_sealed_transaction_report(
             for entry in all_deliveries:
                 fields = _metadata_fields(entry)
                 if (fields.get("generation") == generation_text and
-                        fields.get("target") == target and
                         fields.get("requestor", "").lower() == requestor and
                         (property_xid is None or
                          fields.get("property", "").lower() ==
-                         property_xid.lower())):
+                         property_xid.lower()) and
+                        (property_xid is not None or
+                         fields.get("target") == target)):
                     delivery_matches.append(entry)
                     retained_chansrv["x11_deliveries"].append(
                         _public_chansrv_event(entry))
@@ -1132,8 +1155,9 @@ def build_sealed_transaction_report(
                         "terminator_generation")
                         if fields.get(name) is not None), None)
                     ack_is_current = True
-                    target_matches = fields.get("target", target) in (
-                        target, "-")
+                    target_matches = (
+                        property_xid is not None or
+                        fields.get("target", target) in (target, "-"))
                 if (event_generation == generation_text and
                         ack_is_current and target_matches and
                         fields.get("requestor", "").lower() == requestor and
