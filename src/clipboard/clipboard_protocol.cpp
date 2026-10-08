@@ -412,8 +412,7 @@ bool wrapDibAsBmp(std::span<const std::uint8_t> dib,
             return false;
         }
     }
-    else if (declaredImageBytes == 0U ||
-             declaredImageBytes > availablePixels)
+    else if (declaredImageBytes == 0U)
     {
         // RLE and embedded JPEG/PNG formats must carry a declared payload.
         return false;
