@@ -907,7 +907,7 @@ index e3fcbc3..8ecb7cd 100644
  #include <stdarg.h>
  #include <stddef.h>
  #include <stdint.h>
-@@ -672,15 +673,148 @@ test_console_dirty_gfx_is_held_during_resize(void **state)
+@@ -672,15 +673,212 @@ test_console_dirty_gfx_is_held_during_resize(void **state)
  {
      UNUSED(state);
  
@@ -1059,15 +1059,80 @@ index e3fcbc3..8ecb7cd 100644
 +                                NULL, NULL));
 +    }
  }
++
++static void
++test_clipboard_png_palette_rules(void **state)
++{
++    static const unsigned char indexed_png[] =
++    {
++        0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,
++        0x00,0x00,0x00,0x0d,0x49,0x48,0x44,0x52,
++        0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,
++        0x01,0x03,0x00,0x00,0x00,0x25,0xdb,0x56,0xca,
++        0x00,0x00,0x00,0x03,0x50,0x4c,0x54,0x45,
++        0x00,0x00,0x00,0xa7,0x7a,0x3d,0xda,
++        0x00,0x00,0x00,0x0d,0x49,0x44,0x41,0x54,
++        0x78,0x01,0x01,0x02,0x00,0xfd,0xff,
++        0x00,0x00,0x00,0x02,0x00,0x01,
++        0x7e,0x05,0x0d,0xd2,
++        0x00,0x00,0x00,0x00,0x49,0x45,0x4e,0x44,
++        0xae,0x42,0x60,0x82
++    };
++    static const unsigned char oversized_palette[] =
++    {
++        0x00,0x00,0x00,0x09,0x50,0x4c,0x54,0x45,
++        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
++        0x83,0x63,0xe9,0xc0
++    };
++    unsigned char changed[128];
++
++    UNUSED(state);
++    assert_int_equal(1, xrdp_clipboard_png_valid(
++                            indexed_png, sizeof(indexed_png), NULL, NULL));
++
++    /* Missing palette: CRCs of the remaining chunks are still correct. */
++    g_memcpy(changed, indexed_png, 33);
++    g_memcpy(changed + 33, indexed_png + 48, sizeof(indexed_png) - 48);
++    assert_int_equal(0, xrdp_clipboard_png_valid(
++                            changed, sizeof(indexed_png) - 15, NULL, NULL));
++
++    /* Duplicate PLTE is forbidden even with independently valid CRCs. */
++    g_memcpy(changed, indexed_png, 48);
++    g_memcpy(changed + 48, indexed_png + 33, 15);
++    g_memcpy(changed + 63, indexed_png + 48, sizeof(indexed_png) - 48);
++    assert_int_equal(0, xrdp_clipboard_png_valid(
++                            changed, sizeof(indexed_png) + 15, NULL, NULL));
++
++    /* A 1-bit indexed PNG cannot have more than two palette entries. */
++    g_memcpy(changed, indexed_png, 33);
++    g_memcpy(changed + 33, oversized_palette, sizeof(oversized_palette));
++    g_memcpy(changed + 33 + sizeof(oversized_palette),
++             indexed_png + 48, sizeof(indexed_png) - 48);
++    assert_int_equal(0, xrdp_clipboard_png_valid(
++                            changed, sizeof(indexed_png) - 15 +
++                            sizeof(oversized_palette), NULL, NULL));
++
++    /* Grayscale with PLTE is forbidden; fix IHDR CRC after the type edit. */
++    g_memcpy(changed, indexed_png, sizeof(indexed_png));
++    changed[25] = 0;
++    changed[29] = 0x37;
++    changed[30] = 0x6e;
++    changed[31] = 0xf9;
++    changed[32] = 0x24;
++    assert_int_equal(0, xrdp_clipboard_png_valid(
++                            changed, sizeof(indexed_png), NULL, NULL));
++}
++
  
  START_TEST(execute_suite)
-@@ -702,6 +836,9 @@ START_TEST(execute_suite)
+@@ -702,6 +900,10 @@ START_TEST(execute_suite)
          cmocka_unit_test(test_console_interaction_priority_state),
          cmocka_unit_test(test_console_generic_encoder_policy),
          cmocka_unit_test(test_console_dirty_gfx_is_held_during_resize),
 +        cmocka_unit_test(test_clipboard_image_format_negotiation),
 +        cmocka_unit_test(test_clipboard_dib_bounds_and_bmp_offsets),
 +        cmocka_unit_test(test_clipboard_png_signature),
++        cmocka_unit_test(test_clipboard_png_palette_rules),
          cmocka_unit_test(
              test_console_gfx_adaptive_pacing_promotes_immediately),
          cmocka_unit_test(
