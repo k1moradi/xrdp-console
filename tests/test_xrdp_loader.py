@@ -3375,6 +3375,104 @@ def _chansrv_event_monotonic_ns(line: str) -> int:
     return int(match.group(1))
 
 
+def assert_clipboard_delayed_png_firefox_session(
+        client: subprocess.Popen[object], client_log_path: Path,
+        chansrv_process: subprocess.Popen[object], chansrv_logs: Path,
+        chansrv_stdout: Path, source_display: str,
+        source_display_process: subprocess.Popen[bytes], root: Path,
+        expected_png_bytes: int, expected_png_sha256: str) -> None:
+    """Trusted Firefox paste over the existing synthetic CLIPRDR peer."""
+    from firefox_chansrv_consumer import (
+        TestInconclusive, correlate_metadata, run_firefox_chansrv_timing)
+    delay_ms = int(os.environ["XRDP_CONSOLE_TEST_DELAY_PNG_RESPONSE_MS"])
+    initial = wait_for_chansrv_pattern(
+        chansrv_logs,
+        rf"event=format-list[^\n]*stored_formats=2 dib_format_id=8 "
+        rf"png_format_id={NAMED_PNG_FORMAT_ID} generation=(\d+)",
+        15.0, chansrv_process, chansrv_stdout)
+    match = re.search(r"generation=(\d+)", initial)
+    if match is None:
+        raise AssertionError("No generation in synthetic Format List")
+    generation = int(match.group(1))
+    wait_for_peer_marker(client, client_log_path,
+        f"PEER_INITIAL_FORMAT_LIST_SENT dib=8 png={NAMED_PNG_FORMAT_ID}",
+        10.0)
+    firefox = (os.environ.get("XRDP_CONSOLE_TEST_FIREFOX_BINARY") or
+               shutil.which("firefox"))
+    geckodriver = (os.environ.get("XRDP_CONSOLE_TEST_GECKODRIVER") or
+                   shutil.which("geckodriver"))
+    if firefox is None or geckodriver is None:
+        raise TestSkipped("test-only Firefox/geckodriver executable unavailable")
+
+    def wait_for_delivery(receipt: dict) -> None:
+        # Keep the browser alive even when synchronous getAsFile() is null.
+        # The delayed owner may still complete INCR after the paste handler.
+        wait_for_peer_marker(
+            client, client_log_path,
+            f"PEER_PNG_DELAY_RESPONSE_SENT delay_ms={delay_ms} ",
+            max(10.0, delay_ms / 1000.0 + 8.0))
+        # Do not kill Firefox after the FIRST terminator when it has sent
+        # several SelectionRequests. Track live same-generation requestors.
+        deadline = time.monotonic() + 20.0
+        seen_requestors: set[str] = set()
+        while time.monotonic() < deadline:
+            logs = chansrv_log_text(chansrv_logs)
+            requestors = {
+                m.group(1).lower()
+                for m in re.finditer(
+                    rf"event=x11-request target=image/png "
+                    rf"requestor=(0x[0-9a-fA-F]+) [^\n]*generation={generation}",
+                    logs)
+            }
+            acks = {
+                m.group(1).lower()
+                for m in re.finditer(
+                    r"event=x11-incr-terminator-ack "
+                    r"requestor=(0x[0-9a-fA-F]+) .*target=image/png",
+                    logs)
+            }
+            seen_requestors |= requestors
+            if seen_requestors and seen_requestors <= acks:
+                receipt["acknowledged_requestors"] = sorted(seen_requestors)
+                return
+            if chansrv_process.poll() is not None:
+                raise AssertionError("Chansrv exited with pending X11 INCR")
+            time.sleep(0.05)
+        raise AssertionError(
+            f"X11 INCR did not finish for all {len(seen_requestors)} "
+            "same-generation Firefox requestors")
+
+    try:
+        report = run_firefox_chansrv_timing(
+            source_display=source_display,
+            xauthority=root / "firefox-Xauthority",
+            xvfb_pid=source_display_process.pid,
+            root=root, firefox=Path(firefox), geckodriver=Path(geckodriver),
+            expected_size=expected_png_bytes,
+            expected_sha256=expected_png_sha256,
+            expected_generation=generation,
+            after_receipt=wait_for_delivery)
+    except TestInconclusive as exc:
+        raise TestSkipped(str(exc)) from exc
+    classification = report["classification"]
+    metadata = correlate_metadata(
+        chansrv_log_text(chansrv_logs), read_text(client_log_path),
+        NAMED_PNG_FORMAT_ID, generation, classification)
+    if metadata["x11_request_count"] < 1:
+        raise AssertionError("No same-generation Firefox X11 image request")
+    if metadata["incr_terminator_ack_count"] < 1:
+        raise AssertionError("No completed Firefox X11 INCR transfer")
+    if classification not in ("TRUSTED_PASTE_NULL_FILE", "READABLE_PNG_FILE"):
+        raise AssertionError(f"Unexpected browser outcome: {classification} "
+                             f"metadata={metadata} receipt={report}")
+    print("FIREFOX_CLIPRDR_PASTE " + json.dumps({
+        "delay_ms": delay_ms, "classification": classification,
+        "trusted": report["trusted"], "getAsFileNull": report["getAsFileNull"],
+        "fileSize": report.get("fileSize"), "sha256": report.get("sha256"),
+        "x11": metadata, "firefox_version": report.get("firefox_version")},
+        sort_keys=True), flush=True)
+
+
 def assert_clipboard_delayed_png_response_session(
         helper: Path, client: subprocess.Popen[object],
         client_log_path: Path, chansrv_process: subprocess.Popen[object],
@@ -7576,6 +7674,9 @@ def main() -> int:
 
     with tempfile.TemporaryDirectory(prefix="xrdp-console-loader-") as temp:
         root = Path(temp)
+        firefox_delayed_png_consumer = (
+            clipboard_delayed_png_response_mode and
+            os.environ.get("XRDP_CONSOLE_TEST_FIREFOX_CONSUMER") == "1")
         named_png_fixture_path = root / "peer-named.png"
         named_png_fixture_info = (
             write_named_png_fixture(named_png_fixture_path)
@@ -7599,9 +7700,14 @@ def main() -> int:
         chansrv_logs_path.mkdir()
         config_path = root / "xrdp.ini"
         port = free_tcp_port()
-        source_display_process, source_display = start_source_display(
-            source_display_log_path, source_width, source_height,
-            randr_resize=randr_resize_mode)
+        if firefox_delayed_png_consumer:
+            from firefox_chansrv_consumer import start_authenticated_source_xvfb
+            source_display_process, source_display = start_authenticated_source_xvfb(
+                root, source_display_log_path, source_width, source_height)
+        else:
+            source_display_process, source_display = start_source_display(
+                source_display_log_path, source_width, source_height,
+                randr_resize=randr_resize_mode)
 
         module_dir = install_root / "lib" / "xrdp"
         module_dir.mkdir(parents=True, exist_ok=True)
@@ -8275,11 +8381,18 @@ password=smoke
                             if named_png_fixture_info is None:
                                 raise AssertionError(
                                     "delayed PNG fixture metadata was not prepared")
-                            assert_clipboard_delayed_png_response_session(
-                                clipboard_helper, client, client_log_path,
-                                chansrv_process, chansrv_logs_path,
-                                chansrv_stdout_path, source_display,
-                                *named_png_fixture_info)
+                            if firefox_delayed_png_consumer:
+                                assert_clipboard_delayed_png_firefox_session(
+                                    client, client_log_path, chansrv_process,
+                                    chansrv_logs_path, chansrv_stdout_path,
+                                    source_display, source_display_process,
+                                    root, *named_png_fixture_info)
+                            else:
+                                assert_clipboard_delayed_png_response_session(
+                                    clipboard_helper, client, client_log_path,
+                                    chansrv_process, chansrv_logs_path,
+                                    chansrv_stdout_path, source_display,
+                                    *named_png_fixture_info)
                         elif clipboard_delayed_png_cancel_mode:
                             assert_clipboard_delayed_png_cancellation_session(
                                 clipboard_helper, client, client_log_path,
