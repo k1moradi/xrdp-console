@@ -379,7 +379,8 @@ bool wrapDibAsBmp(std::span<const std::uint8_t> dib,
         return false;
     }
     const std::size_t paletteEntries =
-        colorsUsed != 0U ? colorsUsed : (bitCount <= 8U ? (1ULL << bitCount) : 0U);
+        colorsUsed != 0U ? colorsUsed :
+        (bitCount != 0U && bitCount <= 8U ? (1ULL << bitCount) : 0U);
     if (paletteEntries > (dib.size() - dibPixelOffset) / 4U)
     {
         return false;
