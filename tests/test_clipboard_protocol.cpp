@@ -213,6 +213,11 @@ void test_dib_pixel_payload_validation()
     put32(embeddedPng, 20, 8);
     assert(wrapDibAsBmp(embeddedPng, bmp, &info));
     assert(info.pixelOffset == 54);
+    // Even a peer which fills in the decoded bit depth must not force a
+    // bitmap palette into the embedded PNG payload.
+    put16(embeddedPng, 14, 8);
+    assert(wrapDibAsBmp(embeddedPng, bmp, &info));
+    assert(info.pixelOffset == 54);
     embeddedPng.resize(47);
     assert(!wrapDibAsBmp(embeddedPng, bmp));
 }
