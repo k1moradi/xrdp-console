@@ -204,9 +204,12 @@ bool validatePng(std::span<const std::uint8_t> bytes,
 
     std::size_t offset = signature.size();
     bool sawIhdr = false;
+    bool sawPlte = false;
     bool sawIdat = false;
     bool idatClosed = false;
     bool sawIend = false;
+    std::uint8_t colorType = 0;
+    std::uint8_t bitDepth = 0;
     while (offset < bytes.size())
     {
         if (bytes.size() - offset < 12U)
@@ -239,8 +242,10 @@ bool validatePng(std::span<const std::uint8_t> bytes,
             }
             info.width = read32be(data);
             info.height = read32be(data + 4U);
+            bitDepth = data[8];
+            colorType = data[9];
             if (info.width == 0 || info.height == 0 ||
-                !validPngBitDepth(data[8], data[9]) ||
+                !validPngBitDepth(bitDepth, colorType) ||
                 data[10] != 0 || data[11] != 0 || data[12] > 1)
             {
                 return fail(PngValidationError::InvalidIhdr);
@@ -253,7 +258,7 @@ bool validatePng(std::span<const std::uint8_t> bytes,
         }
         else if (idat)
         {
-            if (idatClosed)
+            if (idatClosed || (colorType == 3 && !sawPlte))
             {
                 return fail(PngValidationError::InvalidChunkOrder);
             }
@@ -276,10 +281,16 @@ bool validatePng(std::span<const std::uint8_t> bytes,
             }
             else if (plte)
             {
-                if (sawIdat || chunkBytes == 0 || chunkBytes % 3U != 0)
+                const std::size_t paletteEntries = chunkBytes / 3U;
+                if (sawPlte || sawIdat ||
+                    (colorType != 2 && colorType != 3 && colorType != 6) ||
+                    chunkBytes == 0 || chunkBytes % 3U != 0 ||
+                    paletteEntries > 256U ||
+                    (colorType == 3 && paletteEntries > (1U << bitDepth)))
                 {
                     return fail(PngValidationError::InvalidChunkOrder);
                 }
+                sawPlte = true;
             }
             else if ((type[0] & 0x20U) == 0)
             {
