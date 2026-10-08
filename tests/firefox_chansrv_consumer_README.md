@@ -1,6 +1,6 @@
 # Firefox trusted-paste adapter for the frozen xrdp loader
 
-**Status:** offline adapter implementation, not a production fix. Tests pass here;
+**Status:** offline adapter plus strict INCR ledger, not a production fix. Tests pass here;
 **the full Firefox-through-chansrv integration remains UNEXECUTED** pending the
 frozen xrdp / FreeRDP candidate on the Codex host.
 
@@ -37,8 +37,10 @@ metadata and digest. Any pasted image is synthetic.
 - `firefox_chansrv_consumer.py`: authenticated-Xvfb Firefox adapter, W3C
   WebDriver client, trusted Ctrl+V, browser receipt, metadata correlation.
 - `receipt.js`: synchronous DOM File capture, asynchronous SHA-256 and decode.
+- `firefox_x11_delivery_ledger.py`: fail-closed X11 requestor/property/generation and exact PNG byte ledger.
 - `integrate_frozen_loader.py`: **review-only** frozen-Git-blob-checked source
   transformer; writes a new source file and unified diff; refuses in-place edits.
+- `tests/test_delivery_ledger.py`: 17 focused retry, property, generation, INCR completion and timeout tests.
 - `tests/test_adapter.py`: 13 Python tests including a real authenticated
   private Xvfb, wrong-cookie rejection, HTTP service and fake W3C WebDriver.
 - `tests/test_browser_receipt.cjs` and `tests/synthetic.png`: Node VM test for
@@ -47,7 +49,7 @@ metadata and digest. Any pasted image is synthetic.
 ## Local offline tests
 
 ```bash
-python3 -m unittest discover -s tests -p test_adapter.py -v
+python3 -m unittest discover -s tests -p 'test_*.py' -v
 node tests/test_browser_receipt.cjs
 python3 -m py_compile firefox_chansrv_consumer.py integrate_frozen_loader.py
 ```
@@ -59,11 +61,19 @@ The optional private-Xvfb test needs `Xvfb`, `xauth`, `xdpyinfo`.
 
 1. Get the frozen source inputs and build the baseline candidate after explicit
    authorization for any missing downloads. Do not use production chansrv.
-2. In a new detached build worktree at frozen commit, copy the two adapter files:
+2. **Preferred GitHub handoff:** check out draft PR #1 branch
+   `diagnostics/firefox-chansrv-loader-adapter-20261008` in a separate disposable
+   worktree. The loader and companion Python files are already integrated there.
+   Do not apply the generator on top of this branch.
+
+   **Alternative for the exact frozen base:** copy the three companion files
+   (`firefox_chansrv_consumer.py`, `firefox_x11_delivery_ledger.py`, `receipt.js`)
+   alongside the frozen loader, then use `integrate_frozen_loader.py`:
 
 ```bash
 cp firefox_chansrv_consumer.py "$FROZEN_WORKTREE/tests/"
 cp receipt.js "$FROZEN_WORKTREE/tests/"
+cp firefox_x11_delivery_ledger.py "$FROZEN_WORKTREE/tests/"
 python3 integrate_frozen_loader.py \
   --source "$FROZEN_WORKTREE/tests/test_xrdp_loader.py" \
   --output "$FROZEN_WORKTREE/build/test_xrdp_loader.firefox.py" \
@@ -111,7 +121,9 @@ The default deterministic loader remains unchanged whenever
 - The adapter reports `TRUSTED_PASTE_NULL_FILE` separately from no event,
   File-read failure, SHA failure, invalid PNG or a readable decoded PNG.
 - The Firefox process stays alive until the delayed synthetic peer sends its
-  response and each observed same-generation INCR requestor is acknowledged.
+  response and each same-generation INCR transaction is acknowledged, its
+  requestor/property pair matches, and the logged chunks total the exact
+  expected synthetic PNG size. A 350 ms quiet interval precedes cleanup.
 - X11 requestor XIDs are *not* automatically attributed to Firefox PID.
 - Stage timestamps are only reported where existing chansrv/peer logs supply
   monotonic evidence. Current RDP VC first/last-fragment diagnostic lines lack
@@ -126,11 +138,10 @@ The default deterministic loader remains unchanged whenever
 
 ## Remaining gates
 
-- Need a local copy of the **exact frozen loader Git blob** to execute the
-  full `integrate_frozen_loader.py` generation against all 8,442 lines.
-  Source anchors and frozen blob were independently verified from GitHub,
-  and a syntactically valid local miniature was exercised; this is **not** a
-  substitute for a full frozen-file integration build.
+- The full 8,442-line frozen loader Git blob was fetched through the GitHub
+  connector; all four anchors matched, and the opt-in loader source was
+  committed on PR #1. The 13+17 offline regressions and bytecode compilation
+  passed, but the complete candidate-chansrv runtime has **not** run.
 - Need the pinned xrdp 0.10.6.1 and FreeRDP 3.31.0 build artifacts to run
   the complete candidate-chansrv test. No network/download was attempted here.
 - Need the actual Firefox 157.0.1/geckodriver host to demonstrate a trusted
@@ -138,3 +149,11 @@ The default deterministic loader remains unchanged whenever
 
 Only after the real candidate test reproduces `getAsFile() === null` should
 we propose a minimal corrective production patch.
+
+## Audit update — per-transfer INCR ledger
+
+Before this update, the Firefox branch checked only a set of X11 requestor
+IDs against a set of terminator-ack IDs. That could mistake an unrelated
+property/generation or a reused XID for a completed screenshot transfer.
+The loader now uses `firefox_x11_delivery_ledger.py` and rejects such logs.
+This hardens the **experiment**, not production screenshot delivery.
