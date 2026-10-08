@@ -518,7 +518,7 @@ new file mode 100644
 index 0000000..daad931
 --- /dev/null
 +++ b/sesman/chansrv/clipboard_image_formats.h
-@@ -0,0 +1,444 @@
+@@ -0,0 +1,449 @@
 +/*
 + * Small, allocation-free helpers for the CLIPRDR image formats supported by
 + * chansrv. Kept separate so the format and DIB bounds can be unit tested.
@@ -655,7 +655,12 @@ index 0000000..daad931
 +        return 1;
 +    }
 +
-+    if (colors_used != 0)
++    if (compression == 4 || compression == 5)
++    {
++        /* Embedded JPEG/PNG carries its own color tables. */
++        palette_entries = 0;
++    }
++    else if (colors_used != 0)
 +    {
 +        palette_entries = (size_t)colors_used;
 +    }
