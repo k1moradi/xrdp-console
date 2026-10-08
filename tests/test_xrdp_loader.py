@@ -3405,42 +3405,25 @@ def assert_clipboard_delayed_png_firefox_session(
         raise TestSkipped("test-only Firefox/geckodriver executable unavailable")
 
     def wait_for_delivery(receipt: dict) -> None:
-        # Keep the browser alive even when synchronous getAsFile() is null.
-        # The delayed owner may still complete INCR after the paste handler.
+        # Firefox must remain alive until EVERY observed PNG INCR request is
+        # accounted for, including repeated XIDs and properties. A first
+        # terminator ack is insufficient evidence when Firefox retries.
+        from firefox_x11_delivery_ledger import (
+            DeliveryTraceError, wait_for_png_delivery)
         wait_for_peer_marker(
             client, client_log_path,
             f"PEER_PNG_DELAY_RESPONSE_SENT delay_ms={delay_ms} ",
             max(10.0, delay_ms / 1000.0 + 8.0))
-        # Do not kill Firefox after the FIRST terminator when it has sent
-        # several SelectionRequests. Track live same-generation requestors.
-        deadline = time.monotonic() + 20.0
-        seen_requestors: set[str] = set()
-        while time.monotonic() < deadline:
-            logs = chansrv_log_text(chansrv_logs)
-            requestors = {
-                m.group(1).lower()
-                for m in re.finditer(
-                    rf"event=x11-request target=image/png "
-                    rf"requestor=(0x[0-9a-fA-F]+) [^\n]*generation={generation}",
-                    logs)
-            }
-            acks = {
-                m.group(1).lower()
-                for m in re.finditer(
-                    r"event=x11-incr-terminator-ack "
-                    r"requestor=(0x[0-9a-fA-F]+) .*target=image/png",
-                    logs)
-            }
-            seen_requestors |= requestors
-            if seen_requestors and seen_requestors <= acks:
-                receipt["acknowledged_requestors"] = sorted(seen_requestors)
-                return
-            if chansrv_process.poll() is not None:
-                raise AssertionError("Chansrv exited with pending X11 INCR")
-            time.sleep(0.05)
-        raise AssertionError(
-            f"X11 INCR did not finish for all {len(seen_requestors)} "
-            "same-generation Firefox requestors")
+        try:
+            delivery = wait_for_png_delivery(
+                lambda: chansrv_log_text(chansrv_logs),
+                lambda: chansrv_process.poll() is None,
+                generation=generation, expected_bytes=expected_png_bytes,
+                timeout_s=20.0, quiescence_s=0.35)
+        except DeliveryTraceError as exc:
+            raise AssertionError(
+                f"X11 PNG delivery evidence incomplete: {exc}") from exc
+        receipt["x11_delivery"] = delivery
 
     try:
         report = run_firefox_chansrv_timing(
