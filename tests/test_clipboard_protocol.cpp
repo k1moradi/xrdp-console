@@ -124,6 +124,99 @@ void test_dib_wrapping()
     assert(bmp.empty());
 }
 
+void test_dib_pixel_payload_validation()
+{
+    using namespace xrdp_console::clipboard;
+    const auto put16 = [](std::vector<std::uint8_t> &bytes,
+                          std::size_t offset, std::uint16_t value) {
+        bytes[offset] = static_cast<std::uint8_t>(value);
+        bytes[offset + 1] = static_cast<std::uint8_t>(value >> 8U);
+    };
+    const auto put32 = [](std::vector<std::uint8_t> &bytes,
+                          std::size_t offset, std::uint32_t value) {
+        for (unsigned shift = 0; shift < 32; shift += 8)
+        {
+            bytes[offset + shift / 8] =
+                static_cast<std::uint8_t>(value >> shift);
+        }
+    };
+    const auto make = [&](std::uint32_t width, std::uint32_t height,
+                          std::uint16_t bpp, std::uint32_t compression,
+                          std::size_t bytesAfterHeader) {
+        std::vector<std::uint8_t> dib(40U + bytesAfterHeader);
+        put32(dib, 0, 40);
+        put32(dib, 4, width);
+        put32(dib, 8, height);
+        put16(dib, 12, 1);
+        put16(dib, 14, bpp);
+        put32(dib, 16, compression);
+        return dib;
+    };
+
+    std::vector<std::uint8_t> bmp;
+    DibInfo info;
+
+    // A 3-pixel 24-bpp row requires twelve bytes, not nine.
+    auto rgb = make(3, 1, 24, 0, 12);
+    assert(wrapDibAsBmp(rgb, bmp, &info));
+    assert(info.pixelOffset == 54);
+    rgb.pop_back();
+    assert(!wrapDibAsBmp(rgb, bmp));
+    assert(bmp.empty());
+
+    // The 4-byte-aligned row rule is applied once per scanline.
+    auto twoRows = make(1, 2, 24, 0, 8);
+    assert(wrapDibAsBmp(twoRows, bmp));
+    twoRows.pop_back();
+    assert(!wrapDibAsBmp(twoRows, bmp));
+
+    auto invalid = make(1, 1, 24, 0, 4);
+    put32(invalid, 4, 0); // Zero width
+    assert(!wrapDibAsBmp(invalid, bmp));
+    put32(invalid, 4, 1);
+    put32(invalid, 8, 0); // Zero height
+    assert(!wrapDibAsBmp(invalid, bmp));
+    put32(invalid, 8, 1);
+    put16(invalid, 12, 0); // biPlanes must equal one
+    assert(!wrapDibAsBmp(invalid, bmp));
+    put16(invalid, 12, 1);
+    put32(invalid, 20, 100); // Declared image size exceeds payload
+    assert(!wrapDibAsBmp(invalid, bmp));
+
+    // Negative height is legal for uncompressed top-down bitmaps.
+    auto topDown = make(2, 0xfffffffeU, 32, 0, 16);
+    assert(wrapDibAsBmp(topDown, bmp, &info));
+    assert(info.pixelOffset == 54);
+    topDown.resize(55);
+    assert(!wrapDibAsBmp(topDown, bmp));
+
+    // The same negative height is invalid for compressed RLE8.
+    auto rle = make(1, 0xffffffffU, 8, 1, 12);
+    put32(rle, 32, 2); // Only two entries in the palette
+    put32(rle, 20, 4);
+    assert(!wrapDibAsBmp(rle, bmp));
+    put32(rle, 8, 1);
+    assert(wrapDibAsBmp(rle, bmp, &info));
+    assert(info.pixelOffset == 62);
+    put32(rle, 20, 5); // Only four RLE bytes remain
+    assert(!wrapDibAsBmp(rle, bmp));
+
+    // BI_BITFIELDS includes three masks after a 40-byte header.
+    auto masked = make(1, 1, 16, 3, 16);
+    assert(wrapDibAsBmp(masked, bmp, &info));
+    assert(info.pixelOffset == 66);
+    masked.pop_back();
+    assert(!wrapDibAsBmp(masked, bmp));
+
+    // Embedded BI_PNG can legitimately use biBitCount=0 with no palette.
+    auto embeddedPng = make(1, 1, 0, 5, 8);
+    put32(embeddedPng, 20, 8);
+    assert(wrapDibAsBmp(embeddedPng, bmp, &info));
+    assert(info.pixelOffset == 54);
+    embeddedPng.resize(47);
+    assert(!wrapDibAsBmp(embeddedPng, bmp));
+}
+
 } // namespace
 
 int main()
@@ -133,5 +226,6 @@ int main()
     test_unicode_and_line_endings();
     test_png_validation();
     test_dib_wrapping();
+    test_dib_pixel_payload_validation();
     return 0;
 }
