@@ -980,7 +980,7 @@ index e3fcbc3..8ecb7cd 100644
  #include <stdarg.h>
  #include <stddef.h>
  #include <stdint.h>
-@@ -672,15 +673,216 @@ test_console_dirty_gfx_is_held_during_resize(void **state)
+@@ -672,15 +673,220 @@ test_console_dirty_gfx_is_held_during_resize(void **state)
  {
      UNUSED(state);
  
@@ -1143,6 +1143,10 @@ index e3fcbc3..8ecb7cd 100644
 +    assert_int_equal(0, xrdp_clipboard_dib_payload_valid(
 +                            dib, 48, &pixel_offset));
 +    assert_int_equal(54, pixel_offset);
++    dib[14] = 8; /* Embedded PNG still carries its own palette. */
++    assert_int_equal(0, xrdp_clipboard_dib_payload_valid(
++                            dib, 48, &pixel_offset));
++    assert_int_equal(54, pixel_offset);
 +    assert_int_not_equal(0, xrdp_clipboard_dib_payload_valid(
 +                                dib, 47, &pixel_offset));
 +}
@@ -1202,7 +1206,7 @@ index e3fcbc3..8ecb7cd 100644
  }
  
  START_TEST(execute_suite)
-@@ -702,6 +904,10 @@ START_TEST(execute_suite)
+@@ -702,6 +908,10 @@ START_TEST(execute_suite)
          cmocka_unit_test(test_console_interaction_priority_state),
          cmocka_unit_test(test_console_generic_encoder_policy),
          cmocka_unit_test(test_console_dirty_gfx_is_held_during_resize),
