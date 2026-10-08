@@ -325,14 +325,38 @@ bool wrapDibAsBmp(std::span<const std::uint8_t> dib,
     {
         return false;
     }
+    // This function wraps a complete packed DIB, not just its header.
+    // A signed negative height is a valid top-down uncompressed bitmap.
+    const std::uint32_t width = read32(dib.data() + 4U);
+    const std::uint32_t rawHeight = read32(dib.data() + 8U);
+    const std::uint16_t planes = read16(dib.data() + 12U);
     const std::uint16_t bitCount = read16(dib.data() + 14U);
-    if (bitCount != 1U && bitCount != 2U && bitCount != 4U &&
-        bitCount != 8U && bitCount != 16U && bitCount != 24U &&
-        bitCount != 32U)
+    if (width == 0U ||
+        width > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ||
+        rawHeight == 0U || planes != 1U ||
+        (bitCount != 1U && bitCount != 2U && bitCount != 4U &&
+         bitCount != 8U && bitCount != 16U && bitCount != 24U &&
+         bitCount != 32U))
     {
         return false;
     }
     const std::uint32_t compression = read32(dib.data() + 16U);
+    const bool uncompressed =
+        compression == 0U || compression == 3U || compression == 6U;
+    if (!uncompressed &&
+        !((compression == 1U && bitCount == 8U) ||
+          (compression == 2U && bitCount == 4U)))
+    {
+        return false;
+    }
+    if (((compression == 3U || compression == 6U) &&
+         bitCount != 16U && bitCount != 32U) ||
+        (rawHeight > static_cast<std::uint32_t>(
+                         std::numeric_limits<std::int32_t>::max()) &&
+         !uncompressed))
+    {
+        return false;
+    }
     const std::uint32_t colorsUsed = read32(dib.data() + 32U);
     std::size_t dibPixelOffset = headerBytes;
     if (headerBytes == 40U && compression == 3U)
@@ -356,6 +380,30 @@ bool wrapDibAsBmp(std::span<const std::uint8_t> dib,
     dibPixelOffset += paletteEntries * 4U;
     if (dibPixelOffset > dib.size() ||
         dibPixelOffset > std::numeric_limits<std::uint32_t>::max() - 14U)
+    {
+        return false;
+    }
+
+    const std::size_t availablePixels = dib.size() - dibPixelOffset;
+    if (uncompressed)
+    {
+        // DWORD-aligned scanlines; divide before multiplying by the number
+        // of rows to keep even hostile INT32_MAX dimensions overflow-safe.
+        const std::uint64_t rowBits =
+            static_cast<std::uint64_t>(width) * bitCount;
+        const std::uint64_t strideBytes = ((rowBits + 31U) / 32U) * 4U;
+        const std::uint64_t height =
+            rawHeight <= static_cast<std::uint32_t>(
+                             std::numeric_limits<std::int32_t>::max())
+                ? rawHeight
+                : (std::uint64_t{1} << 32U) - rawHeight;
+        if (strideBytes == 0U || strideBytes > availablePixels ||
+            height > availablePixels / strideBytes)
+        {
+            return false;
+        }
+    }
+    else if (availablePixels == 0U)
     {
         return false;
     }
