@@ -333,31 +333,38 @@ bool wrapDibAsBmp(std::span<const std::uint8_t> dib,
     const std::uint16_t bitCount = read16(dib.data() + 14U);
     if (width == 0U ||
         width > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max()) ||
-        rawHeight == 0U || planes != 1U ||
-        (bitCount != 1U && bitCount != 2U && bitCount != 4U &&
-         bitCount != 8U && bitCount != 16U && bitCount != 24U &&
-         bitCount != 32U))
+        rawHeight == 0U || planes != 1U)
     {
         return false;
     }
     const std::uint32_t compression = read32(dib.data() + 16U);
+    const std::uint32_t declaredImageBytes = read32(dib.data() + 20U);
     const bool uncompressed =
         compression == 0U || compression == 3U || compression == 6U;
-    if (!uncompressed &&
-        !((compression == 1U && bitCount == 8U) ||
-          (compression == 2U && bitCount == 4U)))
-    {
-        return false;
-    }
-    if (((compression == 3U || compression == 6U) &&
+    const bool supportedBitCount =
+        bitCount == 1U || bitCount == 2U || bitCount == 4U ||
+        bitCount == 8U || bitCount == 16U || bitCount == 24U ||
+        bitCount == 32U ||
+        (bitCount == 0U && (compression == 4U || compression == 5U));
+    const bool supportedCompression =
+        uncompressed || (compression == 1U && bitCount == 8U) ||
+        (compression == 2U && bitCount == 4U) ||
+        (compression == 4U || compression == 5U);
+    if (!supportedBitCount || !supportedCompression ||
+        ((compression == 3U || compression == 6U) &&
          bitCount != 16U && bitCount != 32U) ||
         (rawHeight > static_cast<std::uint32_t>(
                          std::numeric_limits<std::int32_t>::max()) &&
-         !uncompressed))
+         compression != 0U && compression != 3U))
     {
         return false;
     }
     const std::uint32_t colorsUsed = read32(dib.data() + 32U);
+    if (bitCount != 0U && bitCount <= 8U &&
+        colorsUsed > (1U << bitCount))
+    {
+        return false;
+    }
     std::size_t dibPixelOffset = headerBytes;
     if (headerBytes == 40U && compression == 3U)
     {
@@ -403,7 +410,13 @@ bool wrapDibAsBmp(std::span<const std::uint8_t> dib,
             return false;
         }
     }
-    else if (availablePixels == 0U)
+    else if (declaredImageBytes == 0U ||
+             declaredImageBytes > availablePixels)
+    {
+        // RLE and embedded JPEG/PNG formats must carry a declared payload.
+        return false;
+    }
+    if (declaredImageBytes != 0U && declaredImageBytes > availablePixels)
     {
         return false;
     }
