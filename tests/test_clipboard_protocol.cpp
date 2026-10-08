@@ -95,6 +95,71 @@ void test_png_validation()
     assert(error == PngValidationError::TrailingData);
 }
 
+void test_png_palette_rules()
+{
+    using namespace xrdp_console::clipboard;
+
+    // Fully decodable 1x1 indexed-color PNG: filter=0, palette index=0,
+    // stored DEFLATE block, and correct PNG and Adler-32 checksums.
+    const std::vector<std::uint8_t> indexed{
+        0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,
+        0x00,0x00,0x00,0x0d,0x49,0x48,0x44,0x52,
+        0x00,0x00,0x00,0x01,0x00,0x00,0x00,0x01,
+        0x01,0x03,0x00,0x00,0x00,0x25,0xdb,0x56,0xca,
+        0x00,0x00,0x00,0x03,0x50,0x4c,0x54,0x45,
+        0x00,0x00,0x00,0xa7,0x7a,0x3d,0xda,
+        0x00,0x00,0x00,0x0d,0x49,0x44,0x41,0x54,
+        0x78,0x01,0x01,0x02,0x00,0xfd,0xff,
+        0x00,0x00,0x00,0x02,0x00,0x01,
+        0x7e,0x05,0x0d,0xd2,
+        0x00,0x00,0x00,0x00,0x49,0x45,0x4e,0x44,
+        0xae,0x42,0x60,0x82
+    };
+    PngInfo info;
+    PngValidationError error;
+    assert(validatePng(indexed, info, &error));
+    assert(info.width == 1 && info.height == 1);
+
+    auto noPalette = indexed;
+    noPalette.erase(noPalette.begin() + 33, noPalette.begin() + 48);
+    assert(!validatePng(noPalette, info, &error));
+    assert(error == PngValidationError::InvalidChunkOrder);
+
+    auto duplicatePalette = indexed;
+    duplicatePalette.insert(duplicatePalette.begin() + 48,
+                            indexed.begin() + 33, indexed.begin() + 48);
+    assert(!validatePng(duplicatePalette, info, &error));
+    assert(error == PngValidationError::InvalidChunkOrder);
+
+    // Move PLTE after the IDAT chunk, preserving both chunks' CRCs.
+    auto latePalette = noPalette;
+    latePalette.insert(latePalette.begin() + 58,
+                       indexed.begin() + 33, indexed.begin() + 48);
+    assert(!validatePng(latePalette, info, &error));
+
+    // Three palette entries do not fit 1-bit palette indices (maximum 2).
+    const std::vector<std::uint8_t> threeColorPalette{
+        0x00,0x00,0x00,0x09,0x50,0x4c,0x54,0x45,
+        0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+        0x83,0x63,0xe9,0xc0
+    };
+    auto overlargePalette = noPalette;
+    overlargePalette.insert(overlargePalette.begin() + 33,
+                            threeColorPalette.begin(), threeColorPalette.end());
+    assert(!validatePng(overlargePalette, info, &error));
+    assert(error == PngValidationError::InvalidChunkOrder);
+
+    // A grayscale IHDR with a corrected CRC must not carry PLTE.
+    auto grayscaleWithPalette = indexed;
+    grayscaleWithPalette[25] = 0x00;
+    grayscaleWithPalette[29] = 0x37;
+    grayscaleWithPalette[30] = 0x6e;
+    grayscaleWithPalette[31] = 0xf9;
+    grayscaleWithPalette[32] = 0x24;
+    assert(!validatePng(grayscaleWithPalette, info, &error));
+    assert(error == PngValidationError::InvalidChunkOrder);
+}
+
 void test_dib_wrapping()
 {
     using namespace xrdp_console::clipboard;
@@ -132,6 +197,7 @@ int main()
     test_chunk_reassembly();
     test_unicode_and_line_endings();
     test_png_validation();
+    test_png_palette_rules();
     test_dib_wrapping();
     return 0;
 }
