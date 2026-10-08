@@ -239,8 +239,8 @@ index 8ce60cb..cc58d7e 100644
  
 +    image_data = (const unsigned char *)s->p;
 +    if (len > INT_MAX - BMPFILEHEADER_LEN ||
-+            xrdp_clipboard_dib_pixel_offset(image_data, (size_t)len,
-+                                             &bmp_pixel_offset) != 0)
++            xrdp_clipboard_dib_payload_valid(image_data, (size_t)len,
++                                              &bmp_pixel_offset) != 0)
 +    {
 +        LOG(LOG_LEVEL_WARNING,
 +            "clipboard_process_data_response_for_image: invalid DIB data");
@@ -518,7 +518,7 @@ new file mode 100644
 index 0000000..daad931
 --- /dev/null
 +++ b/sesman/chansrv/clipboard_image_formats.h
-@@ -0,0 +1,364 @@
+@@ -0,0 +1,444 @@
 +/*
 + * Small, allocation-free helpers for the CLIPRDR image formats supported by
 + * chansrv. Kept separate so the format and DIB bounds can be unit tested.
@@ -631,13 +631,14 @@ index 0000000..daad931
 +    }
 +
 +    bit_count = (uint32_t)dib[14] | ((uint32_t)dib[15] << 8);
++    compression = xrdp_clipboard_read_u32le(dib + 16);
 +    if (bit_count != 1 && bit_count != 2 && bit_count != 4 &&
 +            bit_count != 8 && bit_count != 16 && bit_count != 24 &&
-+            bit_count != 32)
++            bit_count != 32 &&
++            !(bit_count == 0 && (compression == 4 || compression == 5)))
 +    {
 +        return 1;
 +    }
-+    compression = xrdp_clipboard_read_u32le(dib + 16);
 +    colors_used = xrdp_clipboard_read_u32le(dib + 32);
 +    offset = (size_t)header_bytes;
 +
@@ -658,7 +659,7 @@ index 0000000..daad931
 +    {
 +        palette_entries = (size_t)colors_used;
 +    }
-+    else if (bit_count <= 8)
++    else if (bit_count != 0 && bit_count <= 8)
 +    {
 +        palette_entries = (size_t)1U << bit_count;
 +    }
@@ -678,6 +679,85 @@ index 0000000..daad931
 +    }
 +
 +    *bmp_pixel_offset = offset + 14;
++    return 0;
++}
++
++/*
++ * Validate a complete packed DIB, beyond the header-only offset contract
++ * above. This verifies uncompressed pixel-array extent without decoding
++ * compressed JPEG, PNG or RLE bitmap content.
++ */
++static inline int
++xrdp_clipboard_dib_payload_valid(const unsigned char *dib,
++                                 size_t dib_bytes,
++                                 size_t *bmp_pixel_offset)
++{
++    size_t pixel_offset;
++    size_t remaining;
++    uint32_t width;
++    uint32_t raw_height;
++    uint32_t compression;
++    uint32_t declared_image_bytes;
++    uint32_t colors_used;
++    uint32_t bits;
++    uint32_t planes;
++    int uncompressed;
++
++    if (dib == NULL || bmp_pixel_offset == NULL ||
++            xrdp_clipboard_dib_pixel_offset(dib, dib_bytes,
++                                             &pixel_offset) != 0)
++    {
++        return 1;
++    }
++
++    width = xrdp_clipboard_read_u32le(dib + 4);
++    raw_height = xrdp_clipboard_read_u32le(dib + 8);
++    planes = (uint32_t)dib[12] | ((uint32_t)dib[13] << 8);
++    bits = (uint32_t)dib[14] | ((uint32_t)dib[15] << 8);
++    compression = xrdp_clipboard_read_u32le(dib + 16);
++    declared_image_bytes = xrdp_clipboard_read_u32le(dib + 20);
++    colors_used = xrdp_clipboard_read_u32le(dib + 32);
++    uncompressed = compression == 0 || compression == 3 ||
++                   compression == 6;
++
++    if (width == 0 || width > INT32_MAX || raw_height == 0 ||
++            planes != 1 ||
++            !(uncompressed ||
++              (compression == 1 && bits == 8) ||
++              (compression == 2 && bits == 4) ||
++              compression == 4 || compression == 5) ||
++            ((compression == 3 || compression == 6) &&
++             bits != 16 && bits != 32) ||
++            (raw_height > INT32_MAX && compression != 0 &&
++             compression != 3) ||
++            (bits != 0 && bits <= 8 && colors_used > (1U << bits)))
++    {
++        return 1;
++    }
++    remaining = dib_bytes - (pixel_offset - 14);
++    if (uncompressed)
++    {
++        uint64_t row_bits = (uint64_t)width * bits;
++        uint64_t stride = ((row_bits + 31U) / 32U) * 4U;
++        uint64_t height = raw_height <= INT32_MAX ?
++                          raw_height : UINT64_C(0x100000000) - raw_height;
++        if (stride == 0 || stride > remaining ||
++                height > remaining / stride)
++        {
++            return 1;
++        }
++    }
++    else if (declared_image_bytes == 0 ||
++             declared_image_bytes > remaining)
++    {
++        return 1;
++    }
++    if (declared_image_bytes != 0 &&
++            declared_image_bytes > remaining)
++    {
++        return 1;
++    }
++    *bmp_pixel_offset = pixel_offset;
 +    return 0;
 +}
 +
