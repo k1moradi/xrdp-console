@@ -975,7 +975,7 @@ index e3fcbc3..8ecb7cd 100644
  #include <stdarg.h>
  #include <stddef.h>
  #include <stdint.h>
-@@ -672,15 +673,148 @@ test_console_dirty_gfx_is_held_during_resize(void **state)
+@@ -672,15 +673,216 @@ test_console_dirty_gfx_is_held_during_resize(void **state)
  {
      UNUSED(state);
  
@@ -1075,6 +1075,74 @@ index e3fcbc3..8ecb7cd 100644
 +}
 +
 +static void
++test_clipboard_dib_complete_pixel_payload(void **state)
++{
++    unsigned char dib[80];
++    size_t pixel_offset = 0;
++
++    UNUSED(state);
++    g_memset(dib, 0, sizeof(dib));
++    dib[0] = 40; /* BITMAPINFOHEADER */
++    dib[4] = 3;  /* width=3 */
++    dib[8] = 1;  /* height=1 */
++    dib[12] = 1; /* one color plane */
++    dib[14] = 24;
++    /* Three 24-bpp pixels require a 12-byte, DWORD-padded row. */
++    assert_int_equal(0, xrdp_clipboard_dib_payload_valid(
++                            dib, 52, &pixel_offset));
++    assert_int_equal(54, pixel_offset);
++    assert_int_not_equal(0, xrdp_clipboard_dib_payload_valid(
++                                dib, 51, &pixel_offset));
++    dib[12] = 0; /* invalid plane count */
++    assert_int_not_equal(0, xrdp_clipboard_dib_payload_valid(
++                                dib, 52, &pixel_offset));
++    dib[12] = 1;
++    dib[4] = 0; /* invalid zero width */
++    assert_int_not_equal(0, xrdp_clipboard_dib_payload_valid(
++                                dib, 52, &pixel_offset));
++
++    /* Valid top-down 2x2, 32-bpp bitmap: 16 bytes of pixel data. */
++    dib[4] = 2;
++    dib[8] = 0xfe;
++    dib[9] = 0xff;
++    dib[10] = 0xff;
++    dib[11] = 0xff;
++    dib[14] = 32;
++    assert_int_equal(0, xrdp_clipboard_dib_payload_valid(
++                            dib, 56, &pixel_offset));
++    assert_int_not_equal(0, xrdp_clipboard_dib_payload_valid(
++                                dib, 55, &pixel_offset));
++
++    /* A compressed DIB must be bottom-up and carry its stated payload. */
++    dib[4] = 1;
++    dib[14] = 8;
++    dib[16] = 1; /* BI_RLE8 */
++    dib[20] = 4; /* four bytes of compressed data */
++    dib[32] = 2; /* two RGBQUAD palette entries */
++    assert_int_not_equal(0, xrdp_clipboard_dib_payload_valid(
++                                dib, 52, &pixel_offset));
++    dib[8] = 1;
++    dib[9] = dib[10] = dib[11] = 0;
++    assert_int_equal(0, xrdp_clipboard_dib_payload_valid(
++                            dib, 52, &pixel_offset));
++    assert_int_equal(62, pixel_offset);
++    dib[20] = 5;
++    assert_int_not_equal(0, xrdp_clipboard_dib_payload_valid(
++                                dib, 52, &pixel_offset));
++
++    /* BI_PNG may encode its bit depth within the embedded PNG stream. */
++    dib[14] = 0;
++    dib[16] = 5; /* BI_PNG */
++    dib[20] = 8;
++    dib[32] = 0;
++    assert_int_equal(0, xrdp_clipboard_dib_payload_valid(
++                            dib, 48, &pixel_offset));
++    assert_int_equal(54, pixel_offset);
++    assert_int_not_equal(0, xrdp_clipboard_dib_payload_valid(
++                                dib, 47, &pixel_offset));
++}
++
++static void
 +test_clipboard_png_signature(void **state)
 +{
 +    static const unsigned char valid_png_prefix[8] =
@@ -1129,12 +1197,13 @@ index e3fcbc3..8ecb7cd 100644
  }
  
  START_TEST(execute_suite)
-@@ -702,6 +836,9 @@ START_TEST(execute_suite)
+@@ -702,6 +904,10 @@ START_TEST(execute_suite)
          cmocka_unit_test(test_console_interaction_priority_state),
          cmocka_unit_test(test_console_generic_encoder_policy),
          cmocka_unit_test(test_console_dirty_gfx_is_held_during_resize),
 +        cmocka_unit_test(test_clipboard_image_format_negotiation),
 +        cmocka_unit_test(test_clipboard_dib_bounds_and_bmp_offsets),
++        cmocka_unit_test(test_clipboard_dib_complete_pixel_payload),
 +        cmocka_unit_test(test_clipboard_png_signature),
          cmocka_unit_test(
              test_console_gfx_adaptive_pacing_promotes_immediately),
