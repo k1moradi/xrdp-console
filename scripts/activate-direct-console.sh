@@ -690,6 +690,23 @@ if [ "$preflight_only" -eq 1 ]; then
     echo "xrdp.service: ${xrdp_state:-unknown}"
     echo "xrdp-sesman.service: ${sesman_state:-unknown}"
     echo "xrdp-console-chansrv.service: ${chansrv_state:-unknown}"
+    # A candidate can safely repair an existing broken service. Distinguish
+    # that deployability check from the *current* service's runtime health.
+    # In particular, systemctl is-active reports 'activating' throughout an
+    # auto-restart crash loop; do not label that service healthy or silently
+    # conceal it behind a successful candidate preflight.
+    chansrv_substate=$(systemctl show xrdp-console-chansrv.service \
+        -p SubState --value 2>/dev/null) || chansrv_substate=unknown
+    chansrv_result=$(systemctl show xrdp-console-chansrv.service \
+        -p Result --value 2>/dev/null) || chansrv_result=unknown
+    chansrv_restarts=$(systemctl show xrdp-console-chansrv.service \
+        -p NRestarts --value 2>/dev/null) || chansrv_restarts=unknown
+    echo "Current chansrv health: state=${chansrv_state:-unknown} substate=${chansrv_substate:-unknown} result=${chansrv_result:-unknown} restarts=${chansrv_restarts:-unknown}"
+    if [ "$chansrv_substate" = auto-restart ]; then
+        echo "WARNING: current chansrv is crash-looping; candidate preflight checks deployability, NOT current service health." >&2
+    elif [ "$chansrv_state" != active ] || [ "$chansrv_substate" != running ]; then
+        echo "WARNING: current chansrv is not running; activation may repair it, but runtime health needs post-activation verification." >&2
+    fi
     case "$current_xrdp_exec" in
         *"$daemon"*)
             echo "xrdp already uses the tested pinned runtime."
