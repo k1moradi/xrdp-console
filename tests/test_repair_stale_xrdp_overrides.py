@@ -41,6 +41,13 @@ class RepairTest(unittest.TestCase):
         self.base_patch = mock.patch.object(repair, 'BASE_DIRECTORY', self.sbin)
         self.base_patch.start()
         self.addCleanup(self.base_patch.stop)
+        original_path_in_temp = repair.path_in_temp
+        self.path_patch = mock.patch.object(
+            repair, 'path_in_temp',
+            side_effect=lambda path: False if path.parent == self.sbin
+            else original_path_in_temp(path))
+        self.path_patch.start()
+        self.addCleanup(self.path_patch.stop)
         self.calls = []
         self.fail_at = None
 
