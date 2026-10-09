@@ -16,6 +16,8 @@ set(PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/h264_frame_coherence.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_h264_frame_coherence.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_build_direct_console_script.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_repair_stale_xrdp_overrides.py
+    ${CMAKE_SOURCE_DIR}/scripts/repair-stale-xrdp-overrides.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_test_doctor.py
     ${CMAKE_SOURCE_DIR}/tools/diagnostics/xrdp_clipboard_test_doctor.py)
 
@@ -107,6 +109,16 @@ set_tests_properties(build-direct-console-script-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
 # The diagnostic unit tests never touch /run, services, or a real clipboard.
+# Recovery regression runs against fake systemd units under disposable paths.
+# It never calls real systemctl, changes /etc, or starts any service.
+add_test(NAME xrdp-stale-service-repair-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_repair_stale_xrdp_overrides.py)
+set_tests_properties(xrdp-stale-service-repair-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 10
+    LABELS "deploy;unit")
+
 add_test(NAME clipboard-runtime-prerequisite-unit
     COMMAND ${Python3_EXECUTABLE} -B
     ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_test_doctor.py)
