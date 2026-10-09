@@ -72,6 +72,40 @@ test_clipping_and_merging() noexcept
 }
 
 int
+test_overlapping_stripes_do_not_invent_full_screen_damage() noexcept
+{
+    constexpr PixelSize bounds{100, 100};
+    DamageRegion region;
+
+    // Four disjoint vertical strips, each 20x100, plus one horizontal
+    // 100x20 strip cross at real overlaps. Their naive area sum equals the
+    // 10,000-pixel screen, but the union covers only 8,400 pixels.
+    for (int x : {0, 25, 50, 75})
+    {
+        region.add({x, 0, 20, 100}, bounds);
+    }
+    region.add({0, 0, 100, 20}, bounds);
+    if (region.fullScreenRequired() || region.rectangles().size() != 5 ||
+        contains(region.rectangles(), {0, 0, 100, 100}))
+    {
+        return 1;
+    }
+
+    // Fill the actual uncovered gaps; only *now* is a full-screen
+    // representation justified. The extra strips touch but never erase
+    // content from the prior rectangles.
+    for (int x : {20, 45, 70, 95})
+    {
+        region.add({x, 20, 5, 80}, bounds);
+    }
+    return region.fullScreenRequired() &&
+                   region.rectangles().size() == 1 &&
+                   contains(region.rectangles(), {0, 0, 100, 100})
+               ? 0
+               : 1;
+}
+
+int
 test_fragmentation_stays_bounded() noexcept
 {
     constexpr PixelSize bounds{200, 100};
@@ -212,6 +246,10 @@ main()
 {
     bool success = true;
     if (test_clipping_and_merging() != 0)
+    {
+        success = false;
+    }
+    if (test_overlapping_stripes_do_not_invent_full_screen_damage() != 0)
     {
         success = false;
     }
