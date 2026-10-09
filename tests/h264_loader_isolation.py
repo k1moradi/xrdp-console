@@ -103,9 +103,11 @@ def isolated_desktop_environment(
     The caller supplies a disposable, already-created test root. Fail closed
     for symlinks, so existing host XDG state cannot be reached by accident.
     """
+    if scratch.is_symlink():
+        raise ValueError("isolated desktop root may not be a symlink")
     root = scratch.resolve(strict=True)
-    if root.is_symlink() or not root.is_dir():
-        raise ValueError("isolated desktop root is not a real directory")
+    if not root.is_dir():
+        raise ValueError("isolated desktop root is not a directory")
     env = inherited.copy()
     for key in _SESSION_ENVIRONMENT_KEYS:
         env.pop(key, None)
