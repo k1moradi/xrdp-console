@@ -73,6 +73,47 @@ class ReceiptTests(unittest.TestCase):
         self.assertIsNone(result["x11_notify_ns"])
         self.assertFalse(result["x11_timing_correlated"])
 
+    def test_same_generation_targets_proves_png_was_offered_without_request(self):
+        chansrv = "\n".join([
+            "event=targets-response-issued requestor=0xA1 generation=4 "
+            "target_count=2 targets=TARGETS,UTF8_STRING truncated=0 result=0",
+            "event=x11-request target=TARGETS requestor=0xB2 property=0xF2 generation=5",
+            "event=targets-response-issued requestor=0xB2 generation=5 "
+            "target_count=4 targets=TARGETS,UTF8_STRING,image/png,image/bmp "
+            "truncated=0 result=0",
+        ])
+        result = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "NO_IMAGE_PNG_ITEM")
+        self.assertEqual(result["targets_response_count"], 1)
+        self.assertEqual(result["targets_responses"][0]["requestor"], "0xb2")
+        self.assertEqual(result["targets_responses"][0]["targets"][-2:],
+                         ["image/png", "image/bmp"])
+        self.assertTrue(result["png_target_advertised"])
+        self.assertEqual(result["x11_request_count"], 0)
+        self.assertIsNone(result["format_data_request_ns"])
+
+    def test_complete_targets_without_png_proves_no_png_advertisement(self):
+        chansrv = ("event=targets-response-issued requestor=0xB2 "
+                   "generation=5 target_count=2 "
+                   "targets=TARGETS,UTF8_STRING truncated=0 result=0")
+        result = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "NO_IMAGE_PNG_ITEM")
+        self.assertFalse(result["png_target_advertised"])
+        self.assertFalse(result["targets_responses"][0]["png_advertised"])
+
+    def test_truncated_or_failed_targets_cannot_prove_png_absent(self):
+        for ending in (
+                "targets=TARGETS,UTF8_STRING truncated=1 result=0",
+                "targets=TARGETS,UTF8_STRING truncated=0 result=1",
+                "target_count=2 result=0"):
+            chansrv = ("event=targets-response-issued requestor=0xB2 "
+                       "generation=5 target_count=2 " + ending)
+            result = browser.correlate_metadata(
+                chansrv, "", 40005, 5, "NO_IMAGE_PNG_ITEM")
+            self.assertIsNone(result["png_target_advertised"])
+            self.assertIsNone(
+                result["targets_responses"][0]["png_advertised"])
+
     def test_targets_only_never_invents_png_transfer_timestamps(self):
         # Real post-boot evidence: successful TARGETS for an image-bearing
         # generation does not establish a PNG SelectionRequest or type-4/5.
