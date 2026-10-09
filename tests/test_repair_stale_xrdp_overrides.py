@@ -105,7 +105,7 @@ class RepairTest(unittest.TestCase):
             if args[1] == 'reset-failed':
                 return ''
             if args[1] == 'start':
-                statuses.update({unit: True for unit in repair.UNITS})
+                statuses[args[-1]] = True
                 return ''
             return self.fake_systemctl(args)
         def fake_check(args, **kwargs):
