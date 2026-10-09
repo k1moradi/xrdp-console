@@ -16,6 +16,8 @@ set(PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/h264_frame_coherence.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_h264_frame_coherence.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_build_direct_console_script.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/h264_loader_isolation.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_h264_loader_isolation.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_repair_stale_xrdp_overrides.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_test_doctor.py
     ${CMAKE_SOURCE_DIR}/tools/diagnostics/xrdp_clipboard_test_doctor.py)
@@ -106,6 +108,16 @@ add_test(NAME build-direct-console-script-unit
     ${CMAKE_SOURCE_DIR}/scripts/build-direct-console.sh)
 set_tests_properties(build-direct-console-script-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+# Validate the physical-display, write-isolation and TCP loopback safety
+# requirements without launching any X11 server, FreeRDP or xrdp process.
+add_test(NAME h264-loader-isolation-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_h264_loader_isolation.py)
+set_tests_properties(h264-loader-isolation-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 15
+    LABELS "h264;isolation;unit")
 
 # Guard against a silent H.264 -> GFX Planar downgrade being misclassified
 # as a passing pixel presentation. Pure log fixtures; no X11 or RDP traffic.
@@ -1920,7 +1932,7 @@ if(TARGET xrdp-console)
             1364 768 --gfx-h264-crop-edge)
         set_tests_properties(xrdp-loader-gfx-h264-cropped-edge PROPERTIES
             ENVIRONMENT
-                "PYTHONDONTWRITEBYTECODE=1;XRDP_CONSOLE_TEST_ARTIFACT_DIR=${CMAKE_BINARY_DIR}/test-artifacts/xrdp-loader-gfx-h264-cropped-edge"
+                "PYTHONDONTWRITEBYTECODE=1;XRDP_CONSOLE_TEST_ARTIFACT_DIR=${CMAKE_BINARY_DIR}/test-artifacts/xrdp-loader-gfx-h264-cropped-edge;XRDP_CONSOLE_TEST_RUNTIME_ROOT=${CMAKE_BINARY_DIR}/test-artifacts/xrdp-loader-gfx-h264-cropped-edge/runtime"
             TIMEOUT 60
             LABELS "h264;integration;regression"
             RESOURCE_LOCK xrdp_console_loader_display
