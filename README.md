@@ -248,9 +248,14 @@ If the following error appears repeatedly in clipboard CTests:
 
 the test host is missing the **sesman-managed per-user socket runtime**. This
 happens **before** any clipboard protocol assertions. It does not, by itself,
-prove the screenshot PNG implementation is defective. The build script runs a
-read-only preflight before launching CTest and stops with a precise diagnostic
-if both the per-user directory and the expected sesman endpoint are absent.
+prove the screenshot PNG implementation is defective. The build script first runs a read-only prerequisite check. If it fails, it
+automatically invokes the **same existing deployment activator** in bounded
+`--repair-test-runtime` mode using `sudo` (which may prompt for a password).
+That mode restores only confirmed stale systemd paths to the existing
+persistent /opt executables, starts the existing xrdp/sesman pair if necessary,
+and rechecks the prerequisite. It does **not** install or activate the new
+candidate. Any unknown service configuration, connected RDP client, failed
+repair, or still-missing socket causes the build to stop before CTest.
 
 To inspect the problem without changing production state:
 
@@ -261,12 +266,14 @@ ls -ld /run/xrdp /run/xrdp/sockdir /run/xrdp/sockdir/$(id -u)
 journalctl -u xrdp-sesman.service -n 50 --no-pager
 ```
 
-Do not manually `chmod` or `mkdir` under `/run/xrdp`, or restart production
-services as an automatic test workaround. Have the host administrator restore
-the correct sesman service/runtime configuration before rerunning the 35
-clipboard tests. A present socket directory passes this **prerequisite** check,
-not the clipboard tests themselves. All tests still need to pass before
-activation.
+Do not manually `chmod` or `mkdir` under `/run/xrdp`. The activator's
+bounded bootstrap is the only automated host repair route; it requires root,
+a missing or stale prerequisite, a no-clients check, verified persistent
+binaries, and a backup of every changed service override. To prohibit
+automatic repair in a custom CI or unattended environment, use
+`XRDP_CONSOLE_AUTO_REPAIR_RUNTIME=0`. A present socket directory passes this
+**prerequisite** check, not the clipboard tests themselves. All tests still
+need to pass before activation.
 
 The existing build-plus-activation shell chain preserves `&&` fail-closed
 behavior: if compilation, the runtime prerequisite, or CTest fails,
@@ -314,56 +321,40 @@ The custom executable must pass the same `/buildconfig` checks. A missing or
 incapable H.264 client is a configuration/build failure; the current canonical
 workflow is not supposed to silently skip the H.264 loader requirement.
 
-### Repair stale xrdp/sesman service overrides (without reinstalling)
+### One-command build, test and deployment
 
-If `systemctl status xrdp-sesman.service` reports `203/EXEC` and either
-service's effective `ExecStart` points to an executable removed from a
-temporary build under `/tmp` or `/var/tmp`, restore the persistent
-`/opt/xrdp-console/sbin/` service executables **before** running the
-canonical build/CTest/activation chain.
-
-A deliberately separate recovery script verifies the two effective systemd
-paths, checks the base service units and their persistent executable files,
-and refuses unknown service configurations. It is read-only by default:
+The supported workflow is the original user-facing command, unchanged:
 
 ```sh
-cd ~/xrdp-console
-python3 scripts/repair-stale-xrdp-overrides.py
+cd ~/xrdp-console &&
+git pull --ff-only &&
+./scripts/build-direct-console.sh &&
+sudo env XRDP_CONSOLE_BUILD_DIR="$PWD/build-direct-console" \
+    "$PWD/scripts/activate-direct-console.sh"
 ```
 
-Review its findings and confirm no active RDP sessions. The next command
-is an explicit privileged **configuration repair**, not an installation or a
-service restart:
+The build now compiles with two jobs, performs its initial **read-only**
+clipboard-runtime prerequisite check, and when needed invokes
+`sudo scripts/activate-direct-console.sh --repair-test-runtime` internally.
+The bounded repair uses
+`scripts/repair-stale-xrdp-overrides.py` as an implementation helper, not a
+separate command for the user to run. It backs up only exact activator-generated
+stale overrides to deleted temporary executables, preserves
+`direct-x11-test.conf`, reloads systemd, starts the existing persistent xrdp
+service pair if necessary, and verifies socket readiness. **No new candidate
+is deployed at this stage.**
 
-```sh
-sudo python3 scripts/repair-stale-xrdp-overrides.py --apply
-```
+The canonical project CTests then run serially. Any failure stops the `&&`
+chain before activation. Once every test passes, the activator validates the
+new candidate, automatically creates a root-only rollback backup, installs and
+starts the tested components, then verifies the service runtime and RDP
+listener.
 
-The script backs up the original drop-ins under the root-only persistent
-`/var/backups/xrdp-console/service-repair/` directory, renames only the
-confirmed stale `upstream-local.conf` files to non-`.conf` names, reloads
-systemd and verifies both effective `ExecStart` paths. It restores the
-original drop-ins automatically if daemon-reload or verification fails.
-Unrelated environment drop-ins are preserved. It never modifies binaries,
-creates `/run` directories, or starts/stops services.
-
-With explicit authorization to restore the xrdp listener and no connected
-clients, start the persistent service pair:
-
-```sh
-sudo systemctl reset-failed xrdp-sesman.service xrdp.service
-sudo systemctl start xrdp.service
-systemctl is-active xrdp.service xrdp-sesman.service
-python3 tools/diagnostics/xrdp_clipboard_test_doctor.py
-```
-
-If start fails, inspect the service journal; do **not** run activation.
-When the services and runtime preflight are healthy, rerun
-`scripts/build-direct-console.sh`. Only a complete green CTest run makes
-the new candidate eligible for activation via read-only `--preflight` and
-explicit `--backup`. The backup path printed by the recovery script is
-also available for manual rollback if needed; do not restore the stale
-temporary paths as a routine operation.
+The script deliberately refuses unexpected service overrides, missing
+persistent executables, connected RDP clients, or failed verification.
+No automated system repair can guarantee success with arbitrary broken
+configuration; such cases stop safely with specific diagnostics rather than
+silently altering unrelated host settings.
 
 ## Before activation
 
@@ -400,14 +391,10 @@ sudo env XRDP_CONSOLE_BUILD_DIR="$PWD/build-direct-console" \
   scripts/activate-direct-console.sh
 ```
 
-By default, activation does not make a persistent rollback backup. To save the
-current configuration, installed module/chansrv binaries, service overrides,
-and prior service state for rollback, opt in explicitly:
-
-```sh
-sudo env XRDP_CONSOLE_BUILD_DIR="$PWD/build-direct-console" \
-  scripts/activate-direct-console.sh --backup
-```
+Activation **always creates a persistent rollback backup** before changing
+the installed module/chansrv binaries, service overrides or prior service
+state. The `--backup` switch remains accepted for compatibility, but no
+longer needs to be passed explicitly.
 
 Activation validates the built daemon/sesman/module, checks the embedded build
 revision, preserves port `3389`, installs the tested module plus matching pinned
@@ -417,14 +404,15 @@ with xrdp, then starts chansrv and verifies the complete runtime plus the RDP
 listener. A missing previous `/usr/local/sbin/xrdp-chansrv` is treated as a
 first install, not as an error.
 
-With `--backup`, the script prints a root-only backup directory such as:
+On each successful activation, the script prints a root-only backup directory such as:
 
 ```text
 /var/backups/xrdp-console/direct-console-YYYYMMDD-HHMMSS
 ```
 
-Keep that exact path for rollback. Without `--backup`, activation failures are
-not automatically rolled back and manual recovery may be required.
+Keep that exact path for rollback. If activation fails after starting to
+change the runtime, it attempts to restore this snapshot automatically.
+A failed rollback is reported explicitly and retains the backup.
 
 ### Roll back
 
