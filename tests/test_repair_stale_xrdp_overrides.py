@@ -123,6 +123,27 @@ class RepairTest(unittest.TestCase):
             self.assertEqual(repair.prepare_test_runtime(), 0)
         self.assertTrue(all(statuses.values()))
 
+    def test_prepare_healthy_runtime_does_not_restart(self):
+        for path in self.override.values():
+            path.unlink()
+        plan = self.plan()
+        self.assertTrue(all(not item['repair'] for item in plan))
+        calls = []
+        def live_run(args):
+            calls.append(args)
+            if args[0] == 'ss':
+                return ''
+            return self.fake_systemctl(args)
+        def healthy_status(args, **kwargs):
+            return types.SimpleNamespace(returncode=0)
+        with mock.patch.object(repair.os, 'geteuid', return_value=0), \
+             mock.patch.object(repair, 'inspect', return_value=plan), \
+             mock.patch.object(repair, 'run', side_effect=live_run), \
+             mock.patch.object(repair.subprocess, 'run', side_effect=healthy_status):
+            self.assertEqual(repair.prepare_test_runtime(), 0)
+        self.assertFalse(any(args[1] in ('start', 'restart', 'stop', 'daemon-reload')
+                             for args in calls if args[0] == 'systemctl'))
+
     def test_prepare_refuses_start_when_stale_but_no_clients_not_proven(self):
         with mock.patch.object(repair.os, 'geteuid', return_value=0), \
              mock.patch.object(repair, 'run', side_effect=repair.RepairError('ss unavailable')):
