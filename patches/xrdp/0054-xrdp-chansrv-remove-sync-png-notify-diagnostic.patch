@@ -1,0 +1,51 @@
+diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
+--- a/sesman/chansrv/clipboard.c
++++ b/sesman/chansrv/clipboard.c
+@@ -1093,4 +1093,5 @@
+     int select_result;
+     int send_result;
++    unsigned long long notify_mono_ns;
+     char x11_sha256[65];
+     int x11_hash_valid;
+@@ -1160,4 +1161,9 @@
+         send_result = XSendEvent(g_display, req->requestor, False,
+                                  NoEventMask, &xev);
++        if (type == g_image_png_atom)
++        {
++            notify_mono_ns = clipboard_monotonic_time_ns();
++            XFlush(g_display);
++        }
+         if (req->target == g_image_bmp_atom ||
+                 req->target == g_image_png_atom)
+@@ -1181,8 +1187,8 @@
+                 "target=image/png property=0x%lx request_time=%lu "
+                 "selection_notify_event_time=%lu propagation=0 event_mask=0x0 "
+-                "change_result=%d send_result=%d current_owner=0x%lx mono_ns=%llu",
++                "change_result=%d send_result=%d request_owner=0x%lx mono_ns=%llu",
+                 req->requestor, req->owner, req->selection, req->property,
+                 req->time, xev.xselection.time, change_result, send_result,
+-                XGetSelectionOwner(g_display, req->selection), clipboard_monotonic_time_ns());
++                req->owner, notify_mono_ns);
+             clipboard_png_digest_reset();
+         }
+@@ -1221,4 +1227,9 @@
+         send_result = XSendEvent(g_display, req->requestor, False,
+                                  NoEventMask, &xev);
++        if (type == g_image_png_atom)
++        {
++            notify_mono_ns = clipboard_monotonic_time_ns();
++            XFlush(g_display);
++        }
+         if (req->target == g_image_bmp_atom ||
+                 req->target == g_image_png_atom)
+@@ -1250,8 +1261,8 @@
+                 "target=image/png property=0x%lx request_time=%lu "
+                 "selection_notify_event_time=%lu propagation=0 event_mask=0x0 "
+-                "send_result=%d current_owner=0x%lx mono_ns=%llu",
++                "send_result=%d request_owner=0x%lx mono_ns=%llu",
+                 req->requestor, req->owner, req->selection, req->property,
+                 req->time, xev.xselection.time, send_result,
+-                XGetSelectionOwner(g_display, req->selection), clipboard_monotonic_time_ns());
++                req->owner, notify_mono_ns);
+         }
+     }
