@@ -380,28 +380,67 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
         "first_cliprdr_fragment_ns": None,
         "last_cliprdr_fragment_ns": None,
     }
+    def x11_id(line: str, key: str) -> str | None:
+        match = re.search(rf"\b{key}=(0x[0-9a-fA-F]+)\b", line)
+        return match.group(1).lower() if match else None
+
+    lines = chansrv_log.splitlines()
     requestors = []
-    for m in IMAGE_REQUEST.finditer(chansrv_log):
-        if int(m.group(2)) == expected_generation:
-            requestors.append(m.group(1).lower())
+    primary: tuple[int, str, str | None] | None = None
+    for index, line in enumerate(lines):
+        match = IMAGE_REQUEST.search(line)
+        if match is None or int(match.group(2)) != expected_generation:
+            continue
+        requestor = match.group(1).lower()
+        requestors.append(requestor)
+        if primary is None:
+            # Anchor the summary to the earliest observed PNG request in
+            # this generation. XIDs alone do not prove browser identity.
+            primary = (index, requestor, x11_id(line, "property"))
     stages["x11_request_count"] = len(requestors)
     stages["x11_requestors"] = requestors
-    for line in chansrv_log.splitlines():
+    stages["primary_x11_requestor"] = primary[1] if primary else None
+    stages["primary_x11_property"] = primary[2] if primary else None
+
+    primary_open = primary is not None and primary[2] not in (None, "0x0")
+    for index, line in enumerate(lines):
         names = (
             ("event=request format_id=", "format_data_request_ns"),
             ("event=response status=", "response_complete_ns"),
-            ("event=x11-selection-notify-issued", "x11_notify_ns"),
-            ("event=x11-incr-chunk-issued", "first_incr_chunk_ns"),
         )
         for marker, key in names:
-            if marker in line and key in ("format_data_request_ns", "response_complete_ns") and f"format_id={format_id}" not in line:
+            if marker not in line or f"format_id={format_id}" not in line:
                 continue
-            if marker in line and stages[key] is None:
-                m = re.search(r"\bmono_ns=(\d+)\b", line)
-                if m:
-                    stages[key] = int(m.group(1))
+            if stages[key] is None:
+                match = re.search(r"\bmono_ns=(\d+)\b", line)
+                if match:
+                    stages[key] = int(match.group(1))
+
+        # Notification records lack a generation in the frozen log format.
+        # Associate them only with the first same-generation request's XIDs,
+        # and stop if those XIDs are reused by a later request.
+        if primary_open and primary is not None and index > primary[0]:
+            same_request = (
+                x11_id(line, "requestor") == primary[1] and
+                x11_id(line, "property") == primary[2])
+            if same_request and "event=x11-request " in line:
+                primary_open = False
+            elif same_request:
+                if ("event=x11-selection-notify-issued" in line and
+                        stages["x11_notify_ns"] is None):
+                    match = re.search(r"\bmono_ns=(\d+)\b", line)
+                    if match:
+                        stages["x11_notify_ns"] = int(match.group(1))
+                if ("event=x11-incr-chunk-issued" in line and
+                        f"start_generation={expected_generation}" in line and
+                        stages["first_incr_chunk_ns"] is None):
+                    match = re.search(r"\bmono_ns=(\d+)\b", line)
+                    if match:
+                        stages["first_incr_chunk_ns"] = int(match.group(1))
         if "event=x11-incr-terminator-ack" in line:
+            # Deliberately an aggregate count, not a correlated timestamp.
             stages["incr_terminator_ack_count"] += 1
+    stages["x11_timing_correlated"] = stages["x11_notify_ns"] is not None
     for line in peer_log.splitlines():
         for prefix, key in [
             ("PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED", "peer_request_ns"),
