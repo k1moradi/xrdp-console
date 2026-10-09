@@ -13,7 +13,7 @@ from unittest import mock
 FILE = Path(__file__).resolve().parents[1] / 'scripts' / 'activate-direct-console.sh'
 activator = FILE.read_text(encoding='utf-8')
 match = re.search(
-    r"python3 - <<'PY_RUNTIME'\\n(.*?)\\nPY_RUNTIME\\n",
+    r"python3 - <<'PY_RUNTIME'\n(.*?)\nPY_RUNTIME\n",
     activator, re.DOTALL)
 assert match, 'Embedded recovery code not found in activator'
 repair = types.ModuleType('xrdp_embedded_recovery')
@@ -91,7 +91,7 @@ class RepairTest(unittest.TestCase):
         self.assertIn('def prepare_test_runtime() -> int:', match.group(1))
 
     def test_prepare_rejects_connected_rdp_clients(self):
-        with mock.patch.object(repair, 'inspect', return_value=self.plan()), \\
+        with mock.patch.object(repair, 'inspect', return_value=self.plan()), \
              mock.patch.object(repair, 'run', return_value='ESTABLISHED'):
             self.assertEqual(repair.prepare_test_runtime(), 2)
         self.assertTrue(all(path.exists() for path in self.override.values()))
@@ -109,7 +109,7 @@ class RepairTest(unittest.TestCase):
             return self.fake_systemctl(args)
         def fake_check(args, **kwargs):
             return types.SimpleNamespace(returncode=0 if statuses[args[-1]] else 3)
-        with mock.patch.object(repair, 'run', side_effect=live_run), \\
+        with mock.patch.object(repair, 'run', side_effect=live_run), \
              mock.patch.object(repair.subprocess, 'run', side_effect=fake_check):
             self.assertEqual(repair.prepare_test_runtime(), 0)
         self.assertTrue(all(statuses.values()))
