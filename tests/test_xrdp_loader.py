@@ -7695,81 +7695,96 @@ def main() -> int:
         chansrv_logs_path.mkdir()
         config_path = root / "xrdp.ini"
         port = free_tcp_port()
-        source_display_process, source_display = start_source_display(
-            source_display_log_path, source_width, source_height,
-            randr_resize=randr_resize_mode)
-        if (crop_edge_mode and
-                source_display.split(".", 1)[0] ==
-                os.environ["DISPLAY"].split(".", 1)[0]):
-            raise AssertionError(
-                "private X11 source display aliases private RDP client display")
+        source_display_process: subprocess.Popen[bytes] | None = None
+        module_link: Path | None = None
+        try:
+            source_display_process, source_display = start_source_display(
+                source_display_log_path, source_width, source_height,
+                randr_resize=randr_resize_mode)
+            if (crop_edge_mode and
+                    source_display.split(".", 1)[0] ==
+                    os.environ["DISPLAY"].split(".", 1)[0]):
+                raise AssertionError(
+                    "private X11 source display aliases private RDP client display")
 
-        if crop_edge_mode:
-            # xrdp uses a compile-time module directory, which may belong
-            # to the active read-only pinned dependency install. Its loader
-            # permits a relative library filename. Resolve ../ components
-            # to a disposable symlink without EVER writing in that prefix.
-            module_dir = root / "private-module"
-            module_dir.mkdir(mode=0o700)
-            module_link = module_dir / f"libxrdp_console_loader_{os.getpid()}.so"
-            module_name = isolated_loader_module_name(install_root, module_link)
-        else:
-            module_dir = install_root / "lib" / "xrdp"
-            module_dir.mkdir(parents=True, exist_ok=True)
-            module_name = f"libxrdp_console_loader_{os.getpid()}.so"
-            module_link = module_dir / module_name
-        module_link.symlink_to(module_path)
-        fastpath_option = (
-            "use_fastpath=both\n" if rfx_mode or gfx_h264_mode else "")
-        drdynvc_enabled = "true" if gfx_planar_mode or gfx_h264_mode else "false"
-        source_display_number = source_display[1:].split(".", 1)[0]
-        chansrv_port_option = (
-            f"chansrvport=DISPLAY({source_display_number},{os.getuid()})\n"
-            if clipboard_enabled else "")
+            if crop_edge_mode:
+                # xrdp uses a compile-time module directory, which may belong
+                # to the active read-only pinned dependency install. Its loader
+                # permits a relative library filename. Resolve ../ components
+                # to a disposable symlink without EVER writing in that prefix.
+                module_dir = root / "private-module"
+                module_dir.mkdir(mode=0o700)
+                module_link = module_dir / f"libxrdp_console_loader_{os.getpid()}.so"
+                module_name = isolated_loader_module_name(install_root, module_link)
+            else:
+                module_dir = install_root / "lib" / "xrdp"
+                module_dir.mkdir(parents=True, exist_ok=True)
+                module_name = f"libxrdp_console_loader_{os.getpid()}.so"
+                module_link = module_dir / module_name
+            module_link.symlink_to(module_path)
+            fastpath_option = (
+                "use_fastpath=both\n" if rfx_mode or gfx_h264_mode else "")
+            drdynvc_enabled = "true" if gfx_planar_mode or gfx_h264_mode else "false"
+            source_display_number = source_display[1:].split(".", 1)[0]
+            chansrv_port_option = (
+                f"chansrvport=DISPLAY({source_display_number},{os.getuid()})\n"
+                if clipboard_enabled else "")
 
-        config_path.write_text(
-            f"""[Globals]
-ini_version=1
-fork=true
-port=tcp://127.0.0.1:{port}
-security_layer=negotiate
-crypt_level=high
-certificate={install_root / "etc" / "xrdp" / "cert.pem"}
-key_file={install_root / "etc" / "xrdp" / "key.pem"}
-bitmap_cache=false
-bitmap_compression=false
-bulk_compression=false
-allow_channels=true
-max_bpp=32
-{fastpath_option}autorun=console
+            config_path.write_text(
+                f"""[Globals]
+    ini_version=1
+    fork=true
+    port=tcp://127.0.0.1:{port}
+    security_layer=negotiate
+    crypt_level=high
+    certificate={install_root / "etc" / "xrdp" / "cert.pem"}
+    key_file={install_root / "etc" / "xrdp" / "key.pem"}
+    bitmap_cache=false
+    bitmap_compression=false
+    bulk_compression=false
+    allow_channels=true
+    max_bpp=32
+    {fastpath_option}autorun=console
 
-[Logging]
-LogFile={log_path}
-LogLevel=DEBUG
-EnableSyslog=false
-EnableConsole=false
+    [Logging]
+    LogFile={log_path}
+    LogLevel=DEBUG
+    EnableSyslog=false
+    EnableConsole=false
 
-[Channels]
-rdpdr=false
-rdpsnd=false
-drdynvc={drdynvc_enabled}
-cliprdr={"false" if crop_edge_mode else "true"}
-rail=false
-xrdpvr=false
+    [Channels]
+    rdpdr=false
+    rdpsnd=false
+    drdynvc={drdynvc_enabled}
+    cliprdr={"false" if crop_edge_mode else "true"}
+    rail=false
+    xrdpvr=false
 
-[console]
-name=console
-lib={module_name}
-# First-party physical-console capability: complete pixels plus smooth scroll.
-code=21
-display={source_display}
-username=smoke
-password=smoke
-{"enable_dynamic_resizing=true" if randr_resize_mode else ""}
-{chansrv_port_option}
-""",
-            encoding="utf-8",
-        )
+    [console]
+    name=console
+    lib={module_name}
+    # First-party physical-console capability: complete pixels plus smooth scroll.
+    code=21
+    display={source_display}
+    username=smoke
+    password=smoke
+    {"enable_dynamic_resizing=true" if randr_resize_mode else ""}
+    {chansrv_port_option}
+    """,
+                encoding="utf-8",
+            )
+
+        except BaseException:
+            # Setup runs before the normal process-cleanup finally block.
+            # A missing pinned directory or invalid module-path must not
+            # strand its freshly allocated private source Xvfb.
+            if module_link is not None:
+                try:
+                    module_link.unlink()
+                except FileNotFoundError:
+                    pass
+            stop_process(source_display_process)
+            raise
 
         server: subprocess.Popen[object] | None = None
         client: subprocess.Popen[object] | None = None
