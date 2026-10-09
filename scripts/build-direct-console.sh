@@ -129,7 +129,32 @@ cmake --build "$build_root" --parallel "$build_jobs"
 # One absent sesman-created socketdir otherwise causes 35 repeated clipboard
 # startup failures. Fail before CTest with an actionable, read-only diagnosis;
 # never skip tests or silently create a privileged runtime directory.
-python3 "$workspace_root/tools/diagnostics/xrdp_clipboard_test_doctor.py"
+if ! python3 "$workspace_root/tools/diagnostics/xrdp_clipboard_test_doctor.py"; then
+    echo "Clipboard test runtime unavailable; checking guarded activator recovery." >&2
+    case "${XRDP_CONSOLE_AUTO_REPAIR_TEST_RUNTIME:-1}" in
+        1)
+            if [ "$(id -u)" -eq 0 ]; then
+                "$workspace_root/scripts/activate-direct-console.sh" --prepare-test-runtime
+            else
+                command -v sudo >/dev/null 2>&1 || {
+                    echo "sudo is required to restore the sesman test prerequisite." >&2
+                    exit 1
+                }
+                sudo "$workspace_root/scripts/activate-direct-console.sh" --prepare-test-runtime
+            fi
+            # The recovery is not a waiver. Verify the real prerequisite again.
+            python3 "$workspace_root/tools/diagnostics/xrdp_clipboard_test_doctor.py"
+            ;;
+        0)
+            echo "Runtime auto-recovery disabled by XRDP_CONSOLE_AUTO_REPAIR_TEST_RUNTIME=0" >&2
+            exit 1
+            ;;
+        *)
+            echo "XRDP_CONSOLE_AUTO_REPAIR_TEST_RUNTIME must be 0 or 1" >&2
+            exit 1
+            ;;
+    esac
+fi
 ctest --test-dir "$build_root" --output-on-failure --parallel 1
 
 printf '%s\n' \
