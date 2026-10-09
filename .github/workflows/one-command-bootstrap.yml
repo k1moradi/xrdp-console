@@ -1,0 +1,32 @@
+name: Offline one-command deployment bootstrap
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/build-direct-console.sh'
+      - 'scripts/activate-direct-console.sh'
+      - 'scripts/repair-stale-xrdp-overrides.py'
+      - 'tests/test_one_command_bootstrap.py'
+      - 'tests/test_repair_stale_xrdp_overrides.py'
+      - 'tests/test_build_direct_console_script.py'
+      - '.github/workflows/one-command-bootstrap.yml'
+  push:
+    branches:
+      - diagnostics/clipboard-image-trigger
+      - fix/one-command-self-healing-build-20261009
+
+jobs:
+  offline-bootstrap:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+      - name: POSIX shell syntax
+        run: |
+          sh -n scripts/build-direct-console.sh
+          sh -n scripts/activate-direct-console.sh
+      - name: Fake-systemd full-path regressions
+        run: |
+          python3 -B tests/test_one_command_bootstrap.py
+          python3 -B tests/test_repair_stale_xrdp_overrides.py
+          python3 -B tests/test_build_direct_console_script.py scripts/build-direct-console.sh
