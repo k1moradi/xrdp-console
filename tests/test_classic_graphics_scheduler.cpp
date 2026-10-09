@@ -96,6 +96,35 @@ work_states_are_classified()
 }
 
 bool
+borrowed_presentation_remains_pending_without_a_damage_region()
+{
+    bool success = true;
+    // The priority path may borrow a captured image independently of its
+    // authoritative local DamageRegion. It must not disarm the event loop
+    // merely because the region happens to be drained.
+    success &= check(
+        classifyClassicWork(true, false, false, false) ==
+            ClassicWorkClass::ImmediateContinuation,
+        "borrowed image requires an immediate classic continuation");
+    success &= check(
+        classicWorkPending(true, false, false, false),
+        "in-flight borrowed presentation was mistaken for an idle desktop");
+    success &= check(
+        classicWorkPending(false, false, false, true),
+        "full invalidation was mistaken for an idle desktop");
+    success &= check(
+        classicWorkPending(false, false, true, false),
+        "new XDamage was mistaken for an idle desktop");
+    success &= check(
+        classicWorkPending(false, true, false, false),
+        "an unpresented snapshot was mistaken for an idle desktop");
+    success &= check(
+        !classicWorkPending(false, false, false, false),
+        "a fully drained desktop must be allowed to sleep");
+    return success;
+}
+
+bool
 stale_work_is_superseded_only_after_one_second_with_newer_damage()
 {
     using Clock = std::chrono::steady_clock;
@@ -141,6 +170,7 @@ int
 main()
 {
     return work_states_are_classified() &&
+                   borrowed_presentation_remains_pending_without_a_damage_region() &&
                    stale_work_is_superseded_only_after_one_second_with_newer_damage()
                ? 0
                : 1;
