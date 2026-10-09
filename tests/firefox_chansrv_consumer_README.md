@@ -238,3 +238,19 @@ acceptance remains Codex's separately isolated experiment. WebCrypto fallback
 runs after the synchronous paste handler, so its execution time does not
 accelerate clipboard materialization. Full browser decode of the original
 Mac screenshot is still unverified.
+
+### Independent native libpng validation
+
+The four fixture byte-identities above were also passed through the previously
+implemented `png_gate_synthetic_cli` native C11/libpng diagnostic, separately
+from Pillow and Node. All four reported `envelope=1 decoded=1`:
+
+- 1,049,471 bytes → decoded 512×512.
+- 2,286,451 bytes → decoded 1000×760.
+- 2,401,598 bytes → decoded 1000×800.
+- 3,241,953 bytes → decoded 1200×900.
+
+The native diagnostic CTest `full_idat_differential` passed.
+This establishes full native decode of **the synthetic fixtures only**. It
+does not decode or validate the original macOS screenshot. No native gate is
+introduced in the production clipboard path.
