@@ -1084,6 +1084,19 @@ def assert_clipboard_image_session(
         r"event=x11-incr-terminator-issued target=image/bmp "
         r"requestor=(0x[0-9a-fA-F]+) property=(0x[0-9a-fA-F]+) "
         r"current_generation=(\d+)", x11_log)
+    # The requestor finishing its INCR read does not synchronize with the
+    # owner processing the final PropertyDelete event. Wait for the exact
+    # requestor/property/generation ACK without weakening the assertion.
+    if terminator_match is not None:
+        wait_for_chansrv_pattern(
+            chansrv_logs,
+            rf"event=x11-incr-terminator-ack "
+            rf"requestor={re.escape(requestor_id)} "
+            rf"property={re.escape(property_id)} "
+            rf"terminator_generation={generation_id} "
+            rf"current_generation={generation_id}",
+            5.0, chansrv_process, chansrv_stdout)
+        x11_log = chansrv_log_text(chansrv_logs)
     acknowledgement_match = re.search(
         r"event=x11-incr-terminator-ack requestor=(0x[0-9a-fA-F]+) "
         r"property=(0x[0-9a-fA-F]+) terminator_generation=(\d+) "
@@ -3529,6 +3542,17 @@ def assert_clipboard_delayed_png_response_session(
             f"synthetic response delay {measured_peer_delay_ms:.3f}ms is outside "
             f"the configured {delay_ms}ms deadline tolerance")
 
+    # The PNG requestor has read the final zero-length INCR property, but
+    # chansrv's acknowledgement is an asynchronous PropertyDelete handler.
+    # Poll only for the original requestor and generation.
+    wait_for_chansrv_pattern(
+        chansrv_logs,
+        rf"event=x11-incr-terminator-ack "
+        rf"requestor={re.escape(initial_requestor)} "
+        rf"property=0x[0-9a-fA-F]+ "
+        rf"terminator_generation={generation} "
+        rf"current_generation={generation}",
+        5.0, chansrv_process, chansrv_stdout)
     full_log = chansrv_log_text(chansrv_logs)
     patterns = {
         "selection_request": (
