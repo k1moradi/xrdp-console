@@ -283,6 +283,62 @@ bool identity_conversion_handles_cropped_capture_origin()
     return success;
 }
 
+bool cropped_identity_matches_full_frame_reference()
+{
+    constexpr PixelSize frameSize{128, 128};
+    constexpr Rectangle captureBounds{64, 32, 64, 64};
+    constexpr std::array<Rectangle, 3> tiles{{
+        {64, 32, 16, 16},  // Top-left of the cropped capture.
+        {80, 48, 16, 16},  // Interior; absolute origin is not view-local.
+        {112, 80, 16, 16}, // Bottom-right edge of the cropped capture.
+    }};
+    std::vector<std::uint8_t> fullBgra(128U * 128U * 4U);
+    std::vector<std::uint8_t> croppedBgra(64U * 64U * 4U);
+    for (std::uint32_t y = 0; y < frameSize.heightPixels; ++y)
+    {
+        for (std::uint32_t x = 0; x < frameSize.widthPixels; ++x)
+        {
+            const std::size_t offset = (static_cast<std::size_t>(y) * 128U + x) * 4U;
+            fullBgra[offset] = static_cast<std::uint8_t>((x * 3U + y) & 0xffU);
+            fullBgra[offset + 1U] = static_cast<std::uint8_t>((y * 5U + x) & 0xffU);
+            fullBgra[offset + 2U] = static_cast<std::uint8_t>((x + y * 7U) & 0xffU);
+            fullBgra[offset + 3U] = 0xffU;
+        }
+    }
+    for (std::uint32_t y = 0; y < captureBounds.heightPixels; ++y)
+    {
+        const std::size_t sourceOffset =
+            (static_cast<std::size_t>(y + captureBounds.y) * 128U +
+             static_cast<std::uint32_t>(captureBounds.x)) * 4U;
+        const std::size_t destinationOffset = static_cast<std::size_t>(y) * 64U * 4U;
+        std::memcpy(croppedBgra.data() + destinationOffset,
+                    fullBgra.data() + sourceOffset, 64U * 4U);
+    }
+    const FramebufferView full{
+        std::as_bytes(std::span<const std::uint8_t>(fullBgra)), 128, 128, 128U * 4U};
+    const FramebufferView cropped{
+        std::as_bytes(std::span<const std::uint8_t>(croppedBgra)), 64, 64, 64U * 4U};
+    bool success = true;
+    for (const Rectangle tile : tiles)
+    {
+        std::vector<std::byte> expected(nv12FrameBytes(frameSize), std::byte{0x5a});
+        auto actual = expected;
+        Rectangle local{};
+        success &= check(localBgraCaptureRectangle(
+                             captureBounds, cropped, tile, local),
+                         "cropped capture did not contain test tile");
+        success &= check(updateNv12RectangleFromBgraRegion_709FullRange(
+                             full, tile, tile, frameSize, expected),
+                         "full-frame AVC420 tile reference failed");
+        success &= check(updateNv12RectangleFromBgraRegion_709FullRange(
+                             cropped, local, tile, frameSize, actual),
+                         "cropped AVC420 tile conversion failed");
+        success &= check(expected == actual,
+                         "cropped AVC420 conversion changed pixels or neighboring NV12 data");
+    }
+    return success;
+}
+
 bool ssse3_channel_gather_matches_scalar_zero_ff_patterns()
 {
     constexpr std::uint32_t kPatterns = 1U << 16U;
@@ -464,6 +520,7 @@ int main()
     success &= conversion_validates_geometry_and_stride();
     success &= rectangle_conversion_matches_scalar_reference();
     success &= identity_conversion_handles_cropped_capture_origin();
+    success &= cropped_identity_matches_full_frame_reference();
     success &= ssse3_channel_gather_matches_scalar_zero_ff_patterns();
     success &= rectangle_alignment_matches_avc420_requirements();
     success &= command_layout_matches_xrdp_encoder_contract();
