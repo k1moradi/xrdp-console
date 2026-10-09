@@ -394,8 +394,8 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
         requestor = match.group(1).lower()
         requestors.append(requestor)
         if primary is None:
-            # The original remote render belongs to the first PNG request.
-            # Do not accidentally time an unrelated coalesced waiter.
+            # Anchor the summary to the earliest observed PNG request in
+            # this generation. XIDs alone do not prove browser identity.
             primary = (index, requestor, x11_id(line, "property"))
     stages["x11_request_count"] = len(requestors)
     stages["x11_requestors"] = requestors
