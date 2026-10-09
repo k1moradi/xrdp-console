@@ -303,3 +303,30 @@ the Firefox browser, the physical DISPLAY, or an active clipboard. A meaningful
 macOS acceptance experiment still requires explicit permission and a genuine,
 timestamped user screenshot and trusted Firefox paste; XIDs alone are not
 Firefox identification.
+
+### Physical-desktop observation page (not the synthetic Xvfb test)
+
+`tests/firefox_manual_paste_probe.html` is a local `file://` receipt
+page for an **explicitly user-initiated** Mac screenshot paste into Firefox
+over Windows App. Unlike the Xvfb/WebDriver adapter, it observes the actual
+Firefox running on the physical Linux session; it does not connect to
+chansrv, attach to another window, or read the clipboard independently.
+
+When a separate real-client trial is authorized, open this file in Firefox
+directly, focus its contenteditable box, copy a **fresh non-sensitive**
+Mac screenshot, then paste once. Read/copy only the displayed metadata:
+paste event, `types`, item kinds/MIME types, `getAsFileNull`, PNG
+size/decoding status, focus/visibility and wall-clock event timestamps.
+No screenshot image or digest is displayed, uploaded, or saved by the page.
+The receipt script holds image bytes only transiently in browser memory while
+a genuine paste event is being inspected; it does not poll clipboard contents.
+
+Before or immediately after the trial, record the **exact wall-clock
+timestamp** and the target Firefox page. Correlate it with a narrow chansrv
+log interval containing generation, X11 requestor/property, `TARGETS` and
+image requests, format-data requests and responses, and X11 delivery. The
+browser page does **not** know the X11 requestor XID or generation itself,
+and wall-clock proximity alone is not sufficient proof of requestor identity.
+
+Do not switch the host checkout, change services, restart xrdp, or run a
+live paste as part of the offline PR validation.
