@@ -50,3 +50,4 @@
 0051-xrdp-chansrv-log-installed-clipboard-owner.patch
 0052-xrdp-chansrv-recover-stalled-deferred-image-incr.patch
 0053-xrdp-chansrv-qt-like-x11-owner-contract.patch
+0054-xrdp-chansrv-remove-sync-png-notify-diagnostic.patch
