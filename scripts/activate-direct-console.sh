@@ -12,6 +12,7 @@ Usage:
   sudo $0 --backup
   sudo $0 --preflight
   sudo $0 --preflight --backup
+  sudo $0 --repair-test-runtime   # internal bootstrap for build-direct-console.sh
   sudo $0 --rollback BACKUP_DIRECTORY
 
 Activation preserves the RDP listener configuration on port 3389. It can
@@ -29,9 +30,12 @@ Client scaled-output, scroll-reuse, and verified bitmap caching are
 requested by default, subject to negotiated capabilities and per-path safety checks.
 Cache observation is diagnostic-only and opt-in. Set an individual
 XRDP_CONSOLE_CLIENT_* variable to exactly 0 in the xrdp service environment
-to disable that path. A rollback backup is disabled by default; pass --backup
-to save the current configuration, binaries, service overrides, and service
-state for explicit rollback.
+to disable that path. Normal activation automatically saves a rollback backup of the current
+configuration, binaries, service overrides, and service state. --backup remains
+accepted for compatibility. --repair-test-runtime is called by the canonical
+build script ONLY when its clipboard runtime prerequisite is absent; it
+restores confirmed stale systemd executable references and starts the existing
+persistent xrdp service pair. It does not activate a newly compiled candidate.
 EOF
 }
 
@@ -269,6 +273,7 @@ rollback()
 
 preflight_only=0
 backup_enabled=0
+repair_test_runtime=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --help|-h)
@@ -281,12 +286,20 @@ while [ "$#" -gt 0 ]; do
             preflight_only=1
             ;;
         --backup)
-            [ "$backup_enabled" -eq 0 ] || { usage >&2; exit 2; }
+            [ "$backup_enabled" -eq 0 ] &&
+                [ "$repair_test_runtime" -eq 0 ] || { usage >&2; exit 2; }
             backup_enabled=1
+            ;;
+        --repair-test-runtime)
+            [ "$repair_test_runtime" -eq 0 ] &&
+                [ "$preflight_only" -eq 0 ] &&
+                [ "$backup_enabled" -eq 0 ] || { usage >&2; exit 2; }
+            repair_test_runtime=1
             ;;
         --rollback)
             [ "$#" -eq 2 ] &&
                 [ "$preflight_only" -eq 0 ] &&
+                [ "$repair_test_runtime" -eq 0 ] &&
                 [ "$backup_enabled" -eq 0 ] || { usage >&2; exit 2; }
             [ "$(id -u)" -eq 0 ] ||
                 fail "run rollback as root (for example, with sudo)"
@@ -302,6 +315,40 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$(id -u)" -eq 0 ] || fail "run as root (for example, with sudo)"
+if [ "$repair_test_runtime" -eq 1 ]; then
+    # The canonical build needs the existing service-managed clipboard socket
+    # namespace BEFORE CTest. This bootstrap does not install any candidate.
+    # This helper is the fail-closed, reversible repair covered by
+    # test_repair_stale_xrdp_overrides.py; no extra operator command is needed.
+    established=$(ss -tnH state established 'sport = :3389') ||
+        fail "cannot inspect connected RDP clients for safe bootstrap"
+    [ -z "$established" ] ||
+        fail "cannot bootstrap the test runtime while an RDP client is connected"
+    python3 "$workspace_root/scripts/repair-stale-xrdp-overrides.py" --apply ||
+        fail "stale systemd service-path recovery failed"
+    if ! systemctl is-active --quiet xrdp.service ||
+       ! systemctl is-active --quiet xrdp-sesman.service; then
+        systemctl reset-failed xrdp.service xrdp-sesman.service ||
+            fail "could not reset failed xrdp service state"
+        systemctl start xrdp.service ||
+            fail_service xrdp.service "cannot start existing persistent xrdp runtime"
+    fi
+    systemctl is-active --quiet xrdp.service ||
+        fail_service xrdp.service "persistent xrdp is not active"
+    systemctl is-active --quiet xrdp-sesman.service ||
+        fail_service xrdp-sesman.service "persistent xrdp-sesman is not active"
+    python3 "$workspace_root/tools/diagnostics/xrdp_clipboard_test_doctor.py" ||
+        fail "persistent xrdp runtime remains unusable for clipboard tests"
+    echo "Existing xrdp/sesman runtime recovered for isolated build CTests."
+    echo "No new candidate was installed or activated during bootstrap."
+    exit 0
+fi
+
+# All normal deployments take a rollback snapshot automatically, including
+# the exact existing one-liner with no extra activation arguments.
+if [ "$preflight_only" -eq 0 ]; then
+    backup_enabled=1
+fi
 [ -x "$daemon" ] || fail "missing pinned xrdp daemon: $daemon"
 [ -x "$sesman" ] || fail "missing pinned xrdp-sesman: $sesman"
 [ -x "$chansrv_source" ] || fail "missing pinned xrdp chansrv: $chansrv_source"
@@ -421,7 +468,7 @@ if [ "$preflight_only" -eq 1 ]; then
     if [ "$backup_enabled" -eq 1 ]; then
         echo "Rollback backup: requested; it will be created only if activation proceeds."
     else
-        echo "Rollback backup: disabled (default); use --backup to save the current state."
+        echo "Rollback backup: not requested in read-only preflight; normal activation automatically snapshots rollback state."
     fi
     exit 0
 fi
@@ -461,7 +508,8 @@ if [ "$backup_enabled" -eq 1 ]; then
     fi
     echo "Rollback backup: $backup_directory"
 else
-    echo "Rollback backup disabled; activation failures will not be automatically rolled back."
+    echo "Rollback backup unexpectedly disabled; refusing unprotected activation." >&2
+    exit 1
 fi
 
 activation_finalized=0
