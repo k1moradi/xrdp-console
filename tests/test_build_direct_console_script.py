@@ -54,6 +54,26 @@ class BuildDirectConsoleScriptTests(unittest.TestCase):
                                 capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_preflight_distinguishes_candidate_health_from_live_crash_loop(self) -> None:
+        script_path = Path(sys.argv[1]).with_name('activate-direct-console.sh')
+        script = script_path.read_text(encoding="utf-8")
+        preflight = script.split('if [ "$preflight_only" -eq 1 ]; then', 1)[1]
+        preflight = preflight.split('backup_directory=', 1)[0]
+        self.assertIn('systemctl show xrdp-console-chansrv.service', preflight)
+        self.assertIn('-p SubState --value', preflight)
+        self.assertIn('-p Result --value', preflight)
+        self.assertIn('-p NRestarts --value', preflight)
+        self.assertIn('chansrv_substate" = auto-restart', preflight)
+        self.assertIn('WARNING: current chansrv is crash-looping', preflight)
+        self.assertIn('candidate preflight checks deployability', preflight)
+        self.assertIn('WARNING: current chansrv is not running', preflight)
+        # A stopped or crash-looping old service must not block installing
+        # a matching, candidate-validated replacement with rollback.
+        self.assertNotIn('fail "current chansrv', preflight)
+        result = subprocess.run(['sh', '-n', str(script_path)],
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_preflight_and_activation_commands_are_copy_paste_safe(self) -> None:
         script = Path(sys.argv[1]).read_text(encoding="utf-8")
 
