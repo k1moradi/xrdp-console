@@ -3,6 +3,7 @@
 """Offline safety tests for the private cropped-edge H.264 RDP loader."""
 from __future__ import annotations
 
+import ast
 import os
 import tempfile
 import unittest
@@ -116,6 +117,34 @@ class LoaderIsolationTests(unittest.TestCase):
                 loader.ensure_test_display(
                     1364, 768, force_private_client=True,
                     scratch_root=self.root / "private-client")
+
+    def test_generated_loader_ini_lines_are_not_indented(self):
+        # The ini template is embedded in a source-level try block.
+        # An indentation-only Python refactor once broke every directive.
+        source = Path(loader.__file__).read_text(encoding="utf-8")
+        syntax = ast.parse(source)
+        generated = []
+        for node in ast.walk(syntax):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if (isinstance(func, ast.Attribute) and func.attr == "write_text" and
+                    isinstance(func.value, ast.Name) and
+                    func.value.id == "config_path" and node.args and
+                    isinstance(node.args[0], ast.JoinedStr)):
+                joined = node.args[0]
+                generated.append("".join(
+                    part.value if isinstance(part, ast.Constant)
+                    else "<dynamic>"
+                    for part in joined.values))
+        self.assertEqual(len(generated), 1)
+        template = generated[0]
+        self.assertIn("[Globals]\\nini_version=1\\nfork=true\\n", template)
+        self.assertIn("port=tcp://127.0.0.1:<dynamic>", template)
+        self.assertIn("[console]\\nname=console\\nlib=<dynamic>", template)
+        for line in template.splitlines():
+            if line.strip() and line != "<dynamic>":
+                self.assertFalse(line[0].isspace(), repr(line))
 
     def _write_proc_tables(self, addresses: list[tuple[str, str]]):
         proc_net = self.root / "net"
