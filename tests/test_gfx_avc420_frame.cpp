@@ -231,6 +231,58 @@ bool rectangle_conversion_matches_scalar_reference()
     return success;
 }
 
+bool identity_conversion_handles_cropped_capture_origin()
+{
+    constexpr Rectangle captureBounds{64, 32, 64, 64};
+    constexpr Rectangle absoluteTile{80, 48, 16, 16};
+    constexpr PixelSize frameSize{128, 128};
+    std::vector<std::uint8_t> bgra(64U * 64U * 4U);
+    for (std::uint32_t y = 0; y < 64U; ++y)
+    {
+        for (std::uint32_t x = 0; x < 64U; ++x)
+        {
+            const std::size_t offset = (static_cast<std::size_t>(y) * 64U + x) * 4U;
+            bgra[offset] = static_cast<std::uint8_t>((x * 3U) & 0xffU);
+            bgra[offset + 1U] = static_cast<std::uint8_t>((y * 5U) & 0xffU);
+            bgra[offset + 2U] = static_cast<std::uint8_t>((x + y) & 0xffU);
+            bgra[offset + 3U] = 0xffU;
+        }
+    }
+    const FramebufferView view{
+        std::as_bytes(std::span<const std::uint8_t>(bgra)), 64, 64, 64U * 4U};
+    std::vector<std::byte> before(nv12FrameBytes(frameSize), std::byte{0x5a});
+    auto output = before;
+    Rectangle local{};
+    bool success = true;
+    success &= check(!updateNv12RectangleFromBgraRegion_709FullRange(
+                         view, absoluteTile, absoluteTile, frameSize, output),
+                     "absolute root rectangle unexpectedly fit cropped BGRA view");
+    success &= check(localBgraCaptureRectangle(
+                         captureBounds, view, absoluteTile, local) &&
+                         local == Rectangle{16, 16, 16, 16},
+                     "failed to translate source tile into capture-local pixels");
+    success &= check(updateNv12RectangleFromBgraRegion_709FullRange(
+                         view, local, absoluteTile, frameSize, output),
+                     "valid cropped identity tile failed NV12 conversion");
+    success &= check(output != before,
+                     "captured identity tile did not produce NV12 data");
+    success &= check(!localBgraCaptureRectangle(
+                         captureBounds, view, {60, 48, 16, 16}, local),
+                     "accepted a source tile left of capture origin");
+    success &= check(!localBgraCaptureRectangle(
+                         captureBounds, view, {120, 48, 16, 16}, local),
+                     "accepted a source tile beyond capture right edge");
+    success &= check(!localBgraCaptureRectangle(
+                         captureBounds, {view.pixels, 32, 64, view.strideBytes},
+                         absoluteTile, local),
+                     "accepted a mismatched capture view geometry");
+    success &= check(localBgraCaptureRectangle(
+                         {0, 0, 64, 64}, view, {16, 16, 16, 16}, local) &&
+                         local == Rectangle{16, 16, 16, 16},
+                     "full-origin snapshot translation changed");
+    return success;
+}
+
 bool ssse3_channel_gather_matches_scalar_zero_ff_patterns()
 {
     constexpr std::uint32_t kPatterns = 1U << 16U;
@@ -411,6 +463,7 @@ int main()
     success &= conversion_matches_xorgxrdp_reference();
     success &= conversion_validates_geometry_and_stride();
     success &= rectangle_conversion_matches_scalar_reference();
+    success &= identity_conversion_handles_cropped_capture_origin();
     success &= ssse3_channel_gather_matches_scalar_zero_ff_patterns();
     success &= rectangle_alignment_matches_avc420_requirements();
     success &= command_layout_matches_xrdp_encoder_contract();
