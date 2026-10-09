@@ -129,7 +129,26 @@ cmake --build "$build_root" --parallel "$build_jobs"
 # One absent sesman-created socketdir otherwise causes 35 repeated clipboard
 # startup failures. Fail before CTest with an actionable, read-only diagnosis;
 # never skip tests or silently create a privileged runtime directory.
-python3 "$workspace_root/tools/diagnostics/xrdp_clipboard_test_doctor.py"
+if ! python3 "$workspace_root/tools/diagnostics/xrdp_clipboard_test_doctor.py"; then
+    # The host may carry an activator-generated ExecStart override pointing
+    # into a deleted /var/tmp diagnostic worktree. This blocks every
+    # clipboard test before CLIPRDR starts. Recover only through the existing
+    # guarded activator, then REQUIRE the original prerequisite to pass.
+    # sudo may ask for the operator's password. No candidate is activated.
+    if [ "${XRDP_CONSOLE_AUTO_REPAIR_RUNTIME:-1}" != "1" ]; then
+        echo "Clipboard runtime unavailable; automatic recovery disabled." >&2
+        exit 1
+    fi
+    command -v sudo >/dev/null 2>&1 || {
+        echo "Cannot repair xrdp/sesman prerequisite without sudo." >&2
+        exit 1
+    }
+    printf '%s\n' \
+        "Clipboard test prerequisite failed. Recovering only verified stale" \
+        "persistent xrdp/sesman service paths through the existing activator."
+    sudo "$workspace_root/scripts/activate-direct-console.sh" --repair-test-runtime
+    python3 "$workspace_root/tools/diagnostics/xrdp_clipboard_test_doctor.py"
+fi
 ctest --test-dir "$build_root" --output-on-failure --parallel 1
 
 printf '%s\n' \
