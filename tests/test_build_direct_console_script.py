@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 from pathlib import Path
+import os
+import subprocess
 import sys
 import unittest
 
@@ -27,6 +29,24 @@ class BuildDirectConsoleScriptTests(unittest.TestCase):
         script = Path(sys.argv[1]).read_text(encoding="utf-8")
         self.assertIn('test_scratch_root=$build_root/test-artifacts/tmp', script)
         self.assertIn('export TMPDIR', script)
+
+    def test_activation_rejects_temp_service_paths_before_root_check(self) -> None:
+        script = Path(sys.argv[1]).with_name("activate-direct-console.sh")
+        for override in (
+            {"XRDP_CONSOLE_BUILD_DIR": "/var/tmp/disposable-candidate"},
+            {"XRDP_CONSOLE_BUILD_DIR": "/tmp/disposable-candidate"},
+            {"XRDP_CONSOLE_XRDP_INSTALL_DIR": "/var/tmp/disposable-install"},
+        ):
+            with self.subTest(override=override):
+                env = os.environ.copy()
+                env.update(override)
+                process = subprocess.run(
+                    ["sh", str(script), "--preflight"], env=env,
+                    capture_output=True, text=True, timeout=5, check=False)
+                self.assertNotEqual(process.returncode, 0)
+                self.assertIn(
+                    "refusing persistent service ExecStart from temporary build path",
+                    process.stderr)
 
     def test_preflight_and_activation_commands_are_copy_paste_safe(self) -> None:
         script = Path(sys.argv[1]).read_text(encoding="utf-8")
