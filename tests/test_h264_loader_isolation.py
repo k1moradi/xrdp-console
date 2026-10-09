@@ -3,9 +3,13 @@
 """Offline safety tests for the private cropped-edge H.264 RDP loader."""
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
+import test_xrdp_loader as loader
 
 from h264_loader_isolation import (
     isolated_loader_module_name,
@@ -68,6 +72,50 @@ class LoaderIsolationTests(unittest.TestCase):
         self.assertFalse(private_client_display_is_safe("localhost:44", ":0", str(auth)))
         self.assertFalse(private_client_display_is_safe(":94", ":0", None))
         self.assertTrue(private_client_display_is_safe(":94", ":0", str(auth)))
+
+    def test_loader_forces_new_xvfb_even_when_physical_display_is_usable(self):
+        # Do not actually start Xvfb or inspect the real user's display.
+        auth = self.root / "old-xauthority"
+        auth.touch()
+        scratch = self.root / "private-client"
+        class ReplacedExec(Exception):
+            pass
+        with (mock.patch.dict(os.environ, {
+                "DISPLAY": ":0", "XAUTHORITY": str(auth),
+                "XRDP_CONSOLE_TEST_PRIVATE_CLIENT_XVFB": ""}),
+              mock.patch.object(loader.shutil, "which",
+                                return_value="/usr/bin/xvfb-run"),
+              mock.patch.object(loader, "display_is_usable",
+                                return_value=True),
+              mock.patch.object(loader.os, "execvpe",
+                                side_effect=ReplacedExec) as exec_call):
+            with self.assertRaises(ReplacedExec):
+                loader.ensure_test_display(
+                    1364, 768, force_private_client=True, scratch_root=scratch)
+        self.assertEqual(exec_call.call_count, 1)
+        command, args, child_env = exec_call.call_args.args
+        self.assertEqual(command, "/usr/bin/xvfb-run")
+        self.assertEqual(args[0:2], ["/usr/bin/xvfb-run", "-a"])
+        self.assertEqual(child_env["XRDP_CONSOLE_TEST_PARENT_DISPLAY"], ":0")
+        self.assertEqual(child_env["XRDP_CONSOLE_TEST_PRIVATE_CLIENT_XVFB"], "1")
+        self.assertEqual(child_env["TMPDIR"], str(scratch))
+        self.assertNotIn("DISPLAY", child_env)
+        self.assertNotIn("XAUTHORITY", child_env)
+        self.assertTrue(scratch.is_dir())
+
+    def test_loader_rejects_inherited_parent_display_in_child_mode(self):
+        auth = self.root / "inherited-xauthority"
+        auth.touch()
+        with (mock.patch.dict(os.environ, {
+                "DISPLAY": ":0", "XAUTHORITY": str(auth),
+                "XRDP_CONSOLE_TEST_PARENT_DISPLAY": ":0",
+                "XRDP_CONSOLE_TEST_PRIVATE_CLIENT_XVFB": "1"}),
+              mock.patch.object(loader, "display_is_usable",
+                                return_value=True)):
+            with self.assertRaisesRegex(AssertionError, "private RDP client"):
+                loader.ensure_test_display(
+                    1364, 768, force_private_client=True,
+                    scratch_root=self.root / "private-client")
 
     def _write_proc_tables(self, addresses: list[tuple[str, str]]):
         proc_net = self.root / "net"
