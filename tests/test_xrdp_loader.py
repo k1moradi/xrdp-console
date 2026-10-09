@@ -7127,8 +7127,8 @@ def presentation_probe_point(width: int, height: int,
                              source_x: int = 30,
                              source_y: int = 30) -> tuple[int, int]:
     """Map an interior stimulus pixel through the aspect-fit transform."""
-    # Keep the probe inside sparse window A (25..44, 25..44) so the Planar
-    # sparse-update assertion observes a pixel that the stimulus changes.
+    # Default source coordinates are in sparse window A (25..44, 25..44).
+    # The cropped H.264 edge regression supplies its own source pixel.
     if width * source_height <= height * source_width:
         viewport_width = width
         viewport_height = max(1, width * source_height // source_width)
