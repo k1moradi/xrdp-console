@@ -5386,9 +5386,14 @@ def start_stimulus(stimulus_path: Path, display: str,
                    environment: dict[str, str],
                    coherence_mode: bool = False,
                    full_screen_size: tuple[int, int] | None = None,
-                   continuous_damage: bool = False
+                   continuous_damage: bool = False,
+                   origin: tuple[int, int] | None = None
                    ) -> subprocess.Popen[bytes]:
+    if origin is not None and (coherence_mode or full_screen_size is not None):
+        raise ValueError("cropped-capture stimulus origin requires window mode")
     command = [str(stimulus_path), display]
+    if origin is not None:
+        command.extend((str(origin[0]), str(origin[1])))
     expected_ready = b"READY 160 100\n"
     if full_screen_size is not None:
         command.append("--fullscreen-20hz" if continuous_damage
@@ -6777,7 +6782,9 @@ def assert_client_pixel(client_display: str,
                         maximum_pixel_latency_ms: int | None = None,
                         prestarted_cpu_spinner: subprocess.Popen[bytes] | None = None,
                         client_damage_counter: subprocess.Popen[bytes] | None = None,
-                        client_damage_after_count: int | None = None
+                        client_damage_after_count: int | None = None,
+                        source_probe_x: int = 60,
+                        source_probe_y: int = 60
                         ) -> None:
     """Draw a known source color and require it in the FreeRDP framebuffer."""
     try:
@@ -6864,7 +6871,8 @@ def assert_client_pixel(client_display: str,
         source_pixel_sample = None
         if source_display is not None:
             source_sample = subprocess.run(
-                [str(pixel_probe), source_display, "root", "60", "60"],
+                [str(pixel_probe), source_display, "root",
+                 str(source_probe_x), str(source_probe_y)],
                 input=b"sample\n", capture_output=True, check=False,
                 timeout=3.0)
             source_lines = source_sample.stdout.splitlines()
@@ -7115,12 +7123,12 @@ def assert_client_stays_connected(client: subprocess.Popen[object],
 
 def presentation_probe_point(width: int, height: int,
                              source_width: int = 1024,
-                             source_height: int = 768) -> tuple[int, int]:
+                             source_height: int = 768,
+                             source_x: int = 30,
+                             source_y: int = 30) -> tuple[int, int]:
     """Map an interior stimulus pixel through the aspect-fit transform."""
     # Keep the probe inside sparse window A (25..44, 25..44) so the Planar
     # sparse-update assertion observes a pixel that the stimulus changes.
-    source_x = 30
-    source_y = 30
     if width * source_height <= height * source_width:
         viewport_width = width
         viewport_height = max(1, width * source_height // source_width)
@@ -7203,6 +7211,7 @@ def main() -> int:
     coherence_mode = False
     fullhd_source_mode = False
     narrow_source_mode = False
+    crop_edge_mode = False
     popup_ui_stress_mode = False
     popup_narrow_source_mode = False
     pointer_latency_mode = False
@@ -7383,6 +7392,7 @@ def main() -> int:
         "--gfx-planar", "--gfx-h264",
         "--gfx-h264-coherence", "--gfx-h264-fullhd",
         "--gfx-h264-narrow-source",
+        "--gfx-h264-crop-edge",
         "--gfx-h264-popup-ui-stress",
         "--gfx-h264-popup-narrow-source-stress",
         "--gfx-h264-pointer-latency",
@@ -7414,6 +7424,7 @@ def main() -> int:
         gfx_h264_mode = selected_mode in (
             "--gfx-h264", "--gfx-h264-coherence", "--gfx-h264-fullhd",
             "--gfx-h264-narrow-source",
+            "--gfx-h264-crop-edge",
             "--gfx-h264-popup-ui-stress",
             "--gfx-h264-popup-narrow-source-stress",
             "--gfx-h264-pointer-latency",
@@ -7434,7 +7445,9 @@ def main() -> int:
         fullhd_source_mode = selected_mode in (
             "--rfx-fullhd", "--classic-fullhd-source",
             "--gfx-h264-fullhd")
-        narrow_source_mode = selected_mode == "--gfx-h264-narrow-source"
+        crop_edge_mode = selected_mode == "--gfx-h264-crop-edge"
+        narrow_source_mode = selected_mode in (
+            "--gfx-h264-narrow-source", "--gfx-h264-crop-edge")
         randr_resize_mode = selected_mode in (
             "--gfx-h264-randr-resize",
             "--gfx-h264-randr-resize-no-dynamic-resolution")
@@ -7454,7 +7467,7 @@ def main() -> int:
             "--cpu-contention requires an H.264 coherence, Full HD, or "
             "narrow-source, popup UI stress, pointer-latency, or startup "
             "current-state test")
-    full_screen_update_mode = narrow_source_mode or (
+    full_screen_update_mode = (narrow_source_mode and not crop_edge_mode) or (
         cpu_contention and (fullhd_source_mode or popup_ui_stress_mode or
                             pointer_latency_mode))
 
@@ -7482,6 +7495,7 @@ def main() -> int:
             "[--rfx|--rfx-fullhd|--classic-fullhd-source|"
             "--gfx-planar|--gfx-h264|--gfx-h264-coherence|"
             "--gfx-h264-fullhd|--gfx-h264-narrow-source|"
+            "--gfx-h264-crop-edge|"
             "--gfx-h264-pointer-latency|"
             "--gfx-h264-randr-resize|"
             "--gfx-h264-randr-resize-no-dynamic-resolution] "
@@ -7587,7 +7601,8 @@ def main() -> int:
             raise AssertionError(
                 f"missing X11 pointer latency probe: {pointer_probe_path}")
     probe_x, probe_y = presentation_probe_point(
-        presentation_width, presentation_height, source_width, source_height)
+        presentation_width, presentation_height, source_width, source_height,
+        1182 if crop_edge_mode else 30, 734 if crop_edge_mode else 30)
     window_title = f"xrdp-console-loader-{os.getpid()}"
     for required in (
             module_path, xrdp_path, freerdp_path, pixel_probe, stimulus_path):
@@ -7735,7 +7750,8 @@ password=smoke
                     if (full_screen_update_mode or pointer_latency_mode)
                     else None,
                     continuous_damage=(pointer_latency_mode and
-                                       cpu_contention))
+                                       cpu_contention),
+                    origin=(1152, 704) if crop_edge_mode else None)
             if cpu_contention and (fullhd_source_mode or popup_ui_stress_mode or
                                    pointer_latency_mode):
                 startup_cpu_spinner = subprocess.Popen(
@@ -8166,7 +8182,9 @@ password=smoke
                                 1000 if cpu_contention and
                                 (narrow_source_mode or fullhd_source_mode)
                                 else None),
-                            prestarted_cpu_spinner=startup_cpu_spinner)
+                            prestarted_cpu_spinner=startup_cpu_spinner,
+                            source_probe_x=1182 if crop_edge_mode else 60,
+                            source_probe_y=734 if crop_edge_mode else 60)
                         if fullhd_source_mode:
                             assert_client_stays_connected(
                                 client, os.environ["DISPLAY"], window_title,
