@@ -43,7 +43,9 @@ function fullDecode(png) {
 }
 function testPage({subtle=crypto.webcrypto.subtle,decoder=fullDecode}={}) {
   const events=new Map(),window={addEventListener(name,fn){events.set(name,fn)}};
-  const sandbox={window,Uint8Array,Uint32Array,DataView,Array,Number,
+  const editor={},document={activeElement:editor,visibilityState:'visible',
+    getElementById:id=>id==='editor'?editor:null,hasFocus:()=>true};
+  const sandbox={window,document,Uint8Array,Uint32Array,DataView,Array,Number,
     performance:{now:()=>100},crypto:{subtle},
     createImageBitmap:async file=>({...(decoder(await file.buffer())),close(){}}),
     fetch:async()=>{throw Error('network disabled')},File:class {},Promise};
