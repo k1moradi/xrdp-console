@@ -3,6 +3,7 @@
 #include "core/damage_region.h"
 
 #include <cstdlib>
+#include <initializer_list>
 #include <span>
 
 namespace
