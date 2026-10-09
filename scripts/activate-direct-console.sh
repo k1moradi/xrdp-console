@@ -355,7 +355,11 @@ def prepare_test_runtime() -> int:
             return 0
         # Only a start is permitted; never restart or stop an active service.
         run(['systemctl', 'reset-failed', 'xrdp.service', 'xrdp-sesman.service'])
-        run(['systemctl', 'start', 'xrdp.service'])
+        # Start inactive dependencies explicitly, without restarting healthy units.
+        for unit in ('xrdp-sesman.service', 'xrdp.service'):
+            if subprocess.run(['systemctl', 'is-active', '--quiet', unit],
+                              capture_output=True, check=False, timeout=5).returncode:
+                run(['systemctl', 'start', unit])
         for unit in UNITS:
             if subprocess.run(['systemctl', 'is-active', '--quiet', unit],
                               capture_output=True, check=False, timeout=5).returncode:
