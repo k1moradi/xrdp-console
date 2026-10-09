@@ -6737,6 +6737,30 @@ def assert_pointer_latency_session(
         stop_process(observer)
 
 
+def assert_h264_no_unexpected_fallback(log_text: str) -> None:
+    """Refuse an invisible H.264->Planar downgrade in a healthy smoke test.
+
+    Initial GFX Planar surface batches may be legitimate during GFX startup.
+    Only an actual H.264 conversion/recovery/fallback event is forbidden.
+    """
+    if ("selected_gfx_mode=h264" not in log_text or
+            "actual_output=gfx-h264-avc420" not in log_text):
+        raise AssertionError(
+            "H.264 GFX session was not proven negotiated in test log")
+    forbidden = (
+        "XRDP_CONSOLE_H264_CONVERSION_FAILURE",
+        "presentation-nv12-conversion-failed",
+        "action=defer-gfx-planar",
+        "action=fallback-gfx-planar",
+        "XRDP_CONSOLE_H264_RECOVERY event=service-failure",
+    )
+    observed = [marker for marker in forbidden if marker in log_text]
+    if observed:
+        raise AssertionError(
+            "H.264 session degraded to graphics recovery or conversion "
+            f"failure, even if the client pixels look correct: {observed!r}")
+
+
 def assert_client_pixel(client_display: str,
                         stimulus: subprocess.Popen[bytes],
                         window_title: str, pixel_probe: Path,
@@ -8151,13 +8175,13 @@ password=smoke
                             assert_client_stays_connected(
                                 client, os.environ["DISPLAY"], window_title,
                                 client_log_path, log_path, stdout_path)
-                            if ("XRDP_CONSOLE_H264_RECOVERY "
-                                    "event=service-failure" in
-                                    read_text(log_path)):
+                            try:
+                                assert_h264_no_unexpected_fallback(
+                                    read_text(log_path))
+                            except AssertionError as error:
                                 raise AssertionError(
-                                    "narrow-source H.264 smoke fell back from "
-                                    "H.264 service after the display update:\n"
-                                    f"{xrdp_log_excerpt(log_path)}")
+                                    f"{error}\n{xrdp_log_excerpt(log_path)}"
+                                ) from error
                         if randr_resize_mode:
                             resize_source_x11_display(
                                 source_display, 1920, 1080)
