@@ -279,6 +279,7 @@ def send_trusted_paste(driver: WebDriver, page_url: str,
                 return result
         time.sleep(0.07)
     return {"phase": "no-complete-paste", "last_observed": last,
+            "observer": last.get("observer") if isinstance(last, dict) else None,
             "host_probe_elapsed_ms": round((time.monotonic_ns() - started) / 1e6, 3)}
 
 
@@ -327,6 +328,26 @@ def classify_receipt(report: dict, expected_size: int,
                      expected_sha256: str,
                      expected_dimensions: tuple[int, int] | None = None) -> str:
     if report.get("phase") != "complete":
+        if report.get("phase") == "no-complete-paste":
+            # An unanswered Ctrl+V is not equivalent to a Firefox paste
+            # event whose image File remained unavailable. Only the test
+            # page's own trusted-event observations support these stages.
+            last = report.get("last_observed")
+            observed = (last.get("observer") if isinstance(last, dict)
+                        else None)
+            if isinstance(observed, dict):
+                shortcuts = observed.get("trustedPasteShortcuts")
+                paste_events = observed.get("pasteEvents")
+                trusted_pastes = observed.get("trustedPasteEvents")
+                if (type(shortcuts) is int and type(paste_events) is int and
+                        type(trusted_pastes) is int):
+                    if paste_events > 0 and trusted_pastes == 0:
+                        return "UNTRUSTED_PASTE_EVENT_ONLY"
+                    if paste_events > 0:
+                        return "PASTE_EVENT_NOT_COMPLETED"
+                    if shortcuts > 0:
+                        return "TRUSTED_SHORTCUT_NO_PASTE_EVENT"
+                    return "NO_TRUSTED_SHORTCUT_OBSERVED"
         return "NO_COMPLETED_TRUSTED_PASTE"
     if report.get("trusted") is not True or report.get("source") != "paste":
         return "INVALID_UNTRUSTED_EVENT"
