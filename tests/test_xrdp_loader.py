@@ -27,6 +27,7 @@ from pathlib import Path
 
 from h264_frame_coherence import coherence_problem, parse_frame_sample
 from h264_loader_isolation import (
+    isolated_desktop_environment,
     isolated_loader_module_name,
     private_client_display_is_safe,
     require_loopback_tcp_listener,
@@ -7190,6 +7191,15 @@ def ensure_test_display(minimum_width: int, minimum_height: int,
     if force_private_client:
         marker = "XRDP_CONSOLE_TEST_PRIVATE_CLIENT_XVFB"
         if os.environ.get(marker) == "1":
+            # The xvfb-run shell must be the actual parent of the re-execed
+            # Python test. An inherited marker alone is not authorization
+            # to reuse any existing user's X11 display.
+            parent_id = os.environ.get(
+                "XRDP_CONSOLE_TEST_XVFB_WRAPPER_PID", "")
+            if (not parent_id.isdecimal() or
+                    int(parent_id) != os.getppid()):
+                raise AssertionError(
+                    "private RDP client marker is not owned by xvfb-run")
             if (not private_client_display_is_safe(
                     os.environ.get("DISPLAY"),
                     os.environ.get("XRDP_CONSOLE_TEST_PARENT_DISPLAY"),
@@ -7207,6 +7217,7 @@ def ensure_test_display(minimum_width: int, minimum_height: int,
         environment["XRDP_CONSOLE_TEST_PARENT_DISPLAY"] = (
             environment.get("DISPLAY", ""))
         environment[marker] = "1"
+        environment["XRDP_CONSOLE_TEST_XVFB_WRAPPER_PID"] = str(os.getpid())
         environment["TMPDIR"] = str(scratch_root)
         # The xvfb-run wrapper must allocate a fresh display and Xauthority;
         # never let it accept or authenticate against the user's DISPLAY.
@@ -7882,10 +7893,8 @@ password=smoke
             with stdout_path.open("w", encoding="utf-8") as server_stdout:
                 server_environment = os.environ.copy()
                 if crop_edge_mode:
-                    server_environment["HOME"] = str(root)
-                    server_environment["XDG_CACHE_HOME"] = str(root / "cache")
-                    server_environment["XDG_CONFIG_HOME"] = str(root / "config")
-                    server_environment["XDG_DATA_HOME"] = str(root / "data")
+                    server_environment = isolated_desktop_environment(
+                        server_environment, root, source_display)
                 if pointer_latency_mode:
                     server_environment["XRDP_CONSOLE_POINTER_TRACE"] = "1"
                 server = subprocess.Popen(
@@ -7950,10 +7959,8 @@ password=smoke
                 with client_log_path.open("w", encoding="utf-8") as client_log:
                     client_environment = os.environ.copy()
                     if crop_edge_mode:
-                        client_environment["HOME"] = str(root)
-                        client_environment["XDG_CACHE_HOME"] = str(root / "cache")
-                        client_environment["XDG_CONFIG_HOME"] = str(root / "config")
-                        client_environment["XDG_DATA_HOME"] = str(root / "data")
+                        client_environment = isolated_desktop_environment(
+                            client_environment, root, os.environ["DISPLAY"])
                     if clipboard_no_server_copy_reconnect_mode:
                         client_environment[
                             "XRDP_CONSOLE_TEST_CLIPBOARD_SERVER_AUDIT"] = "1"
