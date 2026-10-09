@@ -6988,7 +6988,8 @@ def assert_client_pixel(client_display: str,
                 r"XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 frame=(\d+) "
                 r"starts=1 ends=1 rects=(\d+) tiles=(\d+) "
                 r"pixels=(\d+) pending=(\d+)")
-            # Console Planar intentionally has a zero minimum flush interval.
+            # Fresh Console Planar damage uses a coalescing interval;
+            # successfully draining pending damage may continue immediately.
             # The stimulus draws the two sparse windows with separate X11
             # requests, so both damages may already be pending for one frame,
             # or the first may be flushed before the second request is
@@ -7044,12 +7045,31 @@ def assert_client_pixel(client_display: str,
                 damage_debug = "\n".join(
                     line for line in read_text(stdout_path).splitlines()
                     if "DAMAGE_" in line)
+                # The batch aggregate cannot reveal whether a new full-screen
+                # invalidation or truly sparse XDamage caused the overdraw.
+                # Report only the post-baseline sent rectangles for this
+                # session, bounded to avoid flooding the failure output.
+                planar_provenance = []
+                for line in read_text(log_path).splitlines():
+                    if "XRDP_CONSOLE_GFX_PLANAR_RECT_V1" not in line:
+                        continue
+                    frame_match = re.search(r"\bframe=(\d+)", line)
+                    if (frame_match is not None and
+                            int(frame_match.group(1)) >
+                            sparse_baseline_frame):
+                        planar_provenance.append(line)
+                provenance_excerpt = "\n".join(planar_provenance[:64])
+                if len(planar_provenance) > 64:
+                    provenance_excerpt += (
+                        f"\n[omitted {len(planar_provenance) - 64} rectangles]")
                 raise AssertionError(
                     "two sparse 20x20 updates did not produce bounded Planar "
                     "output (expected aggregate two rects, <=128 Ki pixels, "
                     f"pending=0; observed rects={sparse_rects} "
                     f"tiles={sparse_tiles} pixels={sparse_pixels} "
                     f"pending={sparse_pending}):\n{summaries}\n"
+                    f"[post-baseline Planar source/stripe provenance]\n"
+                    f"{provenance_excerpt or 'not available'}\n"
                     f"{damage_debug}\n"
                     f"{xrdp_log_excerpt(log_path)}")
     finally:

@@ -1,0 +1,24 @@
+--- a/xrdp/xrdp_mm.c
++++ b/xrdp/xrdp_mm.c
+@@ -4,6 +4,22 @@
+         rows = MIN(rows, height);
+         stripe = clipped;
+         stripe.bottom = stripe.top + rows;
++        /* Diagnostic-only: identify the dirty rectangle which led to each
++         * submitted Planar stripe. A batch summary alone cannot distinguish
++         * sparse changes from a newly introduced full-screen invalidation. */
++        if (self->console_planar_batch_log_count < 64)
++        {
++            LOG(LOG_LEVEL_INFO,
++                "XRDP_CONSOLE_GFX_PLANAR_RECT_V1 frame=%d "
++                "source=%d,%d,%d,%d clipped=%d,%d,%d,%d "
++                "stripe=%d,%d,%d,%d surface=%d "
++                "rect_index=%d region_rects=%d",
++                self->console_planar_frame_id,
++                current.left, current.top, current.right, current.bottom,
++                clipped.left, clipped.top, clipped.right, clipped.bottom,
++                stripe.left, stripe.top, stripe.right, stripe.bottom,
++                surface_id, scan_index - 1, scan.count);
++        }
+         rv = xrdp_mm_egfx_send_planar_bitmap(
+                  self, bitmap, &stripe, surface_id, x, y);
