@@ -282,7 +282,8 @@ while [ "$#" -gt 0 ]; do
             exit 0
             ;;
         --preflight)
-            [ "$preflight_only" -eq 0 ] || { usage >&2; exit 2; }
+            [ "$preflight_only" -eq 0 ] &&
+                [ "$repair_test_runtime" -eq 0 ] || { usage >&2; exit 2; }
             preflight_only=1
             ;;
         --backup)
