@@ -271,7 +271,7 @@ activation.
 The existing build-plus-activation shell chain preserves `&&` fail-closed
 behavior: if compilation, the runtime prerequisite, or CTest fails,
 `activate-direct-console.sh` **will not execute**. Activation still modifies
-live services; follow the read-only `--preflight` and optional `--backup`
+live services; follow the read-only `--preflight` and automatic rollback backup
 guidance below before choosing to activate.
 
 ### Never continue after a failed build
@@ -397,14 +397,10 @@ sudo env XRDP_CONSOLE_BUILD_DIR="$PWD/build-direct-console" \
   scripts/activate-direct-console.sh
 ```
 
-By default, activation does not make a persistent rollback backup. To save the
-current configuration, installed module/chansrv binaries, service overrides,
-and prior service state for rollback, opt in explicitly:
-
-```sh
-sudo env XRDP_CONSOLE_BUILD_DIR="$PWD/build-direct-console" \
-  scripts/activate-direct-console.sh --backup
-```
+Activation automatically creates a persistent rollback backup before
+modifying installed module/chansrv binaries, service overrides, or service
+state. The existing `--backup` option remains accepted for compatibility,
+but is no longer necessary for the normal one-liner.
 
 Activation validates the built daemon/sesman/module, checks the embedded build
 revision, preserves port `3389`, installs the tested module plus matching pinned
@@ -414,14 +410,14 @@ with xrdp, then starts chansrv and verifies the complete runtime plus the RDP
 listener. A missing previous `/usr/local/sbin/xrdp-chansrv` is treated as a
 first install, not as an error.
 
-With `--backup`, the script prints a root-only backup directory such as:
+Every successful activation prints its root-only backup directory, such as:
 
 ```text
 /var/backups/xrdp-console/direct-console-YYYYMMDD-HHMMSS
 ```
 
-Keep that exact path for rollback. Without `--backup`, activation failures are
-not automatically rolled back and manual recovery may be required.
+Keep that exact path for rollback. If activation fails, the script attempts
+to restore this snapshot automatically and reports any rollback failure.
 
 ### Roll back
 
