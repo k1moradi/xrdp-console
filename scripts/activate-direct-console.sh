@@ -330,7 +330,7 @@ def prepare_test_runtime() -> int:
     try:
         if os.geteuid() != 0:
             raise RepairError('root privileges required for test runtime preparation')
-        plan = inspect()
+        plan = inspect(systemctl=run)
         for item in plan:
             print(f"test-runtime {item['unit']}: {item['status']}; ExecStart={item['current']}", flush=True)
         connections = run(['ss', '-tnH', 'state', 'established', 'sport = :3389'])
@@ -338,7 +338,7 @@ def prepare_test_runtime() -> int:
             raise RepairError('RDP clients are connected; refusing automatic recovery')
         changes = [item for item in plan if item['repair']]
         if changes:
-            backup = apply(plan)
+            backup = apply(plan, systemctl=run)
             print('Backed up stale service overrides:', backup, flush=True)
         for unit in UNITS:
             effective = exec_from_show(run(
