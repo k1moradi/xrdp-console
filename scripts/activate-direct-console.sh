@@ -301,6 +301,19 @@ while [ "$#" -gt 0 ]; do
     shift
 done
 
+# The absolute build paths are installed in persistent systemd ExecStart
+# overrides below. Reject ephemeral paths before doing any system action.
+# Rollback exits in the argument parser above and remains available.
+for executable_root in "$build_root" "$prefix"; do
+    resolved_root=$(readlink -m -- "$executable_root") ||
+        fail "cannot resolve activation candidate path: $executable_root"
+    case "$resolved_root" in
+        /tmp|/tmp/*|/var/tmp|/var/tmp/*)
+            fail "refusing persistent service ExecStart from temporary build path: $resolved_root; rebuild under the repository's build-direct-console directory"
+            ;;
+    esac
+done
+
 [ "$(id -u)" -eq 0 ] || fail "run as root (for example, with sudo)"
 [ -x "$daemon" ] || fail "missing pinned xrdp daemon: $daemon"
 [ -x "$sesman" ] || fail "missing pinned xrdp-sesman: $sesman"
