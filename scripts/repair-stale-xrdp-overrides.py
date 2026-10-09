@@ -107,10 +107,8 @@ def inspect(systemctl: Callable[[list[str]], str] = run,
     for unit in UNITS:
         base_file = base_dir / unit
         dropin = base_dir / (unit + '.d') / 'upstream-local.conf'
-        # Only operate on service overrides with no competing *.conf files.
-        extras = [p.name for p in dropin.parent.glob('*.conf') if p.name != 'upstream-local.conf']
-        if extras:
-            raise RepairError(f'Unexpected other {unit} drop-ins: {extras}')
+        # Other drop-ins may set DISPLAY, XAUTHORITY, or hardening policy.
+        # Check the effective ExecStart before and after the targeted edit.
         effective = systemctl(['systemctl', 'show', '-p', 'ExecStart', '--value', unit])
         result.append(check_candidate(unit, base_file, dropin, effective))
     return result
