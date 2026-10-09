@@ -157,3 +157,84 @@ IDs against a set of terminator-ack IDs. That could mistake an unrelated
 property/generation or a reused XID for a completed screenshot transfer.
 The loader now uses `firefox_x11_delivery_ledger.py` and rejects such logs.
 This hardens the **experiment**, not production screenshot delivery.
+
+## 2026-10-08 PNG browser integrity and size-matrix update
+
+**This is diagnostic-only. Screenshot pasting is not yet fixed.** The rebuilt
+frozen candidate passed 12/12 Firefox trusted-paste trials with a 1,049,471-byte
+synthetic PNG even at 2,550 ms. This new test matrix checks whether the larger
+realistically compressed PNG sizes or byte integrity change that outcome.
+
+The browser receipt now:
+
+- Calls `getAsFile()` synchronously in the trusted event.
+- Reads its bytes in memory only, with a 64-MiB upper bound.
+- Computes SHA-256 using WebCrypto or a bounded pure-JavaScript fallback,
+  explicitly reporting `digestMethod=webcrypto|js-fallback`.
+- Requires the browser decoder's dimensions to match the PNG IHDR dimensions.
+- Prevents an older, asynchronous paste from overwriting a later report.
+- Returns `PNG_DIMENSION_MISMATCH` or `PNG_UNEXPECTED_DIMENSIONS` rather than
+  `READABLE_PNG_FILE` when decoded dimensions are absent or unexpected.
+- Retains the strict requestor/property/generation and exact-byte INCR ledger.
+
+### Verified synthetic fixture identities
+
+| Fixture | Bytes | Decoded dimensions | SHA-256 |
+|---|---:|---|---|
+| Rebuilt candidate fixture | 1,049,471 | 512 × 512 RGBA | `c6635535e3669a731add63b3c4b89a0c873e0c7c88412f6ea7b06423eacfee7c` |
+| Mac-size control, synthetic | 2,286,451 | 1000 × 760 RGB | `cca28eec0cce17ae047221aa3177ed1765ad6d5884b7dc60df2ce3a3ff3a7cf4` |
+| Exact previous standalone synthetic | 2,401,598 | 1000 × 800 RGB | `d9b7864e95e934ee999ee333ce9bf86adcf823aaca271634bafb8d8b9d3f6c22` |
+| Oversize stress control | 3,241,953 | 1200 × 900 RGB | `ba8246c60e667f7cf553d6369887e7c976d58529faad60977f6681635d07e106` |
+
+The Mac-size control's IDAT contains 2,281,461 bytes; the remaining minor
+ancillary chunk padding reaches the precise screenshot-like encoded size.
+**The control is not the user's original screenshot** and cannot prove the
+original compressed pixels were valid. All fixtures here are synthetic.
+
+### Generate, decode and test offline
+
+The generator and full decoder test require Pillow for Python. Node.js 22+
+runs the browser receipt VM tests with an actual zlib PNG-inflate oracle.
+
+```sh
+# Work only in the disposable diagnostic build directory
+python3 tests/make_png_fixtures.py --output build/fixture-matrix
+python3 -m unittest discover -s tests -p 'test_png_fixture_integrity.py' -v
+XRDP_CONSOLE_TEST_PNG_FIXTURE_DIR=build/fixture-matrix \
+  node tests/test_png_browser_receipt.cjs
+```
+
+The exact previous standalone PNG is intentionally **not regenerated under
+the same hash**. When the prior synthetic fixture is available locally:
+
+```sh
+python3 tests/make_png_fixtures.py --output build/fixture-matrix \
+  --existing-standalone /path/to/exact/2401598-byte/synthetic.png
+XRDP_CONSOLE_TEST_STANDALONE_PNG=/path/to/exact/2401598-byte/synthetic.png \
+  python3 -m unittest discover -s tests -p 'test_png_fixture_integrity.py' -v
+```
+
+For candidate-chansrv tests, select the verified fixture without changing
+the existing FreeRDP peer or production chansrv. This option works only when
+the Firefox consumer is explicitly enabled and rejects any file whose exact
+SHA-256 does not match the four permitted **synthetic** identities:
+
+```sh
+export XRDP_CONSOLE_TEST_FIREFOX_CONSUMER=1
+export XRDP_CONSOLE_TEST_BROWSER_PNG_FIXTURE="$PWD/build/fixture-matrix/mac_size_control_2286451.png"
+export XRDP_CONSOLE_TEST_DELAY_PNG_RESPONSE_MS=2550
+# Run the existing candidate loader's full binary arguments,
+# followed by --clipboard-delayed-png-response.
+```
+
+Do not apply the frozen integration generator **on top of** the already
+patched diagnostic PR branch. Its five source transformations are reproduced
+in the committed PR loader and were verified byte-for-byte against the frozen
+source. No production install or activation is authorized.
+
+**Limitations:** Python unit tests and Node VM tests do not establish
+Firefox 157.0.1's real browser behavior; full Firefox-through-chansrv
+acceptance remains Codex's separately isolated experiment. WebCrypto fallback
+runs after the synchronous paste handler, so its execution time does not
+accelerate clipboard materialization. Full browser decode of the original
+Mac screenshot is still unverified.
