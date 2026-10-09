@@ -16,6 +16,7 @@ set(PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/h264_frame_coherence.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_h264_frame_coherence.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_build_direct_console_script.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_one_command_bootstrap.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_repair_stale_xrdp_overrides.py
     ${CMAKE_SOURCE_DIR}/scripts/repair-stale-xrdp-overrides.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_test_doctor.py
@@ -117,6 +118,16 @@ add_test(NAME xrdp-stale-service-repair-unit
 set_tests_properties(xrdp-stale-service-repair-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
     TIMEOUT 10
+    LABELS "deploy;unit")
+
+# The complete normal bootstrap is exercised with fake sudo/systemctl/ss.
+# It cannot inspect or mutate real host services, even when run as root.
+add_test(NAME xrdp-one-command-bootstrap-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_one_command_bootstrap.py)
+set_tests_properties(xrdp-one-command-bootstrap-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 15
     LABELS "deploy;unit")
 
 add_test(NAME clipboard-runtime-prerequisite-unit
