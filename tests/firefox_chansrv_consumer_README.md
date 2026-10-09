@@ -330,3 +330,22 @@ and wall-clock proximity alone is not sufficient proof of requestor identity.
 
 Do not switch the host checkout, change services, restart xrdp, or run a
 live paste as part of the offline PR validation.
+
+
+### TARGETS offer-level evidence (October 9)
+
+The metadata analyzer now includes `targets_responses` for a single CLIPRDR
+format-list generation. Each response records only requestor XID, advertised
+X11 atom names, the logged truncation flag, and result status. The aggregate
+`png_target_advertised` is **true** only when a successful TARGETS response
+actually contains `image/png`; **false** only when successful, complete
+responses prove it absent; otherwise it is **null** (unknown).
+
+An image-bearing CLIPRDR format ID does not by itself prove `image/png`
+was offered to Firefox. Conversely, an `image/png` TARGETS entry does not
+prove Firefox requested or received PNG bytes. These records must still be
+correlated with one authorized trusted paste and browser requestor; no X11
+target name, ID, or wall-clock proximity establishes browser identity alone.
+
+The reporting is metadata-only: no clipboard data, PNG bytes, hashes, or
+screenshot pixels are read or returned by this parser.
