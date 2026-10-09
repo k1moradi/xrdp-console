@@ -3410,6 +3410,7 @@ ModuleContext::check_h264_gfx() noexcept
     using xrdp_console::rdp::buildGfxSolidFillCommand;
     using xrdp_console::rdp::buildGfxSurfaceToSurfaceCommand;
     using xrdp_console::rdp::copyNv12EncodeRectangles;
+    using xrdp_console::rdp::localBgraCaptureRectangle;
     using xrdp_console::rdp::ScaledNv12UpdateResult;
     using xrdp_console::rdp::updateNv12Rectangle_709FullRange;
     using xrdp_console::rdp::updateNv12RectangleFromBgraRegion_709FullRange;
