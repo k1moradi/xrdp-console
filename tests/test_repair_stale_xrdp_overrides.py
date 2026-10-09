@@ -91,10 +91,13 @@ class RepairTest(unittest.TestCase):
         with self.assertRaisesRegex(repair.RepairError, 'does not match'):
             self.plan()
 
-    def test_reject_competing_dropins(self):
-        (self.override['xrdp.service'].parent / 'other.conf').write_text('[Service]\n')
-        with self.assertRaisesRegex(repair.RepairError, 'Unexpected other'):
-            self.plan()
+    def test_unrelated_environment_dropin_is_preserved(self):
+        extra = self.override['xrdp.service'].parent / 'console-environment.conf'
+        extra.write_text('[Service]\nEnvironment=DISPLAY=:0\n')
+        plan = self.plan()
+        repair.apply(plan, systemctl=self.fake_systemctl, backup_root=self.root / 'backups')
+        self.assertTrue(extra.is_file())
+        self.assertIn('Environment=DISPLAY=:0', extra.read_text())
 
     def test_reject_unexpected_base_path(self):
         (self.systemd / 'xrdp.service').write_text('[Service]\nExecStart=/usr/bin/xrdp\n')
