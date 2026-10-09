@@ -76,6 +76,32 @@ class DoctorTests(unittest.TestCase):
     def test_unrelated_ctest_failures_not_misclassified(self):
         d = doctor.summarize_ctest_log('67 - unrelated-smoke (Failed)\nAssertionError: wrong pixels')
         self.assertFalse(d['shared_missing_socketdir_pattern'])
+    def test_stale_systemd_override_identified(self):
+        with tempfile.TemporaryDirectory() as td:
+            missing = Path(td) / 'deleted-build' / 'sbin' / 'xrdp-sesman'
+            line = '{ path=' + str(missing) + ' ; argv[]=' + str(missing) + ' --nodaemon ; }'
+            result = doctor.inspect_systemd_exec_value(line)
+            self.assertEqual(result['status'], 'missing-executable')
+            self.assertEqual(result['path'], str(missing))
+    def test_existing_systemd_override_is_not_called_missing(self):
+        with tempfile.TemporaryDirectory() as td:
+            binary = Path(td) / 'xrdp-sesman'
+            binary.write_text('#!/bin/sh\\nexit 0\\n', encoding='utf-8')
+            binary.chmod(0o700)
+            result = doctor.inspect_systemd_exec_value(
+                '{ path=' + str(binary) + ' ; argv[]=' + str(binary) + ' ; }')
+            self.assertEqual(result['status'], 'executable-present')
+    def test_malformed_systemd_exec_fails_unknown(self):
+        self.assertEqual(doctor.inspect_systemd_exec_value(
+            '{ argv[]=/wrong ; }')['status'], 'unknown')
+    def test_nonexecutable_systemd_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            binary = Path(td) / 'not-executable'
+            binary.write_text('unexecutable', encoding='utf-8')
+            binary.chmod(0o600)
+            result = doctor.inspect_systemd_exec_value(
+                '{ path=' + str(binary) + ' ; }')
+            self.assertEqual(result['status'], 'not-executable')
     def test_no_implicit_repairs(self):
         with tempfile.TemporaryDirectory() as td:
             rc = doctor.main(['--socket-root', str(Path(td) / 'nonexistent')])
