@@ -3383,7 +3383,8 @@ def assert_clipboard_delayed_png_firefox_session(
         expected_png_bytes: int, expected_png_sha256: str) -> None:
     """Trusted Firefox paste over the existing synthetic CLIPRDR peer."""
     from firefox_chansrv_consumer import (
-        TestInconclusive, correlate_metadata, run_firefox_chansrv_timing)
+        TestInconclusive, correlate_metadata, run_firefox_chansrv_timing,
+        expected_synthetic_png_dimensions)
     delay_ms = int(os.environ["XRDP_CONSOLE_TEST_DELAY_PNG_RESPONSE_MS"])
     initial = wait_for_chansrv_pattern(
         chansrv_logs,
@@ -3433,6 +3434,7 @@ def assert_clipboard_delayed_png_firefox_session(
             root=root, firefox=Path(firefox), geckodriver=Path(geckodriver),
             expected_size=expected_png_bytes,
             expected_sha256=expected_png_sha256,
+            expected_dimensions=expected_synthetic_png_dimensions(expected_png_sha256),
             expected_generation=generation,
             after_receipt=wait_for_delivery)
     except TestInconclusive as exc:
@@ -7673,6 +7675,12 @@ def main() -> int:
                 clipboard_cold_png_waiters_mode or
                 clipboard_png_malformed_response_mode or
                 clipboard_data_response_oracle_mode) else None)
+        if firefox_delayed_png_consumer:
+            synthetic_source = os.environ.get("XRDP_CONSOLE_TEST_BROWSER_PNG_FIXTURE")
+            if synthetic_source:
+                from firefox_chansrv_consumer import install_approved_synthetic_png
+                named_png_fixture_info = install_approved_synthetic_png(
+                    Path(synthetic_source), named_png_fixture_path)
         log_path = root / "xrdp.log"
         stdout_path = root / "xrdp-stdout.log"
         client_log_path = root / "freerdp.log"
