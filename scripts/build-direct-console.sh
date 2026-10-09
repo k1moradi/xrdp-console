@@ -6,6 +6,16 @@ set -eu
 
 workspace_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build_root=${XRDP_CONSOLE_BUILD_DIR:-$workspace_root/build-direct-console}
+case "$build_root" in
+    /*) ;;
+    *) build_root=$workspace_root/$build_root ;;
+esac
+# Keep generated dependency scratch files and Python TemporaryDirectory
+# instances beneath the selected build root, never /tmp or /var/tmp.
+test_scratch_root=$build_root/test-artifacts/tmp
+mkdir -p "$test_scratch_root"
+TMPDIR=$test_scratch_root
+export TMPDIR
 # Low-memory-safe parallel compilation. Change with XRDP_CONSOLE_BUILD_JOBS.
 # This governs both the top-level Ninja build and the pinned xrdp Make build.
 build_jobs=${XRDP_CONSOLE_BUILD_JOBS:-2}
