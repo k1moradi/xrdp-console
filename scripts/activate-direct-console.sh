@@ -30,9 +30,9 @@ Client scaled-output, scroll-reuse, and verified bitmap caching are
 requested by default, subject to negotiated capabilities and per-path safety checks.
 Cache observation is diagnostic-only and opt-in. Set an individual
 XRDP_CONSOLE_CLIENT_* variable to exactly 0 in the xrdp service environment
-to disable that path. A rollback backup is disabled by default; pass --backup
-to save the current configuration, binaries, service overrides, and service
-state for explicit rollback.
+to disable that path. A rollback backup is created automatically before production changes,
+preserving the previous configuration, binaries, service overrides, and
+service state. --backup is retained for backwards-compatible invocation.
 EOF
 }
 
@@ -539,7 +539,10 @@ rollback()
 }
 
 preflight_only=0
-backup_enabled=0
+# A rollback snapshot is mandatory for every production activation.
+# --backup remains an explicit compatible spelling.
+backup_enabled=1
+backup_flag_seen=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --help|-h)
@@ -554,19 +557,19 @@ while [ "$#" -gt 0 ]; do
         --prepare-test-runtime)
             [ "$#" -eq 1 ] &&
             [ "$preflight_only" -eq 0 ] &&
-            [ "$backup_enabled" -eq 0 ] ||
+            [ "$backup_flag_seen" -eq 0 ] ||
                 { usage >&2; exit 2; }
             prepare_test_runtime
             exit $?
             ;;
         --backup)
-            [ "$backup_enabled" -eq 0 ] || { usage >&2; exit 2; }
-            backup_enabled=1
+            [ "$backup_flag_seen" -eq 0 ] || { usage >&2; exit 2; }
+            backup_flag_seen=1
             ;;
         --rollback)
             [ "$#" -eq 2 ] &&
                 [ "$preflight_only" -eq 0 ] &&
-                [ "$backup_enabled" -eq 0 ] || { usage >&2; exit 2; }
+                [ "$backup_flag_seen" -eq 0 ] || { usage >&2; exit 2; }
             [ "$(id -u)" -eq 0 ] ||
                 fail "run rollback as root (for example, with sudo)"
             rollback "$2"
@@ -713,7 +716,7 @@ if [ "$preflight_only" -eq 1 ]; then
     if [ "$backup_enabled" -eq 1 ]; then
         echo "Rollback backup: requested; it will be created only if activation proceeds."
     else
-        echo "Rollback backup: disabled (default); use --backup to save the current state."
+        echo "Rollback backup: automatically enabled for activation."
     fi
     exit 0
 fi
@@ -753,7 +756,7 @@ if [ "$backup_enabled" -eq 1 ]; then
     fi
     echo "Rollback backup: $backup_directory"
 else
-    echo "Rollback backup disabled; activation failures will not be automatically rolled back."
+    echo "Rollback backup is required for this activation."
 fi
 
 activation_finalized=0
@@ -1008,6 +1011,6 @@ echo "No client capabilities are forced or advertised by this setting; set an in
 if [ "$backup_enabled" -eq 1 ]; then
     echo "Rollback: sudo $0 --rollback $backup_directory"
 else
-    echo "No rollback backup was created (default); pass --backup on activation to enable rollback."
+    echo "No rollback backup was created; activation must not have proceeded."
 fi
 systemctl --no-pager --full status xrdp | sed -n '1,18p'
