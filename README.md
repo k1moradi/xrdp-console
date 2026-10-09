@@ -314,6 +314,30 @@ The custom executable must pass the same `/buildconfig` checks. A missing or
 incapable H.264 client is a configuration/build failure; the current canonical
 workflow is not supposed to silently skip the H.264 loader requirement.
 
+### Stale systemd ExecStart from a deleted scratch build
+
+A service override under
+`/etc/systemd/system/xrdp-sesman.service.d/upstream-local.conf` can
+supersede the base `ExecStart` and point to a deleted temporary build. This
+results in `203/EXEC`, prevents sesman from starting, and can cause every
+clipboard loader test to fail before reaching its assertions.
+
+The read-only clipboard runtime doctor now reports a missing configured
+`xrdp-sesman.service` executable rather than only the absent socketdir.
+
+**Never activate from `/tmp` or `/var/tmp`**. Activation now rejects
+either the build directory or a custom xrdp install prefix resolving into
+those temporary trees, *before* changing any files or service state. The
+rollback option remains available independently.
+
+For a stale service override, inspect `systemctl cat xrdp-sesman.service`,
+`systemctl show -p ExecStart --value xrdp.service`, and the executable
+permissions before selecting a repair. On a host with active RDP sessions,
+do not restart services without scheduling an interruption. Any corrective
+edit to `/etc/systemd/system` should retain the old drop-in as a reversible
+backup, and the repaired executable should reside in a persistent location.
+The build-and-test process does not autonomously alter the service.
+
 ## Before activation
 
 Activation modifies the live xrdp configuration and service state. Build and
