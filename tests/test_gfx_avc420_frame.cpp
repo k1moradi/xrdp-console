@@ -287,10 +287,12 @@ bool cropped_identity_matches_full_frame_reference()
 {
     constexpr PixelSize frameSize{128, 128};
     constexpr Rectangle captureBounds{64, 32, 64, 64};
-    constexpr std::array<Rectangle, 3> tiles{{
+    constexpr std::array<Rectangle, 5> tiles{{
         {64, 32, 16, 16},  // Top-left of the cropped capture.
         {80, 48, 16, 16},  // Interior; absolute origin is not view-local.
         {112, 80, 16, 16}, // Bottom-right edge of the cropped capture.
+        {112, 80, 16, 8},  // First bounded row chunk of the same tile.
+        {112, 88, 16, 8},  // Second row chunk ends at the capture boundary.
     }};
     std::vector<std::uint8_t> fullBgra(128U * 128U * 4U);
     std::vector<std::uint8_t> croppedBgra(64U * 64U * 4U);
