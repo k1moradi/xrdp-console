@@ -317,3 +317,35 @@ explicit instruction wins for that task.
 If a requested action is not covered by either this file or the task-specific
 authorization, do not broaden scope. Stop and report what authorization or
 evidence is missing.
+
+## New workspace hygiene rule (2026-10-09)
+
+Preserve all existing safety, provenance and clipboard-correlation rules above.
+
+- **New task worktrees, logs, build intermediates, downloaded source, test
+  profiles and metadata belong under a named `build/<task-slug>/` directory
+  within this checkout**. For the canonical candidate, use
+  `build-direct-console/test-artifacts/<task-slug>/`.
+- Never place **new** project scratch or handoff files in `/tmp` or
+  `/var/tmp`. Historical paths recorded earlier in this document remain
+  historical evidence only, not templates for future experiments.
+- Set `TMPDIR` to a subdirectory of the named build workspace when running
+  Python/Xvfb/Firefox test helpers.
+- Reusable investigation tools belong in `tools/diagnostics/`, build and
+  activation entry points in `scripts/`, test assertions and deterministic
+  synthetic fixtures in `tests/`, production runtime code in `src/` and
+  `include/`, and engineering records in `docs/`.
+- No unreviewable ZIP-only handoffs. Push text source to a review branch,
+  provide exact commits, and submit a draft GitHub PR. Do not merge without
+  the required acceptance checks.
+- Work in small independent steps: inspect a single boundary, make one
+  focused change, run its targeted tests, record the outcome, then proceed.
+  Do not share or overwrite another agent's mutable worktree.
+- Prefer the **screenshot paste** investigation and its enabling build/test
+  prerequisites over broad non-blocking refactors.
+- Compile in parallel with bounded jobs using `XRDP_CONSOLE_BUILD_JOBS`
+  (default 2). Preserve serial execution of shared-state clipboard CTests.
+- If the chansrv test per-user socketdir is missing, use the read-only
+  `tools/diagnostics/xrdp_clipboard_test_doctor.py` and report the blocker.
+  Never run privileged directory repair or restart production sesman on your
+  own authority.

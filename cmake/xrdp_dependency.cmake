@@ -92,6 +92,15 @@ set(XRDP_CONSOLE_XRDP_LDFLAGS "" CACHE STRING
 set(XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH "$ENV{PKG_CONFIG_PATH}" CACHE STRING
     "PKG_CONFIG_PATH used for the xrdp dependency build")
 
+# Keep a small, explicit parallel Make build; only the upstream xrdp compilation
+# uses this value. Upstream tests and installs remain sequential.
+set(XRDP_CONSOLE_XRDP_BUILD_JOBS "2" CACHE STRING
+    "Concurrent compilation jobs for the pinned xrdp dependency (1..64)")
+if(NOT XRDP_CONSOLE_XRDP_BUILD_JOBS MATCHES "^[1-9][0-9]*$" OR
+   XRDP_CONSOLE_XRDP_BUILD_JOBS GREATER 64)
+    message(FATAL_ERROR "XRDP_CONSOLE_XRDP_BUILD_JOBS must be an integer 1..64")
+endif()
+
 set(_xrdp_configure_args
     "<SOURCE_DIR>/configure"
     "--prefix=<INSTALL_DIR>"
@@ -195,7 +204,7 @@ ExternalProject_Add(xrdp_upstream
         "LDFLAGS=${XRDP_CONSOLE_XRDP_LDFLAGS}"
         "PKG_CONFIG_PATH=${XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH}"
         ${_xrdp_configure_args}
-    BUILD_COMMAND "${XRDP_CONSOLE_MAKE_PROGRAM}" -j1 "${_xrdp_make_flags}"
+    BUILD_COMMAND "${XRDP_CONSOLE_MAKE_PROGRAM}" "-j${XRDP_CONSOLE_XRDP_BUILD_JOBS}" "${_xrdp_make_flags}"
     ${_xrdp_test_arguments}
     # Libtool reports "warning: relinking" for installed .la targets whose
     # dependency_libs still point into the out-of-tree build directory. The
@@ -220,7 +229,7 @@ set_target_properties(xrdp-rfxencode PROPERTIES
     IMPORTED_LOCATION "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/librfxencode.a")
 add_dependencies(xrdp-rfxencode xrdp_upstream)
 
-message(STATUS "xrdp ${XRDP_CONSOLE_XRDP_VERSION} will build natively with: ${XRDP_CONSOLE_XRDP_CFLAGS}")
+message(STATUS "xrdp ${XRDP_CONSOLE_XRDP_VERSION} will build natively with: ${XRDP_CONSOLE_XRDP_CFLAGS} (Make -j${XRDP_CONSOLE_XRDP_BUILD_JOBS})")
 message(STATUS "xrdp patchset hash: ${_xrdp_patchset_hash}")
 message(STATUS "xrdp generated state: ${_xrdp_state_hash}")
 message(STATUS "xrdp source: ${XRDP_CONSOLE_XRDP_SOURCE_DIR}")

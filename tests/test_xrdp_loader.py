@@ -7574,7 +7574,14 @@ def main() -> int:
     if overlap_client is not None and not overlap_client.is_file():
         raise AssertionError(f"missing FreeRDP overlap test client: {overlap_client}")
 
-    with tempfile.TemporaryDirectory(prefix="xrdp-console-loader-") as temp:
+    # Store test subprocesses and transient logs in the configured build tree,
+    # not in /tmp or /var/tmp. The normal context manager still cleans up.
+    build_test_root = install_root.parent.parent / "test-artifacts" / "tmp"
+    runtime_root = Path(os.environ.get(
+        "XRDP_CONSOLE_TEST_RUNTIME_ROOT", str(build_test_root)))
+    runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.TemporaryDirectory(prefix="xrdp-console-loader-",
+                                     dir=runtime_root) as temp:
         root = Path(temp)
         named_png_fixture_path = root / "peer-named.png"
         named_png_fixture_info = (

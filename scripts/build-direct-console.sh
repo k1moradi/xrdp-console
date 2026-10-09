@@ -6,6 +6,47 @@ set -eu
 
 workspace_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 build_root=${XRDP_CONSOLE_BUILD_DIR:-$workspace_root/build-direct-console}
+case "$build_root" in
+    /*) ;;
+    *) build_root=$workspace_root/$build_root ;;
+esac
+# Keep generated dependency scratch files and Python TemporaryDirectory
+# instances beneath the selected build root, never /tmp or /var/tmp.
+if [ -f "$build_root/CMakeCache.txt" ]; then
+    configured_source=$(sed -n \
+        's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' \
+        "$build_root/CMakeCache.txt")
+    if [ -n "$configured_source" ] &&
+       [ "$configured_source" != "$workspace_root" ]; then
+        echo "Build directory belongs to a different checkout: $configured_source" >&2
+        echo "Choose a fresh directory with XRDP_CONSOLE_BUILD_DIR; existing files were left untouched." >&2
+        exit 1
+    fi
+
+    if ! grep -Fq 'CMAKE_GENERATOR:INTERNAL=Ninja' "$build_root/CMakeCache.txt"; then
+        echo "$build_root already uses a non-Ninja CMake generator" >&2
+        echo "Choose another XRDP_CONSOLE_BUILD_DIR; existing files were left untouched." >&2
+        exit 1
+    fi
+fi
+
+test_scratch_root=$build_root/test-artifacts/tmp
+mkdir -p "$test_scratch_root"
+TMPDIR=$test_scratch_root
+export TMPDIR
+# Low-memory-safe parallel compilation. Change with XRDP_CONSOLE_BUILD_JOBS.
+# This governs both the top-level Ninja build and the pinned xrdp Make build.
+build_jobs=${XRDP_CONSOLE_BUILD_JOBS:-2}
+xrdp_make_jobs=${XRDP_CONSOLE_XRDP_BUILD_JOBS:-$build_jobs}
+for jobs in "$build_jobs" "$xrdp_make_jobs"; do
+    case "$jobs" in
+        ""|*[!0-9]*) echo "Build job counts must be positive integers" >&2; exit 1 ;;
+    esac
+    if [ "$jobs" -lt 1 ] || [ "$jobs" -gt 64 ]; then
+        echo "Build job counts must be between 1 and 64" >&2
+        exit 1
+    fi
+done
 xrdp_install_root=${XRDP_CONSOLE_XRDP_INSTALL_DIR:-$build_root/_deps/xrdp-install}
 freerdp_client=${XRDP_CONSOLE_FREERDP_EXECUTABLE:-}
 freerdp_build_root=${XRDP_CONSOLE_FREERDP_BUILD_DIR:-$workspace_root/build-test-freerdp}
@@ -25,7 +66,8 @@ if [ -z "$freerdp_client" ]; then
     done
 
     if [ -z "$freerdp_client" ]; then
-        "$workspace_root/scripts/build-test-freerdp.sh"
+        XRDP_CONSOLE_FREERDP_BUILD_JOBS=${XRDP_CONSOLE_FREERDP_BUILD_JOBS:-$build_jobs} \
+            "$workspace_root/scripts/build-test-freerdp.sh"
         for candidate in \
             "$freerdp_build_root/install/bin/xfreerdp3" \
             "$freerdp_build_root/install/bin/xfreerdp"; do
@@ -72,35 +114,23 @@ for required in cmake ninja ctest; do
     fi
 done
 
-if [ -f "$build_root/CMakeCache.txt" ]; then
-    configured_source=$(sed -n \
-        's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' \
-        "$build_root/CMakeCache.txt")
-    if [ -n "$configured_source" ] &&
-       [ "$configured_source" != "$workspace_root" ]; then
-        echo "Build directory belongs to a different checkout: $configured_source" >&2
-        echo "Choose a fresh directory with XRDP_CONSOLE_BUILD_DIR; existing files were left untouched." >&2
-        exit 1
-    fi
-
-    if ! grep -Fq 'CMAKE_GENERATOR:INTERNAL=Ninja' "$build_root/CMakeCache.txt"; then
-        echo "$build_root already uses a non-Ninja CMake generator" >&2
-        echo "Choose another XRDP_CONSOLE_BUILD_DIR; existing files were left untouched." >&2
-        exit 1
-    fi
-fi
-
 cmake -S "$workspace_root" -B "$build_root" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DXRDP_CONSOLE_NATIVE=ON \
     -DXRDP_CONSOLE_BUILD_XRDP=ON \
     "-DXRDP_CONSOLE_XRDP_INSTALL_DIR=$xrdp_install_root" \
-    "-DXRDP_CONSOLE_FREERDP_EXECUTABLE=$freerdp_client"
+    "-DXRDP_CONSOLE_FREERDP_EXECUTABLE=$freerdp_client" \
+    "-DXRDP_CONSOLE_XRDP_BUILD_JOBS=$xrdp_make_jobs"
 
-# The pinned xrdp build is serialized to stay within the target laptop's
-# memory budget. First-party targets are also built serially for predictability.
-cmake --build "$build_root" --parallel 1
-ctest --test-dir "$build_root" --output-on-failure
+# Only compilation is parallelized. Clipboard integration CTests intentionally
+# remain serial because they share the xrdp per-user chansrv socket namespace.
+printf 'Build jobs: Ninja=%s xrdp Make=%s\n' "$build_jobs" "$xrdp_make_jobs"
+cmake --build "$build_root" --parallel "$build_jobs"
+# One absent sesman-created socketdir otherwise causes 35 repeated clipboard
+# startup failures. Fail before CTest with an actionable, read-only diagnosis;
+# never skip tests or silently create a privileged runtime directory.
+python3 "$workspace_root/tools/diagnostics/xrdp_clipboard_test_doctor.py"
+ctest --test-dir "$build_root" --output-on-failure --parallel 1
 
 printf '%s\n' \
     "Native direct-X11 build and tests passed." \
