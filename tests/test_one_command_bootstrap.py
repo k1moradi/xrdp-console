@@ -14,7 +14,10 @@ BUILDER = ROOT / "scripts" / "build-direct-console.sh"
 
 class BootstrapTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory(prefix="xrdp-bootstrap-unit-")
+        scratch = ROOT / "build" / "unit-one-command-bootstrap"
+        scratch.mkdir(parents=True, exist_ok=True)
+        self.tmp = tempfile.TemporaryDirectory(prefix="xrdp-bootstrap-unit-",
+                                               dir=scratch)
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.bin = self.root / "fake-bin"
