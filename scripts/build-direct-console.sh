@@ -12,6 +12,24 @@ case "$build_root" in
 esac
 # Keep generated dependency scratch files and Python TemporaryDirectory
 # instances beneath the selected build root, never /tmp or /var/tmp.
+if [ -f "$build_root/CMakeCache.txt" ]; then
+    configured_source=$(sed -n \
+        's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' \
+        "$build_root/CMakeCache.txt")
+    if [ -n "$configured_source" ] &&
+       [ "$configured_source" != "$workspace_root" ]; then
+        echo "Build directory belongs to a different checkout: $configured_source" >&2
+        echo "Choose a fresh directory with XRDP_CONSOLE_BUILD_DIR; existing files were left untouched." >&2
+        exit 1
+    fi
+
+    if ! grep -Fq 'CMAKE_GENERATOR:INTERNAL=Ninja' "$build_root/CMakeCache.txt"; then
+        echo "$build_root already uses a non-Ninja CMake generator" >&2
+        echo "Choose another XRDP_CONSOLE_BUILD_DIR; existing files were left untouched." >&2
+        exit 1
+    fi
+fi
+
 test_scratch_root=$build_root/test-artifacts/tmp
 mkdir -p "$test_scratch_root"
 TMPDIR=$test_scratch_root
@@ -95,24 +113,6 @@ for required in cmake ninja ctest; do
         exit 1
     fi
 done
-
-if [ -f "$build_root/CMakeCache.txt" ]; then
-    configured_source=$(sed -n \
-        's/^CMAKE_HOME_DIRECTORY:INTERNAL=//p' \
-        "$build_root/CMakeCache.txt")
-    if [ -n "$configured_source" ] &&
-       [ "$configured_source" != "$workspace_root" ]; then
-        echo "Build directory belongs to a different checkout: $configured_source" >&2
-        echo "Choose a fresh directory with XRDP_CONSOLE_BUILD_DIR; existing files were left untouched." >&2
-        exit 1
-    fi
-
-    if ! grep -Fq 'CMAKE_GENERATOR:INTERNAL=Ninja' "$build_root/CMakeCache.txt"; then
-        echo "$build_root already uses a non-Ninja CMake generator" >&2
-        echo "Choose another XRDP_CONSOLE_BUILD_DIR; existing files were left untouched." >&2
-        exit 1
-    fi
-fi
 
 cmake -S "$workspace_root" -B "$build_root" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
