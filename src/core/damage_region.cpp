@@ -78,24 +78,43 @@ covers_entire_screen(std::span<const Rectangle> rectangles,
             continue;
         }
         // Every rectangle either covers this complete horizontal band or
-        // misses it: its vertical edges are among the sorted cuts.
-        WideCoordinate coveredRight = 0;
-        while (coveredRight < bounds.widthPixels)
+        // misses it: its vertical edges are among the sorted cuts. Sort its
+        // at-most-32 horizontal spans once, instead of repeatedly scanning
+        // every rectangle for each advance across the band.
+        struct Span final
         {
-            WideCoordinate nextRight = coveredRight;
-            for (const Rectangle &rectangle : rectangles)
+            WideCoordinate left{};
+            WideCoordinate right{};
+        };
+        std::array<Span, DamageRegion::kMaxRectangles> spans{};
+        std::size_t spanCount = 0;
+        for (const Rectangle &rectangle : rectangles)
+        {
+            if (rectangle.y <= top && bottom_edge(rectangle) >= bottom)
             {
-                if (rectangle.y <= top && bottom_edge(rectangle) >= bottom &&
-                    rectangle.x <= coveredRight)
-                {
-                    nextRight = std::max(nextRight, right_edge(rectangle));
-                }
+                spans[spanCount++] = {rectangle.x, right_edge(rectangle)};
             }
-            if (nextRight == coveredRight)
+        }
+        std::sort(spans.begin(), spans.begin() + spanCount,
+                  [](const Span &left, const Span &right) {
+                      return left.left < right.left;
+                  });
+        WideCoordinate coveredRight = 0;
+        for (std::size_t index = 0; index < spanCount; ++index)
+        {
+            if (spans[index].left > coveredRight)
             {
-                return false; // An uncovered horizontal interval remains.
+                return false;
             }
-            coveredRight = nextRight;
+            coveredRight = std::max(coveredRight, spans[index].right);
+            if (coveredRight >= bounds.widthPixels)
+            {
+                break;
+            }
+        }
+        if (coveredRight < bounds.widthPixels)
+        {
+            return false;
         }
     }
     return true;
