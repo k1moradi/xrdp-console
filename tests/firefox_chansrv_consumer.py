@@ -282,8 +282,50 @@ def send_trusted_paste(driver: WebDriver, page_url: str,
             "host_probe_elapsed_ms": round((time.monotonic_ns() - started) / 1e6, 3)}
 
 
+# Only these deterministic synthetic fixtures may replace the loader's PNG.
+# Never accept an arbitrary file path or a user clipboard export.
+APPROVED_SYNTHETIC_PNGS = {
+    "c6635535e3669a731add63b3c4b89a0c873e0c7c88412f6ea7b06423eacfee7c": (1049471, 512, 512),
+    "d9b7864e95e934ee999ee333ce9bf86adcf823aaca271634bafb8d8b9d3f6c22": (2401598, 1000, 800),
+    "cca28eec0cce17ae047221aa3177ed1765ad6d5884b7dc60df2ce3a3ff3a7cf4": (2286451, 1000, 760),
+    "ba8246c60e667f7cf553d6369887e7c976d58529faad60977f6681635d07e106": (3241953, 1200, 900),
+}
+
+
+def install_approved_synthetic_png(source: Path, destination: Path) -> tuple[int, str]:
+    """Copy only a known synthetic fixture into the already private loader root.
+
+    This function never accepts the real Mac screenshot: only the four published
+    synthetic byte-for-byte identities. The private target is created afresh.
+    """
+    if source.resolve() == destination.resolve():
+        raise TestInconclusive("Source and target of synthetic fixture coincide")
+    if not source.is_file() or source.stat().st_size > 8 * 1024 * 1024:
+        raise TestInconclusive("Synthetic fixture absent or exceeds test size limit")
+    payload = source.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    expected = APPROVED_SYNTHETIC_PNGS.get(digest)
+    if expected is None or len(payload) != expected[0]:
+        raise TestInconclusive("Synthetic fixture not on digest allowlist")
+    if payload[:8] != b"\x89PNG\r\n\x1a\n":
+        raise TestInconclusive("Approved PNG signature mismatch")
+    import struct
+    if struct.unpack(">II", payload[16:24]) != expected[1:]:
+        raise TestInconclusive("Approved PNG dimensions mismatch")
+    destination.write_bytes(payload)
+    return len(payload), digest
+
+
+def expected_synthetic_png_dimensions(digest: str) -> tuple[int, int]:
+    verified = APPROVED_SYNTHETIC_PNGS.get(digest)
+    if verified is None:
+        raise TestInconclusive("Unrecognized synthetic PNG identity")
+    return verified[1], verified[2]
+
+
 def classify_receipt(report: dict, expected_size: int,
-                     expected_sha256: str) -> str:
+                     expected_sha256: str,
+                     expected_dimensions: tuple[int, int] | None = None) -> str:
     if report.get("phase") != "complete":
         return "NO_COMPLETED_TRUSTED_PASTE"
     if report.get("trusted") is not True or report.get("source") != "paste":
@@ -311,6 +353,13 @@ def classify_receipt(report: dict, expected_size: int,
         return "PNG_DECODE_API_UNAVAILABLE"
     if report.get("decodeError") is not None:
         return "PNG_DECODE_FAILURE"
+    dimensions = (report.get("decodedWidth"), report.get("decodedHeight"))
+    header_dimensions = (report.get("ihdrWidth"), report.get("ihdrHeight"))
+    if (any(type(x) is not int or x < 1 or x > 16384 for x in dimensions) or
+            dimensions != header_dimensions):
+        return "PNG_DIMENSION_MISMATCH"
+    if expected_dimensions is not None and dimensions != expected_dimensions:
+        return "PNG_UNEXPECTED_DIMENSIONS"
     return "READABLE_PNG_FILE"
 
 
@@ -372,6 +421,7 @@ def run_firefox_chansrv_timing(*, source_display: str,
                                xauthority: Path, xvfb_pid: int,
                                root: Path, firefox: Path, geckodriver: Path,
                                expected_size: int, expected_sha256: str,
+                               expected_dimensions: tuple[int, int] | None = None,
                                pref_ms: int = 1000,
                                expected_generation: int | None = None,
                                after_receipt: Any = None) -> dict:
@@ -414,7 +464,8 @@ def run_firefox_chansrv_timing(*, source_display: str,
                 receipt["firefox_version"] = caps.get("browserVersion")
                 receipt["expected_generation"] = expected_generation
                 receipt["classification"] = classify_receipt(
-                    receipt, expected_size, expected_sha256)
+                    receipt, expected_size, expected_sha256,
+                    expected_dimensions=expected_dimensions)
                 if after_receipt is not None:
                     # Keep Firefox alive while chansrv finishes outstanding
                     # INCR transfers, even when getAsFile was synchronously null.
