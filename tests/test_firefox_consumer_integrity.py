@@ -73,6 +73,106 @@ class ReceiptTests(unittest.TestCase):
         self.assertIsNone(result["x11_notify_ns"])
         self.assertFalse(result["x11_timing_correlated"])
 
+    def test_targets_only_never_invents_png_transfer_timestamps(self):
+        # Real post-boot evidence: successful TARGETS for an image-bearing
+        # generation does not establish a PNG SelectionRequest or type-4/5.
+        chansrv = "\n".join([
+            "event=x11-request target=image/png requestor=0xA1 property=0xF1 generation=4",
+            "event=request format_id=40005 target=image/png attempt=1 mono_ns=100",
+            "event=response status=0x1 bytes=1024 format_id=40005 mono_ns=200",
+            "event=format-list stored_formats=3 png_format_id=40005 generation=5",
+            "event=x11-request target=TARGETS requestor=0xB2 property=0xF2 generation=5",
+            "event=targets-response-issued requestor=0xB2 generation=5 target_count=7 result=0",
+            "event=response status=0x1 bytes=0 format_id=40005 mono_ns=900",
+        ])
+        result = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "TRUSTED_SHORTCUT_NO_PASTE_EVENT")
+        self.assertEqual(result["targets_request_count"], 1)
+        self.assertEqual(result["targets_response_count"], 1)
+        self.assertEqual(result["x11_request_count"], 0)
+        self.assertIsNone(result["format_data_request_ns"])
+        self.assertIsNone(result["response_complete_ns"])
+        self.assertFalse(result["format_data_timing_correlated"])
+        self.assertIsNone(result["x11_notify_ns"])
+
+    def test_png_timing_requires_same_generation_x11_anchor(self):
+        chansrv = "\n".join([
+            "event=request format_id=40005 target=image/png attempt=1 mono_ns=75",
+            "event=response status=0x1 bytes=5 format_id=40005 mono_ns=100",
+            "event=x11-request target=image/png requestor=0xA1 property=0xF1 generation=5",
+            "event=request format_id=40005 target=image/png attempt=1 mono_ns=200",
+            "event=response status=0x1 bytes=5 format_id=40005 mono_ns=300",
+            "event=format-list stored_formats=3 png_format_id=40005 generation=6",
+            "event=request format_id=40005 target=image/png attempt=1 mono_ns=400",
+            "event=response status=0x1 bytes=5 format_id=40005 mono_ns=500",
+        ])
+        result = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(result["format_data_request_ns"], 200)
+        self.assertEqual(result["response_complete_ns"], 300)
+        self.assertTrue(result["format_data_timing_correlated"])
+
+    def test_png_timing_refuses_response_after_generation_change(self):
+        chansrv = "\n".join([
+            "event=x11-request target=image/png requestor=0xA1 property=0xF1 generation=5",
+            "event=request format_id=40005 target=image/png attempt=1 mono_ns=200",
+            "event=format-list stored_formats=3 png_format_id=40005 generation=6",
+            "event=response status=0x1 bytes=5 format_id=40005 mono_ns=300",
+        ])
+        result = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(result["format_data_request_ns"], 200)
+        self.assertIsNone(result["response_complete_ns"])
+        self.assertFalse(result["format_data_timing_correlated"])
+
+    def test_shortcut_without_paste_event_is_distinct(self):
+        report = {"phase": "no-complete-paste", "last_observed": {
+            "phase": "waiting", "observer": {
+                "trustedPasteShortcuts": 1, "pasteEvents": 0,
+                "trustedPasteEvents": 0, "editorFocused": True,
+                "documentHasFocus": True}}}
+        self.assertEqual(self.classify(report),
+                         "TRUSTED_SHORTCUT_NO_PASTE_EVENT")
+
+    def test_no_keyboard_shortcut_is_a_separate_inconclusive_stage(self):
+        report = {"phase": "no-complete-paste", "last_observed": {
+            "phase": "waiting", "observer": {
+                "trustedPasteShortcuts": 0, "pasteEvents": 0,
+                "trustedPasteEvents": 0, "editorFocused": False,
+                "documentHasFocus": False}}}
+        self.assertEqual(self.classify(report),
+                         "NO_TRUSTED_SHORTCUT_OBSERVED")
+
+    def test_pending_trusted_paste_is_not_reclassified_as_no_event(self):
+        report = {"phase": "no-complete-paste", "last_observed": {
+            "phase": "reading", "observer": {
+                "trustedPasteShortcuts": 1, "pasteEvents": 1,
+                "trustedPasteEvents": 1}}}
+        self.assertEqual(self.classify(report),
+                         "PASTE_EVENT_NOT_COMPLETED")
+
+    def test_untrusted_paste_is_not_taken_for_trusted_paste(self):
+        report = {"phase": "no-complete-paste", "last_observed": {
+            "phase": "reading", "observer": {
+                "trustedPasteShortcuts": 0, "pasteEvents": 1,
+                "trustedPasteEvents": 0}}}
+        self.assertEqual(self.classify(report),
+                         "UNTRUSTED_PASTE_EVENT_ONLY")
+
+    def test_missing_event_observation_remains_inconclusive(self):
+        report = {"phase": "no-complete-paste", "last_observed": {
+            "phase": "waiting"}}
+        self.assertEqual(self.classify(report),
+                         "NO_COMPLETED_TRUSTED_PASTE")
+
+    def test_bool_counters_are_not_accepted_as_event_counts(self):
+        report = {"phase": "no-complete-paste", "last_observed": {
+            "phase": "waiting", "observer": {
+                "trustedPasteShortcuts": True, "pasteEvents": False,
+                "trustedPasteEvents": False}}}
+        self.assertEqual(self.classify(report),
+                         "NO_COMPLETED_TRUSTED_PASTE")
+
     def test_full_acceptance(self):
         self.assertEqual(self.classify(self.good()),"READABLE_PNG_FILE")
 

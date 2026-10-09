@@ -17,6 +17,25 @@
   ]);
   let sequence = 0;
   let current = Object.freeze({phase: 'waiting'});
+  // Event-only metadata. No navigator.clipboard access, image bytes, key
+  // content, page text, or X11 requestor identity is captured here.
+  const observer = {trustedPasteShortcuts: 0, pasteEvents: 0,
+    trustedPasteEvents: 0, lastShortcutWallMs: null, lastPasteWallMs: null};
+  const editor = document.getElementById('editor');
+  function notePasteShortcut(event) {
+    if (event.isTrusted && (event.ctrlKey || event.metaKey) &&
+        (event.code === 'KeyV' ||
+         String(event.key || '').toLowerCase() === 'v')) {
+      observer.trustedPasteShortcuts++;
+      observer.lastShortcutWallMs = Date.now();
+    }
+  }
+  function getLastReport() {
+    return {...current, observer: {...observer,
+      editorFocused: document.activeElement === editor,
+      documentHasFocus: document.hasFocus(),
+      visibilityState: document.visibilityState}};
+  }
 
   function publish(report, id) {
     if (id != null && id !== sequence) return;
@@ -148,6 +167,9 @@
     publish({...report,phase:'complete'}, id);
   }
   function capturePaste(event) {
+    observer.pasteEvents++;
+    if (event.isTrusted) observer.trustedPasteEvents++;
+    observer.lastPasteWallMs = Date.now();
     // Synchronous getAsFile() in a genuine WebDriver/user paste event only.
     const items = Array.from(event.clipboardData?.items || []);
     const imageItems = items.filter(item => item.kind === 'file' && item.type === 'image/png');
@@ -180,7 +202,8 @@
     publish(meta,id);await inspect(file,meta,id);return current;
   }
   window.ClipboardImageReceipt = Object.freeze({fixtureSelfTest,
-    getLastReport: () => current});
+    getLastReport});
+  window.addEventListener('keydown',notePasteShortcut,true);
   window.addEventListener('paste',capturePaste,true);
   publish({phase:'waiting'});
 })();

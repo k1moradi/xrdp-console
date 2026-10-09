@@ -13,7 +13,6 @@ from pathlib import Path
 import random
 import struct
 import zlib
-from PIL import Image
 
 SIGNATURE = b'\x89PNG\r\n\x1a\n'
 BASELINE_HASH = 'd9b7864e95e934ee999ee333ce9bf86adcf823aaca271634bafb8d8b9d3f6c22'
@@ -75,6 +74,7 @@ def validate_png(data: bytes) -> dict:
     if not names or names[0] != 'IHDR' or names[-1] != 'IEND' or 'IDAT' not in names:
         raise ValueError('Missing PNG chunks')
     import io
+    from PIL import Image  # Only full decode needs this optional dependency.
     with Image.open(io.BytesIO(data)) as im:
         width, height, mode = im.width, im.height, im.mode
         if not 0 < width * height <= MAX_PIXELS:

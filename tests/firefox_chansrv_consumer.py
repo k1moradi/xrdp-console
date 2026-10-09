@@ -35,6 +35,9 @@ CAP_BYTES = 64 * 1024 * 1024
 IMAGE_REQUEST = re.compile(
     r"event=x11-request target=image/png requestor=(0x[0-9a-fA-F]+) "
     r"[^\n]*generation=(\d+)")
+TARGETS_REQUEST = re.compile(
+    r"event=x11-request target=TARGETS requestor=(0x[0-9a-fA-F]+) "
+    r"[^\n]*generation=(\d+)")
 
 
 class TestInconclusive(RuntimeError):
@@ -279,6 +282,7 @@ def send_trusted_paste(driver: WebDriver, page_url: str,
                 return result
         time.sleep(0.07)
     return {"phase": "no-complete-paste", "last_observed": last,
+            "observer": last.get("observer") if isinstance(last, dict) else None,
             "host_probe_elapsed_ms": round((time.monotonic_ns() - started) / 1e6, 3)}
 
 
@@ -327,6 +331,26 @@ def classify_receipt(report: dict, expected_size: int,
                      expected_sha256: str,
                      expected_dimensions: tuple[int, int] | None = None) -> str:
     if report.get("phase") != "complete":
+        if report.get("phase") == "no-complete-paste":
+            # An unanswered Ctrl+V is not equivalent to a Firefox paste
+            # event whose image File remained unavailable. Only the test
+            # page's own trusted-event observations support these stages.
+            last = report.get("last_observed")
+            observed = (last.get("observer") if isinstance(last, dict)
+                        else None)
+            if isinstance(observed, dict):
+                shortcuts = observed.get("trustedPasteShortcuts")
+                paste_events = observed.get("pasteEvents")
+                trusted_pastes = observed.get("trustedPasteEvents")
+                if (type(shortcuts) is int and type(paste_events) is int and
+                        type(trusted_pastes) is int):
+                    if paste_events > 0 and trusted_pastes == 0:
+                        return "UNTRUSTED_PASTE_EVENT_ONLY"
+                    if paste_events > 0:
+                        return "PASTE_EVENT_NOT_COMPLETED"
+                    if shortcuts > 0:
+                        return "TRUSTED_SHORTCUT_NO_PASTE_EVENT"
+                    return "NO_TRUSTED_SHORTCUT_OBSERVED"
         return "NO_COMPLETED_TRUSTED_PASTE"
     if report.get("trusted") is not True or report.get("source") != "paste":
         return "INVALID_UNTRUSTED_EVENT"
@@ -368,6 +392,8 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
                        classification: str) -> dict:
     """Metadata-only correlation. Missing stages remain missing, never invented."""
     stages = {
+        "targets_request_count": 0,
+        "targets_response_count": 0,
         "x11_request_count": 0,
         "x11_requestors": [],
         "format_data_request_ns": None,
@@ -385,6 +411,14 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
         return match.group(1).lower() if match else None
 
     lines = chansrv_log.splitlines()
+    stages["targets_request_count"] = sum(
+        1 for line in lines
+        if (match := TARGETS_REQUEST.search(line)) is not None
+        and int(match.group(2)) == expected_generation)
+    stages["targets_response_count"] = sum(
+        1 for line in lines
+        if "event=targets-response-issued " in line and
+        f"generation={expected_generation} " in line)
     requestors = []
     primary: tuple[int, str, str | None] | None = None
     for index, line in enumerate(lines):
@@ -403,18 +437,31 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
     stages["primary_x11_property"] = primary[2] if primary else None
 
     primary_open = primary is not None and primary[2] not in (None, "0x0")
+    transfer_open = primary is not None
+    format_request_seen = False
     for index, line in enumerate(lines):
-        names = (
-            ("event=request format_id=", "format_data_request_ns"),
-            ("event=response status=", "response_complete_ns"),
-        )
-        for marker, key in names:
-            if marker not in line or f"format_id={format_id}" not in line:
-                continue
-            if stages[key] is None:
+        if transfer_open and primary is not None and index > primary[0]:
+            # CLIPRDR does not carry a request identity in the response.
+            # Without a same-generation X11 image request, it is *never*
+            # sound to ascribe a reused PNG format ID's type-4/type-5
+            # timestamps to the observed Firefox paste.
+            if "event=format-list " in line:
+                transfer_open = False
+                primary_open = False
+            elif (f"format_id={format_id}" in line and
+                  "event=request format_id=" in line and
+                  not format_request_seen):
                 match = re.search(r"\bmono_ns=(\d+)\b", line)
                 if match:
-                    stages[key] = int(match.group(1))
+                    stages["format_data_request_ns"] = int(match.group(1))
+                    format_request_seen = True
+            elif (f"format_id={format_id}" in line and
+                  "event=response status=" in line and
+                  format_request_seen and
+                  stages["response_complete_ns"] is None):
+                match = re.search(r"\bmono_ns=(\d+)\b", line)
+                if match:
+                    stages["response_complete_ns"] = int(match.group(1))
 
         # Notification records lack a generation in the frozen log format.
         # Associate them only with the first same-generation request's XIDs,
@@ -441,6 +488,9 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
             # Deliberately an aggregate count, not a correlated timestamp.
             stages["incr_terminator_ack_count"] += 1
     stages["x11_timing_correlated"] = stages["x11_notify_ns"] is not None
+    stages["format_data_timing_correlated"] = (
+        stages["format_data_request_ns"] is not None and
+        stages["response_complete_ns"] is not None)
     for line in peer_log.splitlines():
         for prefix, key in [
             ("PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED", "peer_request_ns"),
