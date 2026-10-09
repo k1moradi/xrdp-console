@@ -107,6 +107,16 @@ add_test(NAME build-direct-console-script-unit
 set_tests_properties(build-direct-console-script-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
 
+# Guard against a silent H.264 -> GFX Planar downgrade being misclassified
+# as a passing pixel presentation. Pure log fixtures; no X11 or RDP traffic.
+add_test(NAME h264-no-fallback-trace-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_h264_no_fallback_trace.py)
+set_tests_properties(h264-no-fallback-trace-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 10
+    LABELS "h264;unit")
+
 # The diagnostic unit tests never touch /run, services, or a real clipboard.
 # Recovery regression runs against fake systemd units under disposable paths.
 # It never calls real systemctl, changes /etc, or starts any service.
