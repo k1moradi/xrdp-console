@@ -1904,6 +1904,27 @@ if(TARGET xrdp-console)
             LABELS "h264;integration"
             RESOURCE_LOCK xrdp_console_loader_display
             RUN_SERIAL TRUE)
+        # The real conversion-failure tile was root-relative
+        # (1152,704,64x64) in a 1366x768 X11 source. Exercise that
+        # lower-right cropped capture through a private loader session and
+        # forbid silent H.264 -> Planar fallback despite correct final pixels.
+        add_test(NAME xrdp-loader-gfx-h264-cropped-edge
+            COMMAND ${Python3_EXECUTABLE} -B
+            ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
+            $<TARGET_FILE:xrdp-console>
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/sbin/xrdp"
+            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+            "${XRDP_CONSOLE_FREERDP_EXECUTABLE}"
+            $<TARGET_FILE:x11-pixel-probe>
+            $<TARGET_FILE:x11-latency-stimulus>
+            1364 768 --gfx-h264-crop-edge)
+        set_tests_properties(xrdp-loader-gfx-h264-cropped-edge PROPERTIES
+            ENVIRONMENT
+                "PYTHONDONTWRITEBYTECODE=1;XRDP_CONSOLE_TEST_ARTIFACT_DIR=${CMAKE_BINARY_DIR}/test-artifacts/xrdp-loader-gfx-h264-cropped-edge"
+            TIMEOUT 60
+            LABELS "h264;integration;regression"
+            RESOURCE_LOCK xrdp_console_loader_display
+            RUN_SERIAL TRUE)
         add_test(NAME xrdp-loader-gfx-h264-narrow-source-cpu-contention
             COMMAND ${Python3_EXECUTABLE} -B
             ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_loader.py
