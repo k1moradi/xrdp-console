@@ -110,7 +110,14 @@ class RepairTest(unittest.TestCase):
             return self.fake_systemctl(args)
         def fake_check(args, **kwargs):
             return types.SimpleNamespace(returncode=0 if statuses[args[-1]] else 3)
+        original_apply = repair.apply
+        def apply_private(plan, *, systemctl):
+            return original_apply(
+                plan, systemctl=systemctl,
+                backup_root=self.root / 'backups')
         with mock.patch.object(repair.os, 'geteuid', return_value=0), \
+             mock.patch.object(repair, 'inspect', return_value=self.plan()), \
+             mock.patch.object(repair, 'apply', side_effect=apply_private), \
              mock.patch.object(repair, 'run', side_effect=live_run), \
              mock.patch.object(repair.subprocess, 'run', side_effect=fake_check):
             self.assertEqual(repair.prepare_test_runtime(), 0)
