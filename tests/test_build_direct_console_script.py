@@ -47,6 +47,9 @@ class BuildDirectConsoleScriptTests(unittest.TestCase):
         self.assertIn('def prepare_test_runtime() -> int:', script)
         self.assertIn('BACKUP_ROOT = Path("/var/backups/xrdp-console/service-repair")', script)
         self.assertIn('refusing temporary build path in persistent systemd ExecStart:', script)
+        self.assertIn('backup_enabled=1', script)
+        self.assertIn('backup_flag_seen=0', script)
+        self.assertIn('rollback_failed_activation', script)
         result = subprocess.run(['sh', '-n', str(script_path)],
                                 capture_output=True, text=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
