@@ -341,6 +341,152 @@ bool cropped_identity_matches_full_frame_reference()
     return success;
 }
 
+// This is the exact geometry from the live PID 349024 failure on October 9:
+// path=identity, capture=1152,704,128x64, source_view=128x64,
+// tile=1152,704,64x64, destination=1152,704,64x64, rows=64.
+// Run both a reference full-frame conversion and the capture-local path;
+// no H.264/AVC fallback is involved in this isolated converter test.
+bool recorded_identity_capture_geometry_matches_full_frame()
+{
+    constexpr PixelSize frameSize{1366, 768};
+    constexpr Rectangle captureBounds{1152, 704, 128, 64};
+    constexpr std::array<Rectangle, 4> updates{{
+        {1152, 704, 64, 64}, // Exact failing tile.
+        {1216, 704, 64, 64}, // Adjacent tile, at capture's right edge.
+        {1152, 704, 64, 32}, // Bounded first row chunk.
+        {1152, 736, 64, 32}, // Bounded second row chunk.
+    }};
+    const std::size_t fullStride = static_cast<std::size_t>(frameSize.widthPixels) * 4U;
+    const std::size_t captureStride = static_cast<std::size_t>(captureBounds.widthPixels) * 4U;
+    std::vector<std::uint8_t> fullBgra(
+        fullStride * frameSize.heightPixels, 0xffU);
+    for (std::uint32_t y = 0; y < frameSize.heightPixels; ++y)
+    {
+        for (std::uint32_t x = 0; x < frameSize.widthPixels; ++x)
+        {
+            const std::size_t offset = static_cast<std::size_t>(y) * fullStride +
+                                       static_cast<std::size_t>(x) * 4U;
+            fullBgra[offset] = static_cast<std::uint8_t>((x + y * 3U) & 255U);
+            fullBgra[offset + 1U] =
+                static_cast<std::uint8_t>((x * 5U + y) & 255U);
+            fullBgra[offset + 2U] =
+                static_cast<std::uint8_t>((x * 7U + y * 11U) & 255U);
+        }
+    }
+    std::vector<std::uint8_t> croppedBgra(
+        captureStride * captureBounds.heightPixels);
+    for (std::uint32_t row = 0; row < captureBounds.heightPixels; ++row)
+    {
+        const std::size_t from =
+            static_cast<std::size_t>(row + captureBounds.y) * fullStride +
+            static_cast<std::size_t>(captureBounds.x) * 4U;
+        std::memcpy(croppedBgra.data() + row * captureStride,
+                    fullBgra.data() + from, captureStride);
+    }
+    const FramebufferView full{
+        std::as_bytes(std::span<const std::uint8_t>(fullBgra)),
+        frameSize.widthPixels, frameSize.heightPixels,
+        static_cast<std::uint32_t>(fullStride)};
+    const FramebufferView capture{
+        std::as_bytes(std::span<const std::uint8_t>(croppedBgra)),
+        captureBounds.widthPixels, captureBounds.heightPixels,
+        static_cast<std::uint32_t>(captureStride)};
+    constexpr std::byte sentinel{0x5a};
+    const std::size_t yPlaneBytes =
+        static_cast<std::size_t>(frameSize.widthPixels) * frameSize.heightPixels;
+    bool success = true;
+    Rectangle local{};
+    std::vector<std::byte> unchanged(nv12FrameBytes(frameSize), sentinel);
+    auto oldResult = unchanged;
+    success &= check(!updateNv12RectangleFromBgraRegion_709FullRange(
+                         capture, updates[0], updates[0], frameSize, oldResult) &&
+                         oldResult == unchanged,
+                     "recorded absolute source tile was not rejected outside cropped view");
+    for (const Rectangle tile : updates)
+    {
+        std::vector<std::byte> expected(nv12FrameBytes(frameSize), sentinel);
+        auto actual = expected;
+        local = {};
+        success &= check(localBgraCaptureRectangle(
+                             captureBounds, capture, tile, local),
+                         "recorded source tile failed capture-local mapping");
+        success &= check(local.x == tile.x - captureBounds.x &&
+                             local.y == tile.y - captureBounds.y &&
+                             local.widthPixels == tile.widthPixels &&
+                             local.heightPixels == tile.heightPixels,
+                         "recorded source tile mapped to the wrong local origin");
+        success &= check(updateNv12RectangleFromBgraRegion_709FullRange(
+                             full, tile, tile, frameSize, expected),
+                         "recorded tile full-frame reference conversion failed");
+        success &= check(updateNv12RectangleFromBgraRegion_709FullRange(
+                             capture, local, tile, frameSize, actual),
+                         "recorded tile capture-local conversion failed");
+        success &= check(actual == expected,
+                         "capture-local result differs from full-frame NV12 reference");
+        success &= check(actual != unchanged,
+                         "recorded identity tile did not update NV12 pixels");
+        // Guard all unaffected Y/UV pixels; the full-frame reference and
+        // cropped conversion must not both accidentally overdraw neighbors.
+        for (std::uint32_t row = 0; row < frameSize.heightPixels; ++row)
+        {
+            for (std::uint32_t col = 0; col < frameSize.widthPixels; ++col)
+            {
+                if (row < static_cast<std::uint32_t>(tile.y) ||
+                    row >= static_cast<std::uint32_t>(tile.y) + tile.heightPixels ||
+                    col < static_cast<std::uint32_t>(tile.x) ||
+                    col >= static_cast<std::uint32_t>(tile.x) + tile.widthPixels)
+                {
+                    const std::size_t offset =
+                        static_cast<std::size_t>(row) * frameSize.widthPixels + col;
+                    if (actual[offset] != sentinel)
+                    {
+                        success &= check(false, "identity tile overdrawn outside Y rectangle");
+                        return success;
+                    }
+                }
+            }
+        }
+        for (std::uint32_t row = 0; row < frameSize.heightPixels / 2U; ++row)
+        {
+            for (std::uint32_t col = 0; col < frameSize.widthPixels; ++col)
+            {
+                if (row < static_cast<std::uint32_t>(tile.y) / 2U ||
+                    row >= (static_cast<std::uint32_t>(tile.y) +
+                            tile.heightPixels) / 2U ||
+                    col < static_cast<std::uint32_t>(tile.x) ||
+                    col >= static_cast<std::uint32_t>(tile.x) + tile.widthPixels)
+                {
+                    const std::size_t offset = yPlaneBytes +
+                        static_cast<std::size_t>(row) * frameSize.widthPixels + col;
+                    if (actual[offset] != sentinel)
+                    {
+                        success &= check(false, "identity tile overdrawn outside UV rectangle");
+                        return success;
+                    }
+                }
+            }
+        }
+    }
+    success &= check(!localBgraCaptureRectangle(
+                         captureBounds, capture, {1150, 704, 64, 64}, local),
+                     "recorded capture accepted tile crossing left edge");
+    success &= check(!localBgraCaptureRectangle(
+                         captureBounds, capture, {1279, 704, 64, 64}, local),
+                     "recorded capture accepted tile crossing right edge");
+    success &= check(!localBgraCaptureRectangle(
+                         captureBounds, capture, {1152, 703, 64, 64}, local),
+                     "recorded capture accepted tile crossing top edge");
+    success &= check(!localBgraCaptureRectangle(
+                         captureBounds, capture, {1152, 705, 64, 64}, local),
+                     "recorded capture accepted tile crossing bottom edge");
+    success &= check(!localBgraCaptureRectangle(
+                         captureBounds,
+                         {capture.pixels, 64, 64, capture.strideBytes},
+                         updates[0], local),
+                     "recorded capture accepted mismatched source-view dimensions");
+    return success;
+}
+
 bool ssse3_channel_gather_matches_scalar_zero_ff_patterns()
 {
     constexpr std::uint32_t kPatterns = 1U << 16U;
@@ -523,6 +669,7 @@ int main()
     success &= rectangle_conversion_matches_scalar_reference();
     success &= identity_conversion_handles_cropped_capture_origin();
     success &= cropped_identity_matches_full_frame_reference();
+    success &= recorded_identity_capture_geometry_matches_full_frame();
     success &= ssse3_channel_gather_matches_scalar_zero_ff_patterns();
     success &= rectangle_alignment_matches_avc420_requirements();
     success &= command_layout_matches_xrdp_encoder_contract();
