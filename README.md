@@ -217,6 +217,63 @@ build-test-freerdp/install/
 The build script does **not** activate the module, restart xrdp, or alter the
 live desktop.
 
+### Build concurrency and clipboard-test prerequisites
+
+The canonical script now uses **two compilation jobs** by default instead of
+forcing both Ninja and the pinned xrdp Make build to one job. This remains
+conservative for the target laptop's memory budget:
+
+```sh
+cd ~/xrdp-console
+XRDP_CONSOLE_BUILD_JOBS=2 scripts/build-direct-console.sh
+# Choose 1 for constrained RAM, or increase gradually if the host has capacity.
+# Override upstream Make separately with XRDP_CONSOLE_XRDP_BUILD_JOBS if needed.
+```
+
+A fresh FreeRDP build inherits the same job count unless
+`XRDP_CONSOLE_FREERDP_BUILD_JOBS` is set. CTest execution remains **serial** for
+shared-state RDP/clipboard integration; this does not limit compiler parallelism.
+
+Runtime scratch, temporary Firefox/Xvfb profiles and loader diagnostic logs now
+default to `build-direct-console/test-artifacts/tmp/` (or the selected
+`XRDP_CONSOLE_BUILD_DIR`). Reusable diagnostic scripts remain in
+`tools/diagnostics/`, not in `/tmp` or `/var/tmp`.
+
+If the following error appears repeatedly in clipboard CTests:
+
+```text
+/run/xrdp/sockdir/1000 doesn't exist - asking sesman to create it
+[ERROR] Can't connect to sesman
+```
+
+the test host is missing the **sesman-managed per-user socket runtime**. This
+happens **before** any clipboard protocol assertions. It does not, by itself,
+prove the screenshot PNG implementation is defective. The build script runs a
+read-only preflight before launching CTest and stops with a precise diagnostic
+if both the per-user directory and the expected sesman endpoint are absent.
+
+To inspect the problem without changing production state:
+
+```sh
+python3 tools/diagnostics/xrdp_clipboard_test_doctor.py
+systemctl status xrdp-sesman.service --no-pager
+ls -ld /run/xrdp /run/xrdp/sockdir /run/xrdp/sockdir/$(id -u)
+journalctl -u xrdp-sesman.service -n 50 --no-pager
+```
+
+Do not manually `chmod` or `mkdir` under `/run/xrdp`, or restart production
+services as an automatic test workaround. Have the host administrator restore
+the correct sesman service/runtime configuration before rerunning the 35
+clipboard tests. A present socket directory passes this **prerequisite** check,
+not the clipboard tests themselves. All tests still need to pass before
+activation.
+
+The existing build-plus-activation shell chain preserves `&&` fail-closed
+behavior: if compilation, the runtime prerequisite, or CTest fails,
+`activate-direct-console.sh` **will not execute**. Activation still modifies
+live services; follow the read-only `--preflight` and optional `--backup`
+guidance below before choosing to activate.
+
 ### Never continue after a failed build
 
 A successful `ctest` invocation after a failed build does not mean the project
