@@ -62,6 +62,15 @@ struct GfxSolidFillCommand final
     FramebufferView source, Rectangle destinationRectangle,
     PixelSize frameGeometry, std::span<std::byte> destinationFrame) noexcept;
 
+// Translate absolute X11 source coordinates into the local coordinate space
+// of a cropped BGRA capture. A source-to-frame mapping returns root-relative
+// pixels, while the XShm view begins at the capture rectangle's origin.
+// Reject any mismatch or uncovered source region rather than reading outside
+// the snapshot or falling back after a valid H.264 tile update.
+[[nodiscard]] bool localBgraCaptureRectangle(
+    Rectangle captureBounds, FramebufferView capture,
+    Rectangle absoluteSourceRectangle, Rectangle &localRectangle) noexcept;
+
 // Update a destination rectangle from an even-aligned sub-rectangle of a
 // larger captured BGRA view. This lets a grouped XShm capture convert only
 // the tiles whose fingerprints actually changed.
