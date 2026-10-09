@@ -639,6 +639,45 @@ copyNv12EncodeRectangles(
 }
 
 bool
+localBgraCaptureRectangle(
+    Rectangle captureBounds, FramebufferView capture,
+    Rectangle absoluteSourceRectangle, Rectangle &localRectangle) noexcept
+{
+    localRectangle = {};
+    if (!capture.valid() ||
+        captureBounds.widthPixels != capture.widthPixels ||
+        captureBounds.heightPixels != capture.heightPixels ||
+        captureBounds.widthPixels == 0 || captureBounds.heightPixels == 0 ||
+        absoluteSourceRectangle.widthPixels == 0 ||
+        absoluteSourceRectangle.heightPixels == 0)
+    {
+        return false;
+    }
+
+    const std::int64_t localX =
+        static_cast<std::int64_t>(absoluteSourceRectangle.x) - captureBounds.x;
+    const std::int64_t localY =
+        static_cast<std::int64_t>(absoluteSourceRectangle.y) - captureBounds.y;
+    if (localX < 0 || localY < 0 ||
+        localX > std::numeric_limits<std::int32_t>::max() ||
+        localY > std::numeric_limits<std::int32_t>::max() ||
+        static_cast<std::uint64_t>(localX) +
+                absoluteSourceRectangle.widthPixels > capture.widthPixels ||
+        static_cast<std::uint64_t>(localY) +
+                absoluteSourceRectangle.heightPixels > capture.heightPixels)
+    {
+        return false;
+    }
+    localRectangle = {
+        static_cast<std::int32_t>(localX),
+        static_cast<std::int32_t>(localY),
+        absoluteSourceRectangle.widthPixels,
+        absoluteSourceRectangle.heightPixels,
+    };
+    return true;
+}
+
+bool
 convertBgraToNv12_709FullRange(
     FramebufferView source, std::span<std::byte> destination) noexcept
 {
