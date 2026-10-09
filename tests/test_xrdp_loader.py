@@ -6988,7 +6988,8 @@ def assert_client_pixel(client_display: str,
                 r"XRDP_CONSOLE_GFX_PLANAR_BATCH_V1 frame=(\d+) "
                 r"starts=1 ends=1 rects=(\d+) tiles=(\d+) "
                 r"pixels=(\d+) pending=(\d+)")
-            # Console Planar intentionally has a zero minimum flush interval.
+            # Fresh Console Planar damage uses a coalescing interval;
+            # successfully draining pending damage may continue immediately.
             # The stimulus draws the two sparse windows with separate X11
             # requests, so both damages may already be pending for one frame,
             # or the first may be flushed before the second request is
