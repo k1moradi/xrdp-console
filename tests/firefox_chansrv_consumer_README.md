@@ -254,3 +254,52 @@ The native diagnostic CTest `full_idat_differential` passed.
 This establishes full native decode of **the synthetic fixtures only**. It
 does not decode or validate the original macOS screenshot. No native gate is
 introduced in the production clipboard path.
+
+## October 9: trusted paste-stage and generation-anchored evidence
+
+A post-reboot screenshot attempt produced an image-bearing CLIPRDR generation,
+verified X11 clipboard owner and successful `TARGETS` request, but **no
+correlated image/png or image/bmp X11 request**. Without the user paste timestamp
+or Firefox requestor identity, those records cannot establish which browser
+paste occurred. Do not infer PNG failure from a TARGETS-only trace.
+
+The diagnostic receipt now logs **only event metadata**: trusted Ctrl/Meta+V
+shortcut count, paste-event count, trusted paste-event count, focus/visibility,
+and local browser wall-clock timestamps. It does not call navigator.clipboard,
+read key text, or access image bytes except within an actual paste handler.
+
+The browser result distinguishes:
+
+- `NO_TRUSTED_SHORTCUT_OBSERVED`: page did not observe the shortcut;
+  this does not establish whether a shortcut was sent to a different window.
+- `TRUSTED_SHORTCUT_NO_PASTE_EVENT`: page observed a trusted paste shortcut
+  but no paste event by the bounded timeout.
+- `UNTRUSTED_PASTE_EVENT_ONLY`: an event fired but was not trusted.
+- `PASTE_EVENT_NOT_COMPLETED`: a paste event fired, but File inspection
+  did not finish by the bounded timeout.
+- `NO_IMAGE_PNG_ITEM`: trusted paste completed without an image/png File item.
+- `TRUSTED_PASTE_NULL_FILE`: trusted paste exposed the item but getAsFile()
+  synchronously returned null.
+
+The X11 metadata analyzer also reports `targets_request_count` and
+`targets_response_count` for the announced generation. It reports PNG
+`format_data_request_ns` and `response_complete_ns` **only** after a
+same-generation image/png X11 request and before the next format list;
+format IDs are reused across clipboard generations. Timestamp association is
+best-effort metadata, not a proof of browser PID identity or wire-level
+request ID.
+
+Offline checks for this change (execute from repository root):
+
+```sh
+python3 -B tests/test_firefox_consumer_integrity.py
+node tests/test_firefox_receipt_event_stages.cjs
+# When approved synthetic PNG fixtures have been generated:
+node tests/test_png_browser_receipt.cjs
+```
+
+This is a diagnostic-only stacked draft branch. It does not change chansrv,
+the Firefox browser, the physical DISPLAY, or an active clipboard. A meaningful
+macOS acceptance experiment still requires explicit permission and a genuine,
+timestamped user screenshot and trusted Firefox paste; XIDs alone are not
+Firefox identification.
