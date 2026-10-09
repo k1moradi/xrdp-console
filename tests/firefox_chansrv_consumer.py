@@ -415,10 +415,42 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
         1 for line in lines
         if (match := TARGETS_REQUEST.search(line)) is not None
         and int(match.group(2)) == expected_generation)
-    stages["targets_response_count"] = sum(
-        1 for line in lines
-        if "event=targets-response-issued " in line and
-        f"generation={expected_generation} " in line)
+    # The owner can respond to TARGETS without any subsequent image data
+    # request. Retain the actual advertised atoms, not just the response
+    # count, so a missing image/png offer is distinguishable from a browser
+    # that did not request an image. The log truncates long target lists.
+    # Absence is conclusive only for complete, successful responses.
+    targets_responses: list[dict] = []
+    for line in lines:
+        if ("event=targets-response-issued " not in line or
+                re.search(r"\\bgeneration=(\\d+)\\b", line) is None):
+            continue
+        generation = re.search(r"\\bgeneration=(\\d+)\\b", line)
+        if generation is None or int(generation.group(1)) != expected_generation:
+            continue
+        match = re.search(r"\\btargets=([^ ]*)\\s+truncated=(\\d+)\\s+result=(-?\\d+)\\b",
+                          line)
+        names = match.group(1).split(",") if match and match.group(1) else []
+        truncated = bool(int(match.group(2))) if match else None
+        status = int(match.group(3)) if match else None
+        # Never identify Firefox based on the X11 requestor XID alone.
+        targets_responses.append({
+            "requestor": x11_id(line, "requestor"),
+            "targets": names,
+            "truncated": truncated,
+            "result": status,
+            "png_advertised": (
+                True if match and status == 0 and "image/png" in names
+                else False if match and status == 0 and not truncated
+                else None),
+        })
+    stages["targets_response_count"] = len(targets_responses)
+    stages["targets_responses"] = targets_responses
+    png_presence = [response["png_advertised"] for response in targets_responses]
+    stages["png_target_advertised"] = (
+        True if True in png_presence
+        else False if png_presence and all(p is False for p in png_presence)
+        else None)
     requestors = []
     primary: tuple[int, str, str | None] | None = None
     for index, line in enumerate(lines):
