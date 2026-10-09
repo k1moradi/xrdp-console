@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Local Firefox Clipboard Paste Diagnostics</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font: 16px system-ui, sans-serif; margin: 2rem auto; padding: 0 1.5rem; max-width: 55rem; }
+    #editor { padding: 1.5rem; border: 2px solid currentColor; border-radius: .5rem;
+              min-height: 4rem; margin: 1rem 0; }
+    #editor:focus { outline: 3px solid #067a78; outline-offset: 3px; }
+    pre { white-space: pre-wrap; word-break: break-word; background: #eee;
+          color: #222; padding: 1rem; border-radius: .5rem; }
+  </style>
+</head>
+<body>
+  <h1>Firefox clipboard event diagnostics</h1>
+  <p>Local diagnostic only. Open this file directly in Firefox on the Linux desktop,
+     click the box, then paste once using the Mac's Windows App connection.
+     No screenshot contents are shown, saved, or sent over the network.</p>
+  <div id="editor" contenteditable="true" tabindex="0"
+       aria-label="Click here and paste">Click here, then press Ctrl+V</div>
+  <p>Metadata (no image bytes or digest shown):</p>
+  <pre id="report" aria-live="polite">Waiting for the diagnostic script.</pre>
+  <script src="./receipt.js"></script>
+  <script>
+  (() => {
+    'use strict';
+    const fields = [
+      'phase', 'source', 'trusted', 'types', 'items', 'imageItemCount',
+      'getAsFileNull', 'getAsFileError', 'filesLength', 'fileType',
+      'fileSize', 'readBytes', 'readError', 'signatureValid',
+      'decodeError', 'decodedWidth', 'decodedHeight', 'ihdrWidth',
+      'ihdrHeight', 'observer'
+    ];
+    const element = document.getElementById('report');
+    const update = () => {
+      const receipt = window.ClipboardImageReceipt;
+      if (!receipt) {
+        element.textContent = 'Diagnostic script unavailable; no clipboard accessed.';
+        return;
+      }
+      const report = receipt.getLastReport();
+      const shown = {};
+      for (const field of fields) {
+        if (Object.prototype.hasOwnProperty.call(report, field)) {
+          shown[field] = report[field];
+        }
+      }
+      element.textContent = JSON.stringify(shown, null, 2);
+    };
+    update();
+    setInterval(update, 250);
+  })();
+  </script>
+</body>
+</html>
