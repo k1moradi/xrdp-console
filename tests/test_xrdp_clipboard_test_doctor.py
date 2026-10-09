@@ -4,6 +4,7 @@
 from __future__ import annotations
 import importlib.util
 import os
+import socket
 from pathlib import Path
 import tempfile
 import unittest
@@ -26,6 +27,13 @@ class DoctorTests(unittest.TestCase):
             result = doctor.classify(Path(td), os.getuid())
             self.assertEqual(result['status'], 'missing-user-directory')
             self.assertFalse(result['ready'])
+    def test_missing_user_directory_accepted_when_sesman_socket_available(self):
+        with tempfile.TemporaryDirectory() as td:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as service:
+                service.bind(str(Path(td) / 'sesman.socket'))
+                result = doctor.classify(Path(td), os.getuid())
+                self.assertEqual(result['status'], 'sesman-socket-available')
+                self.assertTrue(result['ready'])
     def test_present_private_user_directory(self):
         with tempfile.TemporaryDirectory() as td:
             (Path(td) / str(os.getuid())).mkdir(mode=0o700)
