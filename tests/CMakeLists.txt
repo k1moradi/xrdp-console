@@ -82,7 +82,20 @@ if(TARGET xrdp-codec-bench)
 endif()
 
 list(APPEND PYTHON_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_publication_watch.py)
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_publication_watch.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/firefox_chansrv_consumer.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_firefox_consumer_integrity.py)
+# Offline event-stage checks need no Firefox, live clipboard, or generated PNG.
+# Do not turn the synthetic fixture/Firefox integration into a CI prerequisite.
+find_program(XRDP_CONSOLE_NODE_EXECUTABLE NAMES node)
+if(XRDP_CONSOLE_NODE_EXECUTABLE)
+    add_test(NAME firefox-receipt-event-stages-unit
+        COMMAND "${XRDP_CONSOLE_NODE_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/test_firefox_receipt_event_stages.cjs")
+    set_tests_properties(firefox-receipt-event-stages-unit PROPERTIES
+        TIMEOUT 10
+        LABELS "clipboard;unit")
+endif()
 add_test(NAME python-syntax
     COMMAND ${Python3_EXECUTABLE} -B -m py_compile ${PYTHON_SOURCES})
 set_tests_properties(python-syntax PROPERTIES
