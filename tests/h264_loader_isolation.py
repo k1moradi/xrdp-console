@@ -78,3 +78,50 @@ def require_loopback_tcp_listener(
         raise AssertionError(
             "xrdp test listener is not exclusively bound to IPv4 "
             f"127.0.0.1:{port}: {matches!r}")
+
+
+# Session integrations (D-Bus, Wayland, PulseAudio, PipeWire and the agent)
+# must never escape a test-only client or server into the physical desktop.
+# Keep DISPLAY and XAUTHORITY unchanged: xvfb-run owns the private X11 auth.
+_SESSION_ENVIRONMENT_KEYS = (
+    "DBUS_SESSION_BUS_ADDRESS",
+    "WAYLAND_DISPLAY",
+    "PULSE_SERVER",
+    "PIPEWIRE_REMOTE",
+    "SSH_AUTH_SOCK",
+    "GPG_AGENT_INFO",
+    "SESSION_MANAGER",
+    "DESKTOP_STARTUP_ID",
+)
+
+
+def isolated_desktop_environment(
+        inherited: dict[str, str], scratch: Path,
+        display: str) -> dict[str, str]:
+    """Create private child-session paths without changing the parent env.
+
+    The caller supplies a disposable, already-created test root. Fail closed
+    for symlinks, so existing host XDG state cannot be reached by accident.
+    """
+    root = scratch.resolve(strict=True)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("isolated desktop root is not a real directory")
+    env = inherited.copy()
+    for key in _SESSION_ENVIRONMENT_KEYS:
+        env.pop(key, None)
+    for name, relative in (
+            ("XDG_RUNTIME_DIR", "runtime"),
+            ("XDG_CACHE_HOME", "cache"),
+            ("XDG_CONFIG_HOME", "config"),
+            ("XDG_DATA_HOME", "data")):
+        child = root / relative
+        if child.is_symlink():
+            raise ValueError(f"isolated {name} path is a symlink")
+        child.mkdir(mode=0o700, exist_ok=True)
+        if child.resolve(strict=True).parent != root:
+            raise ValueError(f"isolated {name} escapes its test root")
+        child.chmod(0o700)
+        env[name] = str(child)
+    env["HOME"] = str(root)
+    env["DISPLAY"] = display
+    return env
