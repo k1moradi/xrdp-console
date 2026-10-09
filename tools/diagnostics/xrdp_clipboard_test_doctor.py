@@ -92,6 +92,33 @@ def sesman_hint() -> str:
         return 'unknown'
 
 
+def inspect_systemd_exec_value(value: str) -> dict[str, str]:
+    """Classify systemctl 'show -p ExecStart --value'; no service actions."""
+    match = re.search(r'(?:^|[\s;{])path=(/\S+)', value)
+    if not match:
+        return {'status': 'unknown', 'path': ''}
+    target = Path(match.group(1))
+    if not target.is_file():
+        return {'status': 'missing-executable', 'path': str(target)}
+    if not os.access(target, os.X_OK):
+        return {'status': 'not-executable', 'path': str(target)}
+    return {'status': 'executable-present', 'path': str(target)}
+
+
+def sesman_exec_hint() -> dict[str, str]:
+    """Inspect configured executable without contacting or restarting sesman."""
+    try:
+        process = subprocess.run(
+            ['systemctl', 'show', '-p', 'ExecStart', '--value',
+             'xrdp-sesman.service'],
+            capture_output=True, text=True, timeout=2, check=False)
+        if process.returncode != 0:
+            return {'status': 'unavailable', 'path': ''}
+        return inspect_systemd_exec_value(process.stdout)
+    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+        return {'status': 'unavailable', 'path': ''}
+
+
 def summarize_ctest_log(text: str) -> dict[str, Any]:
     failed = []
     for line in text.splitlines():
@@ -119,6 +146,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.log:
         result['log'] = summarize_ctest_log(args.log.read_text(encoding='utf-8', errors='replace'))
     result['sesman_service'] = sesman_hint() if args.socket_root == SOCKET_ROOT else 'not-inspected'
+    if args.socket_root == SOCKET_ROOT:
+        result['sesman_exec'] = sesman_exec_hint()
+        if result['sesman_exec']['status'] == 'missing-executable':
+            result.update(ready=False, status='stale-sesman-exec',
+                reason='systemd ExecStart targets a missing binary: ' +
+                       result['sesman_exec']['path'])
+    else:
+        result['sesman_exec'] = {'status': 'not-inspected', 'path': ''}
     if args.json:
         print(json.dumps(result, sort_keys=True))
     elif result['ready']:
@@ -128,6 +163,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Clipboard test runtime preflight BLOCKED ({result['status']}): {result['reason']}")
         print(f"Expected per-user socketdir: {result['user_directory']}")
         print(f"xrdp-sesman.service: {result['sesman_service']}")
+        if result['sesman_exec']['status'] == 'missing-executable':
+            print('Stale systemd ExecStart: ' + result['sesman_exec']['path'])
+            print('A persistent override may point to a deleted test build.')
+            print('  systemctl cat xrdp-sesman.service')
+            print('  systemctl show -p ExecStart --value xrdp.service')
         print('Read-only host diagnostics:')
         print('  systemctl status xrdp-sesman.service --no-pager')
         print('  ls -ld /run/xrdp /run/xrdp/sockdir /run/xrdp/sockdir/$(id -u)')
