@@ -5224,15 +5224,14 @@ ModuleContext::check_wait_objs() noexcept
     // The standalone lifecycle test exercises the transport and Damage
     // ownership before xrdp installs its server callback table. Keep that
     // ABI-only mode valid; a real xrdp session always has the sink available.
-    if (!impl_->rdpUpdateSink.available() ||
-        (impl_->damageRegion.rectangles().empty() &&
-         !impl_->fullPresentationInvalidation &&
-         !impl_->damageTracker->hasPendingDamage()))
+    const bool classicPendingWork = classicWorkPending(
+        impl_->pendingPresentation.active(),
+        !impl_->damageRegion.rectangles().empty(),
+        impl_->damageTracker->hasPendingDamage(),
+        impl_->fullPresentationInvalidation);
+    if (!impl_->rdpUpdateSink.available() || !classicPendingWork)
     {
-        if (impl_->damageRegion.rectangles().empty() &&
-            !impl_->pendingPresentation.active() &&
-            !impl_->fullPresentationInvalidation &&
-            !impl_->damageTracker->hasPendingDamage())
+        if (!classicPendingWork)
         {
             impl_->presentationWorkStarted = {};
         }
