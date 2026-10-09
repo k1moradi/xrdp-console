@@ -7732,45 +7732,45 @@ def main() -> int:
 
             config_path.write_text(
                 f"""[Globals]
-    ini_version=1
-    fork=true
-    port=tcp://127.0.0.1:{port}
-    security_layer=negotiate
-    crypt_level=high
-    certificate={install_root / "etc" / "xrdp" / "cert.pem"}
-    key_file={install_root / "etc" / "xrdp" / "key.pem"}
-    bitmap_cache=false
-    bitmap_compression=false
-    bulk_compression=false
-    allow_channels=true
-    max_bpp=32
-    {fastpath_option}autorun=console
+ini_version=1
+fork=true
+port=tcp://127.0.0.1:{port}
+security_layer=negotiate
+crypt_level=high
+certificate={install_root / "etc" / "xrdp" / "cert.pem"}
+key_file={install_root / "etc" / "xrdp" / "key.pem"}
+bitmap_cache=false
+bitmap_compression=false
+bulk_compression=false
+allow_channels=true
+max_bpp=32
+{fastpath_option}autorun=console
 
-    [Logging]
-    LogFile={log_path}
-    LogLevel=DEBUG
-    EnableSyslog=false
-    EnableConsole=false
+[Logging]
+LogFile={log_path}
+LogLevel=DEBUG
+EnableSyslog=false
+EnableConsole=false
 
-    [Channels]
-    rdpdr=false
-    rdpsnd=false
-    drdynvc={drdynvc_enabled}
-    cliprdr={"false" if crop_edge_mode else "true"}
-    rail=false
-    xrdpvr=false
+[Channels]
+rdpdr=false
+rdpsnd=false
+drdynvc={drdynvc_enabled}
+cliprdr={"false" if crop_edge_mode else "true"}
+rail=false
+xrdpvr=false
 
-    [console]
-    name=console
-    lib={module_name}
-    # First-party physical-console capability: complete pixels plus smooth scroll.
-    code=21
-    display={source_display}
-    username=smoke
-    password=smoke
-    {"enable_dynamic_resizing=true" if randr_resize_mode else ""}
-    {chansrv_port_option}
-    """,
+[console]
+name=console
+lib={module_name}
+# First-party physical-console capability: complete pixels plus smooth scroll.
+code=21
+display={source_display}
+username=smoke
+password=smoke
+{"enable_dynamic_resizing=true" if randr_resize_mode else ""}
+{chansrv_port_option}
+""",
                 encoding="utf-8",
             )
 
