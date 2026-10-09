@@ -7584,10 +7584,12 @@ def main() -> int:
     # The lower-right H.264 regression must never reuse the physical Linux
     # desktop as its FreeRDP client display, even if DISPLAY is already valid.
     # Build-local scratch is required before the xvfb-run exec boundary.
+    if crop_edge_mode and not os.environ.get("XRDP_CONSOLE_TEST_RUNTIME_ROOT"):
+        raise AssertionError(
+            "cropped H.264 test requires a build-local TEST_RUNTIME_ROOT")
     private_client_scratch = (
         Path(os.environ["XRDP_CONSOLE_TEST_RUNTIME_ROOT"]) / "client-xvfb-tmp"
-        if crop_edge_mode and "XRDP_CONSOLE_TEST_RUNTIME_ROOT" in os.environ
-        else Path.cwd() / "test-artifacts" / "h264-cropped-edge-client-xvfb-tmp")
+        if crop_edge_mode else None)
     ensure_test_display(
         max(presentation_width, 1920) if randr_resize_mode else
         presentation_width,
@@ -7751,7 +7753,7 @@ EnableConsole=false
 rdpdr=false
 rdpsnd=false
 drdynvc={drdynvc_enabled}
-cliprdr=true
+cliprdr={"false" if crop_edge_mode else "true"}
 rail=false
 xrdpvr=false
 
@@ -7864,6 +7866,11 @@ password=smoke
                         include_file_format=clipboard_filtered_format_list_mode)
             with stdout_path.open("w", encoding="utf-8") as server_stdout:
                 server_environment = os.environ.copy()
+                if crop_edge_mode:
+                    server_environment["HOME"] = str(root)
+                    server_environment["XDG_CACHE_HOME"] = str(root / "cache")
+                    server_environment["XDG_CONFIG_HOME"] = str(root / "config")
+                    server_environment["XDG_DATA_HOME"] = str(root / "data")
                 if pointer_latency_mode:
                     server_environment["XRDP_CONSOLE_POINTER_TRACE"] = "1"
                 server = subprocess.Popen(
@@ -7927,6 +7934,11 @@ password=smoke
                     client_command.append("-gfx")
                 with client_log_path.open("w", encoding="utf-8") as client_log:
                     client_environment = os.environ.copy()
+                    if crop_edge_mode:
+                        client_environment["HOME"] = str(root)
+                        client_environment["XDG_CACHE_HOME"] = str(root / "cache")
+                        client_environment["XDG_CONFIG_HOME"] = str(root / "config")
+                        client_environment["XDG_DATA_HOME"] = str(root / "data")
                     if clipboard_no_server_copy_reconnect_mode:
                         client_environment[
                             "XRDP_CONSOLE_TEST_CLIPBOARD_SERVER_AUDIT"] = "1"
