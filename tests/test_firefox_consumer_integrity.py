@@ -30,6 +30,49 @@ class ReceiptTests(unittest.TestCase):
             "c6635535e3669a731add63b3c4b89a0c873e0c7c88412f6ea7b06423eacfee7c",
             (512,512))
 
+    def test_metadata_timing_matches_primary_request_xids(self):
+        # An earlier generation and a same-generation coalesced waiter must
+        # never supply the timing of the primary remote image transfer.
+        chansrv = "\n".join([
+            "event=x11-request target=image/png requestor=0xA1 owner=0x1 property=0xF1 generation=1",
+            "event=x11-selection-notify-issued path=incr requestor=0xA1 property=0xF1 mono_ns=100",
+            "event=x11-request target=image/png requestor=0xB2 owner=0x2 property=0xF2 generation=2",
+            "event=x11-request target=image/png requestor=0xC3 owner=0x2 property=0xF3 generation=2",
+            "event=x11-selection-notify-issued path=incr requestor=0xC3 property=0xF3 mono_ns=200",
+            "event=x11-selection-notify-issued path=incr requestor=0xB2 property=0xF2 mono_ns=300",
+            "event=x11-incr-chunk-issued requestor=0xC3 property=0xF3 start_generation=2 mono_ns=400",
+            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 start_generation=2 mono_ns=500",
+        ])
+        result = browser.correlate_metadata(
+            chansrv, "", 40005, 2, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(result["x11_request_count"], 2)
+        self.assertEqual(result["primary_x11_requestor"], "0xb2")
+        self.assertEqual(result["primary_x11_property"], "0xf2")
+        self.assertEqual(result["x11_notify_ns"], 300)
+        self.assertEqual(result["first_incr_chunk_ns"], 500)
+        self.assertTrue(result["x11_timing_correlated"])
+
+    def test_metadata_timing_refuses_reused_request_xids(self):
+        chansrv = "\n".join([
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=2",
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=3",
+            "event=x11-selection-notify-issued path=incr requestor=0xB2 property=0xF2 mono_ns=300",
+        ])
+        result = browser.correlate_metadata(
+            chansrv, "", 40005, 2, "TRUSTED_PASTE_NULL_FILE")
+        self.assertIsNone(result["x11_notify_ns"])
+        self.assertFalse(result["x11_timing_correlated"])
+
+    def test_metadata_timing_refuses_missing_property(self):
+        chansrv = "\n".join([
+            "event=x11-request target=image/png requestor=0xB2 generation=2",
+            "event=x11-selection-notify-issued path=incr requestor=0xB2 property=0xF2 mono_ns=300",
+        ])
+        result = browser.correlate_metadata(
+            chansrv, "", 40005, 2, "TRUSTED_PASTE_NULL_FILE")
+        self.assertIsNone(result["x11_notify_ns"])
+        self.assertFalse(result["x11_timing_correlated"])
+
     def test_full_acceptance(self):
         self.assertEqual(self.classify(self.good()),"READABLE_PNG_FILE")
 
