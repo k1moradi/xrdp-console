@@ -3,8 +3,10 @@
 #include "damage_region.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <limits>
+#include <span>
 
 namespace
 {
@@ -45,6 +47,58 @@ area(PixelSize bounds) noexcept
 {
     return static_cast<std::uint64_t>(bounds.widthPixels) *
            bounds.heightPixels;
+}
+
+// Stored rectangles can overlap without being cheap to merge (e.g. a
+// horizontal strip crossing several vertical strips). Summing their areas
+// overestimates real damage. Before promoting to a full-screen repaint,
+// prove that their *union* covers every pixel. This bounded test runs only
+// when the inexpensive represented-area sum has reached the screen area.
+[[nodiscard]] bool
+covers_entire_screen(std::span<const Rectangle> rectangles,
+                     PixelSize bounds) noexcept
+{
+    std::array<WideCoordinate, 2 * DamageRegion::kMaxRectangles + 2> yCuts{};
+    std::size_t cutCount = 0;
+    yCuts[cutCount++] = 0;
+    yCuts[cutCount++] = bounds.heightPixels;
+    for (const Rectangle &rectangle : rectangles)
+    {
+        yCuts[cutCount++] = rectangle.y;
+        yCuts[cutCount++] = bottom_edge(rectangle);
+    }
+    std::sort(yCuts.begin(), yCuts.begin() + cutCount);
+
+    for (std::size_t cut = 1; cut < cutCount; ++cut)
+    {
+        const WideCoordinate top = yCuts[cut - 1];
+        const WideCoordinate bottom = yCuts[cut];
+        if (top == bottom)
+        {
+            continue;
+        }
+        // Every rectangle either covers this complete horizontal band or
+        // misses it: its vertical edges are among the sorted cuts.
+        WideCoordinate coveredRight = 0;
+        while (coveredRight < bounds.widthPixels)
+        {
+            WideCoordinate nextRight = coveredRight;
+            for (const Rectangle &rectangle : rectangles)
+            {
+                if (rectangle.y <= top && bottom_edge(rectangle) >= bottom &&
+                    rectangle.x <= coveredRight)
+                {
+                    nextRight = std::max(nextRight, right_edge(rectangle));
+                }
+            }
+            if (nextRight == coveredRight)
+            {
+                return false; // An uncovered horizontal interval remains.
+            }
+            coveredRight = nextRight;
+        }
+    }
+    return true;
 }
 
 bool
@@ -251,7 +305,8 @@ DamageRegion::add(Rectangle rectangle, PixelSize bounds) noexcept
         {
             representedArea += area(rectangles_[index]);
         }
-        if (representedArea >= area(bounds))
+        if (representedArea >= area(bounds) &&
+            covers_entire_screen(rectangles(), bounds))
         {
             rectangles_[0] = {0, 0, bounds.widthPixels, bounds.heightPixels};
             count_ = 1;
