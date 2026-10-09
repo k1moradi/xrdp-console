@@ -105,21 +105,24 @@ class DirectConsoleServiceTests(unittest.TestCase):
         self.assertIn("diagnostic-only", text)
         self.assertIn("No client capabilities are forced", text)
 
-    def test_activation_rollback_backup_is_opt_in(self):
+    def test_activation_always_snapshots_rollback_before_changes(self):
         text = ACTIVATION.read_text(encoding="utf-8")
-        self.assertIn("backup_enabled=0", text)
+        self.assertIn("backup_enabled=1", text)
+        self.assertIn("backup_flag_seen=0", text)
         self.assertIn(
-            'echo "Existing chansrv target will be replaced: $chansrv_target"', text
+            'echo "Existing chansrv target will be replaced: $chansrv_target"',
+            text,
         )
         self.assertNotIn("target will be backed up before replacement", text)
         backup_guard = text.index('if [ "$backup_enabled" -eq 1 ]; then\n    stamp=')
         backup_creation = text.index('install -d -m 0700 "$backup_root"')
         self.assertLess(backup_guard, backup_creation)
-        self.assertIn(
+        self.assertIn('rollback_failed_activation()', text)
+        self.assertIn('rollback "$backup_directory"', text)
+        self.assertNotIn(
             "Rollback backup disabled; activation failures will not be automatically rolled back.",
             text,
         )
-        self.assertIn("manual recovery may be required", text)
 
     def test_activation_can_repair_stopped_runtime_transactionally(self):
         activation = ACTIVATION.read_text(encoding="utf-8")
