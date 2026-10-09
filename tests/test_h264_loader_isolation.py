@@ -13,6 +13,7 @@ from unittest import mock
 import test_xrdp_loader as loader
 
 from h264_loader_isolation import (
+    isolated_desktop_environment,
     isolated_loader_module_name,
     private_client_display_is_safe,
     require_loopback_tcp_listener,
@@ -99,6 +100,8 @@ class LoaderIsolationTests(unittest.TestCase):
         self.assertEqual(args[0:2], ["/usr/bin/xvfb-run", "-a"])
         self.assertEqual(child_env["XRDP_CONSOLE_TEST_PARENT_DISPLAY"], ":0")
         self.assertEqual(child_env["XRDP_CONSOLE_TEST_PRIVATE_CLIENT_XVFB"], "1")
+        self.assertEqual(child_env["XRDP_CONSOLE_TEST_XVFB_WRAPPER_PID"],
+                         str(os.getpid()))
         self.assertEqual(child_env["TMPDIR"], str(scratch))
         self.assertNotIn("DISPLAY", child_env)
         self.assertNotIn("XAUTHORITY", child_env)
@@ -145,6 +148,78 @@ class LoaderIsolationTests(unittest.TestCase):
         for line in template.splitlines():
             if line.strip() and line != "<dynamic>":
                 self.assertFalse(line[0].isspace(), repr(line))
+
+    def test_private_client_marker_without_real_wrapper_parent_is_rejected(self):
+        auth = self.root / "private-xauthority"
+        auth.touch()
+        with (mock.patch.dict(os.environ, {
+                "DISPLAY": ":94", "XAUTHORITY": str(auth),
+                "XRDP_CONSOLE_TEST_PARENT_DISPLAY": ":0",
+                "XRDP_CONSOLE_TEST_PRIVATE_CLIENT_XVFB": "1",
+                "XRDP_CONSOLE_TEST_XVFB_WRAPPER_PID": "1234"}),
+              mock.patch.object(loader.os, "getppid", return_value=4567),
+              mock.patch.object(loader, "display_is_usable",
+                                return_value=True)):
+            with self.assertRaisesRegex(AssertionError, "not owned by xvfb-run"):
+                loader.ensure_test_display(1364, 768, force_private_client=True)
+
+    def test_private_client_wrapper_parent_accepts_real_private_display(self):
+        auth = self.root / "private-xauthority"
+        auth.touch()
+        with (mock.patch.dict(os.environ, {
+                "DISPLAY": ":94", "XAUTHORITY": str(auth),
+                "XRDP_CONSOLE_TEST_PARENT_DISPLAY": ":0",
+                "XRDP_CONSOLE_TEST_PRIVATE_CLIENT_XVFB": "1",
+                "XRDP_CONSOLE_TEST_XVFB_WRAPPER_PID": "1234"}),
+              mock.patch.object(loader.os, "getppid", return_value=1234),
+              mock.patch.object(loader, "display_is_usable",
+                                return_value=True)):
+            loader.ensure_test_display(1364, 768, force_private_client=True)
+
+    def test_isolated_desktop_environment_drops_host_session_integrations(self):
+        inherited = {
+            "DISPLAY": ":0",
+            "XAUTHORITY": str(self.root / "private-xauthority"),
+            "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/1000/bus",
+            "XDG_RUNTIME_DIR": "/run/user/1000",
+            "WAYLAND_DISPLAY": "wayland-0",
+            "PULSE_SERVER": "unix:/run/user/1000/pulse/native",
+            "PIPEWIRE_REMOTE": "pipewire-0",
+            "SSH_AUTH_SOCK": "/run/user/1000/ssh-agent",
+            "SESSION_MANAGER": "local/host:12345",
+            "HOME": "/home/real-user",
+            "KEEP_THIS": "still-here",
+        }
+        env = isolated_desktop_environment(inherited, self.root, ":94")
+        self.assertEqual(env["DISPLAY"], ":94")
+        self.assertEqual(env["XAUTHORITY"], inherited["XAUTHORITY"])
+        self.assertEqual(env["KEEP_THIS"], "still-here")
+        self.assertEqual(env["HOME"], str(self.root.resolve()))
+        self.assertEqual(inherited["HOME"], "/home/real-user")
+        for key in (
+                "DBUS_SESSION_BUS_ADDRESS", "WAYLAND_DISPLAY", "PULSE_SERVER",
+                "PIPEWIRE_REMOTE", "SSH_AUTH_SOCK", "SESSION_MANAGER"):
+            self.assertNotIn(key, env)
+        for key in (
+                "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
+                "XDG_CACHE_HOME", "XDG_DATA_HOME"):
+            path = Path(env[key])
+            self.assertTrue(path.is_relative_to(self.root))
+            self.assertTrue(path.is_dir())
+            self.assertEqual(path.stat().st_mode & 0o777, 0o700)
+
+    def test_isolated_desktop_environment_rejects_runtime_symlinks(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.root / "runtime").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            isolated_desktop_environment({}, self.root, ":95")
+
+    def test_isolated_desktop_environment_rejects_symlinked_root(self):
+        link = self.root / "aliased"
+        link.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            isolated_desktop_environment({}, link, ":95")
 
     def _write_proc_tables(self, addresses: list[tuple[str, str]]):
         proc_net = self.root / "net"
