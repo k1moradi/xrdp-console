@@ -36,6 +36,16 @@ def integrate(src: str) -> str:
         named_png_fixture_path = root / "peer-named.png"
 ''')
     src = change_once(src,
+        '        log_path = root / "xrdp.log"\n',
+        '''        if firefox_delayed_png_consumer:
+            synthetic_source = os.environ.get("XRDP_CONSOLE_TEST_BROWSER_PNG_FIXTURE")
+            if synthetic_source:
+                from firefox_chansrv_consumer import install_approved_synthetic_png
+                named_png_fixture_info = install_approved_synthetic_png(
+                    Path(synthetic_source), named_png_fixture_path)
+        log_path = root / "xrdp.log"
+''')
+    src = change_once(src,
         '''        source_display_process, source_display = start_source_display(
             source_display_log_path, source_width, source_height,
             randr_resize=randr_resize_mode)
@@ -88,7 +98,8 @@ def integrate(src: str) -> str:
         expected_png_bytes: int, expected_png_sha256: str) -> None:
     """Trusted Firefox paste over the existing synthetic CLIPRDR peer."""
     from firefox_chansrv_consumer import (
-        TestInconclusive, correlate_metadata, run_firefox_chansrv_timing)
+        TestInconclusive, correlate_metadata, run_firefox_chansrv_timing,
+        expected_synthetic_png_dimensions)
     delay_ms = int(os.environ["XRDP_CONSOLE_TEST_DELAY_PNG_RESPONSE_MS"])
     initial = wait_for_chansrv_pattern(
         chansrv_logs,
@@ -138,6 +149,7 @@ def integrate(src: str) -> str:
             root=root, firefox=Path(firefox), geckodriver=Path(geckodriver),
             expected_size=expected_png_bytes,
             expected_sha256=expected_png_sha256,
+            expected_dimensions=expected_synthetic_png_dimensions(expected_png_sha256),
             expected_generation=generation,
             after_receipt=wait_for_delivery)
     except TestInconclusive as exc:
