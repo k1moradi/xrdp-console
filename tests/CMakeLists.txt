@@ -15,7 +15,9 @@ set(PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/test_memory_pressure.py
     ${CMAKE_CURRENT_SOURCE_DIR}/h264_frame_coherence.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_h264_frame_coherence.py
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_build_direct_console_script.py)
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_build_direct_console_script.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_test_doctor.py
+    ${CMAKE_SOURCE_DIR}/tools/diagnostics/xrdp_clipboard_test_doctor.py)
 
 if(TARGET xrdp-console)
     add_test(NAME xrdp-clipboard-padding-source-contract
@@ -103,6 +105,15 @@ add_test(NAME build-direct-console-script-unit
     ${CMAKE_SOURCE_DIR}/scripts/build-direct-console.sh)
 set_tests_properties(build-direct-console-script-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1")
+
+# The diagnostic unit tests never touch /run, services, or a real clipboard.
+add_test(NAME clipboard-runtime-prerequisite-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_test_doctor.py)
+set_tests_properties(clipboard-runtime-prerequisite-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    LABELS "clipboard;unit"
+    TIMEOUT 10)
 
 add_test(NAME network-unit
     COMMAND ${Python3_EXECUTABLE} -B ${CMAKE_CURRENT_SOURCE_DIR}/test_network.py)
