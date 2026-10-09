@@ -35,7 +35,13 @@ class RepairTest(unittest.TestCase):
             override_dir.mkdir()
             dropin = override_dir / 'upstream-local.conf'
             stale = Path('/var/tmp/xrdp-test-unit-nonexistent-932471') / name
-            dropin.write_text('[Service]\nExecStart=\nExecStart=' + str(stale) + ' --nodaemon\n')
+            if unit == 'xrdp.service':
+                dropin.write_text('[Unit]\nRequires=xrdp-sesman.service\nAfter=xrdp-sesman.service\n'
+                                  '[Service]\nExecStart=\nExecStart=' + str(stale) +
+                                  ' --nodaemon --config /etc/xrdp/xrdp.ini\n')
+            else:
+                dropin.write_text('[Service]\nExecStart=\nExecStart=' + str(stale) +
+                                  ' --nodaemon --config /etc/xrdp/sesman.ini\n')
             self.override[unit] = dropin
             self.stale[unit] = stale
         self.base_patch = mock.patch.object(repair, 'BASE_DIRECTORY', self.sbin)
@@ -96,6 +102,12 @@ class RepairTest(unittest.TestCase):
         self.override['xrdp.service'].write_text(
             '[Service]\nExecStart=\nExecStart=' + str(self.sbin / 'xrdp') + ' --nodaemon\n')
         with self.assertRaisesRegex(repair.RepairError, 'does not match'):
+            self.plan()
+
+    def test_refuses_extra_directives_in_stale_override(self):
+        override = self.override['xrdp.service']
+        override.write_text(override.read_text() + 'Environment=MY_TOKEN=present\n')
+        with self.assertRaisesRegex(repair.RepairError, 'Unexpected content'):
             self.plan()
 
     def test_unrelated_environment_dropin_is_preserved(self):
