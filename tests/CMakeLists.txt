@@ -17,7 +17,6 @@ set(PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/test_h264_frame_coherence.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_build_direct_console_script.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_repair_stale_xrdp_overrides.py
-    ${CMAKE_SOURCE_DIR}/scripts/repair-stale-xrdp-overrides.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_test_doctor.py
     ${CMAKE_SOURCE_DIR}/tools/diagnostics/xrdp_clipboard_test_doctor.py)
 

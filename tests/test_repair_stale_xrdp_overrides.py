@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Offline tests, no host systemctl, no host service mutation."""
-import importlib.util
+import re
 from pathlib import Path
 import tempfile
+import types
 import unittest
 from unittest import mock
 
-FILE = Path(__file__).resolve().parents[1] / 'scripts' / 'repair-stale-xrdp-overrides.py'
-spec = importlib.util.spec_from_file_location('repair', FILE)
-repair = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(repair)
+# The recovery code resides INSIDE the activator. Extract only its marked
+# Python here-doc, rather than testing an obsolete standalone repair script.
+FILE = Path(__file__).resolve().parents[1] / 'scripts' / 'activate-direct-console.sh'
+activator = FILE.read_text(encoding='utf-8')
+match = re.search(
+    r"python3 - <<'PY_RUNTIME'\n(.*?)\nPY_RUNTIME\n",
+    activator, re.DOTALL)
+assert match, 'Embedded recovery code not found in activator'
+repair = types.ModuleType('xrdp_embedded_recovery')
+exec(compile(match.group(1), str(FILE) + ':PY_RUNTIME', 'exec'),
+     repair.__dict__)
 
 
 class RepairTest(unittest.TestCase):
@@ -76,6 +84,71 @@ class RepairTest(unittest.TestCase):
 
     def plan(self):
         return repair.inspect(self.fake_systemctl, self.systemd)
+
+    def test_embedded_script_has_no_independent_python_dependency(self):
+        self.assertIn('--prepare-test-runtime', activator)
+        self.assertIn('def prepare_test_runtime()', activator)
+        self.assertIn('def prepare_test_runtime() -> int:', match.group(1))
+
+    def test_prepare_rejects_connected_rdp_clients(self):
+        with mock.patch.object(repair.os, 'geteuid', return_value=0), \
+             mock.patch.object(repair, 'inspect', return_value=self.plan()), \
+             mock.patch.object(repair, 'run', return_value='ESTABLISHED'):
+            self.assertEqual(repair.prepare_test_runtime(), 2)
+        self.assertTrue(all(path.exists() for path in self.override.values()))
+
+    def test_prepare_starts_stopped_services_once(self):
+        statuses = {unit: False for unit in repair.UNITS}
+        def live_run(args):
+            if args[0] == 'ss':
+                return ''
+            if args[1] == 'reset-failed':
+                return ''
+            if args[1] == 'start':
+                statuses.update({unit: True for unit in repair.UNITS})
+                return ''
+            return self.fake_systemctl(args)
+        def fake_check(args, **kwargs):
+            return types.SimpleNamespace(returncode=0 if statuses[args[-1]] else 3)
+        original_apply = repair.apply
+        def apply_private(plan, *, systemctl):
+            return original_apply(
+                plan, systemctl=systemctl,
+                backup_root=self.root / 'backups')
+        with mock.patch.object(repair.os, 'geteuid', return_value=0), \
+             mock.patch.object(repair, 'inspect', return_value=self.plan()), \
+             mock.patch.object(repair, 'apply', side_effect=apply_private), \
+             mock.patch.object(repair, 'run', side_effect=live_run), \
+             mock.patch.object(repair.subprocess, 'run', side_effect=fake_check):
+            self.assertEqual(repair.prepare_test_runtime(), 0)
+        self.assertTrue(all(statuses.values()))
+
+    def test_prepare_healthy_runtime_does_not_restart(self):
+        for path in self.override.values():
+            path.unlink()
+        plan = self.plan()
+        self.assertTrue(all(not item['repair'] for item in plan))
+        calls = []
+        def live_run(args):
+            calls.append(args)
+            if args[0] == 'ss':
+                return ''
+            return self.fake_systemctl(args)
+        def healthy_status(args, **kwargs):
+            return types.SimpleNamespace(returncode=0)
+        with mock.patch.object(repair.os, 'geteuid', return_value=0), \
+             mock.patch.object(repair, 'inspect', return_value=plan), \
+             mock.patch.object(repair, 'run', side_effect=live_run), \
+             mock.patch.object(repair.subprocess, 'run', side_effect=healthy_status):
+            self.assertEqual(repair.prepare_test_runtime(), 0)
+        self.assertFalse(any(args[1] in ('start', 'restart', 'stop', 'daemon-reload')
+                             for args in calls if args[0] == 'systemctl'))
+
+    def test_prepare_refuses_start_when_stale_but_no_clients_not_proven(self):
+        with mock.patch.object(repair.os, 'geteuid', return_value=0), \
+             mock.patch.object(repair, 'run', side_effect=repair.RepairError('ss unavailable')):
+            self.assertEqual(repair.prepare_test_runtime(), 2)
+        self.assertTrue(all(path.exists() for path in self.override.values()))
 
     def test_exact_stale_pair(self):
         p = self.plan()
