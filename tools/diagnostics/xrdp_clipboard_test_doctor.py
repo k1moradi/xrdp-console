@@ -44,8 +44,23 @@ def classify(socket_root: Path, uid: int) -> dict[str, Any]:
     try:
         child = user_directory.lstat()
     except FileNotFoundError:
-        result.update(status='missing-user-directory',
-                      reason='Chansrv will ask sesman to create this per-user directory')
+        # A fresh system may legitimately have no per-user directory yet.
+        # In that case chansrv asks sesman; allow it only if the expected
+        # *same socket namespace* exposes a reachable-looking UNIX socket.
+        # This is a preflight, not a service health or connection test.
+        sesman_socket = socket_root / 'sesman.socket'
+        try:
+            endpoint = sesman_socket.lstat()
+            fallback_ready = (stat.S_ISSOCK(endpoint.st_mode) and
+                              os.access(sesman_socket, os.W_OK))
+        except OSError:
+            fallback_ready = False
+        if fallback_ready:
+            result.update(ready=True, status='sesman-socket-available',
+                          reason='No user directory yet; chansrv can ask sesman to create it')
+        else:
+            result.update(status='missing-user-directory',
+                          reason='No per-user directory or accessible sesman.socket in pinned runtime namespace')
         return result
     except OSError as exc:
         result.update(status='user-directory-inaccessible',
