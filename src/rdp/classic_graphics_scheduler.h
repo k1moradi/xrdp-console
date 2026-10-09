@@ -15,6 +15,18 @@ enum class ClassicWorkClass
     PriorityDamage,
 };
 
+// An active borrowed presentation is work even if its source DamageRegion
+// has already been drained. The event-loop idle gate must use the same
+// authoritative pending-state union as the continuation scheduler.
+[[nodiscard]] constexpr bool
+classicWorkPending(bool pendingPresentation, bool snapshottedDamage,
+                   bool unsnapshottedDamage,
+                   bool fullPresentationInvalidation) noexcept
+{
+    return pendingPresentation || snapshottedDamage || unsnapshottedDamage ||
+           fullPresentationInvalidation;
+}
+
 [[nodiscard]] constexpr ClassicWorkClass
 classifyClassicWork(bool pendingPresentation, bool snapshottedDamage,
                     bool unsnapshottedDamage,
