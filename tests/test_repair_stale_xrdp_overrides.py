@@ -91,7 +91,8 @@ class RepairTest(unittest.TestCase):
         self.assertIn('def prepare_test_runtime() -> int:', match.group(1))
 
     def test_prepare_rejects_connected_rdp_clients(self):
-        with mock.patch.object(repair, 'inspect', return_value=self.plan()), \
+        with mock.patch.object(repair.os, 'geteuid', return_value=0), \
+             mock.patch.object(repair, 'inspect', return_value=self.plan()), \
              mock.patch.object(repair, 'run', return_value='ESTABLISHED'):
             self.assertEqual(repair.prepare_test_runtime(), 2)
         self.assertTrue(all(path.exists() for path in self.override.values()))
@@ -109,13 +110,15 @@ class RepairTest(unittest.TestCase):
             return self.fake_systemctl(args)
         def fake_check(args, **kwargs):
             return types.SimpleNamespace(returncode=0 if statuses[args[-1]] else 3)
-        with mock.patch.object(repair, 'run', side_effect=live_run), \
+        with mock.patch.object(repair.os, 'geteuid', return_value=0), \
+             mock.patch.object(repair, 'run', side_effect=live_run), \
              mock.patch.object(repair.subprocess, 'run', side_effect=fake_check):
             self.assertEqual(repair.prepare_test_runtime(), 0)
         self.assertTrue(all(statuses.values()))
 
     def test_prepare_refuses_start_when_stale_but_no_clients_not_proven(self):
-        with mock.patch.object(repair, 'run', side_effect=repair.RepairError('ss unavailable')):
+        with mock.patch.object(repair.os, 'geteuid', return_value=0), \
+             mock.patch.object(repair, 'run', side_effect=repair.RepairError('ss unavailable')):
             self.assertEqual(repair.prepare_test_runtime(), 2)
         self.assertTrue(all(path.exists() for path in self.override.values()))
 
