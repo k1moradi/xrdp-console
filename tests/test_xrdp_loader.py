@@ -26,6 +26,11 @@ from datetime import datetime
 from pathlib import Path
 
 from h264_frame_coherence import coherence_problem, parse_frame_sample
+from h264_loader_isolation import (
+    isolated_loader_module_name,
+    private_client_display_is_safe,
+    require_loopback_tcp_listener,
+)
 
 PLANAR_PIXEL_LIMIT = 128 * 1024
 COHERENCE_SOURCE_WIDTH = 512
@@ -7179,7 +7184,41 @@ def display_is_usable(minimum_width: int, minimum_height: int) -> bool:
         return False
 
 
-def ensure_test_display(minimum_width: int, minimum_height: int) -> None:
+def ensure_test_display(minimum_width: int, minimum_height: int,
+                        force_private_client: bool = False,
+                        scratch_root: Path | None = None) -> None:
+    if force_private_client:
+        marker = "XRDP_CONSOLE_TEST_PRIVATE_CLIENT_XVFB"
+        if os.environ.get(marker) == "1":
+            if (not private_client_display_is_safe(
+                    os.environ.get("DISPLAY"),
+                    os.environ.get("XRDP_CONSOLE_TEST_PARENT_DISPLAY"),
+                    os.environ.get("XAUTHORITY")) or
+                    not display_is_usable(minimum_width, minimum_height)):
+                raise AssertionError(
+                    "private RDP client Xvfb display or Xauthority invalid")
+            return
+        xvfb_run = shutil.which("xvfb-run")
+        if xvfb_run is None or scratch_root is None:
+            raise AssertionError(
+                "cropped H.264 edge test requires xvfb-run and private scratch")
+        scratch_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        environment = os.environ.copy()
+        environment["XRDP_CONSOLE_TEST_PARENT_DISPLAY"] = (
+            environment.get("DISPLAY", ""))
+        environment[marker] = "1"
+        environment["TMPDIR"] = str(scratch_root)
+        # The xvfb-run wrapper must allocate a fresh display and Xauthority;
+        # never let it accept or authenticate against the user's DISPLAY.
+        environment.pop("DISPLAY", None)
+        environment.pop("XAUTHORITY", None)
+        os.execvpe(xvfb_run,
+                    [xvfb_run, "-a", "-s",
+                     f"-screen 0 {minimum_width}x{minimum_height}x24",
+                     sys.executable, "-B", *sys.argv],
+                    environment)
+        raise AssertionError("private xvfb-run did not execute")
+
     if display_is_usable(minimum_width, minimum_height):
         return
 
@@ -7542,11 +7581,20 @@ def main() -> int:
     if cpu_contention:
         set_single_cpu_affinity()
 
+    # The lower-right H.264 regression must never reuse the physical Linux
+    # desktop as its FreeRDP client display, even if DISPLAY is already valid.
+    # Build-local scratch is required before the xvfb-run exec boundary.
+    private_client_scratch = (
+        Path(os.environ["XRDP_CONSOLE_TEST_RUNTIME_ROOT"]) / "client-xvfb-tmp"
+        if crop_edge_mode and "XRDP_CONSOLE_TEST_RUNTIME_ROOT" in os.environ
+        else Path.cwd() / "test-artifacts" / "h264-cropped-edge-client-xvfb-tmp")
     ensure_test_display(
         max(presentation_width, 1920) if randr_resize_mode else
         presentation_width,
         max(presentation_height, 1080) if randr_resize_mode else
-        presentation_height)
+        presentation_height,
+        force_private_client=crop_edge_mode,
+        scratch_root=private_client_scratch if crop_edge_mode else None)
 
     module_path = Path(arguments[0]).resolve()
     xrdp_path = Path(arguments[1]).resolve()
@@ -7648,11 +7696,26 @@ def main() -> int:
         source_display_process, source_display = start_source_display(
             source_display_log_path, source_width, source_height,
             randr_resize=randr_resize_mode)
+        if (crop_edge_mode and
+                source_display.split(".", 1)[0] ==
+                os.environ["DISPLAY"].split(".", 1)[0]):
+            raise AssertionError(
+                "private X11 source display aliases private RDP client display")
 
-        module_dir = install_root / "lib" / "xrdp"
-        module_dir.mkdir(parents=True, exist_ok=True)
-        module_name = f"libxrdp_console_loader_{os.getpid()}.so"
-        module_link = module_dir / module_name
+        if crop_edge_mode:
+            # xrdp uses a compile-time module directory, which may belong
+            # to the active read-only pinned dependency install. Its loader
+            # permits a relative library filename. Resolve ../ components
+            # to a disposable symlink without EVER writing in that prefix.
+            module_dir = root / "private-module"
+            module_dir.mkdir(mode=0o700)
+            module_link = module_dir / f"libxrdp_console_loader_{os.getpid()}.so"
+            module_name = isolated_loader_module_name(install_root, module_link)
+        else:
+            module_dir = install_root / "lib" / "xrdp"
+            module_dir.mkdir(parents=True, exist_ok=True)
+            module_name = f"libxrdp_console_loader_{os.getpid()}.so"
+            module_link = module_dir / module_name
         module_link.symlink_to(module_path)
         fastpath_option = (
             "use_fastpath=both\n" if rfx_mode or gfx_h264_mode else "")
@@ -7666,7 +7729,7 @@ def main() -> int:
             f"""[Globals]
 ini_version=1
 fork=true
-port={port}
+port=tcp://127.0.0.1:{port}
 security_layer=negotiate
 crypt_level=high
 certificate={install_root / "etc" / "xrdp" / "cert.pem"}
@@ -7817,6 +7880,10 @@ password=smoke
                     start_new_session=True,
                 )
                 wait_for_listener(server, port, 8.0, stdout_path)
+                if crop_edge_mode:
+                    # A loopback client address does NOT imply the test
+                    # server bound only loopback. Inspect kernel listeners.
+                    require_loopback_tcp_listener(port)
 
                 client_executable = (
                     overlap_client if (clipboard_peer_mode or
