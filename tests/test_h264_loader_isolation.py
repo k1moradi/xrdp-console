@@ -139,9 +139,9 @@ class LoaderIsolationTests(unittest.TestCase):
                     for part in joined.values))
         self.assertEqual(len(generated), 1)
         template = generated[0]
-        self.assertIn("[Globals]\\nini_version=1\\nfork=true\\n", template)
+        self.assertIn("[Globals]\nini_version=1\nfork=true\n", template)
         self.assertIn("port=tcp://127.0.0.1:<dynamic>", template)
-        self.assertIn("[console]\\nname=console\\nlib=<dynamic>", template)
+        self.assertIn("[console]\nname=console\nlib=<dynamic>", template)
         for line in template.splitlines():
             if line.strip() and line != "<dynamic>":
                 self.assertFalse(line[0].isspace(), repr(line))
