@@ -4008,12 +4008,19 @@ ModuleContext::check_h264_gfx() noexcept
         bool converted = false;
         if (identitySnapshot)
         {
-            Rectangle sourceRectangle{};
+            Rectangle absoluteSourceRectangle{};
+            Rectangle localSourceRectangle{};
+            // sourceCaptureForFrameRectangle() is root-relative; a grouped
+            // XShm capture begins at pending.captureRectangle, so the BGRA
+            // converter requires local pixel coordinates within that view.
             converted =
                 impl_->h264Frame.sourceCaptureForFrameRectangle(
-                    destination, sourceRectangle) &&
+                    destination, absoluteSourceRectangle) &&
+                localBgraCaptureRectangle(
+                    pending.captureRectangle, pending.sourcePixels,
+                    absoluteSourceRectangle, localSourceRectangle) &&
                 updateNv12RectangleFromBgraRegion_709FullRange(
-                    pending.sourcePixels, sourceRectangle, destination,
+                    pending.sourcePixels, localSourceRectangle, destination,
                     impl_->h264Frame.geometry(),
                     impl_->h264Frame.frameBytes());
         }
