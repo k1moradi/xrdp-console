@@ -13,7 +13,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -79,6 +78,8 @@ def check_candidate(unit: str, base_file: Path, dropin: Path,
     base_exec = exec_from_unit(base_file.read_text(encoding='utf-8'))
     if base_exec != BASE_DIRECTORY / name:
         raise RepairError(f'Base {unit} unexpectedly executes {base_exec}, not {BASE_DIRECTORY / name}')
+    if path_in_temp(base_exec):
+        raise RepairError(f'Persistent base executable resolves into an unsafe temp path: {base_exec}')
     if not base_exec.is_file() or not os.access(base_exec, os.X_OK):
         raise RepairError(f'Persistent base executable missing or non-executable: {base_exec}')
     current_exec = exec_from_show(effective_value)
@@ -183,7 +184,7 @@ def main(argv: list[str] | None = None) -> int:
         if connected.strip():
             raise RepairError('Active RDP clients present; refusing to change effective service definitions')
         backup = apply(plan)
-        print('Both overrides backed up and disabled. Backup:', backup)
+        print('Confirmed stale overrides backed up and disabled. Backup:', backup)
         print('Configuration reloaded and verified. No services were started or restarted.')
         print('After verifying that no users are connected: sudo systemctl reset-failed xrdp-sesman.service xrdp.service; sudo systemctl start xrdp.service')
         return 0
