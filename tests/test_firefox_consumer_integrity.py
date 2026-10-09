@@ -73,6 +73,58 @@ class ReceiptTests(unittest.TestCase):
         self.assertIsNone(result["x11_notify_ns"])
         self.assertFalse(result["x11_timing_correlated"])
 
+    def test_targets_only_never_invents_png_transfer_timestamps(self):
+        # Real post-boot evidence: successful TARGETS for an image-bearing
+        # generation does not establish a PNG SelectionRequest or type-4/5.
+        chansrv = "\n".join([
+            "event=x11-request target=image/png requestor=0xA1 property=0xF1 generation=4",
+            "event=request format_id=40005 target=image/png attempt=1 mono_ns=100",
+            "event=response status=0x1 bytes=1024 format_id=40005 mono_ns=200",
+            "event=format-list stored_formats=3 png_format_id=40005 generation=5",
+            "event=x11-request target=TARGETS requestor=0xB2 property=0xF2 generation=5",
+            "event=targets-response-issued requestor=0xB2 generation=5 target_count=7 result=0",
+            "event=response status=0x1 bytes=0 format_id=40005 mono_ns=900",
+        ])
+        result = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "TRUSTED_SHORTCUT_NO_PASTE_EVENT")
+        self.assertEqual(result["targets_request_count"], 1)
+        self.assertEqual(result["targets_response_count"], 1)
+        self.assertEqual(result["x11_request_count"], 0)
+        self.assertIsNone(result["format_data_request_ns"])
+        self.assertIsNone(result["response_complete_ns"])
+        self.assertFalse(result["format_data_timing_correlated"])
+        self.assertIsNone(result["x11_notify_ns"])
+
+    def test_png_timing_requires_same_generation_x11_anchor(self):
+        chansrv = "\n".join([
+            "event=request format_id=40005 target=image/png attempt=1 mono_ns=75",
+            "event=response status=0x1 bytes=5 format_id=40005 mono_ns=100",
+            "event=x11-request target=image/png requestor=0xA1 property=0xF1 generation=5",
+            "event=request format_id=40005 target=image/png attempt=1 mono_ns=200",
+            "event=response status=0x1 bytes=5 format_id=40005 mono_ns=300",
+            "event=format-list stored_formats=3 png_format_id=40005 generation=6",
+            "event=request format_id=40005 target=image/png attempt=1 mono_ns=400",
+            "event=response status=0x1 bytes=5 format_id=40005 mono_ns=500",
+        ])
+        result = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(result["format_data_request_ns"], 200)
+        self.assertEqual(result["response_complete_ns"], 300)
+        self.assertTrue(result["format_data_timing_correlated"])
+
+    def test_png_timing_refuses_response_after_generation_change(self):
+        chansrv = "\n".join([
+            "event=x11-request target=image/png requestor=0xA1 property=0xF1 generation=5",
+            "event=request format_id=40005 target=image/png attempt=1 mono_ns=200",
+            "event=format-list stored_formats=3 png_format_id=40005 generation=6",
+            "event=response status=0x1 bytes=5 format_id=40005 mono_ns=300",
+        ])
+        result = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(result["format_data_request_ns"], 200)
+        self.assertIsNone(result["response_complete_ns"])
+        self.assertFalse(result["format_data_timing_correlated"])
+
     def test_shortcut_without_paste_event_is_distinct(self):
         report = {"phase": "no-complete-paste", "last_observed": {
             "phase": "waiting", "observer": {
