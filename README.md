@@ -314,6 +314,57 @@ The custom executable must pass the same `/buildconfig` checks. A missing or
 incapable H.264 client is a configuration/build failure; the current canonical
 workflow is not supposed to silently skip the H.264 loader requirement.
 
+### Repair stale xrdp/sesman service overrides (without reinstalling)
+
+If `systemctl status xrdp-sesman.service` reports `203/EXEC` and either
+service's effective `ExecStart` points to an executable removed from a
+temporary build under `/tmp` or `/var/tmp`, restore the persistent
+`/opt/xrdp-console/sbin/` service executables **before** running the
+canonical build/CTest/activation chain.
+
+A deliberately separate recovery script verifies the two effective systemd
+paths, checks the base service units and their persistent executable files,
+and refuses unknown service configurations. It is read-only by default:
+
+```sh
+cd ~/xrdp-console
+python3 scripts/repair-stale-xrdp-overrides.py
+```
+
+Review its findings and confirm no active RDP sessions. The next command
+is an explicit privileged **configuration repair**, not an installation or a
+service restart:
+
+```sh
+sudo python3 scripts/repair-stale-xrdp-overrides.py --apply
+```
+
+The script backs up the original drop-ins under the root-only persistent
+`/var/backups/xrdp-console/service-repair/` directory, renames only the
+confirmed stale `upstream-local.conf` files to non-`.conf` names, reloads
+systemd and verifies both effective `ExecStart` paths. It restores the
+original drop-ins automatically if daemon-reload or verification fails.
+Unrelated environment drop-ins are preserved. It never modifies binaries,
+creates `/run` directories, or starts/stops services.
+
+With explicit authorization to restore the xrdp listener and no connected
+clients, start the persistent service pair:
+
+```sh
+sudo systemctl reset-failed xrdp-sesman.service xrdp.service
+sudo systemctl start xrdp.service
+systemctl is-active xrdp.service xrdp-sesman.service
+python3 tools/diagnostics/xrdp_clipboard_test_doctor.py
+```
+
+If start fails, inspect the service journal; do **not** run activation.
+When the services and runtime preflight are healthy, rerun
+`scripts/build-direct-console.sh`. Only a complete green CTest run makes
+the new candidate eligible for activation via read-only `--preflight` and
+explicit `--backup`. The backup path printed by the recovery script is
+also available for manual rollback if needed; do not restore the stale
+temporary paths as a routine operation.
+
 ## Before activation
 
 Activation modifies the live xrdp configuration and service state. Build and
