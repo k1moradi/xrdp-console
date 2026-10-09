@@ -423,12 +423,12 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
     targets_responses: list[dict] = []
     for line in lines:
         if ("event=targets-response-issued " not in line or
-                re.search(r"\\bgeneration=(\\d+)\\b", line) is None):
+                re.search(r"\bgeneration=(\d+)\b", line) is None):
             continue
-        generation = re.search(r"\\bgeneration=(\\d+)\\b", line)
+        generation = re.search(r"\bgeneration=(\d+)\b", line)
         if generation is None or int(generation.group(1)) != expected_generation:
             continue
-        match = re.search(r"\\btargets=([^ ]*)\\s+truncated=(\\d+)\\s+result=(-?\\d+)\\b",
+        match = re.search(r"\btargets=([^ ]*)\s+truncated=(\d+)\s+result=(-?\d+)\b",
                           line)
         names = match.group(1).split(",") if match and match.group(1) else []
         truncated = bool(int(match.group(2))) if match else None
