@@ -255,9 +255,23 @@ def compare_file_acceptance(results: Sequence[CaseResult]) -> dict[str, Any]:
             any(a.generation >= b.generation
                 for a, b in zip(results, results[1:]))):
         raise UnsafePlan("A/B/C comparison requires three ordered fresh generations")
-    if any(r.status not in ("image-file-accepted", "image-file-rejected")
-           for r in results):
-        raise UnsafePlan("Incomplete/invalid browser event cannot be compared")
+    # Recompute from the actual retained metadata. A manually constructed
+    # CaseResult with status="accepted" must never launder failed File evidence.
+    for r in results:
+        if (not isinstance(r.receipt, dict) or
+                r.receipt.get("phase") != "complete" or
+                r.receipt.get("trusted") is not True or
+                r.receipt.get("source") != "paste"):
+            raise UnsafePlan("A/B/C comparison requires a completed trusted paste")
+        actual = classify_receipt(
+            r.receipt, FIXTURE_SIZE, FIXTURE_SHA256, FIXTURE_DIMS,
+            require_exact_png_encoding=(r.leg == "chansrv"))
+        required = ("READABLE_PNG_FILE" if r.leg == "chansrv"
+                    else "READABLE_PNG_FILE_VALIDATED_IMAGE")
+        expected_status = ("image-file-accepted" if actual == required
+                           else "image-file-rejected")
+        if r.classification != actual or r.status != expected_status:
+            raise UnsafePlan("Claimed image-file status disagrees with browser receipt")
     accepted = [r.status == "image-file-accepted" for r in results]
     labels = [r.classification for r in results]
     if not accepted[0]:
