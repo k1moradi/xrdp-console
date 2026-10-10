@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ast
 import os
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ from unittest import mock
 import test_xrdp_loader as loader
 
 from h264_loader_isolation import (
+    create_private_source_xauthority,
     isolated_desktop_environment,
     isolated_loader_module_name,
     private_client_display_is_safe,
@@ -27,6 +29,87 @@ class LoaderIsolationTests(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory(dir=scratch)
         self.addCleanup(self.dir.cleanup)
         self.root = Path(self.dir.name)
+
+    def test_source_cookie_is_exclusive_private_and_distinct_from_client(self):
+        source = self.root / "source-xvfb.xauthority"
+        other = self.root / "second-source.xauthority"
+        client = self.root / "client-xvfb.xauthority"
+        client.write_bytes(b"synthetic distinct client Xauthority")
+        create_private_source_xauthority(source)
+        create_private_source_xauthority(other)
+        self.assertEqual(source.stat().st_mode & 0o777, 0o600)
+        first = source.read_bytes()
+        second = other.read_bytes()
+        self.assertNotEqual(first, second)
+        self.assertNotEqual(first, client.read_bytes())
+        self.assertEqual(struct.unpack("!H", first[:2])[0], 0xffff)
+        offsets = 2
+        fields = []
+        for _ in range(4):
+            size = struct.unpack("!H", first[offsets:offsets + 2])[0]
+            offsets += 2
+            fields.append(first[offsets:offsets + size])
+            offsets += size
+        self.assertEqual(fields[:3], [b"", b"", b"MIT-MAGIC-COOKIE-1"])
+        self.assertEqual(len(fields[3]), 16)
+        self.assertEqual(offsets, len(first))
+        with self.assertRaises(FileExistsError):
+            create_private_source_xauthority(source)
+        self.assertEqual(source.read_bytes(), first)
+
+    def test_source_xvfb_uses_cookie_in_server_and_probe(self):
+        auth = self.root / "source.xauthority"
+        log = self.root / "source.log"
+        fake_process = mock.Mock()
+        fake_process.stdout = object()
+        with (mock.patch.object(loader.shutil, "which",
+                                return_value="/usr/bin/Xvfb"),
+              mock.patch.object(loader.subprocess, "Popen",
+                                return_value=fake_process) as popen,
+              mock.patch.object(loader, "read_line", return_value=b"94\\n"),
+              mock.patch.object(loader.subprocess, "run",
+                                return_value=mock.Mock(returncode=0)) as run):
+            process, display = loader.start_source_display(
+                log, 1366, 768, auth_file=auth)
+        self.assertIs(process, fake_process)
+        self.assertEqual(display, ":94")
+        args = popen.call_args.args[0]
+        self.assertEqual(args[-2:], ["-auth", str(auth)])
+        self.assertIn("-nolisten", args)
+        self.assertTrue(auth.is_file())
+        probe = run.call_args
+        self.assertEqual(probe.kwargs["env"]["DISPLAY"], ":94")
+        self.assertEqual(probe.kwargs["env"]["XAUTHORITY"], str(auth))
+
+    def test_source_xvfb_rejects_display_zero_and_stops_process(self):
+        auth = self.root / "source.xauthority"
+        log = self.root / "source.log"
+        fake_process = mock.Mock()
+        fake_process.stdout = object()
+        with (mock.patch.object(loader.shutil, "which",
+                                return_value="/usr/bin/Xvfb"),
+              mock.patch.object(loader.subprocess, "Popen",
+                                return_value=fake_process),
+              mock.patch.object(loader, "read_line", return_value=b"0\\n"),
+              mock.patch.object(loader, "stop_process") as stop):
+            with self.assertRaisesRegex(AssertionError, "physical DISPLAY"):
+                loader.start_source_display(log, 1366, 768, auth_file=auth)
+        stop.assert_called_once_with(fake_process)
+
+    def test_source_xvfb_stops_process_on_displayfd_timeout(self):
+        auth = self.root / "source.xauthority"
+        log = self.root / "source.log"
+        fake_process = mock.Mock()
+        fake_process.stdout = object()
+        with (mock.patch.object(loader.shutil, "which",
+                                return_value="/usr/bin/Xvfb"),
+              mock.patch.object(loader.subprocess, "Popen",
+                                return_value=fake_process),
+              mock.patch.object(loader, "read_line", side_effect=TimeoutError),
+              mock.patch.object(loader, "stop_process") as stop):
+            with self.assertRaises(TimeoutError):
+                loader.start_source_display(log, 1366, 768, auth_file=auth)
+        stop.assert_called_once_with(fake_process)
 
     def test_module_link_resolves_to_private_workspace_without_prefix_writes(self):
         prefix = self.root / "pinned"
