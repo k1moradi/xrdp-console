@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 from typing import Any
 
@@ -113,6 +114,15 @@ def patchset_hash(source: Path) -> str:
 def expected_state_hash(cache: dict[str, str], release: Path,
                         patch_hash: str, patch_script_hash: str) -> str:
     cflags = require(cache, "XRDP_CONSOLE_XRDP_CFLAGS")
+    try:
+        tokens = shlex.split(cflags)
+    except ValueError as exc:
+        raise ProvenanceError("Unparseable private compiler flags") from exc
+    if not tokens or any(re.fullmatch(
+            r"(-O[0-3sgz]|-g[0-9]?|-march=[A-Za-z0-9._+-]+|"
+            r"-mtune=[A-Za-z0-9._+-]+|-fno-omit-frame-pointer|-fPIC|"
+            r"-fPIE|-W[a-zA-Z0-9-]+)", token) is None for token in tokens):
+        raise ProvenanceError("Private CFLAGS contain unreviewed compiler inputs")
     cppflags = require(cache, "XRDP_CONSOLE_XRDP_CPPFLAGS", "")
     ldflags = require(cache, "XRDP_CONSOLE_XRDP_LDFLAGS", "")
     pkgpath = require(cache, "XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH", "")
