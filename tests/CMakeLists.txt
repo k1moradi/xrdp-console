@@ -84,7 +84,8 @@ endif()
 list(APPEND PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_publication_watch.py
     ${CMAKE_CURRENT_SOURCE_DIR}/firefox_chansrv_consumer.py
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_firefox_consumer_integrity.py)
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_firefox_consumer_integrity.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_qt6_screengrab_owner_integrity.py)
 # Offline event-stage checks need no Firefox, live clipboard, or generated PNG.
 # Do not turn the synthetic fixture/Firefox integration into a CI prerequisite.
 add_test(NAME firefox-consumer-classification-unit
@@ -93,6 +94,15 @@ add_test(NAME firefox-consumer-classification-unit
 set_tests_properties(firefox-consumer-classification-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
     TIMEOUT 45
+    LABELS "clipboard;unit")
+# Check fixture identities and private-X11 preflight ordering offline.
+# This test never starts Qt, Firefox, Xvfb or chansrv.
+add_test(NAME qt6-screengrab-owner-integrity-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_qt6_screengrab_owner_integrity.py)
+set_tests_properties(qt6-screengrab-owner-integrity-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 10
     LABELS "clipboard;unit")
 find_program(XRDP_CONSOLE_NODE_EXECUTABLE NAMES node)
 if(XRDP_CONSOLE_NODE_EXECUTABLE)
