@@ -33,6 +33,7 @@ from h264_loader_isolation import (
     isolated_loader_module_name,
     private_client_display_is_safe,
     private_release_directory,
+    require_ctest_build_inside_release,
     require_existing_release_workspace,
     require_release_outside_pinned_prefix,
     require_loopback_tcp_listener,
@@ -7645,6 +7646,8 @@ def main() -> int:
             os.environ.get("XRDP_CONSOLE_RELEASE_ROOT"))
         if crop_edge_mode else None)
     if release_workspace is not None:
+        require_ctest_build_inside_release(
+            release_workspace, os.environ.get("XRDP_CONSOLE_CTEST_BUILD_ROOT"))
         require_release_outside_pinned_prefix(
             release_workspace, Path(arguments[2]))
     release_runtime = (
