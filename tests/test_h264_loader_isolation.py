@@ -20,6 +20,7 @@ from h264_loader_isolation import (
     private_client_display_is_safe,
     private_release_directory,
     require_existing_release_workspace,
+    require_release_outside_pinned_prefix,
     require_loopback_tcp_listener,
     require_unoccupied_pinned_xrdp_pidfile,
 )
@@ -208,6 +209,20 @@ class LoaderIsolationTests(unittest.TestCase):
         workspace.chmod(0o777)
         with self.assertRaisesRegex(ValueError, "group/world"):
             require_existing_release_workspace(str(workspace))
+
+    def test_release_workspace_cannot_overlap_pinned_dependency_tree(self):
+        install = self.root / "build-direct-console" / "_deps" / "xrdp-install"
+        install.mkdir(parents=True)
+        release = self.root / ".release"
+        release.mkdir(mode=0o700)
+        require_release_outside_pinned_prefix(release, install)
+        nested = install / ".release"
+        nested.mkdir(mode=0o700)
+        with self.assertRaisesRegex(ValueError, "overlaps"):
+            require_release_outside_pinned_prefix(nested, install)
+        upstream = self.root / "build-direct-console"
+        with self.assertRaisesRegex(ValueError, "overlaps"):
+            require_release_outside_pinned_prefix(upstream, install)
 
     def test_release_reusable_directory_refuses_symlinks_and_non_private(self):
         workspace = self.root / ".release"
