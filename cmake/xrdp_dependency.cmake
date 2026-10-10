@@ -1,5 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+# Define the private-build opt-in before probing pkg-config: ambient
+# pkg-config/loader search paths must be rejected before any dependency scan.
+option(XRDP_CONSOLE_PRIVATE_XRDP_BUILD
+    "Opt in to a separate release-root private xrdp/chansrv diagnostic build"
+    OFF)
+if(XRDP_CONSOLE_PRIVATE_XRDP_BUILD)
+    include("${CMAKE_CURRENT_LIST_DIR}/private_xrdp_paths.cmake")
+    xrdp_console_reject_private_host_environment()
+endif()
+
 include(ExternalProject)
 
 find_program(XRDP_CONSOLE_MAKE_PROGRAM NAMES make gmake)
@@ -28,9 +38,6 @@ set(XRDP_CONSOLE_XRDP_INSTALL_DIR
 # OFF preserves the pre-existing production/direct-console dependency build:
 # --runstatedir=/run and --with-socketdir=/run/xrdp/sockdir.
 # ON is only a configuration-time private candidate; it never runs a session.
-option(XRDP_CONSOLE_PRIVATE_XRDP_BUILD
-    "Opt in to a separate release-root private xrdp/chansrv diagnostic build"
-    OFF)
 set(XRDP_CONSOLE_PRIVATE_RELEASE_ROOT "" CACHE PATH
     "Caller-owned existing .release/xrdp-console root for private builds")
 set(_xrdp_runstate_arg "--runstatedir=/run")
@@ -40,7 +47,6 @@ if(XRDP_CONSOLE_PRIVATE_XRDP_BUILD)
     if(NOT XRDP_CONSOLE_BUILD_XRDP)
         message(FATAL_ERROR "Private xrdp mode requires XRDP_CONSOLE_BUILD_XRDP=ON")
     endif()
-    include("${CMAKE_CURRENT_LIST_DIR}/private_xrdp_paths.cmake")
     xrdp_console_validate_private_paths(
         "${XRDP_CONSOLE_PRIVATE_RELEASE_ROOT}"
         "${CMAKE_BINARY_DIR}"
@@ -131,6 +137,20 @@ set(XRDP_CONSOLE_XRDP_LDFLAGS "" CACHE STRING
 set(XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH "$ENV{PKG_CONFIG_PATH}" CACHE STRING
     "PKG_CONFIG_PATH used for the xrdp dependency build")
 
+set(_xrdp_utmp_arg "--enable-utmp")
+set(_xrdp_vsock_arg "--enable-vsock")
+if(XRDP_CONSOLE_PRIVATE_XRDP_BUILD)
+    xrdp_console_reject_private_build_flags(
+        "${XRDP_CONSOLE_XRDP_CFLAGS}"
+        "${XRDP_CONSOLE_XRDP_CPPFLAGS}"
+        "${XRDP_CONSOLE_XRDP_LDFLAGS}"
+        "${XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH}")
+    # Do not permit synthetic RDP diagnostics to write global utmp/wtmp or
+    # accidentally enable an AF_VSOCK listener in a future private runtime.
+    set(_xrdp_utmp_arg "--disable-utmp")
+    set(_xrdp_vsock_arg "--disable-vsock")
+endif()
+
 set(_xrdp_configure_args
     "<SOURCE_DIR>/configure"
     "--prefix=<INSTALL_DIR>"
@@ -144,8 +164,8 @@ set(_xrdp_configure_args
     "--enable-jpeg"
     "--enable-fuse"
     "--enable-ipv6"
-    "--enable-vsock"
-    "--enable-utmp"
+    "${_xrdp_vsock_arg}"
+    "${_xrdp_utmp_arg}"
     "--with-freetype2=yes"
     "--disable-neutrinordp")
 
