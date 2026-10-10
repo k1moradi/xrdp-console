@@ -347,6 +347,33 @@ summary as a proven failed call without examining its exact `items`,
 `classification`. None of this proves which X11 requestor belongs
 to Firefox or grants runtime authorization.
 
+### Two browser-local delay measurements (diagnostic only)
+
+The trusted-paste receipt now includes:
+
+- `shortcutToPasteMs`: difference between the test page's last **trusted**
+  Ctrl/Meta+V keydown handler and the first following trusted paste handler,
+  measured with `performance.now()` in the **same document**. A paste with
+  no preceding trusted shortcut reports `null`. The pairing is consumed so
+  later paste events cannot borrow it.
+- `getAsFileElapsedMs`: synchronous wall time spent in the actual first
+  `image/png` File item's `getAsFile()` call, including a thrown exception.
+  This is `null` when no PNG File item was found and no call occurred.
+
+These durations answer **different** questions. A long
+`shortcutToPasteMs` and short `getAsFileElapsedMs` suggests the delay
+occurred before JavaScript's paste listener (which can include browser
+clipboard prefetch, event scheduling or focus delay). A short interval
+before the paste but a long synchronous File call points to work done in
+`getAsFile()`. Both being short while no image item appears points toward
+format discovery or unsupported conversion, not a measured delay.
+
+Neither interval alone proves a Firefox/GTK timeout, identifies an X11
+requestor, or measures the CLIPRDR round trip. They cannot be subtracted
+from chansrv's `CLOCK_MONOTONIC` nanoseconds without a measured clock
+bridge. `null` means **not measured**, never zero or instantaneous.
+No clipboard pixels, filenames, text or payload bytes are logged.
+
 ### Fail-closed log attribution
 
 Use `correlate_metadata(chansrv_log, peer_log, format_id,
