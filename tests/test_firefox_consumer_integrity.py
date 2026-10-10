@@ -40,8 +40,8 @@ class ReceiptTests(unittest.TestCase):
             "event=x11-request target=image/png requestor=0xC3 owner=0x2 property=0xF3 generation=2",
             "event=x11-selection-notify-issued path=incr requestor=0xC3 property=0xF3 mono_ns=200",
             "event=x11-selection-notify-issued path=incr requestor=0xB2 property=0xF2 mono_ns=300",
-            "event=x11-incr-chunk-issued requestor=0xC3 property=0xF3 start_generation=2 mono_ns=400",
-            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 start_generation=2 mono_ns=500",
+            "event=x11-incr-chunk-issued requestor=0xC3 property=0xF3 start_generation=2 current_generation=2 mono_ns=400",
+            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 start_generation=2 current_generation=2 mono_ns=500",
         ])
         result = browser.correlate_metadata(
             chansrv, "", 40005, 2, "TRUSTED_PASTE_NULL_FILE")
