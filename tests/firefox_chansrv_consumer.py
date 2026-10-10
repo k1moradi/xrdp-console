@@ -372,8 +372,14 @@ def classify_receipt(report: dict, expected_size: int,
         return "NO_IMAGE_PNG_ITEM"
     if report.get("getAsFileError"):
         return "GET_AS_FILE_EXCEPTION"
+    # A missing getAsFile() result is not evidence that the synchronous
+    # browser API returned a File. Do not promote partial receipt objects.
     if report.get("getAsFileNull") is True:
         return "TRUSTED_PASTE_NULL_FILE"
+    if report.get("getAsFileNull") is not False:
+        return "GET_AS_FILE_STATE_UNVERIFIED"
+    if report.get("fileType") != "image/png":
+        return "FILE_MIME_NOT_PNG"
     file_size = report.get("fileSize")
     if type(file_size) is not int or not 0 < file_size <= CAP_BYTES:
         return "FILE_SIZE_INVALID"
