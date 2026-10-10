@@ -7726,11 +7726,13 @@ def main() -> int:
         config_path = root / "xrdp.ini"
         port = free_tcp_port()
         source_display_process: subprocess.Popen[bytes] | None = None
+        source_auth_file = root / "source-xvfb.xauthority"
         module_link: Path | None = None
         try:
             source_display_process, source_display = start_source_display(
                 source_display_log_path, source_width, source_height,
-                randr_resize=randr_resize_mode)
+                randr_resize=randr_resize_mode,
+                auth_file=source_auth_file if crop_edge_mode else None)
             if (crop_edge_mode and
                     source_display.split(".", 1)[0] ==
                     os.environ["DISPLAY"].split(".", 1)[0]):
@@ -7853,8 +7855,15 @@ password=smoke
                     stimulus_path, source_display, os.environ.copy(),
                     source_width, source_height)
             else:
+                source_stimulus_environment = (
+                    isolated_desktop_environment(
+                        os.environ.copy(), root, source_display)
+                    if crop_edge_mode else os.environ.copy())
+                if crop_edge_mode:
+                    source_stimulus_environment["XAUTHORITY"] = str(
+                        source_auth_file)
                 stimulus = start_stimulus(
-                    stimulus_path, source_display, os.environ.copy(),
+                    stimulus_path, source_display, source_stimulus_environment,
                     coherence_mode=coherence_mode,
                     full_screen_size=(source_width, source_height)
                     if (full_screen_update_mode or pointer_latency_mode)
@@ -7914,6 +7923,7 @@ password=smoke
                 if crop_edge_mode:
                     server_environment = isolated_desktop_environment(
                         server_environment, root, source_display)
+                    server_environment["XAUTHORITY"] = str(source_auth_file)
                 if pointer_latency_mode:
                     server_environment["XRDP_CONSOLE_POINTER_TRACE"] = "1"
                 server = subprocess.Popen(
