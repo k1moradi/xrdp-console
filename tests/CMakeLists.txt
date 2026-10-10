@@ -32,6 +32,16 @@ set_tests_properties(xrdp-private-staged-module-elf-unit PROPERTIES
     TIMEOUT 25
     LABELS "build;safety;offline")
 
+# Real CMake/CC synthetic module link, not real xrdp: inspect the exact
+# private-mode target-property helper's ELF DT_RUNPATH with readelf.
+add_test(NAME xrdp-private-module-linker-rpath-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_private_module_linker_rpath.py)
+set_tests_properties(xrdp-private-module-linker-rpath-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 60
+    LABELS "build;safety;offline")
+
 # Read-only Git/ordered patch series/CMakeCache provenance test. Uses
 # synthetic source fixtures, not any native xrdp execution or compilation.
 add_test(NAME xrdp-private-build-provenance-unit
@@ -43,6 +53,7 @@ set_tests_properties(xrdp-private-build-provenance-unit PROPERTIES
     LABELS "build;safety;offline")
 
 set(PYTHON_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_private_module_linker_rpath.py
     ${CMAKE_CURRENT_SOURCE_DIR}/private_staged_module_elf_audit.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_private_staged_module_elf_audit.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_private_build_only_stage.py

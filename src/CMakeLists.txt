@@ -125,10 +125,20 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libxrdp.so"
         xrdp-rfxencode
         "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp/libcommon.so")
-    set_target_properties(xrdp-console PROPERTIES
-        BUILD_RPATH
-            "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp;${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib"
-        INSTALL_RPATH "$ORIGIN/../xrdp")
+    if(XRDP_CONSOLE_PRIVATE_XRDP_BUILD)
+        # The private stage copies the *built* module without a CMake
+        # install-time RPATH relink. Build with its final loader-relative
+        # search directory now, avoiding trailing empty placeholder fields
+        # in DT_RUNPATH and any protected-prefix absolute build RPATH.
+        include("${CMAKE_SOURCE_DIR}/cmake/private_module_rpath.cmake")
+        xrdp_console_set_private_module_rpath(xrdp-console)
+    else()
+        # Preserve the existing normal build/deployment module settings.
+        set_target_properties(xrdp-console PROPERTIES
+            BUILD_RPATH
+                "${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib/xrdp;${XRDP_CONSOLE_XRDP_INSTALL_DIR}/lib"
+            INSTALL_RPATH "$ORIGIN/../xrdp")
+    endif()
     add_dependencies(xrdp-console xrdp_upstream xrdp-console-build-revision)
 
     # Keep the normal project install destination unchanged. Only an
