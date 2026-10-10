@@ -708,46 +708,55 @@ class ReceiptTests(unittest.TestCase):
         self.assertFalse(stages["incr_terminator_ack_correlated"])
 
 
-    def test_private_xvfb_launcher_preserves_parent_xauthority(self):
-        """Offline mocks: never starts Xvfb or queries an actual X display."""
+    def test_legacy_xvfb_starter_refuses_without_spawning_anything(self):
+        """Disable check-then-launch; the future safe allocator is separate."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            fake_xvfb = mock.Mock()
-            fake_xvfb.pid = 2147483000
-            fake_xvfb.poll.return_value = None
-            done = []
+            with (mock.patch.object(browser.subprocess, "Popen") as start,
+                  mock.patch.object(browser.subprocess, "run") as run,
+                  mock.patch.dict(os.environ, {
+                      "DISPLAY": ":0", "XAUTHORITY": "/physical/auth"})):
+                original = dict(os.environ)
+                with self.assertRaisesRegex(browser.TestInconclusive,
+                                            "disabled"):
+                    browser.start_authenticated_source_xvfb(
+                        root, root / "xvfb.log", 512, 512)
+                self.assertEqual(dict(os.environ), original)
+                start.assert_not_called()
+                run.assert_not_called()
 
-            def fake_run(args, **kwargs):
-                done.append((args, kwargs))
-                return mock.Mock(returncode=0)
-
-            with (mock.patch.dict(os.environ, {
-                    "XAUTHORITY": "/original/unchanged/authority"}),
-                  mock.patch.object(browser.shutil, "which",
-                                    return_value="/mocked/test-only-binary"),
-                  mock.patch.object(browser.subprocess, "Popen",
-                                    return_value=fake_xvfb) as start,
-                  mock.patch.object(browser.subprocess, "run",
-                                    side_effect=fake_run),
-                  mock.patch.object(browser, "verify_isolated_xvfb") as verify):
-                _proc, display = browser.start_authenticated_source_xvfb(
-                    root, root / "xvfb.log", 512, 512)
-                self.assertIs(_proc, fake_xvfb)
-                self.assertRegex(display, r"^:(19[1-9]|2[0-4][0-9])$")
-                self.assertEqual(os.environ["XAUTHORITY"],
-                                 "/original/unchanged/authority")
-                self.assertEqual(start.call_count, 1)
-                verify.assert_called_once()
-                self.assertEqual(len(done), 2)
-                self.assertEqual(done[0][0][0], "xauth")
-                self.assertEqual(done[1][0][0], "xdpyinfo")
-                probe_env = done[1][1]["env"]
-                self.assertEqual(probe_env["DISPLAY"], display)
-                self.assertEqual(probe_env["XAUTHORITY"],
-                                 str(root / "firefox-Xauthority"))
-                self.assertNotEqual(
-                    probe_env["XAUTHORITY"], os.environ["XAUTHORITY"])
-
+    def test_xvfb_authentication_requires_exact_flag_pairs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            authority = Path(directory) / "Xauthority"
+            expected = [
+                b"/usr/bin/Xvfb", b":191", b"-auth", os.fsencode(authority),
+                b"-screen", b"0", b"512x512x24", b"-nolisten", b"tcp",
+                b"-noreset"]
+            self.assertTrue(browser._private_xvfb_cmdline(
+                expected, ":191", authority))
+            negatives = [
+                [b"-nolisten", b"unix", b"tcp"],
+                [b"-auth", b"/physical/.Xauthority"],
+                [b"-auth", os.fsencode(authority), b"-auth",
+                 b"/untrusted/duplicate"],
+                [b"-nolisten", b"tcp", b"-nolisten", b"unix"],
+            ]
+            for replacement in negatives:
+                with self.subTest(replacement=replacement):
+                    if replacement[0] == b"-auth":
+                        candidate = expected[:]
+                        i = candidate.index(b"-auth")
+                        candidate[i:i+2] = replacement
+                    else:
+                        candidate = expected[:]
+                        i = candidate.index(b"-nolisten")
+                        candidate[i:i+2] = replacement
+                    self.assertFalse(browser._private_xvfb_cmdline(
+                        candidate, ":191", authority))
+            self.assertFalse(browser._private_xvfb_cmdline(
+                expected, ":192", authority))
+            self.assertFalse(browser._private_xvfb_cmdline(
+                expected, ":191", Path(directory) / "different-authority"))
 
     def test_browser_child_environment_never_inherits_physical_session(self):
         """Pure environment construction, with no browser/X11 process."""
