@@ -131,10 +131,24 @@ if(XRDP_CONSOLE_BUILD_XRDP)
         INSTALL_RPATH "$ORIGIN/../xrdp")
     add_dependencies(xrdp-console xrdp_upstream xrdp-console-build-revision)
 
-    # Keep the first-party module in the normal project install tree until the
-    # deployment workflow explicitly wires it into the private xrdp prefix.
+    # Keep the normal project install destination unchanged. Only an
+    # explicitly invoked private staging target may copy this actual,
+    # compiled module into its matched hash-keyed xrdp loader prefix.
     install(TARGETS xrdp-console
         LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}/xrdp-console")
+
+    if(XRDP_CONSOLE_PRIVATE_XRDP_BUILD)
+        add_custom_target(xrdp-console-private-stage
+            COMMAND "${CMAKE_COMMAND}"
+                "-DPRIVATE_RELEASE_ROOT=${XRDP_CONSOLE_PRIVATE_CANONICAL_RELEASE_ROOT}"
+                "-DPRIVATE_INSTALL_ROOT=${XRDP_CONSOLE_XRDP_INSTALL_DIR}"
+                "-DPRIVATE_BUILD_ROOT=${CMAKE_BINARY_DIR}"
+                "-DMODULE_FILE=$<TARGET_FILE:xrdp-console>"
+                -P "${CMAKE_SOURCE_DIR}/cmake/stage_private_xrdp_module.cmake"
+            DEPENDS xrdp-console xrdp_upstream
+            COMMENT "Explicit, guarded private libxrdp_console.so stage (not system install)"
+            VERBATIM)
+    endif()
 endif()
 
 # The benchmark and diagnostic programs deliberately live under tools/.
