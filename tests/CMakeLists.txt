@@ -87,13 +87,25 @@ list(APPEND PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/test_firefox_consumer_integrity.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_qt6_screengrab_owner_integrity.py
     ${CMAKE_CURRENT_SOURCE_DIR}/clipboard_abc_controller.py
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_clipboard_abc_controller.py)
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_clipboard_abc_controller.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/private_elf_closure.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_private_elf_closure.py)
 # A/B/C controller is deliberately OFFLINE_ONLY. Negative tests mock every
 # owner/browser port; no runtime process, X11 or clipboard access is permitted.
 add_test(NAME clipboard-abc-controller-safety-unit
     COMMAND ${Python3_EXECUTABLE} -B
     ${CMAKE_CURRENT_SOURCE_DIR}/test_clipboard_abc_controller.py)
 set_tests_properties(clipboard-abc-controller-safety-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 20
+    LABELS "clipboard;safety;unit")
+
+# Read ELF DT_NEEDED/RUNPATH metadata from inert offline fixtures only.
+# No ldd, dynamic loading, X server or private chansrv execution.
+add_test(NAME clipboard-private-elf-closure-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_private_elf_closure.py)
+set_tests_properties(clipboard-private-elf-closure-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
     TIMEOUT 20
     LABELS "clipboard;safety;unit")
