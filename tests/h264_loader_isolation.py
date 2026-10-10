@@ -154,3 +154,24 @@ def create_private_source_xauthority(path: Path) -> None:
                          getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(descriptor, "wb") as file:
         file.write(record)
+
+
+def require_unoccupied_pinned_xrdp_pidfile(install_root: Path) -> None:
+    """Fail closed before private Xvfb if the pinned xrdp PID path exists.
+
+    Pinned xrdp 0.10.6.1 defines XRDP_PID_PATH as localstatedir/run.
+    The private loader dependency is configured with localstatedir =
+    INSTALL_DIR/var. xrdp main() checks this file even under --nodaemon
+    and will refuse startup if the referenced PID is active. Never remove
+    or modify it: it could be owned by the deployed service.
+    """
+    root = install_root.resolve(strict=True)
+    run_dir = root / "var" / "run"
+    pid_file = run_dir / "xrdp.pid"
+    if run_dir.is_symlink() or pid_file.is_symlink():
+        raise AssertionError("pinned xrdp PID namespace uses a symlink")
+    if pid_file.exists():
+        raise AssertionError(
+            "pinned xrdp PID file already exists; cannot prove an "
+            "independent private listener from this binary. "
+            "Do not delete the file or stop the live service.")

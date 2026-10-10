@@ -19,6 +19,7 @@ from h264_loader_isolation import (
     isolated_loader_module_name,
     private_client_display_is_safe,
     require_loopback_tcp_listener,
+    require_unoccupied_pinned_xrdp_pidfile,
 )
 
 
@@ -68,7 +69,8 @@ class LoaderIsolationTests(unittest.TestCase):
                                 return_value=fake_process) as popen,
               mock.patch.object(loader, "read_line", return_value=b"94\n"),
               mock.patch.object(loader.subprocess, "run",
-                                return_value=mock.Mock(returncode=0)) as run):
+                                side_effect=[mock.Mock(returncode=0),
+                                             mock.Mock(returncode=1)]) as run):
             process, display = loader.start_source_display(
                 log, 1366, 768, auth_file=auth)
         self.assertIs(process, fake_process)
@@ -77,9 +79,35 @@ class LoaderIsolationTests(unittest.TestCase):
         self.assertEqual(args[-2:], ["-auth", str(auth)])
         self.assertIn("-nolisten", args)
         self.assertTrue(auth.is_file())
-        probe = run.call_args
-        self.assertEqual(probe.kwargs["env"]["DISPLAY"], ":94")
-        self.assertEqual(probe.kwargs["env"]["XAUTHORITY"], str(auth))
+        self.assertEqual(run.call_count, 2)
+        positive, negative = run.call_args_list
+        self.assertEqual(positive.kwargs["env"]["DISPLAY"], ":94")
+        self.assertEqual(positive.kwargs["env"]["XAUTHORITY"], str(auth))
+        self.assertEqual(negative.kwargs["env"]["DISPLAY"], ":94")
+        negative_auth = Path(negative.kwargs["env"]["XAUTHORITY"])
+        self.assertNotEqual(negative_auth, auth)
+        self.assertTrue(negative_auth.is_file())
+        self.assertEqual(negative_auth.stat().st_mode & 0o777, 0o600)
+        self.assertNotEqual(auth.read_bytes(), negative_auth.read_bytes())
+
+    def test_source_xvfb_refuses_unprotected_local_socket(self):
+        auth = self.root / "source.xauthority"
+        log = self.root / "source.log"
+        fake_process = mock.Mock()
+        fake_process.stdout = object()
+        with (mock.patch.object(loader.shutil, "which",
+                                return_value="/usr/bin/Xvfb"),
+              mock.patch.object(loader.subprocess, "Popen",
+                                return_value=fake_process),
+              mock.patch.object(loader, "read_line", return_value=b"94\n"),
+              mock.patch.object(loader.subprocess, "run",
+                                side_effect=[mock.Mock(returncode=0),
+                                             mock.Mock(returncode=0)]) as run,
+              mock.patch.object(loader, "stop_process") as stop):
+            with self.assertRaisesRegex(AssertionError, "unrelated"):
+                loader.start_source_display(log, 1366, 768, auth_file=auth)
+        self.assertEqual(run.call_count, 2)
+        stop.assert_called_once_with(fake_process)
 
     def test_source_xvfb_rejects_display_zero_and_stops_process(self):
         auth = self.root / "source.xauthority"
@@ -110,6 +138,28 @@ class LoaderIsolationTests(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 loader.start_source_display(log, 1366, 768, auth_file=auth)
         stop.assert_called_once_with(fake_process)
+
+    def test_pinned_xrdp_pidfile_gate_is_read_only(self):
+        prefix = self.root / "pinned-pid-check"
+        run_dir = prefix / "var" / "run"
+        run_dir.mkdir(parents=True)
+        require_unoccupied_pinned_xrdp_pidfile(prefix)
+        pid_file = run_dir / "xrdp.pid"
+        pid_file.write_text("1234\\n", encoding="ascii")
+        with self.assertRaisesRegex(AssertionError, "already exists"):
+            require_unoccupied_pinned_xrdp_pidfile(prefix)
+        self.assertEqual(pid_file.read_text(encoding="ascii"), "1234\\n")
+        self.assertEqual(sorted(p.name for p in run_dir.iterdir()), ["xrdp.pid"])
+
+    def test_pinned_xrdp_pidfile_gate_rejects_symlinked_run_dir(self):
+        prefix = self.root / "pinned-symlink-check"
+        outside = self.root / "outside-pid-check"
+        outside.mkdir()
+        (prefix / "var").mkdir(parents=True)
+        (prefix / "var" / "run").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(AssertionError, "symlink"):
+            require_unoccupied_pinned_xrdp_pidfile(prefix)
+        self.assertEqual(list(outside.iterdir()), [])
 
     def test_module_link_resolves_to_private_workspace_without_prefix_writes(self):
         prefix = self.root / "pinned"
@@ -181,6 +231,7 @@ class LoaderIsolationTests(unittest.TestCase):
         command, args, child_env = exec_call.call_args.args
         self.assertEqual(command, "/usr/bin/xvfb-run")
         self.assertEqual(args[0:2], ["/usr/bin/xvfb-run", "-a"])
+        self.assertIn("-nolisten tcp", args[3])
         self.assertEqual(child_env["XRDP_CONSOLE_TEST_PARENT_DISPLAY"], ":0")
         self.assertEqual(child_env["XRDP_CONSOLE_TEST_PRIVATE_CLIENT_XVFB"], "1")
         self.assertEqual(child_env["XRDP_CONSOLE_TEST_XVFB_WRAPPER_PID"],
