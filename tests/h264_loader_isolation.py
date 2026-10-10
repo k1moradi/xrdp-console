@@ -80,6 +80,17 @@ def require_existing_release_workspace(configured: str | None) -> Path:
     return resolved
 
 
+def require_release_outside_pinned_prefix(
+        release_root: Path, install_root: Path) -> None:
+    """Never place reusable test scratch inside a live pinned prefix."""
+    pinned = install_root.resolve(strict=True)
+    release = release_root.resolve(strict=True)
+    if release == pinned or release.is_relative_to(pinned) or pinned.is_relative_to(release):
+        raise ValueError(
+            "existing .release workspace overlaps the active pinned xrdp "
+            "install prefix; choose a separate pre-existing .release")
+
+
 def private_release_directory(workspace: Path, name: str) -> Path:
     """Reuse an owned, stable subdirectory; never follow an existing link."""
     if name not in ("runtime", "logs", "client-xvfb-tmp", "h264-cropped-edge"):
