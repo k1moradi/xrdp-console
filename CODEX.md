@@ -318,19 +318,46 @@ If a requested action is not covered by either this file or the task-specific
 authorization, do not broaden scope. Stop and report what authorization or
 evidence is missing.
 
-## New workspace hygiene rule (2026-10-09)
+## Reusable workspace hygiene rule (updated 2026-10-09)
 
-Preserve all existing safety, provenance and clipboard-correlation rules above.
+This supersedes the earlier rule to create `build/<task-slug>/` or
+`build-direct-console/test-artifacts/<task-slug>/` for every task. Preserve
+all other safety, provenance and clipboard-correlation rules above.
 
-- **New task worktrees, logs, build intermediates, downloaded source, test
-  profiles and metadata belong under a named `build/<task-slug>/` directory
-  within this checkout**. For the canonical candidate, use
-  `build-direct-console/test-artifacts/<task-slug>/`.
+- **Reuse the existing user-designated `.release` directory** for all
+  agent-generated detached worktrees, build intermediates, logs, test profiles,
+  temporary files, downloaded source and handoff reports. Resolve and report
+  its *actual canonical path* before use; do not assume whether `.release`
+  is under the checkout or the user's home. If it is missing, ambiguous,
+  symlinked to an unsafe location or not writable, STOP and ask rather than
+  create another task directory.
+- Use stable, reusable paths *inside* `.release`; clean up stale outputs
+  between tasks only after verifying they are not in use. Do not create fresh
+  date-stamped or per-task build roots in the home directory or under
+  `build/`, `build-direct-console/test-artifacts/`, `/tmp` or `/var/tmp`.
+  A clean detached worktree may be recreated **inside `.release`**, never
+  over another agent's active worktree. Preserve build provenance in
+  committed refs and reports, not accumulating directories.
+- Set `TMPDIR` to a stable disposable path *inside `.release`* for
+  Python/Xvfb/Firefox test helpers; make the directory private (0700).
+  Treat any existing files there as potentially active until checked.
+- **Obsolete build cleanup:** first inventory exact canonical paths of
+  agent-created obsolete build directories, the owning checkout and any
+  useful reports. Remove a specifically verified obsolete build directory
+  only when it is not used by a process, worktree, active dependency,
+  RUNPATH, service, concurrent agent or retained validation. Preserve
+  necessary evidence inside `.release` before deleting the old directory.
+  If ownership, liveness, or the intended deletion target is uncertain,
+  STOP and report candidates for explicit approval. Never do home-wide
+  deletion, wildcard `rm -rf`, or follow symlinks when cleaning.
+- **Never delete or rewrite** `build-direct-console/_deps/xrdp-install`,
+  its parent pinned dependency tree, active runtimes, production services,
+  pre-existing ZIP files, unrelated user material or the entire `.release`
+  directory. The currently running xrdp may be using the pinned tree via
+  absolute ELF paths even when a test build appears disposable.
 - Never place **new** project scratch or handoff files in `/tmp` or
   `/var/tmp`. Historical paths recorded earlier in this document remain
   historical evidence only, not templates for future experiments.
-- Set `TMPDIR` to a subdirectory of the named build workspace when running
-  Python/Xvfb/Firefox test helpers.
 - Reusable investigation tools belong in `tools/diagnostics/`, build and
   activation entry points in `scripts/`, test assertions and deterministic
   synthetic fixtures in `tests/`, production runtime code in `src/` and
