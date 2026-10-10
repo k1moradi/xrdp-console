@@ -84,7 +84,21 @@ endif()
 list(APPEND PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_publication_watch.py
     ${CMAKE_CURRENT_SOURCE_DIR}/firefox_chansrv_consumer.py
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_firefox_consumer_integrity.py)
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_firefox_consumer_integrity.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_chansrv_patch0041_stack.py)
+# Apply the actual 0039 and 0041 declaration hunks with zero fuzz in a
+# synthetic isolated source fragment. This is not the full 52-patch replay.
+find_program(XRDP_CONSOLE_PATCH_EXECUTABLE NAMES patch)
+if(XRDP_CONSOLE_PATCH_EXECUTABLE)
+    add_test(NAME chansrv-patch0041-context-unit
+        COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_chansrv_patch0041_stack.py)
+    set_tests_properties(chansrv-patch0041-context-unit PROPERTIES
+        ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+        TIMEOUT 20
+        LABELS "clipboard;patch;unit")
+endif()
+
 # Offline event-stage checks need no Firefox, live clipboard, or generated PNG.
 # Do not turn the synthetic fixture/Firefox integration into a CI prerequisite.
 add_test(NAME firefox-consumer-classification-unit
