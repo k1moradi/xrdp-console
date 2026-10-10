@@ -118,6 +118,29 @@ class PrivateModuleStageTests(unittest.TestCase):
         self.assertNotEqual(self.stage().returncode, 0)
         self.assertEqual(outside.read_bytes(), b"protected")
 
+    def test_private_libtool_soname_symlinks_are_allowed_only_inside_libdir(self):
+        for name in ("libxrdp.so", "libcommon.so"):
+            original = self.lib / name
+            versioned = self.lib / (name + ".0.10.6")
+            original.rename(versioned)
+            original.symlink_to(versioned.name)
+        passed = self.stage()
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertTrue((self.lib / self.module.name).is_file())
+
+    def test_private_libtool_symlink_may_not_resolve_outside_loader_directory(self):
+        internal = self.lib / "libcommon.so"
+        internal.unlink()
+        outside = Path(self.tmp.name) / "libcommon.so.0"
+        outside.write_bytes(b"external bogus libcommon")
+        internal.symlink_to(outside)
+        failed = self.stage()
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("escapes matched loader directory",
+                      failed.stdout + failed.stderr)
+        self.assertFalse((self.lib / self.module.name).exists())
+        self.assertEqual(outside.read_bytes(), b"external bogus libcommon")
+
     def test_no_external_install_or_source(self):
         for overrides in (
                 {"install": self.root.parent / "external"},
