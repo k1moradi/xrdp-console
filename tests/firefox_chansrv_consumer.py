@@ -329,7 +329,15 @@ def expected_synthetic_png_dimensions(digest: str) -> tuple[int, int]:
 
 def classify_receipt(report: dict, expected_size: int,
                      expected_sha256: str,
-                     expected_dimensions: tuple[int, int] | None = None) -> str:
+                     expected_dimensions: tuple[int, int] | None = None,
+                     *, require_exact_png_encoding: bool = True) -> str:
+    """Validate trusted Firefox File evidence.
+
+    Chansrv's approved remote PNG must retain its original encoded bytes.
+    A Qt/ScreenGrab QPixmap owner can re-encode the same pixels to PNG, so
+    its control leg must verify File readability, PNG decoding, and dimensions
+    without incorrectly requiring the original PNG byte digest or size.
+    """
     if report.get("phase") != "complete":
         if report.get("phase") == "no-complete-paste":
             # An unanswered Ctrl+V is not equivalent to a Firefox paste
@@ -361,15 +369,21 @@ def classify_receipt(report: dict, expected_size: int,
         return "GET_AS_FILE_EXCEPTION"
     if report.get("getAsFileNull") is True:
         return "TRUSTED_PASTE_NULL_FILE"
-    if report.get("fileSize") != expected_size:
+    file_size = report.get("fileSize")
+    if type(file_size) is not int or not 0 < file_size <= CAP_BYTES:
+        return "FILE_SIZE_INVALID"
+    if require_exact_png_encoding and file_size != expected_size:
         return "FILE_SIZE_MISMATCH"
-    if report.get("readError") is not None or report.get("readBytes") != expected_size:
+    if report.get("readError") is not None or report.get("readBytes") != file_size:
         return "FILE_READ_FAILURE"
     if report.get("digestError"):
         return "FILE_DIGEST_ERROR"
-    if report.get("sha256") is None:
+    digest = report.get("sha256")
+    if digest is None:
         return "FILE_DIGEST_UNAVAILABLE"
-    if report.get("sha256") != expected_sha256:
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        return "FILE_DIGEST_INVALID"
+    if require_exact_png_encoding and digest != expected_sha256:
         return "FILE_DIGEST_MISMATCH"
     if report.get("signatureValid") is not True:
         return "PNG_SIGNATURE_INVALID"
@@ -384,7 +398,8 @@ def classify_receipt(report: dict, expected_size: int,
         return "PNG_DIMENSION_MISMATCH"
     if expected_dimensions is not None and dimensions != expected_dimensions:
         return "PNG_UNEXPECTED_DIMENSIONS"
-    return "READABLE_PNG_FILE"
+    return ("READABLE_PNG_FILE" if require_exact_png_encoding
+            else "READABLE_PNG_FILE_VALIDATED_IMAGE")
 
 
 def correlate_metadata(chansrv_log: str, peer_log: str,
@@ -401,6 +416,10 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
         "x11_notify_ns": None,
         "first_incr_chunk_ns": None,
         "incr_terminator_ack_count": 0,
+        # These diagnostics prove XChangeProperty *arguments were issued*,
+        # not that Firefox received or decoded the bytes.
+        "png_x11_argument_issue": None,
+        "png_x11_argument_issue_count": 0,
         "peer_request_ns": None,
         "peer_response_sent_ns": None,
         "first_cliprdr_fragment_ns": None,
@@ -409,6 +428,11 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
     def x11_id(line: str, key: str) -> str | None:
         match = re.search(rf"\b{key}=(0x[0-9a-fA-F]+)\b", line)
         return match.group(1).lower() if match else None
+
+    def matches_format_id(line: str) -> bool:
+        # Substring checks mistake format_id=400050 for format_id=40005.
+        match = re.search(r"\bformat_id=(\d+)\b", line)
+        return match is not None and int(match.group(1)) == format_id
 
     lines = chansrv_log.splitlines()
     stages["targets_request_count"] = sum(
@@ -518,6 +542,7 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
     primary_open = primary is not None and primary[2] not in (None, "0x0")
     transfer_open = primary is not None
     format_request_seen = False
+    issued_png_arguments: list[dict] = []
     for index, line in enumerate(lines):
         if transfer_open and primary is not None and index > primary[0]:
             # CLIPRDR does not carry a request identity in the response.
@@ -527,14 +552,14 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
             if "event=format-list " in line:
                 transfer_open = False
                 primary_open = False
-            elif (f"format_id={format_id}" in line and
+            elif (matches_format_id(line) and
                   "event=request format_id=" in line and
                   not format_request_seen):
                 match = re.search(r"\bmono_ns=(\d+)\b", line)
                 if match:
                     stages["format_data_request_ns"] = int(match.group(1))
                     format_request_seen = True
-            elif (f"format_id={format_id}" in line and
+            elif (matches_format_id(line) and
                   "event=response status=" in line and
                   format_request_seen and
                   stages["response_complete_ns"] is None):
@@ -552,6 +577,23 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
             if same_request and "event=x11-request " in line:
                 primary_open = False
             elif same_request:
+                if "event=png-xchange-arguments-issued " in line:
+                    generation = re.search(r"\bstart_generation=(\d+)\b", line)
+                    current = re.search(r"\bcurrent_generation=(\d+)\b", line)
+                    status = re.search(
+                        r"\bhash_match=([01])\s+length_match=([01])\b", line)
+                    issued_bytes = re.search(
+                        r"\bxchange_argument_bytes=(\d+)\b", line)
+                    path = re.search(r"\bpath=(direct|incr)\b", line)
+                    if (generation and current and status and issued_bytes and path
+                            and int(generation.group(1)) == expected_generation
+                            and int(current.group(1)) == expected_generation):
+                        issued_png_arguments.append({
+                            "path": path.group(1),
+                            "bytes": int(issued_bytes.group(1)),
+                            "hash_match": status.group(1) == "1",
+                            "length_match": status.group(2) == "1",
+                        })
                 if ("event=x11-selection-notify-issued" in line and
                         stages["x11_notify_ns"] is None):
                     match = re.search(r"\bmono_ns=(\d+)\b", line)
@@ -566,23 +608,93 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
         if "event=x11-incr-terminator-ack" in line:
             # Deliberately an aggregate count, not a correlated timestamp.
             stages["incr_terminator_ack_count"] += 1
+    stages["png_x11_argument_issue_count"] = len(issued_png_arguments)
+    # Do not choose one transaction if multiple same-XID completions exist.
+    if len(issued_png_arguments) == 1:
+        stages["png_x11_argument_issue"] = issued_png_arguments[0]
     stages["x11_timing_correlated"] = stages["x11_notify_ns"] is not None
     stages["format_data_timing_correlated"] = (
         stages["format_data_request_ns"] is not None and
         stages["response_complete_ns"] is not None)
+    peer_events: dict[str, list[int]] = {
+        "peer_request_ns": [], "peer_response_sent_ns": []}
     for line in peer_log.splitlines():
         for prefix, key in [
             ("PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED", "peer_request_ns"),
             ("PEER_CLIENT_FORMAT_RESPONSE_SENT", "peer_response_sent_ns")]:
-            if line.startswith(prefix) and f"format_id={format_id}" in line:
-                m = re.search(r"\bmono_ns=(\d+)\b", line)
-                if m:
-                    stages[key] = int(m.group(1))
+            if line.startswith(prefix) and matches_format_id(line):
+                match = re.search(r"\bmono_ns=(\d+)\b", line)
+                if match:
+                    peer_events[key].append(int(match.group(1)))
+    # CLIPRDR has no response request-ID and the peer's log has no generation.
+    # Repeated matching peer events therefore cannot be assigned to this
+    # particular browser paste, even if their format ID is identical.
+    for key, events in peer_events.items():
+        stages[key + "_event_count"] = len(events)
+        if len(events) == 1:
+            stages[key] = events[0]
     stages["classification"] = classification
     stages["generation"] = expected_generation
     # NOTE: first/last fragment timestamps come from xrdp, not chansrv logs;
     # absent evidence is reported as null rather than fabricated.
     return stages
+
+
+def diagnose_clipboard_boundary(
+        stages: dict, *, attested_browser_requestor: str | None = None) -> dict:
+    """Find the earliest *observed* boundary, without inventing browser XIDs.
+
+    The caller must independently attest the Firefox X11 requestor window
+    before this function may associate a chansrv TARGETS response with the
+    browser. A single window XID does not exclude other Firefox windows.
+    """
+    result = stages.get("classification")
+    if result in ("READABLE_PNG_FILE", "READABLE_PNG_FILE_VALIDATED_IMAGE"):
+        return {"boundary": "BROWSER_READABLE_PNG",
+                "confidence": "observed", "receipt": result}
+    if result in (
+            "NO_TRUSTED_SHORTCUT_OBSERVED", "TRUSTED_SHORTCUT_NO_PASTE_EVENT",
+            "UNTRUSTED_PASTE_EVENT_ONLY", "PASTE_EVENT_NOT_COMPLETED",
+            "NO_COMPLETED_TRUSTED_PASTE"):
+        return {"boundary": "BROWSER_EVENT_INCOMPLETE",
+                "confidence": "observed", "receipt": result}
+
+    if attested_browser_requestor is None:
+        return {"boundary": "REQUESTOR_IDENTITY_NOT_ATTESTED",
+                "confidence": "inconclusive", "receipt": result}
+    if (not isinstance(attested_browser_requestor, str) or
+            re.fullmatch(r"0x[0-9a-fA-F]+", attested_browser_requestor) is None):
+        raise ValueError("Expected independently attested hexadecimal X11 requestor")
+
+    requestor = attested_browser_requestor.lower()
+    responses = [record for record in stages.get("targets_responses", [])
+                 if record.get("requestor") == requestor]
+    if not responses:
+        return {"boundary": "BROWSER_TARGETS_RESPONSE_NOT_OBSERVED",
+                "confidence": "inconclusive", "receipt": result}
+    # Positive advertisement is evidence even in a truncated TARGETS log.
+    # Negative advertisement requires ALL matched responses to be complete.
+    offers = [record.get("png_advertised") for record in responses]
+    if True not in offers:
+        if offers and all(value is False for value in offers):
+            return {"boundary": "PNG_NOT_ADVERTISED_TO_ATTESTED_XID",
+                    "confidence": "observed", "receipt": result}
+        return {"boundary": "BROWSER_TARGETS_UNRESOLVED",
+                "confidence": "inconclusive", "receipt": result}
+
+    if requestor not in stages.get("x11_requestors", []):
+        return {"boundary": "PNG_REQUEST_NOT_OBSERVED_FOR_ATTESTED_XID",
+                "confidence": "inconclusive", "receipt": result}
+
+    # Source hash agreement is at the owner's XChangeProperty argument
+    # boundary. No acknowledgement or Firefox File acceptance is implied.
+    if stages.get("primary_x11_requestor") == requestor:
+        issued = stages.get("png_x11_argument_issue")
+        if issued and issued["hash_match"] and issued["length_match"]:
+            return {"boundary": "PNG_X11_ARGUMENTS_ISSUED_ONLY",
+                    "confidence": "observed", "receipt": result}
+    return {"boundary": "PNG_REQUEST_OBSERVED_DELIVERY_UNPROVEN",
+            "confidence": "inconclusive", "receipt": result}
 
 
 def run_firefox_chansrv_timing(*, source_display: str,
