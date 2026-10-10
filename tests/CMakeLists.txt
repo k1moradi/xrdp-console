@@ -1931,7 +1931,8 @@ if(TARGET xrdp-console)
             $<TARGET_FILE:x11-latency-stimulus>
             1364 768 --gfx-h264-crop-edge)
         set_tests_properties(xrdp-loader-gfx-h264-cropped-edge PROPERTIES
-            ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+            ENVIRONMENT
+                "PYTHONDONTWRITEBYTECODE=1;XRDP_CONSOLE_CTEST_BUILD_ROOT=${CMAKE_BINARY_DIR}"
             TIMEOUT 60
             LABELS "h264;integration;regression"
             RESOURCE_LOCK xrdp_console_loader_display
