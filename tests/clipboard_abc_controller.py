@@ -55,7 +55,10 @@ def _private_path(value: str, root: Path, label: str, *,
     for candidate in (path, *path.parents):
         if candidate.is_symlink():
             raise UnsafePlan(f"{label}: symlinked component")
-    canonical = path.resolve(strict=must_exist)
+    try:
+        canonical = path.resolve(strict=must_exist)
+    except OSError as exc:
+        raise UnsafePlan(f"{label}: required private path unavailable") from exc
     if not _inside(canonical, root):
         raise UnsafePlan(f"{label}: path escapes private release root")
     if must_exist and canonical.stat().st_uid != os.geteuid():
