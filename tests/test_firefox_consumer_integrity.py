@@ -539,5 +539,101 @@ class ReceiptTests(unittest.TestCase):
                          "BROWSER_READABLE_PNG")
 
 
+    def test_incr_terminator_ack_requires_requestor_property_and_generation(self):
+        chansrv = "\n".join([
+            "event=targets-response-issued requestor=0xB2 generation=5 "
+            "target_count=3 targets=TARGETS@0x101,TIMESTAMP@0x102,"
+            "image/png@0x241 truncated=0 result=0",
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-selection-notify-issued path=incr requestor=0xB2 "
+            "property=0xF2 send_result=1 mono_ns=110",
+            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 "
+            "start_generation=50 current_generation=50 mono_ns=120",
+            "event=x11-incr-terminator-ack requestor=0xB3 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=1 mono_ns=130",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=50 start_generation=50 "
+            "current_generation=50 state_match=1 mono_ns=140",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=0 mono_ns=150",
+            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 "
+            "start_generation=5 current_generation=5 mono_ns=160",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=1 mono_ns=180",
+        ])
+        stages = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(stages["incr_terminator_ack_count"], 4)
+        self.assertEqual(stages["incr_terminator_ack_matches"], 1)
+        self.assertTrue(stages["incr_terminator_ack_correlated"])
+        self.assertEqual(stages["incr_terminator_ack_ns"], 180)
+        self.assertEqual(stages["first_incr_chunk_ns"], 160)
+        self.assertEqual(stages["x11_notify_send_result"], 1)
+        self.assertEqual(browser.diagnose_clipboard_boundary(stages)["boundary"],
+                         "REQUESTOR_IDENTITY_NOT_ATTESTED")
+        decision = browser.diagnose_clipboard_boundary(
+            stages, attested_browser_requestor="0xB2")
+        self.assertEqual(decision["boundary"], "PNG_INCR_TERMINATOR_ACK_ONLY")
+        self.assertEqual(decision["confidence"], "observed")
+        self.assertNotEqual(decision["boundary"], "BROWSER_READABLE_PNG")
+
+    def test_unrelated_ack_never_proves_primary_incr_completion(self):
+        trace = "\n".join([
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-terminator-ack requestor=0xB3 property=0xF3 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=1 mono_ns=190",
+        ])
+        stages = browser.correlate_metadata(
+            trace, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(stages["incr_terminator_ack_count"], 1)
+        self.assertEqual(stages["incr_terminator_ack_matches"], 0)
+        self.assertFalse(stages["incr_terminator_ack_correlated"])
+        self.assertIsNone(stages["incr_terminator_ack_ns"])
+
+    def test_multiple_matching_ack_events_are_not_silently_collapsed(self):
+        trace = "\n".join([
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=1 mono_ns=190",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=1 mono_ns=200",
+        ])
+        stages = browser.correlate_metadata(
+            trace, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(stages["incr_terminator_ack_matches"], 2)
+        self.assertFalse(stages["incr_terminator_ack_correlated"])
+        self.assertIsNone(stages["incr_terminator_ack_ns"])
+
+    def test_reused_xid_property_after_later_request_disables_ack_attribution(self):
+        trace = "\n".join([
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=6",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=1 mono_ns=190",
+        ])
+        stages = browser.correlate_metadata(
+            trace, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(stages["incr_terminator_ack_count"], 1)
+        self.assertFalse(stages["incr_terminator_ack_correlated"])
+
+    def test_incr_ack_missing_state_match_is_inconclusive(self):
+        trace = "\n".join([
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 mono_ns=190",
+        ])
+        stages = browser.correlate_metadata(
+            trace, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertFalse(stages["incr_terminator_ack_correlated"])
+
+
 if __name__ == "__main__":
     unittest.main()
