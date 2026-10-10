@@ -24,6 +24,14 @@ from firefox_chansrv_consumer import classify_receipt
 # Product and test identity are deliberately not conflated. The source used
 # for the staged native chansrv must include the corrected committed 0041.
 CHANSRV_SOURCE_REF = "447447ff68fe34cf2391ca9c908c4bd993ed4ef2"
+# Exact reviewed source commits for builds carrying PR #40's private path
+# configure mode. A new commit requires an explicit source review/update,
+# not a manifest assertion that it descends from corrected PR #32.
+REVIEWED_PRIVATE_BUILD_COMMITS = frozenset({
+    "5d012ecd54cf177b7df1f25a1ec4c9bc04f800c8",  # PR #40
+    "b8faacbac64a78edea196890b066737a36561dd3",  # PR #42
+    "ab22e93ad531b3e857cd0fa07792af638f39766d",  # PR #43
+})
 FIXTURE_SHA256 = "d9b7864e95e934ee999ee333ce9bf86adcf823aaca271634bafb8d8b9d3f6c22"
 FIXTURE_SIZE = 2_401_598
 FIXTURE_DIMS = (1000, 800)
@@ -123,7 +131,8 @@ def _validate_fixed_fixture(fixture: Path) -> None:
 
 
 def _valid_binary_role(name: str, spec: dict[str, Any], root: Path,
-                       *, executable: bool = True) -> dict[str, str]:
+                       *, executable: bool = True,
+                       expected_source: str | None = None) -> dict[str, str]:
     if not isinstance(spec, dict):
         raise UnsafePlan(f"{name}: missing binary specification")
     path = _private_path(_manifest_value(spec, "path", str), root,
@@ -136,16 +145,73 @@ def _valid_binary_role(name: str, spec: dict[str, Any], root: Path,
     source = _manifest_value(spec, "source_commit", str)
     if re.fullmatch(r"[0-9a-f]{40}", source) is None:
         raise UnsafePlan(f"{name}: invalid pinned commit")
-    if name == "chansrv" and source != CHANSRV_SOURCE_REF:
-        raise UnsafePlan("chansrv must be built from committed corrected patch stack")
+    if name == "chansrv" and expected_source is None:
+        expected_source = CHANSRV_SOURCE_REF
+    if expected_source is not None and source != expected_source:
+        raise UnsafePlan(
+            f"{name}: artifact source disagrees with reviewed private build")
     # Host ELF runtime closure is not proven by a binary hash or readelf alone.
     # Existing protected-prefix build libraries may not be used for runtime.
     return {"path": str(path), "sha256": expected_sha, "source_commit": source}
 
 
+def _validate_private_build_contract(
+        build: dict[str, Any], release: Path,
+        compiled_sockets: Path) -> dict[str, Any]:
+    """Reconcile actual PR #40 path layout before the C-leg can be described."""
+    if not isinstance(build, dict):
+        raise UnsafePlan("Missing matched private xrdp build contract")
+    build_root = _private_path(
+        _manifest_value(build, "root", str), release, "private_build_root")
+    if (build_root != release / "xrdp-console" or
+            not build_root.is_dir() or
+            build_root.stat().st_uid != os.geteuid()):
+        raise UnsafePlan("Private build must use owned .release/xrdp-console")
+    source_commit = _manifest_value(build, "source_commit", str)
+    if source_commit not in REVIEWED_PRIVATE_BUILD_COMMITS:
+        raise UnsafePlan("Private build source not in reviewed corrected-source set")
+    state_hash = _manifest_value(build, "state_hash", str)
+    if SHA256.fullmatch(state_hash) is None:
+        raise UnsafePlan("Private build state hash must be SHA-256")
+    install = _private_path(
+        _manifest_value(build, "install_prefix", str),
+        build_root, "private_install_prefix")
+    if (not install.is_dir() or
+            install.name != f"xrdp-install-{state_hash[:16]}"):
+        raise UnsafePlan("Private installed prefix does not match state hash")
+    socket_root = _private_path(
+        _manifest_value(build, "compiled_socket_root", str),
+        build_root, "compiled_socket_root")
+    if socket_root != build_root / "socket-root" or socket_root != compiled_sockets:
+        raise UnsafePlan("Controller and compiled chansrv socket roots differ")
+    runstate = _private_path(
+        _manifest_value(build, "compiled_runstate", str),
+        build_root, "compiled_runstate", must_exist=False)
+    if runstate != build_root / "runstate":
+        raise UnsafePlan("Compiled runstate is inconsistent with private CMake profile")
+    pid_path = _private_path(
+        _manifest_value(build, "compiled_pid_path", str),
+        install, "compiled_pid_path", must_exist=False)
+    if pid_path != install / "var" / "run":
+        raise UnsafePlan("Chansrv PID path must use private localstatedir/run")
+    return {
+        "root": str(build_root),
+        "source_commit": source_commit,
+        "corrected_chansrv_ancestor_claim": CHANSRV_SOURCE_REF,
+        "ancestry_proven_by_manifest": False,
+        "state_hash": state_hash,
+        "install_prefix": str(install),
+        "compiled_socket_root": str(socket_root),
+        "compiled_runstate": str(runstate),
+        "compiled_pid_path": str(pid_path),
+        "runtime_authorized": False,
+    }
+
+
 def _validate_private_rdp_endpoint(
         endpoint: dict[str, Any], release: Path,
-        run_root: Path, source_display: str
+        run_root: Path, source_display: str,
+        build_contract: dict[str, Any]
         ) -> dict[str, Any]:
     """Offline description only; no bind, connect, spawn or listener attestation."""
     if not isinstance(endpoint, dict):
@@ -185,8 +251,12 @@ def _validate_private_rdp_endpoint(
     }
     if len({item["path"] for item in artifacts.values()}) != len(artifacts):
         raise UnsafePlan("C-leg artifacts cannot share executable identities")
-    if artifacts["xrdp"]["source_commit"] != CHANSRV_SOURCE_REF:
-        raise UnsafePlan("Private xrdp must share the corrected chansrv source stack")
+    for name in ("xrdp", "module"):
+        if artifacts[name]["source_commit"] != build_contract["source_commit"]:
+            raise UnsafePlan(f"{name}: source must match the reviewed chansrv build")
+        if not _inside(Path(artifacts[name]["path"]),
+                       Path(build_contract["install_prefix"])):
+            raise UnsafePlan(f"{name}: compiled artifact outside matched install")
     display_number = int(source_display[1:])
     expected_route = f"DISPLAY({display_number},{os.getuid()})"
     if _manifest_value(endpoint, "chansrvport", str) != expected_route:
