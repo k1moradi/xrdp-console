@@ -278,6 +278,63 @@ class ProvenanceTests(unittest.TestCase):
             ])
         self.assertEqual(ctx.exception.code, 2)
 
+    def test_cmake_42_static_redirect_entry_is_accepted_only_in_private_build(self):
+        directory = self.build / "CMakeFiles/pkgRedirects"
+        directory.mkdir(parents=True)
+        raw = (
+            "CMAKE_FIND_PACKAGE_REDIRECTS_DIR:STATIC=" + str(directory) + "\n"
+            "XRDP_CONSOLE_PRIVATE_XRDP_BUILD:BOOL=ON\n"
+        )
+        data = evidence.read_cache(raw)
+        self.assertEqual(data["CMAKE_FIND_PACKAGE_REDIRECTS_DIR"],
+                         str(directory))
+        self.cache.update(data)
+        result = self.audit()
+        self.assertTrue(result["private_build_config_verified"])
+
+    def test_cmake_static_redirect_cannot_point_outside_current_build(self):
+        expected = self.build / "CMakeFiles/pkgRedirects"
+        expected.mkdir(parents=True)
+        external = self.release / "other-build/CMakeFiles/pkgRedirects"
+        external.mkdir(parents=True)
+        for path in (str(external),
+                     str(self.build / "../other-build/CMakeFiles/pkgRedirects"),
+                     "/run/xrdp/sockdir",
+                     str(self.build / "CMakeFiles/missingRedirects")):
+            with self.subTest(path=path):
+                self.cache["CMAKE_FIND_PACKAGE_REDIRECTS_DIR"] = path
+                with self.assertRaises(evidence.ProvenanceError):
+                    self.audit()
+        del self.cache["CMAKE_FIND_PACKAGE_REDIRECTS_DIR"]
+
+    def test_cmake_static_redirect_rejects_symlink_and_non_directory(self):
+        generated = self.build / "CMakeFiles/pkgRedirects"
+        generated.parent.mkdir(exist_ok=True)
+        real = self.build / "safe-other"
+        real.mkdir()
+        generated.symlink_to(real, target_is_directory=True)
+        self.cache["CMAKE_FIND_PACKAGE_REDIRECTS_DIR"] = str(generated)
+        with self.assertRaisesRegex(evidence.ProvenanceError, "symlink"):
+            self.audit()
+        generated.unlink()
+        generated.write_text("not a directory")
+        with self.assertRaises(evidence.ProvenanceError):
+            self.audit()
+
+    def test_no_arbitrary_static_keys_or_type_smuggling(self):
+        entries = (
+            "XRDP_CONSOLE_PRIVATE_XRDP_BUILD:STATIC=ON\n",
+            "XRDP_CONSOLE_XRDP_SOURCE_SHA256:STATIC=" + "a" * 64 + "\n",
+            "CMAKE_FIND_PACKAGE_REDIRECTS_DIR:STRING=/tmp/redirect\n",
+            "UNTRUSTED_PREFIX:STATIC=/usr/local/xrdp\n",
+            "XRDP_CONSOLE_XRDP_CFLAGS:NEWTYPE=-L/protected\n",
+            "CMAKE_FIND_PACKAGE_REDIRECTS_DIR:STATIC=/tmp/ok\n"
+            "CMAKE_FIND_PACKAGE_REDIRECTS_DIR:STATIC=/tmp/other\n",
+        )
+        for raw in entries:
+            with self.subTest(raw=raw), self.assertRaises(evidence.ProvenanceError):
+                evidence.read_cache(raw)
+
     def test_read_cache_is_readonly_and_parses_native_cache_types(self):
         parsed = evidence.read_cache(
             "// comment\n# explanatory comment\n"
