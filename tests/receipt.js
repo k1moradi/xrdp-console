@@ -174,13 +174,18 @@
     const items = Array.from(event.clipboardData?.items || []);
     const imageItems = items.filter(item => item.kind === 'file' && item.type === 'image/png');
     let file = null, getAsFileError = null;
-    try { if (imageItems.length) file = imageItems[0].getAsFile(); }
+    // No PNG item means getAsFile() was NEVER invoked. The old probe
+    // reported getAsFileNull:true for both that case and an actual null
+    // return; do not conflate MIME discovery with File materialization.
+    const getAsFileInvoked = imageItems.length > 0;
+    try { if (getAsFileInvoked) file = imageItems[0].getAsFile(); }
     catch (error) { getAsFileError = errorCode(error,'getAsFile'); }
     const id = ++sequence;
     const meta = {source:'paste',phase:'captured',trusted:event.isTrusted,
       types:Array.from(event.clipboardData?.types || []),
       items:items.map(item => ({kind:item.kind,type:item.type})),
-      imageItemCount:imageItems.length,getAsFileNull:file===null,
+      imageItemCount:imageItems.length,getAsFileInvoked,
+      getAsFileNull:getAsFileInvoked ? file===null : null,
       getAsFileError,filesLength:event.clipboardData?.files.length ?? -1,
       fileType:file?.type ?? null,fileSize:file?.size ?? null,
       selectionGeneration:null};
@@ -197,7 +202,8 @@
     const id = ++sequence;
     const meta = {source:'synthetic-validation',trusted:false,
       phase:'captured',types:[],items:[],imageItemCount:0,
-      getAsFileNull:false,getAsFileError:null,filesLength:0,
+      getAsFileInvoked:false,getAsFileNull:null,
+      getAsFileError:null,filesLength:0,
       fileType:file.type,fileSize:file.size,selectionGeneration:null};
     publish(meta,id);await inspect(file,meta,id);return current;
   }
