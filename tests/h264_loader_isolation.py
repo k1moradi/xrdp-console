@@ -53,6 +53,124 @@ def private_client_display_is_safe(
     return bool(xauthority and Path(xauthority).is_file())
 
 
+def require_existing_release_workspace(configured: str | None) -> Path:
+    """Return an explicitly selected existing .release workspace, unchanged.
+
+    The loader must not create task roots or guess whether the owner's
+    workspace is in their home folder or checkout.
+    """
+    if not configured:
+        raise ValueError(
+            "cropped H.264 test requires XRDP_CONSOLE_RELEASE_ROOT "
+            "pointing to the existing .release directory")
+    workspace = Path(configured)
+    if not workspace.is_absolute() or workspace.name != ".release":
+        raise ValueError("XRDP_CONSOLE_RELEASE_ROOT must be an absolute .release path")
+    if workspace.is_symlink() or not workspace.is_dir():
+        raise ValueError("existing .release must be a real, non-symlink directory")
+    resolved = workspace.resolve(strict=True)
+    if resolved != workspace or resolved.name != ".release":
+        raise ValueError(".release path must be canonical; do not follow aliases")
+    if resolved.stat().st_uid != os.getuid():
+        raise ValueError(".release workspace must be owned by the test user")
+    if resolved.stat().st_mode & 0o022:
+        raise ValueError(".release workspace may not be group/world writable")
+    if not os.access(resolved, os.W_OK | os.X_OK):
+        raise ValueError(".release workspace is not writable")
+    return resolved
+
+
+def require_ctest_build_inside_release(
+        release_root: Path, configured: str | None) -> Path:
+    """Prevent CTest itself from writing outside .release/Testing.
+
+    CTest writes its own output alongside CMakeCache.txt even if the loader
+    sends all subprocess logs into .release/runtime.
+    """
+    if not configured:
+        raise ValueError("private H.264 CTest requires XRDP_CONSOLE_CTEST_BUILD_ROOT")
+    build = Path(configured)
+    if not build.is_absolute() or build.is_symlink() or not build.is_dir():
+        raise ValueError("CTest build root must be existing, absolute, and non-symlinked")
+    resolved = build.resolve(strict=True)
+    if not resolved.is_relative_to(release_root) or resolved == release_root:
+        raise ValueError("CTest build root must be inside existing .release")
+    return resolved
+
+
+def require_release_outside_pinned_prefix(
+        release_root: Path, install_root: Path) -> None:
+    """Never place reusable test scratch inside a live pinned prefix."""
+    pinned = install_root.resolve(strict=True)
+    release = release_root.resolve(strict=True)
+    if release == pinned or release.is_relative_to(pinned) or pinned.is_relative_to(release):
+        raise ValueError(
+            "existing .release workspace overlaps the active pinned xrdp "
+            "install prefix; choose a separate pre-existing .release")
+
+
+def private_release_directory(workspace: Path, name: str) -> Path:
+    """Reuse an owned, stable subdirectory; never follow an existing link."""
+    if name not in ("runtime", "logs", "client-xvfb-tmp", "h264-cropped-edge"):
+        raise ValueError("unapproved reusable .release subdirectory")
+    path = workspace / name
+    if path.is_symlink():
+        raise ValueError("reusable .release subdirectory may not be a symlink")
+    path.mkdir(mode=0o700, exist_ok=True)
+    if not path.is_dir() or path.resolve(strict=True).parent != workspace:
+        raise ValueError("reusable .release subdirectory escaped its parent")
+    if path.stat().st_uid != os.getuid() or path.stat().st_mode & 0o077:
+        raise ValueError("reusable .release subdirectory must be private")
+    return path
+
+
+def archive_private_h264_logs(
+        release_workspace: Path, sources: tuple[tuple[Path, str], ...]) -> Path:
+    """Preserve bounded synthetic-only logs in one reused agent-owned folder.
+
+    An existing directory without our ownership marker is not safe to
+    overwrite: the user's .release may contain unrelated files.
+    """
+    approved = {
+        "xrdp.log", "xrdp-stdout.log", "freerdp.log", "source-xvfb.log"}
+    if any(name not in approved for _, name in sources):
+        raise ValueError("unexpected H.264 log name")
+    logs = private_release_directory(release_workspace, "logs")
+    target_dir = private_release_directory(logs, "h264-cropped-edge")
+    marker = target_dir / ".xrdp-console-synthetic-logs"
+    if marker.is_symlink():
+        raise ValueError("synthetic log ownership marker is a symlink")
+    if not marker.exists():
+        if any(target_dir.iterdir()):
+            raise ValueError("refusing to overwrite unclaimed .release log files")
+        descriptor = os.open(
+            marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+            getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+            handle.write("Reusable synthetic cropped-edge test logs\\n")
+    elif not marker.is_file() or marker.stat().st_uid != os.getuid():
+        raise ValueError("invalid synthetic log ownership marker")
+
+    for source_path, name in sources:
+        if not source_path.is_file():
+            continue
+        with source_path.open("rb") as source:
+            source.seek(0, os.SEEK_END)
+            source.seek(max(0, source.tell() - 131072))
+            last_bytes = source.read()
+        target = target_dir / name
+        if target.is_symlink() or (
+                target.exists() and (
+                    not target.is_file() or target.stat().st_nlink > 1 or
+                    target.stat().st_uid != os.getuid())):
+            raise ValueError("refusing to overwrite an unsafe .release test log")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(target, flags, 0o600), "wb") as output:
+            output.write(last_bytes)
+    return target_dir
+
+
 def require_loopback_tcp_listener(
         port: int, proc_net: Path = Path("/proc/net")) -> None:
     """Refuse an RDP listener visible on any non-loopback interface.

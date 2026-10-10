@@ -27,10 +27,15 @@ from pathlib import Path
 
 from h264_frame_coherence import coherence_problem, parse_frame_sample
 from h264_loader_isolation import (
+    archive_private_h264_logs,
     create_private_source_xauthority,
     isolated_desktop_environment,
     isolated_loader_module_name,
     private_client_display_is_safe,
+    private_release_directory,
+    require_ctest_build_inside_release,
+    require_existing_release_workspace,
+    require_release_outside_pinned_prefix,
     require_loopback_tcp_listener,
     require_unoccupied_pinned_xrdp_pidfile,
 )
@@ -7633,20 +7638,29 @@ def main() -> int:
     if cpu_contention:
         set_single_cpu_affinity()
 
-    # The lower-right H.264 regression must never reuse the physical Linux
-    # desktop as its FreeRDP client display, even if DISPLAY is already valid.
-    # Build-local scratch is required before the xvfb-run exec boundary.
-    if crop_edge_mode and not os.environ.get("XRDP_CONSOLE_TEST_RUNTIME_ROOT"):
-        raise AssertionError(
-            "cropped H.264 test requires a build-local TEST_RUNTIME_ROOT")
+    # The user's explicitly designated, existing .release workspace is
+    # the ONLY writable artifact root for this cropped-edge regression.
+    # Resolve it before spawning Xvfb or xrdp. No new date-stamped roots.
+    release_workspace = (
+        require_existing_release_workspace(
+            os.environ.get("XRDP_CONSOLE_RELEASE_ROOT"))
+        if crop_edge_mode else None)
+    if release_workspace is not None:
+        require_ctest_build_inside_release(
+            release_workspace, os.environ.get("XRDP_CONSOLE_CTEST_BUILD_ROOT"))
+        require_release_outside_pinned_prefix(
+            release_workspace, Path(arguments[2]))
+    release_runtime = (
+        private_release_directory(release_workspace, "runtime")
+        if release_workspace is not None else None)
     if crop_edge_mode:
         # The 0.10.6.1 xrdp main() reads a compile-time PID path even for
         # --nodaemon. Refuse an occupied pinned PID namespace BEFORE we
         # start the private client Xvfb. Never remove the live pidfile.
         require_unoccupied_pinned_xrdp_pidfile(Path(arguments[2]))
     private_client_scratch = (
-        Path(os.environ["XRDP_CONSOLE_TEST_RUNTIME_ROOT"]) / "client-xvfb-tmp"
-        if crop_edge_mode else None)
+        private_release_directory(release_runtime, "client-xvfb-tmp")
+        if release_runtime is not None else None)
     ensure_test_display(
         max(presentation_width, 1920) if randr_resize_mode else
         presentation_width,
@@ -7720,12 +7734,15 @@ def main() -> int:
     if overlap_client is not None and not overlap_client.is_file():
         raise AssertionError(f"missing FreeRDP overlap test client: {overlap_client}")
 
-    # Store test subprocesses and transient logs in the configured build tree,
-    # not in /tmp or /var/tmp. The normal context manager still cleans up.
+    # The cropped-edge mode reuses .release/runtime instead of creating a
+    # new checkout or home-level task directory. Other historical modes keep
+    # their existing test-root behavior until separately migrated.
     build_test_root = install_root.parent.parent / "test-artifacts" / "tmp"
-    runtime_root = Path(os.environ.get(
-        "XRDP_CONSOLE_TEST_RUNTIME_ROOT", str(build_test_root)))
-    runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    runtime_root = (release_runtime if release_runtime is not None else
+                    Path(os.environ.get(
+                        "XRDP_CONSOLE_TEST_RUNTIME_ROOT", str(build_test_root))))
+    if release_runtime is None:
+        runtime_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     with tempfile.TemporaryDirectory(prefix="xrdp-console-loader-",
                                      dir=runtime_root) as temp:
         root = Path(temp)
@@ -8627,6 +8644,13 @@ password=smoke
                     print(
                         f"WARNING: could not preserve coherence diagnostics: "
                         f"{error}", file=sys.stderr)
+            if release_workspace is not None:
+                archive_private_h264_logs(
+                    release_workspace,
+                    ((log_path, "xrdp.log"),
+                     (stdout_path, "xrdp-stdout.log"),
+                     (client_log_path, "freerdp.log"),
+                     (source_display_log_path, "source-xvfb.log")))
             try:
                 module_link.unlink()
             except FileNotFoundError:

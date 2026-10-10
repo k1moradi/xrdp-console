@@ -14,10 +14,15 @@ from unittest import mock
 import test_xrdp_loader as loader
 
 from h264_loader_isolation import (
+    archive_private_h264_logs,
     create_private_source_xauthority,
     isolated_desktop_environment,
     isolated_loader_module_name,
     private_client_display_is_safe,
+    private_release_directory,
+    require_ctest_build_inside_release,
+    require_existing_release_workspace,
+    require_release_outside_pinned_prefix,
     require_loopback_tcp_listener,
     require_unoccupied_pinned_xrdp_pidfile,
 )
@@ -160,6 +165,154 @@ class LoaderIsolationTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "symlink"):
             require_unoccupied_pinned_xrdp_pidfile(prefix)
         self.assertEqual(list(outside.iterdir()), [])
+
+    def test_release_workspace_is_required_and_never_auto_created(self):
+        missing = self.root / ".release"
+        self.assertFalse(missing.exists())
+        with self.assertRaisesRegex(ValueError, "existing \\.release"):
+            require_existing_release_workspace(str(missing))
+        self.assertFalse(missing.exists())
+        with self.assertRaisesRegex(ValueError, "XRDP_CONSOLE_RELEASE_ROOT"):
+            require_existing_release_workspace(None)
+        with self.assertRaisesRegex(ValueError, "absolute"):
+            require_existing_release_workspace(".release")
+        unrelated = self.root / "task-20261010"
+        unrelated.mkdir()
+        with self.assertRaisesRegex(ValueError, "absolute \\.release"):
+            require_existing_release_workspace(str(unrelated))
+
+    def test_release_workspace_reuses_private_stable_directories(self):
+        workspace = self.root / ".release"
+        workspace.mkdir(mode=0o700)
+        resolved = require_existing_release_workspace(str(workspace))
+        self.assertEqual(resolved, workspace.resolve())
+        runtime = private_release_directory(resolved, "runtime")
+        client = private_release_directory(runtime, "client-xvfb-tmp")
+        logs = private_release_directory(resolved, "logs")
+        artifacts = private_release_directory(logs, "h264-cropped-edge")
+        marker = artifacts / "preserve.txt"
+        marker.write_text("prior run", encoding="utf-8")
+        self.assertEqual(private_release_directory(logs, "h264-cropped-edge"),
+                         artifacts)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "prior run")
+        for path in (runtime, client, logs, artifacts):
+            self.assertEqual(path.stat().st_mode & 0o077, 0)
+        self.assertEqual(sorted(p.name for p in workspace.iterdir()),
+                         ["logs", "runtime"])
+
+    def test_release_workspace_rejects_aliases_and_unsafe_paths(self):
+        workspace = self.root / ".release"
+        workspace.mkdir(mode=0o700)
+        link = self.root / "alias" / ".release"
+        link.parent.mkdir()
+        link.symlink_to(workspace, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "non-symlink"):
+            require_existing_release_workspace(str(link))
+        workspace.chmod(0o777)
+        with self.assertRaisesRegex(ValueError, "group/world"):
+            require_existing_release_workspace(str(workspace))
+
+    def test_ctest_build_must_live_inside_existing_release(self):
+        workspace = self.root / ".release"
+        workspace.mkdir(mode=0o700)
+        build = workspace / "build"
+        build.mkdir(mode=0o700)
+        self.assertEqual(require_ctest_build_inside_release(
+            workspace, str(build)), build.resolve())
+        outside = self.root / "active-build-direct-console"
+        outside.mkdir()
+        with self.assertRaisesRegex(ValueError, "inside existing \\.release"):
+            require_ctest_build_inside_release(workspace, str(outside))
+        with self.assertRaisesRegex(ValueError, "XRDP_CONSOLE_CTEST_BUILD_ROOT"):
+            require_ctest_build_inside_release(workspace, None)
+        missing = workspace / "new-timestamp-task"
+        with self.assertRaisesRegex(ValueError, "existing"):
+            require_ctest_build_inside_release(workspace, str(missing))
+        self.assertFalse(missing.exists())
+
+    def test_release_workspace_cannot_overlap_pinned_dependency_tree(self):
+        install = self.root / "build-direct-console" / "_deps" / "xrdp-install"
+        install.mkdir(parents=True)
+        release = self.root / ".release"
+        release.mkdir(mode=0o700)
+        require_release_outside_pinned_prefix(release, install)
+        nested = install / ".release"
+        nested.mkdir(mode=0o700)
+        with self.assertRaisesRegex(ValueError, "overlaps"):
+            require_release_outside_pinned_prefix(nested, install)
+        upstream = self.root / "build-direct-console"
+        with self.assertRaisesRegex(ValueError, "overlaps"):
+            require_release_outside_pinned_prefix(upstream, install)
+
+    def test_release_reusable_directory_refuses_symlinks_and_non_private(self):
+        workspace = self.root / ".release"
+        workspace.mkdir(mode=0o700)
+        outside = self.root / "outside"
+        outside.mkdir()
+        (workspace / "logs").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            private_release_directory(workspace, "logs")
+        (workspace / "logs").unlink()
+        (workspace / "runtime").mkdir(mode=0o755)
+        with self.assertRaisesRegex(ValueError, "private"):
+            private_release_directory(workspace, "runtime")
+        with self.assertRaisesRegex(ValueError, "unapproved"):
+            private_release_directory(workspace, "task-20261010")
+
+    def test_release_log_archive_reuses_owned_fixed_names_with_size_bound(self):
+        workspace = self.root / ".release"
+        workspace.mkdir(mode=0o700)
+        release = require_existing_release_workspace(str(workspace))
+        source = self.root / "synthetic-only-xrdp.log"
+        source.write_bytes(b"A" * 150000 + b"B" * 128)
+        saved = archive_private_h264_logs(release, ((source, "xrdp.log"),))
+        content = (saved / "xrdp.log").read_bytes()
+        self.assertEqual(len(content), 131072)
+        self.assertEqual(content[-128:], b"B" * 128)
+        self.assertTrue((saved / ".xrdp-console-synthetic-logs").is_file())
+        source.write_bytes(b"next synthetic run")
+        again = archive_private_h264_logs(release, ((source, "xrdp.log"),))
+        self.assertEqual(again, saved)
+        self.assertEqual((saved / "xrdp.log").read_bytes(),
+                         b"next synthetic run")
+
+    def test_release_log_archive_wont_overwrite_unclaimed_or_linked_files(self):
+        workspace = self.root / ".release"
+        workspace.mkdir(mode=0o700)
+        release = require_existing_release_workspace(str(workspace))
+        logs = private_release_directory(release, "logs")
+        folder = private_release_directory(logs, "h264-cropped-edge")
+        source = self.root / "synthetic-xrdp.log"
+        source.write_bytes(b"safe content")
+        preexisting = folder / "xrdp.log"
+        preexisting.write_bytes(b"unrelated user content")
+        with self.assertRaisesRegex(ValueError, "unclaimed"):
+            archive_private_h264_logs(
+                release, ((source, "xrdp.log"),))
+        self.assertEqual(preexisting.read_bytes(), b"unrelated user content")
+        preexisting.unlink()
+        archive_private_h264_logs(release, ((source, "xrdp.log"),))
+        (folder / "xrdp.log").unlink()
+        unrelated = self.root / "original-unrelated.txt"
+        unrelated.write_bytes(b"do not touch")
+        (folder / "xrdp.log").symlink_to(unrelated)
+        with self.assertRaisesRegex(ValueError, "unsafe"):
+            archive_private_h264_logs(
+                release, ((source, "xrdp.log"),))
+        self.assertEqual(unrelated.read_bytes(), b"do not touch")
+        with self.assertRaisesRegex(ValueError, "unexpected"):
+            archive_private_h264_logs(
+                release, ((source, "clipboard-private-data.png"),))
+
+    def test_cropped_loader_ctest_no_longer_forces_checkout_build_artifacts(self):
+        cmake = (Path(__file__).resolve().parent / "CMakeLists.txt").read_text(
+            encoding="utf-8")
+        begin = cmake.index("add_test(NAME xrdp-loader-gfx-h264-cropped-edge")
+        end = cmake.index("add_test(NAME", begin + 1)
+        definition = cmake[begin:end]
+        self.assertIn("XRDP_CONSOLE_CTEST_BUILD_ROOT=", definition)
+        self.assertNotIn("XRDP_CONSOLE_TEST_RUNTIME_ROOT=", definition)
+        self.assertNotIn("XRDP_CONSOLE_TEST_ARTIFACT_DIR=", definition)
 
     def test_module_link_resolves_to_private_workspace_without_prefix_writes(self):
         prefix = self.root / "pinned"
