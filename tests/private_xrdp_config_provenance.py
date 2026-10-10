@@ -28,6 +28,36 @@ DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 TAG = re.compile(r"[0-9a-f]{16}\Z")
 COMMIT = re.compile(r"[0-9a-f]{40}\Z")
 
+# Exact project() metadata from the reviewed top-level CMakeLists.txt:
+# project(xrdp_console VERSION 0.1.0
+#   DESCRIPTION "Direct-X11 shared physical-console module for xrdp"
+#   LANGUAGES C CXX)
+#
+# CMake 3.31/4.2 write these generated bookkeeping values as :STATIC in
+# CMakeCache.txt. None are authoritative source, compiler or install inputs.
+# Do not broadly permit arbitrary STATIC fields.
+PROJECT_STATIC_METADATA: dict[str, str] = {
+    "CMAKE_PROJECT_NAME": "xrdp_console",
+    "CMAKE_PROJECT_DESCRIPTION": "Direct-X11 shared physical-console module for xrdp",
+    "CMAKE_PROJECT_VERSION": "0.1.0",
+    "CMAKE_PROJECT_VERSION_MAJOR": "0",
+    "CMAKE_PROJECT_VERSION_MINOR": "1",
+    "CMAKE_PROJECT_VERSION_PATCH": "0",
+    "CMAKE_PROJECT_VERSION_TWEAK": "",
+    "CMAKE_PROJECT_HOMEPAGE_URL": "",
+    "CMAKE_PROJECT_COMPAT_VERSION": "",
+    "CMAKE_PROJECT_SPDX_LICENSE": "",
+    "xrdp_console_IS_TOP_LEVEL": "ON",
+}
+# Dynamic STATIC paths must independently match the already attested source
+# and build; do not allow aliases, traversal, or ancestor symlinks.
+PROJECT_STATIC_PATH_KEYS = frozenset({
+    "CMAKE_FIND_PACKAGE_REDIRECTS_DIR",
+    "xrdp_console_BINARY_DIR",
+    "xrdp_console_SOURCE_DIR",
+})
+
+
 
 class ProvenanceError(RuntimeError):
     pass
@@ -69,22 +99,21 @@ def read_cache(text: str) -> dict[str, str]:
             continue
         key, typ = left.split(":", 1)
         if typ == "STATIC":
-            # CMake 4.2 generates these specific metadata entries; no
-            # arbitrary STATIC source, compiler or prefix keys are trusted.
-            if key == "CMAKE_PROJECT_COMPAT_VERSION":
-                # project() has no COMPAT_VERSION: the CMake 4.2.3 value
-                # must be exactly blank, never a forged compatibility policy.
-                if value != "":
+            # Allow only generated project() metadata with source-defined
+            # immutable values, plus separately validated source/build paths.
+            if key in PROJECT_STATIC_METADATA:
+                if value != PROJECT_STATIC_METADATA[key]:
                     raise ProvenanceError(
-                        "CMake project compatibility version must be empty")
-            elif key != "CMAKE_FIND_PACKAGE_REDIRECTS_DIR":
+                        f"Unexpected CMake project metadata value: {key}")
+            elif key not in PROJECT_STATIC_PATH_KEYS:
                 raise ProvenanceError(f"Unexpected STATIC CMake cache key: {key}")
         elif typ not in ("BOOL", "STRING", "PATH", "FILEPATH", "INTERNAL",
                          "UNINITIALIZED"):
             raise ProvenanceError(f"Unexpected CMake cache type: {key}")
-        if (key in ("CMAKE_FIND_PACKAGE_REDIRECTS_DIR",
-                    "CMAKE_PROJECT_COMPAT_VERSION") and typ != "STATIC"):
-            raise ProvenanceError(f"CMake-generated {key} cache type must be STATIC")
+        if ((key in PROJECT_STATIC_METADATA or
+             key in PROJECT_STATIC_PATH_KEYS) and typ != "STATIC"):
+            raise ProvenanceError(
+                f"CMake-generated {key} cache type must be STATIC")
         if key in entries:
             raise ProvenanceError(f"Duplicate CMake cache value: {key}")
         entries[key] = value
@@ -195,12 +224,25 @@ def inspect_config(source: Path, build: Path, release: Path,
         raise ProvenanceError("Private source/build must be inside release root")
     require(cache, "CMAKE_HOME_DIRECTORY", str(source))
     require(cache, "CMAKE_CACHEFILE_DIR", str(build))
-    # Preserve the value constraint when inspecting direct cache mappings,
-    # not only cache files parsed by read_cache().
-    if cache.get("CMAKE_PROJECT_COMPAT_VERSION", "") != "":
-        raise ProvenanceError(
-            "Unexpected top-level CMake project compatibility version")
-    # Accept only the exact CMake 4.2-generated redirects directory for
+    # Cache dictionaries constructed without read_cache() must obey the
+    # same exact generated-project metadata constraints. Older CMake versions
+    # can legitimately omit generated entries.
+    for key, expected in PROJECT_STATIC_METADATA.items():
+        if key in cache and cache[key] != expected:
+            raise ProvenanceError(
+                f"Unexpected top-level CMake project metadata: {key}")
+    project_paths = {
+        "xrdp_console_BINARY_DIR": build,
+        "xrdp_console_SOURCE_DIR": source,
+    }
+    for key, expected in project_paths.items():
+        if key in cache:
+            # Comparing raw absolute paths first prevents reading an external
+            # path. canonical_directory then disallows symlink ancestors.
+            if Path(cache[key]) != expected:
+                raise ProvenanceError(f"CMake project path escapes build: {key}")
+            canonical_directory(cache[key], label=key)
+    # Accept only the exact CMake-generated redirects directory for
     # this private build, and reject external, traversing or symlink paths.
     # Older CMake versions may omit this metadata entirely.
     redirects_value = cache.get("CMAKE_FIND_PACKAGE_REDIRECTS_DIR")
