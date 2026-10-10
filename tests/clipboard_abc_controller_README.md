@@ -30,7 +30,8 @@ may use:
 
 After preflight, approved PNG verification and successful clipboard
 ownership, the process writes XRDP_CONSOLE_QT_OWNER_READY followed by
-a newline to stdout and flushes. It then watches held stdin:
+a newline to stdout and flushes. Controlled mode fails before Qt/X11
+initialization unless stdin is a dedicated FIFO pipe, and then watches it:
 byte q or EOF requests clean event-loop exit. Unexpected input also quits.
 The new mode has a separate 180-second hard maximum. The controller must
 attest the spawned process, private Xvfb PID/cookie, and generation independently:
