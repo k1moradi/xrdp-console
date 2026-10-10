@@ -371,15 +371,50 @@ class PlanIsolationTests(unittest.TestCase):
         authority = self.run_root / "client-Xauthority"
         authority.write_bytes(b"mock authority only")
         authority.chmod(0o600)
+        self.private_build_root = self.release / "xrdp-console"
+        self.private_build_root.mkdir(mode=0o700)
+        self.private_socket_root = self.private_build_root / "socket-root"
+        self.private_socket_root.mkdir(mode=0o700)
+        source_commit = "5d012ecd54cf177b7df1f25a1ec4c9bc04f800c8"
+        state_hash = "a" * 64
+        self.private_install = (
+            self.private_build_root / "build/abc-private/_deps" /
+            ("xrdp-install-" + state_hash[:16]))
+        self.private_install.mkdir(parents=True)
+        self.spec["private_build"] = {
+            "root": str(self.private_build_root),
+            "source_commit": source_commit,
+            "state_hash": state_hash,
+            "install_prefix": str(self.private_install),
+            "compiled_socket_root": str(self.private_socket_root),
+            "compiled_runstate": str(self.private_build_root / "runstate"),
+            "compiled_pid_path": str(self.private_install / "var/run"),
+        }
+        self.spec["socket_dir"] = str(self.private_socket_root)
+        self.chansrv = self.private_install / "bin/xrdp-chansrv"
+        self.chansrv.parent.mkdir(parents=True)
+        self.chansrv.write_bytes(b"inert matched private chansrv")
+        self.chansrv.chmod(0o700)
+        self.spec["private_binaries"]["chansrv"] = {
+            "path": str(self.chansrv),
+            "sha256": hashlib.sha256(self.chansrv.read_bytes()).hexdigest(),
+            "source_commit": source_commit,
+        }
         binaries = {}
         for role in ("xrdp", "module", "peer", "rdp_client"):
-            binary = self.release / ("private-" + role)
+            if role in ("xrdp", "module"):
+                subdir = "sbin" if role == "xrdp" else "lib/xrdp"
+                binary = self.private_install / subdir / (
+                    "xrdp" if role == "xrdp" else "libxrdp.so")
+                binary.parent.mkdir(parents=True, exist_ok=True)
+            else:
+                binary = self.release / ("private-" + role)
             binary.write_bytes(("inert artifact " + role).encode())
             binary.chmod(0o600 if role == "module" else 0o700)
             binaries[role] = {
                 "path": str(binary),
                 "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-                "source_commit": abc.CHANSRV_SOURCE_REF if role == "xrdp"
+                "source_commit": source_commit if role in ("xrdp", "module")
                 else "06aea13a2785268882ad55ceca0d9d0250325adc",
             }
         self.spec.update({
@@ -410,6 +445,14 @@ class PlanIsolationTests(unittest.TestCase):
                          f"DISPLAY(191,{os.getuid()})")
         self.assertFalse(endpoint["listener_verified"])
         self.assertEqual(endpoint["session_route"], "external-chansrv")
+        self.assertEqual(
+            result["private_build"]["compiled_socket_root"],
+            str(self.private_socket_root))
+        self.assertEqual(
+            result["private_build"]["compiled_pid_path"],
+            str(self.private_install / "var/run"))
+        self.assertFalse(
+            result["private_build"]["ancestry_proven_by_manifest"])
         self.assertEqual(set(endpoint["artifacts"]),
                          {"xrdp", "module", "peer", "rdp_client"})
         self.assertTrue(any("virtual-channel" in gate
@@ -453,6 +496,69 @@ class PlanIsolationTests(unittest.TestCase):
         bins["module"] = original
         bins["xrdp"]["source_commit"] = "f" * 40
         with self.assertRaises(abc.UnsafePlan):
+            self.review()
+
+    def test_c_leg_rejects_socket_root_mismatch_with_compiled_chansrv(self):
+        self.install_private_rdp_endpoint()
+        old = self.spec["socket_dir"]
+        self.spec["socket_dir"] = str(self.run_root / "sockets")
+        with self.assertRaises(abc.UnsafePlan):
+            self.review()
+        self.spec["socket_dir"] = old
+        build = self.spec["private_build"]
+        build["compiled_socket_root"] = str(self.run_root / "sockets")
+        with self.assertRaisesRegex(abc.UnsafePlan, "socket roots differ"):
+            self.review()
+
+    def test_c_leg_rejects_mismatched_compiled_pid_and_runstate(self):
+        self.install_private_rdp_endpoint()
+        contract = self.spec["private_build"]
+        for field, wrong in (
+                ("compiled_pid_path", str(self.private_install / "run")),
+                ("compiled_pid_path", "/run/xrdp"),
+                ("compiled_runstate", "/run/xrdp"),
+                ("compiled_runstate", str(self.private_build_root / "other")),
+                ("state_hash", "b" * 64)):
+            with self.subTest(field=field, wrong=wrong):
+                old = contract[field]
+                contract[field] = wrong
+                try:
+                    with self.assertRaises(abc.UnsafePlan):
+                        self.review()
+                finally:
+                    contract[field] = old
+
+    def test_c_leg_requires_a_reviewed_actual_private_build_revision(self):
+        self.install_private_rdp_endpoint()
+        contract = self.spec["private_build"]
+        for source in (abc.CHANSRV_SOURCE_REF, "f" * 40):
+            with self.subTest(source=source):
+                contract["source_commit"] = source
+                with self.assertRaisesRegex(abc.UnsafePlan, "not in reviewed"):
+                    self.review()
+
+    def test_c_leg_all_artifacts_must_share_actual_source_build_and_install(self):
+        self.install_private_rdp_endpoint()
+        spec = self.spec
+        original = spec["private_binaries"]["chansrv"]["source_commit"]
+        spec["private_binaries"]["chansrv"]["source_commit"] = (
+            abc.CHANSRV_SOURCE_REF)
+        with self.assertRaises(abc.UnsafePlan):
+            self.review()
+        spec["private_binaries"]["chansrv"]["source_commit"] = original
+        artifact = spec["private_rdp_endpoint"]["artifacts"]["module"]
+        original = artifact["source_commit"]
+        artifact["source_commit"] = abc.CHANSRV_SOURCE_REF
+        with self.assertRaises(abc.UnsafePlan):
+            self.review()
+        artifact["source_commit"] = original
+        original = artifact["path"]
+        artifact["path"] = str(self.release / "qt-screengrab-owner")
+        # The content hash and source metadata are still trustworthy-looking
+        # but this is not a module from the matched private install.
+        artifact["sha256"] = hashlib.sha256(
+            (self.release / "qt-screengrab-owner").read_bytes()).hexdigest()
+        with self.assertRaisesRegex(abc.UnsafePlan, "outside matched install"):
             self.review()
 
     def test_private_endpoint_rejects_foreign_authority_and_config(self):
