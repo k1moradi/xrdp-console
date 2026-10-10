@@ -9,6 +9,7 @@
 #include <QDir>
 #include <QFile>
 #include <QMimeData>
+#include <QObject>
 #include <QFileInfo>
 #include <QPixmap>
 #include <QSocketNotifier>
@@ -18,6 +19,7 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace
@@ -67,6 +69,15 @@ int main(int argc, char *argv[])
     if (argc != modeIndex + (pngOnly ? 2 : 1))
     {
         return fail("expected [--controlled] [--png-only] <approved synthetic PNG>");
+    }
+    if (controlled)
+    {
+        struct stat inputStatus {};
+        if (fstat(STDIN_FILENO, &inputStatus) != 0 ||
+            !S_ISFIFO(inputStatus.st_mode))
+        {
+            return fail("controlled mode requires a dedicated stdin pipe");
+        }
     }
 
     const QByteArray display = qgetenv("DISPLAY");
