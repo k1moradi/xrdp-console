@@ -2,9 +2,11 @@
 """Test-only browser receipt classification and synthetic fixture gating."""
 from pathlib import Path
 import hashlib
+import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0,str(ROOT))
@@ -633,6 +635,47 @@ class ReceiptTests(unittest.TestCase):
         stages = browser.correlate_metadata(
             trace, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
         self.assertFalse(stages["incr_terminator_ack_correlated"])
+
+
+    def test_private_xvfb_launcher_preserves_parent_xauthority(self):
+        """Offline mocks: never starts Xvfb or queries an actual X display."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_xvfb = mock.Mock()
+            fake_xvfb.pid = 2147483000
+            fake_xvfb.poll.return_value = None
+            done = []
+
+            def fake_run(args, **kwargs):
+                done.append((args, kwargs))
+                return mock.Mock(returncode=0)
+
+            with (mock.patch.dict(os.environ, {
+                    "XAUTHORITY": "/original/unchanged/authority"}),
+                  mock.patch.object(browser.shutil, "which",
+                                    return_value="/mocked/test-only-binary"),
+                  mock.patch.object(browser.subprocess, "Popen",
+                                    return_value=fake_xvfb) as start,
+                  mock.patch.object(browser.subprocess, "run",
+                                    side_effect=fake_run),
+                  mock.patch.object(browser, "verify_isolated_xvfb") as verify):
+                _proc, display = browser.start_authenticated_source_xvfb(
+                    root, root / "xvfb.log", 512, 512)
+                self.assertIs(_proc, fake_xvfb)
+                self.assertRegex(display, r"^:(19[1-9]|2[0-4][0-9])$")
+                self.assertEqual(os.environ["XAUTHORITY"],
+                                 "/original/unchanged/authority")
+                self.assertEqual(start.call_count, 1)
+                verify.assert_called_once()
+                self.assertEqual(len(done), 2)
+                self.assertEqual(done[0][0][0], "xauth")
+                self.assertEqual(done[1][0][0], "xdpyinfo")
+                probe_env = done[1][1]["env"]
+                self.assertEqual(probe_env["DISPLAY"], display)
+                self.assertEqual(probe_env["XAUTHORITY"],
+                                 str(root / "firefox-Xauthority"))
+                self.assertNotEqual(
+                    probe_env["XAUTHORITY"], os.environ["XAUTHORITY"])
 
 
 if __name__ == "__main__":
