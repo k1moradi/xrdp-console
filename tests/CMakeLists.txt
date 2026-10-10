@@ -2,6 +2,15 @@
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
+# Config-only private xrdp path guard: no upstream build, X11 or RDP.
+add_test(NAME xrdp-private-build-paths-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_private_xrdp_paths.py)
+set_tests_properties(xrdp-private-build-paths-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 30
+    LABELS "build;safety;offline")
+
 set(PYTHON_SOURCES
     ${CMAKE_SOURCE_DIR}/tools/benchmark/xrdp_console_bench.py
     ${CMAKE_SOURCE_DIR}/tools/benchmark/helpers/memory_pressure.py
