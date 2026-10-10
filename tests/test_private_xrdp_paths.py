@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 import unittest
@@ -128,6 +129,72 @@ class PrivateXrdpPathsTests(unittest.TestCase):
         self.assertIn("choose a fresh isolated CMAKE_BINARY_DIR", source)
         self.assertIn('NOT XRDP_CONSOLE_XRDP_CONFIGURED_PROFILE STREQUAL _xrdp_profile',
                       source)
+
+    def private_flags_probe(self, *, flags="-O3 -march=native -mtune=native",
+                            cppflags="", ldflags="", pkgpath="",
+                            environment=None):
+        """Execute only the pure CMake checks, never project configure."""
+        script = self.scratch / "flags.cmake"
+        script.write_text(
+            'include("' + CMAKE_CHECK.as_posix() + '")\n'
+            'xrdp_console_reject_private_host_environment()\n'
+            'xrdp_console_reject_private_build_flags('
+            '"${CFLAGS}" "${CPPFLAGS}" "${LDFLAGS}" "${PKGPATH}")\n'
+        )
+        clean = {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
+        clean.update(environment or {})
+        return subprocess.run(
+            ["cmake", "-DCFLAGS=" + flags, "-DCPPFLAGS=" + cppflags,
+             "-DLDFLAGS=" + ldflags, "-DPKGPATH=" + pkgpath,
+             "-P", str(script)],
+            capture_output=True, text=True, timeout=10, check=False,
+            env=clean)
+
+    def test_private_default_native_flags_are_accepted_offline(self):
+        self.assertEqual(self.private_flags_probe().returncode, 0)
+        self.assertEqual(self.private_flags_probe(
+            flags="-O2 -g -fPIC -Wall -Werror").returncode, 0)
+
+    def test_protected_prefix_injection_via_flags_is_rejected(self):
+        cases = (
+            {"flags": "-O2 -I/opt/protected/xrdp/include"},
+            {"flags": "-O2 -L/opt/protected/xrdp/lib"},
+            {"flags": "-O2 -Wl,-rpath,/opt/protected/xrdp/lib"},
+            {"flags": "-O2 -B/opt/protected/bin"},
+            {"flags": "-O2 @/tmp/unreviewed.rsp"},
+            {"flags": "-O2 -fplugin=/opt/unreviewed/plugin.so"},
+            {"flags": "-O2 -specs=/tmp/custom.spec"},
+            {"cppflags": "-I/opt/protected/include"},
+            {"ldflags": "-L/opt/protected/lib"},
+            {"pkgpath": "/opt/protected/xrdp/lib/pkgconfig"},
+        )
+        for entry in cases:
+            with self.subTest(entry=entry):
+                self.assertNotEqual(self.private_flags_probe(**entry).returncode, 0)
+
+    def test_private_config_cannot_inherit_ambient_loader_or_pkg_config(self):
+        keys = ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT",
+                "PKG_CONFIG_PATH", "PKG_CONFIG_LIBDIR",
+                "PKG_CONFIG_SYSROOT_DIR", "LIBRARY_PATH", "CPATH",
+                "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH",
+                "CMAKE_PREFIX_PATH", "CMAKE_LIBRARY_PATH")
+        for key in keys:
+            with self.subTest(variable=key):
+                result = self.private_flags_probe(
+                    environment={key: "/protected/private-xrdp"})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(key, result.stderr)
+
+    def test_private_host_guard_precedes_pkgconfig_discovery(self):
+        source = CMAKE_DEP.read_text()
+        self.assertLess(source.index(
+            "xrdp_console_reject_private_host_environment()"),
+            source.index("find_package(PkgConfig REQUIRED)"))
+        self.assertIn('"--disable-utmp"', source)
+        self.assertIn('"--disable-vsock"', source)
+        self.assertIn('set(_xrdp_utmp_arg "--enable-utmp")', source)
+        self.assertIn('set(_xrdp_vsock_arg "--enable-vsock")', source)
+        self.assertIn("xrdp_console_reject_private_build_flags(", source)
 
     def test_configuration_check_never_writes_or_launches(self):
         source = CMAKE_CHECK.read_text()
