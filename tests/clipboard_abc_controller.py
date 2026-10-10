@@ -298,12 +298,25 @@ def review_manifest(spec: dict[str, Any]) -> dict[str, Any]:
         _manifest_value(spec, "xauthority", str), run_root, "xauthority")
     home = _private_path(
         _manifest_value(spec, "home", str), run_root, "home")
+    schema = spec["schema"]
+    if schema == 1:
+        socket_scope = run_root
+    else:
+        candidate = _manifest_value(spec, "private_build", dict)
+        socket_scope = _private_path(
+            _manifest_value(candidate, "root", str),
+            release, "private_build_root")
     sockets = _private_path(
-        _manifest_value(spec, "socket_dir", str), run_root, "socket_dir")
+        _manifest_value(spec, "socket_dir", str), socket_scope, "socket_dir")
     if not sockets.is_dir() or sockets.stat().st_mode & 0o077:
         raise UnsafePlan("Sockets must be in a caller-owned mode-0700 directory")
     if run_root in (authority, home, sockets):
         raise UnsafePlan("Distinct private authority/home/socket paths required")
+    build_contract = (
+        _validate_private_build_contract(
+            _manifest_value(spec, "private_build", dict), release, sockets)
+        if schema == 2 else None
+    )
 
     display = _manifest_value(spec, "display", str)
     env = scrub_child_environment(release, display, authority, home)
@@ -318,13 +331,19 @@ def review_manifest(spec: dict[str, Any]) -> dict[str, Any]:
     artifacts = {
         role: _valid_binary_role(
             "chansrv" if role == "chansrv" else "qt_owner",
-            data, release)
+            data, release,
+            expected_source=(build_contract["source_commit"]
+                             if role == "chansrv" and build_contract
+                             else None))
         for role, data in bins.items()
     }
     if artifacts["qt_owner"]["path"] == artifacts["chansrv"]["path"]:
         raise UnsafePlan("Owner binaries must be distinct")
 
-    schema = spec["schema"]
+    if build_contract and not _inside(
+            Path(artifacts["chansrv"]["path"]),
+            Path(build_contract["install_prefix"])):
+        raise UnsafePlan("Chansrv must be from the matched private install")
     binding = _manifest_value(spec, "rdp_listener", str)
     if schema == 1:
         if binding != "disabled":
@@ -335,7 +354,7 @@ def review_manifest(spec: dict[str, Any]) -> dict[str, Any]:
             raise UnsafePlan("C-leg needs a private loopback endpoint contract")
         endpoint = _validate_private_rdp_endpoint(
             _manifest_value(spec, "private_rdp_endpoint", dict),
-            release, run_root, display)
+            release, run_root, display, build_contract)
 
     # Explicit report of evidence the host operator must supply. A manifest
     # cannot self-attest a process PID, an ELF library closure, or X11 identity.
@@ -352,7 +371,10 @@ def review_manifest(spec: dict[str, Any]) -> dict[str, Any]:
         "child_environment_keys": sorted(env),
         "rdp_listener": binding,
         "private_rdp_endpoint": endpoint,
+        "private_build": build_contract,
         "host_gates": [
+            "Compiled private socket/runstate/PID paths require native ELF "
+            "and session proof; manifest source commit is not Git ancestry",
             "Xvfb process PID, arguments, socket and cookie must be attested",
             "C-leg requires a separate private RDP virtual-channel endpoint; "
             "schema 1 has no C-leg route" if endpoint is None else
