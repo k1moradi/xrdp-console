@@ -57,8 +57,17 @@ def observe_png_delivery(chansrv_log: str, *, generation: int,
     events: dict[str, list[str]] = defaultdict(list)
     for line in chansrv_log.splitlines():
         event_type = field(line, "event")
-        if event_type in ("x11-request", "x11-selection-notify-issued",
-                          "x11-incr-chunk-issued", "x11-incr-terminator-ack"):
+        if event_type == "x11-incr-terminator-ack":
+            # The production terminator logger uses get_atom_text(), which
+            # cannot resolve high-valued X11 atom IDs. It may print
+            # 'target=unknown atom 0x...' even when the transfer is PNG.
+            # Never discard that ACK on display-name alone: require the
+            # exact requestor/property plus generation and state below.
+            if field(line, "target") in (None, "image/png", "unknown",
+                                         "unresolved"):
+                events[event_type].append(line)
+        elif event_type in ("x11-request", "x11-selection-notify-issued",
+                           "x11-incr-chunk-issued"):
             if field(line, "target") == "image/png":
                 events[event_type].append(line)
 
