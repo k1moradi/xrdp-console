@@ -280,8 +280,18 @@ INCR. The correlator now distinguishes the **aggregate count** from
 `incr_terminator_ack_correlated`, which only succeeds when exactly one
 matching (requestor XID, property Atom, start/current/terminator
 generation, `state_match=1`) acknowledgement is observed before reuse
-or format-list change. This is stronger X11 protocol evidence, but still
-does not establish a trusted Firefox File or intended UI acceptance.
+or format-list change. **A matching terminal ACK alone is not an ordered
+delivery trace.** The stronger `incr_order_complete` field additionally
+requires the same requestor/property/generation to show an initial INCR
+announcement, initial `PropertyDelete` ACK (`acknowledged_bytes=0`),
+contiguous incrementing PNG chunks, a deletion ACK after each chunk,
+an issued zero-byte terminator at the final byte offset, and the
+terminator ACK, in that order. Incomplete logs set this to false.
+`incr_order_conflict` differentiates contradictory sequences from
+merely unobserved evidence. The boundary classifier will no longer
+promote an isolated terminal ACK to a completed transport claim.
+Even the full ordered owner-side trace still does **not** establish a
+trusted Firefox File or intended UI acceptance.
 
 Older or incomplete logs without these fields remain inconclusive.
 The INCR chunk parser matches numeric generation **exactly**, so

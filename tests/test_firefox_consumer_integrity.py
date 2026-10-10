@@ -620,19 +620,31 @@ class ReceiptTests(unittest.TestCase):
             "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
             "event=x11-selection-notify-issued path=incr requestor=0xB2 "
             "property=0xF2 send_result=1 mono_ns=110",
-            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 "
+            "event=x11-incr-announcement requestor=0xB2 property=0xF2 "
+            "generation=5",
+            "event=x11-incr-property-delete-ack requestor=0xB2 property=0xF2 "
+            "state=PropertyDelete acknowledged_bytes=0 state_match=1 "
+            "start_generation=5 current_generation=5",
+            "event=x11-incr-chunk-issued requestor=0xB4 property=0xF2 "
             "start_generation=50 current_generation=50 mono_ns=120",
             "event=x11-incr-terminator-ack requestor=0xB3 property=0xF2 "
             "terminator_generation=5 start_generation=5 "
             "current_generation=5 state_match=1 mono_ns=130",
-            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "event=x11-incr-terminator-ack requestor=0xB4 property=0xF2 "
             "terminator_generation=50 start_generation=50 "
             "current_generation=50 state_match=1 mono_ns=140",
-            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "event=x11-incr-terminator-ack requestor=0xB4 property=0xF2 "
             "terminator_generation=5 start_generation=5 "
             "current_generation=5 state_match=0 mono_ns=150",
             "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 "
+            "chunk=1 offset=0 bytes=128 end_offset=128 state_match=1 "
             "start_generation=5 current_generation=5 mono_ns=160",
+            "event=x11-incr-property-delete-ack requestor=0xB2 property=0xF2 "
+            "state=PropertyDelete acknowledged_bytes=128 state_match=1 "
+            "start_generation=5 current_generation=5",
+            "event=x11-incr-terminator-issued requestor=0xB2 property=0xF2 "
+            "offset=128 state_match=1 "
+            "start_generation=5 current_generation=5",
             "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
             "terminator_generation=5 start_generation=5 "
             "current_generation=5 state_match=1 mono_ns=180",
@@ -642,6 +654,10 @@ class ReceiptTests(unittest.TestCase):
         self.assertEqual(stages["incr_terminator_ack_count"], 4)
         self.assertEqual(stages["incr_terminator_ack_matches"], 1)
         self.assertTrue(stages["incr_terminator_ack_correlated"])
+        self.assertTrue(stages["incr_order_complete"])
+        self.assertFalse(stages["incr_order_conflict"])
+        self.assertEqual(stages["incr_order_bytes_issued"], 128)
+        self.assertEqual(stages["incr_order_chunks"], 1)
         self.assertEqual(stages["incr_terminator_ack_ns"], 180)
         self.assertEqual(stages["first_incr_chunk_ns"], 160)
         self.assertEqual(stages["x11_notify_send_result"], 1)
@@ -651,6 +667,139 @@ class ReceiptTests(unittest.TestCase):
             stages, attested_browser_requestor="0xB2")
         self.assertEqual(decision["boundary"], "PNG_INCR_TERMINATOR_ACK_ONLY")
         self.assertEqual(decision["confidence"], "observed")
+        self.assertNotEqual(decision["boundary"], "BROWSER_READABLE_PNG")
+
+    def test_isolated_terminator_ack_is_not_an_ordered_png_delivery(self):
+        # The former classifier promoted this lone terminal ACK into
+        # PNG_INCR_TERMINATOR_ACK_ONLY without any evidence of the initial
+        # handshake, a data chunk, or an issued zero-byte terminator.
+        trace = "\n".join([
+            "event=targets-response-issued requestor=0xB2 generation=5 "
+            "target_count=2 targets=TARGETS,image/png truncated=0 result=0",
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=1 mono_ns=190",
+        ])
+        stages = browser.correlate_metadata(
+            trace, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertTrue(stages["incr_terminator_ack_correlated"])
+        self.assertFalse(stages["incr_order_complete"])
+        self.assertTrue(stages["incr_order_conflict"])
+        self.assertEqual(
+            browser.diagnose_clipboard_boundary(
+                stages, attested_browser_requestor="0xB2")["boundary"],
+            "PNG_REQUEST_OBSERVED_DELIVERY_UNPROVEN")
+
+    def test_incr_first_chunk_requires_initial_property_delete(self):
+        events = [
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-announcement requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 "
+            "chunk=1 offset=0 bytes=128 end_offset=128 state_match=1 "
+            "start_generation=5 current_generation=5",
+        ]
+        result = browser.correlate_metadata(
+            "\n".join(events), "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertFalse(result["incr_order_complete"])
+        self.assertTrue(result["incr_order_conflict"])
+        self.assertFalse(result["incr_order_observed"]["initial_property_delete"])
+
+    def test_incr_discontinuous_chunks_are_not_accepted_as_ordered_evidence(self):
+        base = [
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-announcement requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-property-delete-ack requestor=0xB2 property=0xF2 "
+            "state=PropertyDelete acknowledged_bytes=0 state_match=1 "
+            "start_generation=5 current_generation=5",
+        ]
+        for tail in (
+            "chunk=2 offset=0 bytes=128 end_offset=128",
+            "chunk=1 offset=13 bytes=128 end_offset=141",
+            "chunk=1 offset=0 bytes=128 end_offset=120",
+            "chunk=1 offset=0 bytes=0 end_offset=0",
+        ):
+            with self.subTest(tail=tail):
+                report = browser.correlate_metadata(
+                    "\n".join(base + [
+                        "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 "
+                        + tail + " state_match=1 start_generation=5 current_generation=5"
+                    ]), "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+                self.assertTrue(report["incr_order_conflict"])
+                self.assertFalse(report["incr_order_complete"])
+
+    def test_incr_ack_requires_issued_terminator_after_data_delete(self):
+        base = [
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-announcement requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-property-delete-ack requestor=0xB2 property=0xF2 "
+            "state=PropertyDelete acknowledged_bytes=0 state_match=1 "
+            "start_generation=5 current_generation=5",
+            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 "
+            "chunk=1 offset=0 bytes=128 end_offset=128 state_match=1 "
+            "start_generation=5 current_generation=5",
+        ]
+        ack = ("event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+               "terminator_generation=5 start_generation=5 "
+               "current_generation=5 state_match=1 mono_ns=190")
+        for tail in (
+            [ack],  # Missing data-delete ACK and terminator issue
+            [
+                "event=x11-incr-property-delete-ack requestor=0xB2 property=0xF2 "
+                "state=PropertyDelete acknowledged_bytes=128 state_match=1 "
+                "start_generation=5 current_generation=5",
+                ack,  # Missing terminator issue
+            ],
+            [
+                "event=x11-incr-property-delete-ack requestor=0xB2 property=0xF2 "
+                "state=PropertyDelete acknowledged_bytes=128 state_match=1 "
+                "start_generation=5 current_generation=5",
+                "event=x11-incr-terminator-issued requestor=0xB2 property=0xF2 "
+                "offset=127 state_match=1 start_generation=5 current_generation=5",
+                ack,  # Wrong EOF offset
+            ],
+        ):
+            with self.subTest(tail=tail):
+                report = browser.correlate_metadata(
+                    "\n".join(base + tail), "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+                self.assertFalse(report["incr_order_complete"])
+                self.assertTrue(report["incr_order_conflict"])
+
+    def test_incr_complete_sequence_is_not_browser_file_acceptance(self):
+        trace = "\n".join([
+            "event=targets-response-issued requestor=0xB2 generation=5 "
+            "target_count=2 targets=TARGETS,image/png truncated=0 result=0",
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-announcement requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-property-delete-ack requestor=0xB2 property=0xF2 "
+            "state=PropertyDelete acknowledged_bytes=0 state_match=1 "
+            "start_generation=5 current_generation=5",
+            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 "
+            "chunk=1 offset=0 bytes=64 end_offset=64 state_match=1 "
+            "start_generation=5 current_generation=5",
+            "event=x11-incr-property-delete-ack requestor=0xB2 property=0xF2 "
+            "state=PropertyDelete acknowledged_bytes=64 state_match=1 "
+            "start_generation=5 current_generation=5",
+            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 "
+            "chunk=2 offset=64 bytes=64 end_offset=128 state_match=1 "
+            "start_generation=5 current_generation=5",
+            "event=x11-incr-property-delete-ack requestor=0xB2 property=0xF2 "
+            "state=PropertyDelete acknowledged_bytes=128 state_match=1 "
+            "start_generation=5 current_generation=5",
+            "event=x11-incr-terminator-issued requestor=0xB2 property=0xF2 "
+            "offset=128 state_match=1 start_generation=5 current_generation=5",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=1 mono_ns=190",
+        ])
+        stages = browser.correlate_metadata(
+            trace, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertTrue(stages["incr_order_complete"])
+        self.assertEqual(stages["incr_order_chunks"], 2)
+        self.assertEqual(stages["incr_order_bytes_issued"], 128)
+        decision = browser.diagnose_clipboard_boundary(
+            stages, attested_browser_requestor="0xB2")
+        self.assertEqual(decision["boundary"], "PNG_INCR_TERMINATOR_ACK_ONLY")
         self.assertNotEqual(decision["boundary"], "BROWSER_READABLE_PNG")
 
     def test_unrelated_ack_never_proves_primary_incr_completion(self):

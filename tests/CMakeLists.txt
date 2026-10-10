@@ -84,6 +84,8 @@ endif()
 list(APPEND PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_publication_watch.py
     ${CMAKE_CURRENT_SOURCE_DIR}/firefox_chansrv_consumer.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/firefox_x11_delivery_ledger.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_firefox_x11_delivery_ledger.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_firefox_consumer_integrity.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_qt6_screengrab_owner_integrity.py
     ${CMAKE_CURRENT_SOURCE_DIR}/clipboard_abc_controller.py
@@ -119,6 +121,17 @@ set_tests_properties(firefox-consumer-classification-unit PROPERTIES
     ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
     TIMEOUT 45
     LABELS "clipboard;unit")
+# Existing PNG X11 ledger uses synthetic metadata-only logs and a fake
+# clock. Register the tests so high-valued atom/terminator attribution is
+# actually checked by CI; no X11, browser or clipboard process is started.
+add_test(NAME firefox-x11-delivery-ledger-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_firefox_x11_delivery_ledger.py)
+set_tests_properties(firefox-x11-delivery-ledger-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 20
+    LABELS "clipboard;safety;unit")
+
 # Check fixture identities and private-X11 preflight ordering offline.
 # This test never starts Qt, Firefox, Xvfb or chansrv.
 add_test(NAME qt6-screengrab-owner-integrity-unit

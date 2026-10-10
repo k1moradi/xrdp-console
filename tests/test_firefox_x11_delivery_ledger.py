@@ -48,6 +48,30 @@ class Tests(unittest.TestCase):
     def assert_inconclusive(self, lines):
         with self.assertRaises(DeliveryTraceError):self.status(lines)
 
+    def test_high_atom_id_unresolved_terminal_ack_is_still_attributed(self):
+        # PR #32's get_atom_text() cannot resolve certain atom IDs >512.
+        # The emitted source log can say 'target=unknown atom 0x...' while
+        # retaining the exact X11 requestor/property/generation identity.
+        lines = three_retries()
+        lines[-1] = lines[-1].replace(
+            "target=image/png", "target=unknown atom 0x241")
+        report = self.status(lines)
+        self.assertTrue(report["complete"])
+        self.assertEqual(report["ack_count"], 3)
+        self.assertEqual(report["verified_png_bytes"], N * 3)
+
+    def test_unresolved_terminal_ack_cannot_be_borrowed_from_other_requestor(self):
+        lines = three_retries()
+        lines[-1] = ack("0x777", "0xcb", 3240).replace(
+            "target=image/png", "target=unknown atom 0x241")
+        with self.assertRaises(DeliveryTraceError):
+            self.status(lines)
+
+    def test_known_bmp_terminal_ack_cannot_complete_png_transfer(self):
+        lines = three_retries()
+        lines[-1] = lines[-1].replace("target=image/png", "target=image/bmp")
+        self.assertFalse(self.status(lines)["complete"])
+
     def test_three_retries_completed(self):
         summary=self.status(three_retries())
         self.assertTrue(summary['complete'])
