@@ -146,8 +146,11 @@ def _valid_binary_role(name: str, spec: dict[str, Any], root: Path,
     if re.fullmatch(r"[0-9a-f]{40}", source) is None:
         raise UnsafePlan(f"{name}: invalid pinned commit")
     if name == "chansrv" and expected_source is None:
-        expected_source = CHANSRV_SOURCE_REF
-    if expected_source is not None and source != expected_source:
+        # Keep the legacy schema-1 error/contract unchanged; only schema 2
+        # accepts a *reviewed descendant* of the corrected PR #32 base.
+        if source != CHANSRV_SOURCE_REF:
+            raise UnsafePlan("chansrv must be built from corrected patch stack")
+    elif expected_source is not None and source != expected_source:
         raise UnsafePlan(
             f"{name}: artifact source disagrees with reviewed private build")
     # Host ELF runtime closure is not proven by a binary hash or readelf alone.
@@ -373,9 +376,9 @@ def review_manifest(spec: dict[str, Any]) -> dict[str, Any]:
         "private_rdp_endpoint": endpoint,
         "private_build": build_contract,
         "host_gates": [
+            "Xvfb process PID, arguments, socket and cookie must be attested",
             "Compiled private socket/runstate/PID paths require native ELF "
             "and session proof; manifest source commit is not Git ancestry",
-            "Xvfb process PID, arguments, socket and cookie must be attested",
             "C-leg requires a separate private RDP virtual-channel endpoint; "
             "schema 1 has no C-leg route" if endpoint is None else
             "C-leg private loopback listener, virtual-channel forwarding "
