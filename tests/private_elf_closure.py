@@ -131,7 +131,13 @@ def _search_dirs(path: Path, elf: ELFMetadata, root: Path) -> tuple[Path, ...]:
             candidate = Path(item)
         else:
             raise UnsafeELF(f"Untrusted RUNPATH component: {item}")
-        resolved = candidate.resolve(strict=True)
+        # Reject lexical external paths before even trying to inspect them.
+        if not _within(candidate, root):
+            raise UnsafeELF("RUNPATH references protected/external directory")
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as exc:
+            raise UnsafeELF("RUNPATH directory unavailable") from exc
         if not resolved.is_dir() or not _within(resolved, root):
             raise UnsafeELF("RUNPATH resolves into protected/external directory")
         dirs.append(resolved)
