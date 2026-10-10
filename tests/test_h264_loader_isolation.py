@@ -18,6 +18,8 @@ from h264_loader_isolation import (
     isolated_desktop_environment,
     isolated_loader_module_name,
     private_client_display_is_safe,
+    private_release_directory,
+    require_existing_release_workspace,
     require_loopback_tcp_listener,
     require_unoccupied_pinned_xrdp_pidfile,
 )
@@ -160,6 +162,77 @@ class LoaderIsolationTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "symlink"):
             require_unoccupied_pinned_xrdp_pidfile(prefix)
         self.assertEqual(list(outside.iterdir()), [])
+
+    def test_release_workspace_is_required_and_never_auto_created(self):
+        missing = self.root / ".release"
+        self.assertFalse(missing.exists())
+        with self.assertRaisesRegex(ValueError, "existing \\.release"):
+            require_existing_release_workspace(str(missing))
+        self.assertFalse(missing.exists())
+        with self.assertRaisesRegex(ValueError, "XRDP_CONSOLE_RELEASE_ROOT"):
+            require_existing_release_workspace(None)
+        with self.assertRaisesRegex(ValueError, "absolute"):
+            require_existing_release_workspace(".release")
+        unrelated = self.root / "task-20261010"
+        unrelated.mkdir()
+        with self.assertRaisesRegex(ValueError, "absolute \\.release"):
+            require_existing_release_workspace(str(unrelated))
+
+    def test_release_workspace_reuses_private_stable_directories(self):
+        workspace = self.root / ".release"
+        workspace.mkdir(mode=0o700)
+        resolved = require_existing_release_workspace(str(workspace))
+        self.assertEqual(resolved, workspace.resolve())
+        runtime = private_release_directory(resolved, "runtime")
+        client = private_release_directory(runtime, "client-xvfb-tmp")
+        logs = private_release_directory(resolved, "logs")
+        artifacts = private_release_directory(logs, "h264-cropped-edge")
+        marker = artifacts / "preserve.txt"
+        marker.write_text("prior run", encoding="utf-8")
+        self.assertEqual(private_release_directory(logs, "h264-cropped-edge"),
+                         artifacts)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "prior run")
+        for path in (runtime, client, logs, artifacts):
+            self.assertEqual(path.stat().st_mode & 0o077, 0)
+        self.assertEqual(sorted(p.name for p in workspace.iterdir()),
+                         ["logs", "runtime"])
+
+    def test_release_workspace_rejects_aliases_and_unsafe_paths(self):
+        workspace = self.root / ".release"
+        workspace.mkdir(mode=0o700)
+        link = self.root / "alias" / ".release"
+        link.parent.mkdir()
+        link.symlink_to(workspace, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "non-symlink"):
+            require_existing_release_workspace(str(link))
+        workspace.chmod(0o777)
+        with self.assertRaisesRegex(ValueError, "group/world"):
+            require_existing_release_workspace(str(workspace))
+
+    def test_release_reusable_directory_refuses_symlinks_and_non_private(self):
+        workspace = self.root / ".release"
+        workspace.mkdir(mode=0o700)
+        outside = self.root / "outside"
+        outside.mkdir()
+        (workspace / "logs").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(ValueError, "symlink"):
+            private_release_directory(workspace, "logs")
+        (workspace / "logs").unlink()
+        (workspace / "runtime").mkdir(mode=0o755)
+        with self.assertRaisesRegex(ValueError, "private"):
+            private_release_directory(workspace, "runtime")
+        with self.assertRaisesRegex(ValueError, "unapproved"):
+            private_release_directory(workspace, "task-20261010")
+
+    def test_cropped_loader_ctest_no_longer_forces_checkout_build_artifacts(self):
+        cmake = (Path(__file__).resolve().parent / "CMakeLists.txt").read_text(
+            encoding="utf-8")
+        begin = cmake.index("add_test(NAME xrdp-loader-gfx-h264-cropped-edge")
+        end = cmake.index("add_test(NAME", begin + 1)
+        definition = cmake[begin:end]
+        self.assertIn('ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"', definition)
+        self.assertNotIn("XRDP_CONSOLE_TEST_RUNTIME_ROOT=", definition)
+        self.assertNotIn("XRDP_CONSOLE_TEST_ARTIFACT_DIR=", definition)
 
     def test_module_link_resolves_to_private_workspace_without_prefix_writes(self):
         prefix = self.root / "pinned"
