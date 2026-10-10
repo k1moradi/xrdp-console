@@ -258,7 +258,7 @@ def review_manifest(spec: dict[str, Any]) -> dict[str, Any]:
     binding = _manifest_value(spec, "rdp_listener", str)
     if schema == 1:
         if binding != "disabled":
-            raise UnsafePlan("Legacy offline controller permits no RDP listener")
+            raise UnsafePlan("RDP listener not required or authorized by legacy offline controller")
         endpoint = None
     else:
         if binding != "private-loopback-unverified":
