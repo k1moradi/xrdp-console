@@ -9,6 +9,7 @@ There are no production chansrv/clipboard operations in this module.
 from __future__ import annotations
 
 import contextlib
+from dataclasses import dataclass
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -72,17 +73,46 @@ class ReceiptHandler(BaseHTTPRequestHandler):
         pass
 
 
+@dataclass
+class ReceiptOriginLease:
+    """Controller-held private loopback origin, not an unverified URL string."""
+    server: ReceiptServer
+    issuing_pid: int
+    active: bool = True
+
+    def validated_url(self) -> str:
+        if (not self.active or self.issuing_pid != os.getpid() or
+                self.server.server_address[0] != "127.0.0.1" or
+                not 1 <= self.server.server_port <= 65535):
+            raise TestInconclusive("Receipt origin is inactive or not owned locally")
+        return f"http://127.0.0.1:{self.server.server_port}/paste"
+
+
 @contextlib.contextmanager
-def serve_receipt_page():
+def serve_receipt_origin():
+    """One caller-held loopback origin may span all three sequential legs.
+
+    A lease cannot be reused after shutdown, or from another process. The
+    browser's per-profile page reload resets JS receipt state for every leg.
+    """
     server = ReceiptServer(("127.0.0.1", 0), ReceiptHandler)
+    lease = ReceiptOriginLease(server=server, issuing_pid=os.getpid())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}/paste"
+        yield lease
     finally:
+        lease.active = False
         server.shutdown()
         server.server_close()
         thread.join(timeout=3)
+
+
+@contextlib.contextmanager
+def serve_receipt_page():
+    # Backward-compatible one-leg API; A/B/C must hold one OriginLease.
+    with serve_receipt_origin() as lease:
+        yield lease.validated_url()
 
 
 def verify_isolated_xvfb(display: str, authority: Path,
@@ -173,22 +203,56 @@ def free_local_port() -> int:
         return int(s.getsockname()[1])
 
 
+def _group_still_exists(group_id: int) -> bool:
+    """Probe only. Never send a nonzero signal to an unattested group."""
+    try:
+        os.killpg(group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def stop_group(process: subprocess.Popen[Any] | None) -> None:
+    """Conservatively close a caller-spawned new-session group.
+
+    Popen leader exit != descendant cleanup. If its original session
+    identity can no longer be established, raise instead of signalling an
+    unrelated PID-reused group or claiming cleanup succeeded. The future
+    runnable backend still needs cgroup/pidfd-based descendant ownership.
+    """
     if process is None:
         return
-    if process.poll() is None:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=4)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=4)
+    pid = process.pid
+    if type(pid) is not int or pid <= 1:
+        raise TestInconclusive("Cannot attest a valid private process-group leader")
+    if process.poll() is not None:
+        if _group_still_exists(pid):
+            raise TestInconclusive(
+                "Private group leader exited; descendants or reused PID remain unverified")
+        return
+    try:
+        if os.getpgid(pid) != pid or os.getsid(pid) != pid:
+            raise TestInconclusive(
+                "Process does not own the expected private session and group")
+    except ProcessLookupError as exc:
+        raise TestInconclusive("Private group leader exited during attestation") from exc
+    # While this Popen child remains unreaped, its PID cannot be reused.
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError as exc:
+        raise TestInconclusive("Private process group vanished during teardown") from exc
+    try:
+        process.wait(timeout=4)
+    except subprocess.TimeoutExpired:
+        # The unreaped leader still anchors the original PID/group identity.
+        os.killpg(pid, signal.SIGKILL)
+        process.wait(timeout=4)
+    if _group_still_exists(pid):
+        # Never silently advance to a new clipboard owner while any child
+        # group remains. Do not blindly kill an unanchored, reused group.
+        raise TestInconclusive("Private group descendants not proved terminated")
 
 
 class WebDriver:
