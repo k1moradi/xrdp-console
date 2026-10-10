@@ -96,9 +96,11 @@ def patchset_hash(source: Path) -> str:
                 "\\" in name or relative == Path(".")):
             raise ProvenanceError("Unsafe ordered patch series member")
         member = directory / relative
-        if (not member.is_file() or member.is_symlink() or
+        if (not member.is_file() or
+                any(p.is_symlink() for p in (member, *member.parents)
+                    if within(p, directory)) or
                 not within(member.resolve(strict=True), directory)):
-            raise ProvenanceError(f"Missing or external xrdp patch: {name}")
+            raise ProvenanceError(f"Missing, linked or external xrdp patch: {name}")
         members.append(member)
     if len(members) != 53:
         raise ProvenanceError("Expected the committed, ordered 52-patch stack")
@@ -202,7 +204,8 @@ def inspect_config(source: Path, build: Path, release: Path,
 
 
 def git_check(source: Path) -> str:
-    # No fetch/checkout/status locks or git hooks. Refuse dirty tracked trees.
+    # No fetch/checkout/status locks or git hooks. The dedicated private
+    # worktree must have neither modified *nor untracked* build inputs.
     env = {
         "PATH": "/usr/bin:/bin", "LC_ALL": "C",
         "HOME": "/nonexistent",
@@ -225,8 +228,8 @@ def git_check(source: Path) -> str:
     commit = git("rev-parse", "HEAD")
     if COMMIT.fullmatch(commit) is None:
         raise ProvenanceError("Git HEAD is not a full source commit")
-    if git("status", "--porcelain", "--untracked-files=no"):
-        raise ProvenanceError("Tracked source is dirty; no source-to-build receipt")
+    if git("status", "--porcelain", "--untracked-files=all"):
+        raise ProvenanceError("Source has tracked or untracked changes; no receipt")
     git("merge-base", "--is-ancestor", CORRECTED_CHANSRV_ANCESTOR, "HEAD")
     return commit
 
