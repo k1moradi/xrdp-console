@@ -7265,7 +7265,7 @@ def ensure_test_display(minimum_width: int, minimum_height: int,
         environment.pop("XAUTHORITY", None)
         os.execvpe(xvfb_run,
                     [xvfb_run, "-a", "-s",
-                     f"-screen 0 {minimum_width}x{minimum_height}x24",
+                     f"-screen 0 {minimum_width}x{minimum_height}x24 -nolisten tcp",
                      sys.executable, "-B", *sys.argv],
                     environment)
         raise AssertionError("private xvfb-run did not execute")
