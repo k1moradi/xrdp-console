@@ -64,9 +64,17 @@ def read_cache(text: str) -> dict[str, str]:
         if ":" not in left:
             continue
         key, typ = left.split(":", 1)
-        if typ not in ("BOOL", "STRING", "PATH", "FILEPATH", "INTERNAL",
-                       "UNINITIALIZED"):
+        if typ == "STATIC":
+            # CMake 4.2 generates this one STATIC cache entry. It is
+            # build-system metadata, not a project-controlled source or
+            # dependency flag. Other STATIC entries remain untrusted.
+            if key != "CMAKE_FIND_PACKAGE_REDIRECTS_DIR":
+                raise ProvenanceError(f"Unexpected STATIC CMake cache key: {key}")
+        elif typ not in ("BOOL", "STRING", "PATH", "FILEPATH", "INTERNAL",
+                         "UNINITIALIZED"):
             raise ProvenanceError(f"Unexpected CMake cache type: {key}")
+        if key == "CMAKE_FIND_PACKAGE_REDIRECTS_DIR" and typ != "STATIC":
+            raise ProvenanceError("Redirects cache type must be STATIC")
         if key in entries:
             raise ProvenanceError(f"Duplicate CMake cache value: {key}")
         entries[key] = value
@@ -177,6 +185,16 @@ def inspect_config(source: Path, build: Path, release: Path,
         raise ProvenanceError("Private source/build must be inside release root")
     require(cache, "CMAKE_HOME_DIRECTORY", str(source))
     require(cache, "CMAKE_CACHEFILE_DIR", str(build))
+    # Accept only the exact CMake 4.2-generated redirects directory for
+    # this private build, and reject external, traversing or symlink paths.
+    # Older CMake versions may omit this metadata entirely.
+    redirects_value = cache.get("CMAKE_FIND_PACKAGE_REDIRECTS_DIR")
+    if redirects_value is not None:
+        redirects = canonical_directory(
+            redirects_value, label="CMake package redirects directory")
+        if redirects != build / "CMakeFiles" / "pkgRedirects":
+            raise ProvenanceError(
+                "CMake package redirects escape the current private build")
     require(cache, "XRDP_CONSOLE_BUILD_XRDP", "ON")
     require(cache, "XRDP_CONSOLE_PRIVATE_XRDP_BUILD", "ON")
     require(cache, "XRDP_CONSOLE_PRIVATE_RELEASE_ROOT", str(release))
