@@ -122,6 +122,13 @@ class PrivateXrdpPathsTests(unittest.TestCase):
             with self.subTest(required=required):
                 self.assertIn(required, source)
 
+    def test_cache_profile_cannot_switch_from_private_to_production(self):
+        source = CMAKE_DEP.read_text()
+        self.assertIn("XRDP_CONSOLE_XRDP_CONFIGURED_PROFILE", source)
+        self.assertIn("choose a fresh isolated CMAKE_BINARY_DIR", source)
+        self.assertIn('NOT XRDP_CONSOLE_XRDP_CONFIGURED_PROFILE STREQUAL _xrdp_profile',
+                      source)
+
     def test_configuration_check_never_writes_or_launches(self):
         source = CMAKE_CHECK.read_text()
         for forbidden in ("file(MAKE_DIRECTORY", "file(WRITE",
