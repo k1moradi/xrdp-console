@@ -817,6 +817,19 @@ if(TARGET xrdp-console)
         module-lifecycle
         PROPERTIES RESOURCE_LOCK xrdp_console_private_xvfb)
 
+    # Private build-only is NOT a graphics acceptance mode. Keep every
+    # existing FreeRDP/H.264 requirement for normal test configurations,
+    # but avoid probing any executable during this isolated build-only phase.
+    if(XRDP_CONSOLE_PRIVATE_BUILD_ONLY)
+        if(DEFINED XRDP_CONSOLE_FREERDP_EXECUTABLE AND
+           NOT "${XRDP_CONSOLE_FREERDP_EXECUTABLE}" STREQUAL "")
+            message(FATAL_ERROR
+                "Private build-only cannot adopt a FreeRDP executable from the cache")
+        endif()
+        message(STATUS
+            "Private build-only: omit FreeRDP-dependent RDP loader tests; "
+            "retain offline CTests and pinned upstream xrdp unit suite")
+    else()
     set(XRDP_CONSOLE_FREERDP_EXECUTABLE "" CACHE FILEPATH
         "H.264-capable FreeRDP client used by RDP loader integration tests")
     if(NOT XRDP_CONSOLE_FREERDP_EXECUTABLE)
@@ -866,6 +879,7 @@ if(TARGET xrdp-console)
         message(STATUS
             "RDP loader tests use FreeRDP: ${XRDP_CONSOLE_FREERDP_EXECUTABLE}")
     endif()
+    endif() # strict FreeRDP preflight in normal configurations only
     if(XRDP_CONSOLE_FREERDP_EXECUTABLE AND
        TARGET x11-pixel-probe AND TARGET x11-latency-stimulus)
         find_package(PkgConfig REQUIRED)
