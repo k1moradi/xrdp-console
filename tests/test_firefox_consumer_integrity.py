@@ -373,5 +373,171 @@ class ReceiptTests(unittest.TestCase):
                 browser.install_approved_synthetic_png(src,src)
 
 
+    def test_qt_reference_may_reencode_valid_png(self):
+        # QClipboard.setPixmap carries pixels, not the fixture's PNG
+        # compression/chunk ordering. The remote chansrv leg stays exact.
+        report = self.good()
+        report["fileSize"] = 901234
+        report["readBytes"] = 901234
+        report["sha256"] = "b" * 64
+        self.assertEqual(self.classify(report), "FILE_SIZE_MISMATCH")
+        self.assertEqual(browser.classify_receipt(
+            report, 1049471,
+            "c6635535e3669a731add63b3c4b89a0c873e0c7c88412f6ea7b06423eacfee7c",
+            (512, 512), require_exact_png_encoding=False),
+            "READABLE_PNG_FILE_VALIDATED_IMAGE")
+
+    def test_qt_reference_still_rejects_corruption_and_unbounded_files(self):
+        for changes, expected in (
+                ({"fileSize": 0, "readBytes": 0}, "FILE_SIZE_INVALID"),
+                ({"fileSize": True, "readBytes": True}, "FILE_SIZE_INVALID"),
+                ({"fileSize": browser.CAP_BYTES + 1}, "FILE_SIZE_INVALID"),
+                ({"fileSize": 300, "readBytes": 299}, "FILE_READ_FAILURE"),
+                ({"sha256": "invalid"}, "FILE_DIGEST_INVALID"),
+                ({"signatureValid": False}, "PNG_SIGNATURE_INVALID"),
+                ({"decodeError": "createImageBitmap:Error"}, "PNG_DECODE_FAILURE"),
+                ({"decodedWidth": 42, "ihdrWidth": 42}, "PNG_UNEXPECTED_DIMENSIONS")):
+            with self.subTest(changes=changes):
+                report = self.good()
+                report.update(changes)
+                self.assertEqual(browser.classify_receipt(
+                    report, 1049471,
+                    "c6635535e3669a731add63b3c4b89a0c873e0c7c88412f6ea7b06423eacfee7c",
+                    (512, 512), require_exact_png_encoding=False), expected)
+
+    def test_format_ids_are_exact_not_substrings_in_chansrv_and_peer(self):
+        chansrv = "\n".join([
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=request format_id=400050 target=image/png mono_ns=100",
+            "event=response status=0x1 format_id=400050 mono_ns=150",
+            "event=request format_id=40005 target=image/png mono_ns=200",
+            "event=response status=0x1 format_id=40005 mono_ns=300",
+        ])
+        peer = "\n".join([
+            "PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id=400050 mono_ns=111",
+            "PEER_CLIENT_FORMAT_RESPONSE_SENT format_id=400050 mono_ns=160",
+            "PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id=40005 mono_ns=211",
+            "PEER_CLIENT_FORMAT_RESPONSE_SENT format_id=40005 mono_ns=260",
+        ])
+        stages = browser.correlate_metadata(
+            chansrv, peer, 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(stages["format_data_request_ns"], 200)
+        self.assertEqual(stages["response_complete_ns"], 300)
+        self.assertTrue(stages["peer_timing_bracketed"])
+        self.assertEqual(stages["peer_request_ns"], 211)
+        self.assertEqual(stages["peer_response_sent_ns"], 260)
+
+    def test_single_peer_event_outside_generation_window_is_unattributable(self):
+        chansrv = "\n".join([
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=request format_id=40005 target=image/png mono_ns=200",
+            "event=response status=0x1 format_id=40005 mono_ns=300",
+        ])
+        peer = "\n".join([
+            "PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id=40005 mono_ns=100",
+            "PEER_CLIENT_FORMAT_RESPONSE_SENT format_id=40005 mono_ns=150",
+        ])
+        stages = browser.correlate_metadata(
+            chansrv, peer, 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertFalse(stages["peer_timing_bracketed"])
+        self.assertIsNone(stages["peer_request_ns"])
+        self.assertIsNone(stages["peer_response_sent_ns"])
+
+    def test_single_peer_event_with_no_same_generation_png_request_is_unattributable(self):
+        peer = "\n".join([
+            "PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id=40005 mono_ns=220",
+            "PEER_CLIENT_FORMAT_RESPONSE_SENT format_id=40005 mono_ns=260",
+        ])
+        stages = browser.correlate_metadata(
+            "event=format-list generation=5", peer, 40005, 5,
+            "NO_COMPLETED_TRUSTED_PASTE")
+        self.assertFalse(stages["peer_timing_bracketed"])
+        self.assertIsNone(stages["peer_request_ns"])
+        self.assertIsNone(stages["peer_response_sent_ns"])
+
+    def test_duplicate_peer_format_id_is_unattributable(self):
+        chansrv = ("event=x11-request target=image/png "
+                   "requestor=0xB2 property=0xF2 generation=5")
+        peer = "\n".join([
+            "PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id=40005 mono_ns=10",
+            "PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id=40005 mono_ns=20",
+            "PEER_CLIENT_FORMAT_RESPONSE_SENT format_id=40005 mono_ns=30",
+            "PEER_CLIENT_FORMAT_RESPONSE_SENT format_id=40005 mono_ns=40",
+        ])
+        stages = browser.correlate_metadata(
+            chansrv, peer, 40005, 5, "NO_IMAGE_PNG_ITEM")
+        self.assertEqual(stages["peer_request_ns_event_count"], 2)
+        self.assertEqual(stages["peer_response_sent_ns_event_count"], 2)
+        self.assertIsNone(stages["peer_request_ns"])
+        self.assertIsNone(stages["peer_response_sent_ns"])
+
+    def test_argument_integrity_is_issued_not_receipt_proof(self):
+        chansrv = "\n".join([
+            "event=targets-response-issued requestor=0xB2 generation=5 "
+            "target_count=3 targets=TARGETS@0x101,TIMESTAMP@0x102,"
+            "image/png@0x241 truncated=0 result=0",
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=png-xchange-arguments-issued path=incr requestor=0xC3 "
+            "property=0xF2 xchange_argument_bytes=123 hash_match=1 "
+            "length_match=1 start_generation=5 current_generation=5",
+            "event=png-xchange-arguments-issued path=incr requestor=0xB2 "
+            "property=0xF2 xchange_argument_bytes=2048 hash_match=1 "
+            "length_match=1 start_generation=5 current_generation=5",
+        ])
+        stages = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(stages["png_x11_argument_issue_count"], 1)
+        self.assertEqual(stages["png_x11_argument_issue"]["bytes"], 2048)
+        decision = browser.diagnose_clipboard_boundary(
+            stages, attested_browser_requestor="0xB2")
+        self.assertEqual(decision["boundary"], "PNG_X11_ARGUMENTS_ISSUED_ONLY")
+        self.assertEqual(decision["confidence"], "observed")
+        self.assertNotEqual(decision["boundary"], "BROWSER_READABLE_PNG")
+
+    def test_unattested_requestor_never_proves_target_absence(self):
+        chansrv = ("event=targets-response-issued requestor=0xB2 "
+                   "generation=5 target_count=2 targets=TARGETS@0x101,"
+                   "TIMESTAMP@0x102 truncated=0 result=0")
+        stages = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "NO_IMAGE_PNG_ITEM")
+        decision = browser.diagnose_clipboard_boundary(stages)
+        self.assertEqual(decision["boundary"], "REQUESTOR_IDENTITY_NOT_ATTESTED")
+        decision = browser.diagnose_clipboard_boundary(
+            stages, attested_browser_requestor="0xB2")
+        self.assertEqual(decision["boundary"],
+                         "PNG_NOT_ADVERTISED_TO_ATTESTED_XID")
+
+    def test_unresolved_target_names_never_prove_absence(self):
+        chansrv = ("event=targets-response-issued requestor=0xB2 "
+                   "generation=5 target_count=3 targets=TARGETS@0x101,"
+                   "TIMESTAMP@0x102,unresolved@0x241 truncated=0 result=0")
+        stages = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "NO_IMAGE_PNG_ITEM")
+        decision = browser.diagnose_clipboard_boundary(
+            stages, attested_browser_requestor="0xB2")
+        self.assertEqual(decision["boundary"], "BROWSER_TARGETS_UNRESOLVED")
+
+    def test_no_png_request_for_one_xid_is_inconclusive(self):
+        chansrv = ("event=targets-response-issued requestor=0xB2 "
+                   "generation=5 target_count=3 targets=TARGETS@0x101,"
+                   "TIMESTAMP@0x102,image/png@0x241 truncated=0 result=0")
+        stages = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "NO_IMAGE_PNG_ITEM")
+        decision = browser.diagnose_clipboard_boundary(
+            stages, attested_browser_requestor="0xB2")
+        self.assertEqual(decision["boundary"],
+                         "PNG_REQUEST_NOT_OBSERVED_FOR_ATTESTED_XID")
+        self.assertEqual(decision["confidence"], "inconclusive")
+
+    def test_browser_event_precondition_precedes_x11_inferences(self):
+        stages = browser.correlate_metadata(
+            "", "", 40005, 5, "TRUSTED_SHORTCUT_NO_PASTE_EVENT")
+        self.assertEqual(browser.diagnose_clipboard_boundary(stages)["boundary"],
+                         "BROWSER_EVENT_INCOMPLETE")
+        stages["classification"] = "READABLE_PNG_FILE_VALIDATED_IMAGE"
+        self.assertEqual(browser.diagnose_clipboard_boundary(stages)["boundary"],
+                         "BROWSER_READABLE_PNG")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -40,6 +40,32 @@ versions installed on the Linux host. Record those local versions before a test.
 | Firefox image discovery | Mozilla filters X11 `TARGETS` by MIME name, then fetches an image flavor | Existing generation-5 TARGETS had 4 atoms, with two names unresolved in old logging | The old numeric atoms do not establish whether `image/png` was present |
 | Browser receipt | Trusted `paste` needs `kind=file`, readable `getAsFile()`, valid PNG and UI acceptance | Previous tests showed either no image item or a null File, in different experiments | Must not merge these two observed outcomes into one root cause |
 
+**PNG byte-identity caveat:** ScreenGrab calls `QClipboard::setPixmap()`,
+not `setMimeData()` with the original encoded PNG. Qt may *re-encode*
+the pixmap using QImageWriter when Firefox requests `image/png`. The
+output can be pixel-equivalent but have a different SHA-256, compressed
+size, or PNG chunk layout.
+
+Use **different acceptance rules** for the two matched private Xvfb legs:
+
+- **A / Qt6 owner**: verify trusted Firefox paste, `kind=file`,
+  `type=image/png`, non-null `getAsFile()`, bounded File, matching
+  File/readback byte counts, valid digest shape, PNG signature, successful
+  decode, and expected dimensions. The helper already verifies the
+  original synthetic PNG input's digest. The browser File's encoded
+  digest and size need **not** equal the source fixture. This proves
+  Firefox can accept a Qt image, *not* a pixel-by-pixel identity hash.
+- **B / chansrv owner**: require the same and verify exact encoded PNG
+  size and SHA-256 agreement with the CLIPRDR synthetic fixture.
+
+`run_firefox_chansrv_timing(..., require_exact_png_encoding=False)`
+selects the Qt control's structural validation and isolated
+`firefox-qt6-control` profile directory.
+The default `require_exact_png_encoding=True` retains strict remote
+byte identity and the separate `firefox-consumer` profile directory.
+The same already-attested private Xvfb and input image are required for
+both cases; the owner must be sequentially replaced by the operator.
+
 The reviewed Mozilla source explicitly matches X11 target names for image
 flavors, so `image/png` is the **first format to verify**. Adding
 `application/x-qt-image`, JPEG, GIF or `SAVE_TARGETS` to chansrv without
@@ -105,6 +131,27 @@ the isolated CLIPRDR test peer. Record generation, owner, the corrected PR #27
 TARGETS names/IDs, Firefox requestor XID, X11 target/property,
 SelectionNotify/INCR completion, request-to-response timing and matching
 trusted-paste receipt.
+
+### Fail-closed log attribution
+
+Use `correlate_metadata(chansrv_log, peer_log, format_id,
+expected_generation, receipt["classification"])` followed by
+`diagnose_clipboard_boundary(stages)` to identify the first **observed**
+failure boundary. Correlating the global TARGETS count with a browser
+receipt alone does not identify the X11 requestor: without independent
+Firefox requestor attestation, the classifier returns
+`REQUESTOR_IDENTITY_NOT_ATTESTED`. A separately verified Firefox XID
+may be supplied as `attested_browser_requestor="0x..."`; this still does
+not exclude other browser windows.
+
+The correlator now uses exact numeric CLIPRDR format IDs (not prefix
+substrings), refuses to assign duplicate peer timestamps to one paste,
+and reports matched `png_x11_argument_issue` only for the same XID,
+property and generation. Hash agreement at that stage means the PNG
+**arguments were issued** to XChangeProperty: no X11 receipt, GTK decode,
+or Firefox File acceptance is inferred from it. No new service logging,
+clipboard payload capture, or runtime actions are required for this
+offline evidence check.
 
 Interpret **the first demonstrated difference**, in this order:
 
