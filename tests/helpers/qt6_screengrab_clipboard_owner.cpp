@@ -1,0 +1,151 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Test-only Qt6 clipboard owner modeled on LXQt ScreenGrab::copyScreen().
+// This program MUST be launched only by an operator-attested private Xvfb
+// harness. It never captures a screen or reads an existing clipboard.
+#include <QApplication>
+#include <QClipboard>
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QPixmap>
+#include <QTimer>
+
+#include <array>
+#include <cstdio>
+#include <ranges>
+#include <unistd.h>
+
+namespace
+{
+struct SyntheticFixture
+{
+    const char *sha256;
+    qsizetype bytes;
+    int width;
+    int height;
+};
+
+// These are the existing deterministic fixtures from
+// tests/firefox_chansrv_consumer.py; never accept a user screenshot.
+constexpr std::array<SyntheticFixture, 4> approvedFixtures{{
+    {"c6635535e3669a731add63b3c4b89a0c873e0c7c88412f6ea7b06423eacfee7c", 1049471, 512, 512},
+    {"d9b7864e95e934ee999ee333ce9bf86adcf823aaca271634bafb8d8b9d3f6c22", 2401598, 1000, 800},
+    {"cca28eec0cce17ae047221aa3177ed1765ad6d5884b7dc60df2ce3a3ff3a7cf4", 2286451, 1000, 760},
+    {"ba8246c60e667f7cf553d6369887e7c976d58529faad60977f6681635d07e106", 3241953, 1200, 900},
+}};
+
+int fail(const char *reason)
+{
+    std::fprintf(stderr, "qt6-screengrab-owner: %s\n", reason);
+    return 2;
+}
+
+bool isInsideRoot(const QString &canonicalRoot, const QString &canonicalPath)
+{
+    return !canonicalRoot.isEmpty()
+        && canonicalPath.startsWith(canonicalRoot + QDir::separator());
+}
+} // namespace
+
+int main(int argc, char *argv[])
+{
+    // Never initialize Qt/X11 before validating the isolated display and
+    // caller-supplied test paths. The live :0 session is always rejected.
+    if (argc != 2)
+    {
+        return fail("expected one previously approved synthetic PNG");
+    }
+
+    const QByteArray display = qgetenv("DISPLAY");
+    bool validDisplayNumber = false;
+    const int displayNumber = display.startsWith(':')
+        ? display.mid(1).toInt(&validDisplayNumber) : -1;
+    if (!validDisplayNumber || displayNumber < 191 || displayNumber > 249)
+    {
+        return fail("DISPLAY is not in the private Xvfb test range");
+    }
+
+    const QFileInfo releaseDirectory(qEnvironmentVariable("XRDP_CONSOLE_RELEASE_ROOT"));
+    if (!releaseDirectory.isDir() || releaseDirectory.isSymLink()
+        || releaseDirectory.fileName() != QStringLiteral(".release")
+        || releaseDirectory.ownerId() != geteuid())
+    {
+        return fail("missing safe, owned, existing .release root");
+    }
+
+    const QString canonicalRoot = releaseDirectory.canonicalFilePath();
+    if (canonicalRoot.isEmpty())
+    {
+        return fail("cannot canonicalize release root");
+    }
+
+    const QFileInfo authority(qEnvironmentVariable("XAUTHORITY"));
+    const QString authorityPath = authority.canonicalFilePath();
+    if (!authority.isFile() || authority.isSymLink() || authority.size() == 0
+        || authority.ownerId() != geteuid()
+        || !isInsideRoot(canonicalRoot, authorityPath))
+    {
+        return fail("XAUTHORITY is not a private release-root file");
+    }
+
+    const QFileInfo inputFile(QString::fromLocal8Bit(argv[1]));
+    const QString inputPath = inputFile.canonicalFilePath();
+    if (!inputFile.isFile() || inputFile.size() < 1
+        || inputFile.size() > 8 * 1024 * 1024
+        || !isInsideRoot(canonicalRoot, inputPath))
+    {
+        return fail("synthetic PNG is outside the approved release workspace");
+    }
+
+    QFile fixtureFile(inputPath);
+    if (!fixtureFile.open(QIODevice::ReadOnly))
+    {
+        return fail("cannot open synthetic fixture");
+    }
+    const QByteArray encodedImage = fixtureFile.readAll();
+    if (encodedImage.size() != inputFile.size())
+    {
+        return fail("incomplete synthetic fixture read");
+    }
+    const QByteArray digest = QCryptographicHash::hash(
+        encodedImage, QCryptographicHash::Sha256).toHex();
+
+    const auto matchingFixture = std::ranges::find_if(
+        approvedFixtures, [&](const SyntheticFixture &fixture) {
+            return encodedImage.size() == fixture.bytes && digest == fixture.sha256;
+        });
+    if (matchingFixture == approvedFixtures.end())
+    {
+        return fail("fixture checksum or length is not allowlisted");
+    }
+
+    QApplication application(argc, argv);
+    QPixmap image;
+    if (!image.loadFromData(encodedImage, "PNG")
+        || image.width() != matchingFixture->width
+        || image.height() != matchingFixture->height)
+    {
+        return fail("fixture PNG decode or dimensions mismatch");
+    }
+
+    QClipboard *clipboard = QApplication::clipboard();
+    if (clipboard == nullptr)
+    {
+        return fail("Qt clipboard unavailable");
+    }
+
+    // Mirror LXQt ScreenGrab's actual screenshot-copy API. Qt owns the
+    // underlying MIME data; image bytes live for this event loop's lifetime.
+    // No data transfer or GUI operation takes place on a worker thread.
+    clipboard->setPixmap(image, QClipboard::Clipboard);
+    if (!clipboard->ownsClipboard())
+    {
+        return fail("Qt failed to acquire private CLIPBOARD selection");
+    }
+
+    // Bound the observation window; Firefox and chansrv are separate private
+    // test processes, launched only after the owning harness verifies Xvfb.
+    QTimer::singleShot(45'000, &application, &QCoreApplication::quit);
+    return application.exec();
+}
