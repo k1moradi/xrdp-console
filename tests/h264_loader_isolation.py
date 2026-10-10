@@ -106,6 +106,53 @@ def private_release_directory(workspace: Path, name: str) -> Path:
     return path
 
 
+def archive_private_h264_logs(
+        release_workspace: Path, sources: tuple[tuple[Path, str], ...]) -> Path:
+    """Preserve bounded synthetic-only logs in one reused agent-owned folder.
+
+    An existing directory without our ownership marker is not safe to
+    overwrite: the user's .release may contain unrelated files.
+    """
+    approved = {
+        "xrdp.log", "xrdp-stdout.log", "freerdp.log", "source-xvfb.log"}
+    if any(name not in approved for _, name in sources):
+        raise ValueError("unexpected H.264 log name")
+    logs = private_release_directory(release_workspace, "logs")
+    target_dir = private_release_directory(logs, "h264-cropped-edge")
+    marker = target_dir / ".xrdp-console-synthetic-logs"
+    if marker.is_symlink():
+        raise ValueError("synthetic log ownership marker is a symlink")
+    if not marker.exists():
+        if any(target_dir.iterdir()):
+            raise ValueError("refusing to overwrite unclaimed .release log files")
+        descriptor = os.open(
+            marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+            getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+            handle.write("Reusable synthetic cropped-edge test logs\\n")
+    elif not marker.is_file() or marker.stat().st_uid != os.getuid():
+        raise ValueError("invalid synthetic log ownership marker")
+
+    for source_path, name in sources:
+        if not source_path.is_file():
+            continue
+        with source_path.open("rb") as source:
+            source.seek(0, os.SEEK_END)
+            source.seek(max(0, source.tell() - 131072))
+            last_bytes = source.read()
+        target = target_dir / name
+        if target.is_symlink() or (
+                target.exists() and (
+                    not target.is_file() or target.stat().st_nlink > 1 or
+                    target.stat().st_uid != os.getuid())):
+            raise ValueError("refusing to overwrite an unsafe .release test log")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        with os.fdopen(os.open(target, flags, 0o600), "wb") as output:
+            output.write(last_bytes)
+    return target_dir
+
+
 def require_loopback_tcp_listener(
         port: int, proc_net: Path = Path("/proc/net")) -> None:
     """Refuse an RDP listener visible on any non-loopback interface.
