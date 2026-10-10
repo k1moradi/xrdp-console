@@ -71,6 +71,45 @@ authenticated Xvfb PID/socket/cookie attestation; private chansrv library
 and IPC readiness; independent Qt/chansrv TARGETS observation; verified
 Firefox requestor PID identity; and explicit authorization as **unmet gates**.
 
+## C-leg requires a private RDP endpoint: offline schema 2
+
+The former schema-1 manifest remains available as a **legacy, offline
+planner** with `rdp_listener="disabled"`. It cannot describe, run or
+validate a chansrv C-leg. Codex confirmed a synthetic CLIPRDR offer needs
+a genuinely private xrdp endpoint forwarding a channel to an externally
+started private chansrv via `chansrvport=DISPLAY(...)`.
+
+Schema 2 adds a mandatory `private_rdp_endpoint` to the existing manifest,
+and requires `rdp_listener="private-loopback-unverified"`. The endpoint
+contains these strictly checked fields:
+
+- `bind_address="127.0.0.1"` and nonprivileged integer `port`:
+  the **requested** bind, NOT proof of the listener's actual kernel address
+- `session_route="external-chansrv"`: deliberately refuses to invent
+  a sesman session
+- `client_display`: a separate :191–:249 Xvfb display, distinct from
+  source `display`, with its own private `client_xauthority`
+- `config_path` and `config_sha256`: an existing, pinned private
+  xrdp config under the owned run directory; the helper does **not**
+  assert its listener URI syntax has been verified by native xrdp
+- `chansrvport`: exact DISPLAY(source-display-number,current-uid) route
+- `artifacts`: xrdp, module, peer and rdp_client, each with an
+  existing private path, SHA-256 and 40-hex source-commit identity;
+  xrdp is pinned to corrected PR #32's source identity
+
+The source controller validates those shapes but **never launches** any
+of them, checks listener state, opens CLIPRDR, or connects to either X11
+display. A manifest's binary `source_commit` and a SHA-256 do not
+independently prove a trusted source-to-binary build transcript.
+
+Schema 2 returns `private_rdp_endpoint.listener_verified=false` and
+`runtime_authorized=false` even when every local field is well formed.
+All host gates for private xrdp/module/channel forwarding, sesman
+requirements, ELF dependencies, cookie rejection and Firefox browser
+acceptance remain unresolved. Do not treat the new schema as a runtime
+backend. Its purpose is to prevent accidentally treating a Qt-only
+controller as a complete A/B/C transport test.
+
 ## Test-only lifecycle core
 
 CaseCoordinator accepts injectable OwnerPort and BrowserPort interfaces

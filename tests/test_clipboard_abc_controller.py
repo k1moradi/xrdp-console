@@ -364,6 +364,111 @@ class PlanIsolationTests(unittest.TestCase):
         with mock.patch.object(abc, "_validate_fixed_fixture"):
             return abc.review_manifest(self.spec)
 
+    def install_private_rdp_endpoint(self):
+        """Inert byte stubs only; none are native binaries or processes."""
+        config = self.run_root / "private-xrdp.ini"
+        config.write_text("[Globals]\nport=127.0.0.1:33899\n")
+        authority = self.run_root / "client-Xauthority"
+        authority.write_bytes(b"mock authority only")
+        authority.chmod(0o600)
+        binaries = {}
+        for role in ("xrdp", "module", "peer", "rdp_client"):
+            binary = self.release / ("private-" + role)
+            binary.write_bytes(("inert artifact " + role).encode())
+            binary.chmod(0o600 if role == "module" else 0o700)
+            binaries[role] = {
+                "path": str(binary),
+                "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                "source_commit": abc.CHANSRV_SOURCE_REF if role == "xrdp"
+                else "06aea13a2785268882ad55ceca0d9d0250325adc",
+            }
+        self.spec.update({
+            "schema": 2,
+            "rdp_listener": "private-loopback-unverified",
+            "private_rdp_endpoint": {
+                "bind_address": "127.0.0.1",
+                "port": 33899,
+                "session_route": "external-chansrv",
+                "client_display": ":192",
+                "client_xauthority": str(authority),
+                "config_path": str(config),
+                "config_sha256": hashlib.sha256(config.read_bytes()).hexdigest(),
+                "chansrvport": f"DISPLAY(191,{os.getuid()})",
+                "artifacts": binaries,
+            },
+        })
+
+    def test_private_rdp_c_leg_contract_is_explicit_but_never_authorized(self):
+        self.install_private_rdp_endpoint()
+        result = self.review()
+        self.assertEqual(result["rdp_listener"], "private-loopback-unverified")
+        self.assertFalse(result["runtime_authorized"])
+        endpoint = result["private_rdp_endpoint"]
+        self.assertIsNotNone(endpoint)
+        self.assertEqual(endpoint["port_requested"], 33899)
+        self.assertEqual(endpoint["chansrvport"],
+                         f"DISPLAY(191,{os.getuid()})")
+        self.assertFalse(endpoint["listener_verified"])
+        self.assertEqual(endpoint["session_route"], "external-chansrv")
+        self.assertEqual(set(endpoint["artifacts"]),
+                         {"xrdp", "module", "peer", "rdp_client"})
+        self.assertTrue(any("virtual-channel" in gate
+                            for gate in result["host_gates"]))
+
+    def test_private_endpoint_never_trusts_loopback_or_ipc_self_attestation(self):
+        self.install_private_rdp_endpoint()
+        endpoint = self.spec["private_rdp_endpoint"]
+        for key, value in (
+            ("bind_address", "0.0.0.0"),
+            ("bind_address", "::"),
+            ("session_route", "fake-sesman"),
+            ("client_display", ":0"),
+            ("client_display", ":191"),
+            ("client_display", ":250"),
+            ("chansrvport", "DISPLAY(0,0)"),
+            ("port", 22),
+            ("port", 0),
+            ("config_sha256", "a" * 64),
+        ):
+            with self.subTest(key=key, value=value):
+                old = endpoint[key]
+                endpoint[key] = value
+                try:
+                    with self.assertRaises(abc.UnsafePlan):
+                        self.review()
+                finally:
+                    endpoint[key] = old
+
+    def test_private_endpoint_rejects_protected_or_missing_binary(self):
+        self.install_private_rdp_endpoint()
+        bins = self.spec["private_rdp_endpoint"]["artifacts"]
+        prior = bins["xrdp"]["path"]
+        bins["xrdp"]["path"] = "/run/xrdp/xrdp"
+        with self.assertRaises(abc.UnsafePlan):
+            self.review()
+        bins["xrdp"]["path"] = prior
+        original = bins.pop("module")
+        with self.assertRaises(abc.UnsafePlan):
+            self.review()
+        bins["module"] = original
+        bins["xrdp"]["source_commit"] = "f" * 40
+        with self.assertRaises(abc.UnsafePlan):
+            self.review()
+
+    def test_private_endpoint_rejects_foreign_authority_and_config(self):
+        self.install_private_rdp_endpoint()
+        endpoint = self.spec["private_rdp_endpoint"]
+        old = endpoint["client_xauthority"]
+        endpoint["client_xauthority"] = "/home/user/.Xauthority"
+        with self.assertRaises(abc.UnsafePlan):
+            self.review()
+        endpoint["client_xauthority"] = old
+        old = endpoint["config_path"]
+        endpoint["config_path"] = "/etc/xrdp/xrdp.ini"
+        with self.assertRaises(abc.UnsafePlan):
+            self.review()
+        endpoint["config_path"] = old
+
     def test_clean_offline_plan_is_still_runtime_blocked(self):
         with mock.patch.dict(os.environ, {
                 "DISPLAY": ":0", "XAUTHORITY": "/home/user/.Xauthority",
