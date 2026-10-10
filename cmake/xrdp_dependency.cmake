@@ -52,6 +52,18 @@ if(XRDP_CONSOLE_PRIVATE_XRDP_BUILD)
     set(_xrdp_profile "private-offline-only")
 endif()
 
+# A private build must never reuse CMakeCache.txt from the default
+# dependency profile, nor can the mode be silently switched back in place.
+# Both profiles have independently selected source/build/stamp/install state.
+if(DEFINED XRDP_CONSOLE_XRDP_CONFIGURED_PROFILE AND
+   NOT XRDP_CONSOLE_XRDP_CONFIGURED_PROFILE STREQUAL _xrdp_profile)
+    message(FATAL_ERROR
+        "xrdp dependency profile changed in existing CMake cache; "
+        "choose a fresh isolated CMAKE_BINARY_DIR")
+endif()
+set(XRDP_CONSOLE_XRDP_CONFIGURED_PROFILE "${_xrdp_profile}" CACHE INTERNAL
+    "Recorded xrdp dependency configuration profile" FORCE)
+
 # ExternalProject stamps are generated state, not source. Make the patch
 # series and its inputs part of that state so a changed patch can never reuse
 # an already patched tree. CMAKE_CONFIGURE_DEPENDS causes the top-level build
