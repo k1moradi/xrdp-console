@@ -26,22 +26,59 @@ because they can occur before the first-party H.264 presentation.
 
 ## Validation and safety gates
 
-1. Build from PR #18 plus this stacked test branch in an **isolated**
-   worktree and write only to a fresh `build/<task-slug>` directory.
-2. Do not reuse the running `build-direct-console` source or install
-   prefixes. The active xrdp binaries may depend on libraries in that
-   prefix via ELF RUNPATH.
-3. Before any loader CTest, verify effective DISPLAY, Xauthority,
-   loopback RDP port, isolated FreeRDP invocation and the per-user
-   chansrv socket namespace. Do not connect to the actual listener
-   at TCP/3389 or start an unintended chansrv on DISPLAY=:0.
-4. If those constraints cannot be independently proven, **do not
-   execute** the integration CTest; stop and report an isolation blocker.
-5. In a verified private environment, run only the C++ unit
-   `gfx-avc420-frame-unit` and the one targeted
-   `xrdp-loader-gfx-h264-cropped-edge` CTest with output-on-failure,
-   serial execution, and a bounded timeout. Do not run the 133-test
-   suite or alter pass criteria.
+1. Resolve and reuse the user's **existing** `.release` workspace.
+   Its exact canonical location is deliberately not guessed. The test
+   requires `XRDP_CONSOLE_RELEASE_ROOT` to point to a pre-existing,
+   owned, private, non-symlinked directory literally named `.release`.
+   It stops rather than creating a new dated task/build folder.
+2. Keep detached source worktrees and isolated builds under stable paths
+   inside that same `.release`. **Do not** run
+   `scripts/build-direct-console.sh` blindly: it can rebuild/install
+   the pinned xrdp dependency. Never write to or delete the active
+   `build-direct-console/_deps/xrdp-install` prefix, even if read-only
+   module-loading through its compiled RUNPATH is used.
+3. Confirm the intended native `libxrdp_console.so` is built from
+   PR #18 commit `d613f9a6dc26482613aa1ee45fd4bb7edee9dbf7`.
+   Confirm the exact xrdp and FreeRDP executable provenance,
+   unoccupied pinned PID namespace, loaded module path length, and
+   bound IPv4 loopback listener. Do not accept a stale production module.
+4. The synthetic source and FreeRDP client each require **distinct,
+   private** MIT-MAGIC-COOKIE-1 authenticated Xvfb displays.
+   The source must reject a wrong cookie, both displays must disable
+   TCP, and neither may equal the physical `:0`. The temporary server
+   must not launch chansrv or use the user's session bus.
+5. After the user **explicitly authorizes** one bounded private RDP test,
+   the operator may use the existing isolated CMake test build inside
+   `.release`. Set `XRDP_CONSOLE_RELEASE_ROOT` to its verified
+   canonical absolute directory and select **only**
+   `xrdp-loader-gfx-h264-cropped-edge`, running serially with the
+   existing CTest 60-second timeout. Do not run the complete suite,
+   reconnect to production or change runtime services.
+6. Temporary runtime scratch is kept under `.release/runtime`.
+   Last-run synthetic-only logs (at most 128 KiB each) are overwritten
+   under `.release/logs/h264-cropped-edge/` with fixed names.
+   No new `build/<task-slug>`, home-level task folder, or
+   `build-direct-console/test-artifacts/<task-slug>` is permitted.
+   Cleanup may only remove verified obsolete **agent-owned** paths;
+   preserve pinned dependencies and unrelated user files.
+
+### Example future invocation — NOT authorization to execute
+
+Once the operator has verified an isolated build tree and separately
+received the user's approval:
+
+```sh
+# Replace these with already-existing, independently verified paths.
+export XRDP_CONSOLE_RELEASE_ROOT=/absolute/verified/path/to/.release
+# CTEST_BUILD must contain the exact candidate module and the private
+# cropped-edge CTest, not the active production build tree.
+ctest --test-dir "$CTEST_BUILD" \
+  -R '^xrdp-loader-gfx-h264-cropped-edge$' \
+  --output-on-failure --no-tests=error -j1
+```
+
+This instruction is an acceptance gate, not permission for Codex to
+start a private Xvfb, xrdp, FreeRDP or any live clipboard test.
 
 PR #18's original pinned HEAD is `d613f9a6dc26482613aa1ee45fd4bb7edee9dbf7`;
 this regression is stacked as a separate draft so Codex can
