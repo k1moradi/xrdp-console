@@ -38,6 +38,9 @@ IMAGE_REQUEST = re.compile(
 TARGETS_REQUEST = re.compile(
     r"event=x11-request target=TARGETS requestor=(0x[0-9a-fA-F]+) "
     r"[^\n]*generation=(\d+)")
+IMAGE_FLAVOR_REQUEST = re.compile(
+    r"event=x11-request target=(image/png|image/bmp) "
+    r"requestor=(0x[0-9a-fA-F]+) [^\n]*generation=(\d+)")
 
 
 class TestInconclusive(RuntimeError):
@@ -413,6 +416,7 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
         "targets_response_count": 0,
         "x11_request_count": 0,
         "x11_requestors": [],
+        "x11_image_flavor_requests": [],
         "format_data_request_ns": None,
         "response_complete_ns": None,
         "x11_notify_ns": None,
@@ -534,6 +538,18 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
             True if True in presence
             else False if presence and all(p is False for p in presence)
             else None)
+    # Keep the true per-generation flavor selection (PNG vs advertised BMP).
+    # A BMP request is not evidence that Firefox ever asked for PNG.
+    image_flavors: list[dict] = []
+    for line in lines:
+        match = IMAGE_FLAVOR_REQUEST.search(line)
+        if match is not None and int(match.group(3)) == expected_generation:
+            image_flavors.append({
+                "target": match.group(1),
+                "requestor": match.group(2).lower(),
+                "property": x11_id(line, "property"),
+            })
+    stages["x11_image_flavor_requests"] = image_flavors
     requestors = []
     primary: tuple[int, str, str | None] | None = None
     for index, line in enumerate(lines):
@@ -727,6 +743,17 @@ def diagnose_clipboard_boundary(
                 "confidence": "inconclusive", "receipt": result}
 
     if requestor not in stages.get("x11_requestors", []):
+        alternate = [
+            entry["target"]
+            for entry in stages.get("x11_image_flavor_requests", [])
+            if entry.get("requestor") == requestor and
+               entry.get("target") != "image/png"]
+        if alternate:
+            # Only the flavor request is observed. Whether it explains
+            # Firefox's File failure remains unproven.
+            return {"boundary": "OTHER_IMAGE_FLAVOR_REQUEST_OBSERVED",
+                    "confidence": "observed", "receipt": result,
+                    "requested_flavors": sorted(set(alternate))}
         return {"boundary": "PNG_REQUEST_NOT_OBSERVED_FOR_ATTESTED_XID",
                 "confidence": "inconclusive", "receipt": result}
 
