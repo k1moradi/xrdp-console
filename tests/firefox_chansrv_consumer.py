@@ -122,8 +122,8 @@ def verify_isolated_xvfb(display: str, authority: Path,
     PID is a caller-attested subprocess handle, not an untrusted /proc search.
     Caller MUST have spawned it, confirmed its command, and control its cleanup.
     """
-    if not re.fullmatch(r":[1-9][0-9]{0,4}", display) or int(display[1:]) < 2:
-        raise TestInconclusive("Not an isolated numbered Xvfb display")
+    if not re.fullmatch(r":(19[1-9]|2[0-4][0-9])", display):
+        raise TestInconclusive("Not an isolated :191..:249 Xvfb display")
     root = scratch_root.resolve(strict=True)
     auth = authority.resolve(strict=True)
     if not auth.is_relative_to(root) or not auth.is_file() or auth.stat().st_size == 0:
@@ -136,65 +136,39 @@ def verify_isolated_xvfb(display: str, authority: Path,
         raise TestInconclusive("Private Xvfb process exited") from exc
     if not args or Path(os.fsdecode(args[0])).name != "Xvfb":
         raise TestInconclusive("Display process is not Xvfb")
-    if not (b"-auth" in args and os.fsencode(auth) in args and
-            os.fsencode(display) in args and b"-nolisten" in args):
-        raise TestInconclusive("Xvfb missing private authentication or isolation")
+    # Mere membership of -auth / -nolisten is insufficient; their *paired
+    # argument values* must match this exact test display/authentication.
+    def paired_values(flag: bytes) -> list[bytes]:
+        return [args[i + 1] for i in range(len(args) - 1)
+                if args[i] == flag]
+
+    if (paired_values(b"-auth") != [os.fsencode(auth)] or
+            paired_values(b"-nolisten") != [b"tcp"] or
+            args.count(os.fsencode(display)) != 1 or
+            b"-noreset" not in args or
+            Path(f"/proc/{xvfb_pid}").stat().st_uid != os.geteuid()):
+        raise TestInconclusive("Xvfb arguments/UID do not prove private configuration")
+    # Server socket ownership, cookie rejection and race-free allocation
+    # remain separate host gates. This check does not attest the X11 server
+    # socket or authorize opening any display.
 
 
 def start_authenticated_source_xvfb(root: Path, log_path: Path,
                                     width: int, height: int
                                     ) -> tuple[subprocess.Popen[Any], str]:
-    """Allocate a *new* numbered Xvfb with a private MIT-MAGIC-COOKIE.
+    """Permanently reject the legacy check-then-start Xvfb path.
 
-    Only called by the explicit Firefox loader mode. The loader owns cleanup.
+    A filesystem socket scan is a TOCTOU allocation, not proof that the
+    newly launched Xvfb owns the chosen display. The launch also lacked an
+    independent wrong-cookie authentication test. No source-based claim of
+    private X11 safety is justified until a reviewed, caller-held display
+    allocator and attested Xauthority are implemented. The parameters and
+    return shape are retained only for source compatibility with old callers.
     """
-    for utility in ("Xvfb", "xauth", "xdpyinfo"):
-        if shutil.which(utility) is None:
-            raise TestInconclusive(f"Private X11 prerequisite unavailable: {utility}")
-    if not (100 <= width <= 8192 and 100 <= height <= 8192):
-        raise ValueError("Invalid synthetic Xvfb dimensions")
-    slot = next((i for i in range(191, 250)
-                 if not Path(f"/tmp/.X11-unix/X{i}").exists()
-                 and not Path(f"/tmp/.X{i}-lock").exists()), None)
-    if slot is None:
-        raise TestInconclusive("No unoccupied private Xvfb display slot")
-    display = f":{slot}"
-    authority = root / "firefox-Xauthority"
-    authority.touch(mode=0o600, exist_ok=False)
-    cookie = secrets.token_hex(16)
-    result = subprocess.run(["xauth", "-f", str(authority), "add", display,
-                             "MIT-MAGIC-COOKIE-1", cookie],
-                            capture_output=True, check=False, timeout=5)
-    if result.returncode != 0:
-        raise TestInconclusive("Cannot prepare private Xvfb authentication")
-    authority.chmod(0o600)
-    # Keep the parent's XAUTHORITY untouched. Only the child probe may
-    # use the private display cookie; later clients construct their own
-    # explicit DISPLAY/XAUTHORITY environment.
-    private_probe_env = dict(
-        os.environ, DISPLAY=display, XAUTHORITY=str(authority))
-    cmd = [shutil.which("Xvfb"), display, "-auth", str(authority),
-           "-screen", "0", f"{width}x{height}x24", "-nolisten", "tcp",
-           "-noreset"]
-    with log_path.open("wb") as log:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                stderr=log, start_new_session=True)
-    try:
-        deadline = time.monotonic() + 8
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                raise TestInconclusive("New private Xvfb exited before readiness")
-            probe = subprocess.run(["xdpyinfo", "-display", display],
-                                   capture_output=True, timeout=2, check=False,
-                                   env=private_probe_env)
-            if probe.returncode == 0:
-                verify_isolated_xvfb(display, authority, proc.pid, root)
-                return proc, display
-            time.sleep(0.08)
-        raise TestInconclusive("Authenticated private Xvfb unavailable")
-    except BaseException:
-        stop_group(proc)
-        raise
+    raise TestInconclusive(
+        "Legacy Xvfb display scan is disabled: private allocation and "
+        "negative-cookie authentication remain NO-GO")
+
 
 
 def free_local_port() -> int:
