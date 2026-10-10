@@ -46,12 +46,16 @@ CMake may generate:
 
 `CMAKE_FIND_PACKAGE_REDIRECTS_DIR:STATIC=<current-build>/CMakeFiles/pkgRedirects`
 
-The provenance parser accepts **only this exact STATIC key**. Other STATIC
-keys, and the same key with other types, remain errors. When present, the
-provenance auditor requires an existing canonical directory exactly at
-`<verified-CMAKE_CACHEFILE_DIR>/CMakeFiles/pkgRedirects`, rejecting
-nonexistent, symlinked, traversing, protected, or external paths.
-Earlier CMake versions without this entry remain supported.
+The provenance parser accepts **only this exact redirects STATIC key**
+with an owned, canonical directory at the verified build's
+`CMakeFiles/pkgRedirects`, rejecting missing, linked, traversing, protected,
+or external paths. The Linux CMake 4.2.3 native build additionally generated
+`CMAKE_PROJECT_COMPAT_VERSION:STATIC=` because the top-level `project()`
+does not specify `COMPAT_VERSION`. The parser allows **exactly an empty**
+`CMAKE_PROJECT_COMPAT_VERSION:STATIC` value and refuses a nonempty value,
+other cache types or arbitrary extra STATIC keys. The check also applies to
+directly inspected cache mappings, so callers cannot bypass the parser.
+Older CMake versions without either generated entry remain supported.
 
 The tool still independently checks the real Git ancestry, 52 ordered
 patches, build-state hash, owned private source/dependency paths, archive
