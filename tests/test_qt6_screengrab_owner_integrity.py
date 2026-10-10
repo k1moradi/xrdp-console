@@ -98,6 +98,10 @@ class Qt6ScreenGrabOwnerIntegrityTests(unittest.TestCase):
                       source[:app])
         self.assertIn("#include <QSocketNotifier>", source)
         self.assertLess(ownership, ready)
+        self.assertIn('S_ISFIFO(inputStatus.st_mode)', source[:app])
+        self.assertIn("fstat(STDIN_FILENO, &inputStatus)", source[:app])
+        self.assertIn("QOverload<QSocketDescriptor, QSocketNotifier::Type>::of(",
+                      source)
         self.assertIn("QSocketNotifier controlInput(STDIN_FILENO", source)
         self.assertIn("controlInput.setEnabled(controlled);", source)
         self.assertIn("::read(STDIN_FILENO, &command, 1)", source)
