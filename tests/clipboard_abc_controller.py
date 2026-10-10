@@ -17,7 +17,6 @@ import json
 import os
 from pathlib import Path
 import re
-import stat
 from typing import Any, Callable, Protocol
 
 # Product and test identity are deliberately not conflated. The source used
@@ -227,6 +226,7 @@ class BrowserPort(Protocol):
     def wait_ready(self, timeout_seconds: int) -> bool: ...
     def trusted_paste(self, timeout_seconds: int) -> dict[str, Any]: ...
     def stop(self) -> None: ...
+    def is_running(self) -> bool: ...
 
 
 @dataclass(frozen=True)
@@ -290,6 +290,8 @@ class CaseCoordinator:
                 if port is not None:
                     try:
                         port.stop()
+                        if port.is_running():
+                            raise UnsafePlan("Child still alive after requested teardown")
                     except BaseException as exc:
                         self._unsafe_cleanup = True
                         if pending_error is None:
