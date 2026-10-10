@@ -77,11 +77,13 @@ function main() {
   assert.equal(report.observer.pasteEvents, 1);
   assert.equal(report.observer.trustedPasteEvents, 1);
   assert.equal(report.imageItemCount, 0);
-  assert.equal(report.getAsFileNull, true);
+  assert.equal(report.getAsFileInvoked, false);
+  assert.equal(report.getAsFileNull, null);
   assert.equal(typeof report.observer.lastPasteWallMs, 'number');
   assert.equal(report.items[0].type, 'text/plain');
 
   const nullPage = createPage();
+  let nullCalls = 0;
   nullPage.handlers.get('paste')({
     isTrusted: true,
     preventDefault() {},
@@ -89,16 +91,61 @@ function main() {
       types: ['Files'],
       files: [{}],
       items: [{kind: 'file', type: 'image/png',
-        getAsFile: () => null}]
+        getAsFile: () => { nullCalls++; return null; }}]
     }
   });
   report = nullPage.receipt();
   assert.equal(report.phase, 'complete');
   assert.equal(report.imageItemCount, 1);
+  assert.equal(nullCalls, 1);
+  assert.equal(report.getAsFileInvoked, true);
   assert.equal(report.getAsFileNull, true);
   assert.equal(report.observer.pasteEvents, 1);
   assert.equal(report.observer.trustedPasteEvents, 1);
   assert.equal(report.observer.trustedPasteShortcuts, 0);
+
+  const exceptionPage = createPage();
+  let exceptionCalls = 0;
+  exceptionPage.handlers.get('paste')({
+    isTrusted: true,
+    preventDefault() {},
+    clipboardData: {
+      types: ['Files'], files: [],
+      items: [{kind: 'file', type: 'image/png',
+        getAsFile: () => {
+          exceptionCalls++;
+          throw new TypeError('synthetic offline exception');
+        }}]
+    }
+  });
+  report = exceptionPage.receipt();
+  assert.equal(exceptionCalls, 1);
+  assert.equal(report.getAsFileInvoked, true);
+  assert.equal(report.getAsFileNull, true);
+  assert.equal(report.getAsFileError, 'getAsFile:TypeError');
+
+  const filePage = createPage();
+  let fileCalls = 0;
+  filePage.handlers.get('paste')({
+    isTrusted: true,
+    preventDefault() {},
+    clipboardData: {
+      types: ['Files'], files: [{}],
+      items: [{kind: 'file', type: 'image/png',
+        getAsFile: () => {
+          fileCalls++;
+          return {size: 8, type: 'image/png',
+            arrayBuffer: async () => new ArrayBuffer(8)};
+        }}]
+    }
+  });
+  report = filePage.receipt();
+  assert.equal(fileCalls, 1);
+  assert.equal(report.getAsFileInvoked, true);
+  assert.equal(report.getAsFileNull, false);
+  assert.equal(report.fileType, 'image/png');
+  // Byte integrity is handled by the async stage and classifier, not by
+  // successful synchronous construction of an in-memory File-like object.
 
   const other = createPage();
   other.handlers.get('paste')({
@@ -110,6 +157,6 @@ function main() {
   assert.equal(report.observer.pasteEvents, 1);
   assert.equal(report.observer.trustedPasteEvents, 0);
 
-  console.log('PASS: Firefox receipt distinguishes shortcut, paste event, and null File');
+  console.log('PASS: Firefox receipt distinguishes absent PNG, invoked null, exception and File');
 }
 main();
