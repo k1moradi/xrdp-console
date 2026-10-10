@@ -349,3 +349,37 @@ target name, ID, or wall-clock proximity establishes browser identity alone.
 
 The reporting is metadata-only: no clipboard data, PNG bytes, hashes, or
 screenshot pixels are read or returned by this parser.
+
+## October 10: TARGETS atom identity and generation-5 evidence
+
+The retained image-bearing generation 5 answered a complete TARGETS request
+from X11 requestor `0x1e00011` with `TARGETS`, `TIMESTAMP`,
+`unknown atom 0x00000241`, and `unknown atom 0x00000240` (`result=0`,
+`truncated=0`). **Neither high-valued atom has been identified as
+`image/png` or `image/bmp`.** The pinned xrdp 0.10.6.1
+`get_atom_text()` deliberately refuses to look up atom IDs above 512,
+so the apparently complete list still has *unresolved identities*.
+
+Diagnostic patch 0039 now compares advertised atoms against chansrv's own
+interned `g_image_png_atom`, `g_image_bmp_atom` and standard clipboard
+atom variables. It logs entries as `NAME@0xHEX`, for example
+`image/png@0x241` **only when that identity is established in the same
+chansrv process**. All other IDs are logged as `unresolved@0xHEX` rather
+than queried synchronously with XGetAtomName(). This is a logging-only
+change; clipboard selection handling, payloads and INCR are unaffected.
+
+The Python metadata correlator supports both old and new logs, preserves
+numeric IDs in `target_atom_ids`, and exposes `png_target_advertised`
+and `bmp_target_advertised`. Their values are three-state:
+
+- `true`: successful TARGETS explicitly names that image target.
+- `false`: successful, untruncated TARGETS with the recorded number of
+  entries, *all* resolved, explicitly omits that target.
+- `null`: unresolved IDs, missing/failed/truncated response, mismatched
+  target count, or no sufficiently attributable log record.
+
+Neither an announced image target nor requestor XID proves Firefox obtained
+a PNG File. An actual user-authorized, time-bounded trusted paste must
+still be correlated with Firefox event metadata, the X11 image
+SelectionRequest and any CLIPRDR image data request/response. No Mac screenshot
+bytes are retained by this diagnostic.

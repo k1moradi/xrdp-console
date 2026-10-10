@@ -1,6 +1,6 @@
 --- a/sesman/chansrv/clipboard.c
 +++ b/sesman/chansrv/clipboard.c
-@@ -3107,6 +3107,13 @@
+@@ -3107,6 +3107,15 @@
      int n_items;
      int xdata_size;
      char *xdata;
@@ -11,10 +11,12 @@
 +    int target_index;
 +    int target_names_truncated;
 +    int targets_result;
++    Atom target_atom;
++    const char *target_name;
  
      lxev = (XSelectionRequestEvent *)xevent;
      LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: 0x%lx", lxev->property);
-@@ -3264,8 +3271,38 @@
+@@ -3264,8 +3273,79 @@
          }
          atom_buf[atom_count] = 0;
          LOG_DEVEL(LOG_LEVEL_DEBUG, "  reporting %d formats", atom_count);
@@ -25,13 +27,54 @@
 +        target_names_truncated = 0;
 +        for (target_index = 0; target_index < atom_count; ++target_index)
 +        {
++            /* Known atom IDs are reliable even when > 512; the legacy
++             * get_atom_text() helper refuses to resolve those IDs.
++             * No synchronous XGetAtomName() call is required here. */
++            target_atom = atom_buf[target_index];
++            target_name = "unresolved";
++            if (target_atom == g_targets_atom)
++            {
++                target_name = "TARGETS";
++            }
++            else if (target_atom == g_timestamp_atom)
++            {
++                target_name = "TIMESTAMP";
++            }
++            else if (target_atom == g_multiple_atom)
++            {
++                target_name = "MULTIPLE";
++            }
++            else if (target_atom == XA_STRING)
++            {
++                target_name = "STRING";
++            }
++            else if (target_atom == g_utf8_atom)
++            {
++                target_name = "UTF8_STRING";
++            }
++            else if (target_atom == g_image_png_atom)
++            {
++                target_name = "image/png";
++            }
++            else if (target_atom == g_image_bmp_atom)
++            {
++                target_name = "image/bmp";
++            }
++            else if (target_atom == g_file_atom1)
++            {
++                target_name = "text/uri-list";
++            }
++            else if (target_atom == g_file_atom2)
++            {
++                target_name = "x-special/gnome-copied-files";
++            }
 +            target_names_remaining =
 +                (int)sizeof(target_names) - target_names_length;
 +            target_names_written = g_snprintf(
 +                target_names + target_names_length,
-+                target_names_remaining, "%s%s",
-+                target_index == 0 ? "" : ",",
-+                get_atom_text(atom_buf[target_index]));
++                target_names_remaining, "%s%s@0x%lx",
++                target_index == 0 ? "" : ",", target_name,
++                (unsigned long)target_atom);
 +            if (target_names_written < 0 ||
 +                    target_names_written >= target_names_remaining)
 +            {

@@ -421,36 +421,83 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
     # that did not request an image. The log truncates long target lists.
     # Absence is conclusive only for complete, successful responses.
     targets_responses: list[dict] = []
+    known_targets = frozenset((
+        "TARGETS", "TIMESTAMP", "MULTIPLE", "STRING", "UTF8_STRING",
+        "image/png", "image/bmp", "text/uri-list",
+        "x-special/gnome-copied-files",
+    ))
     for line in lines:
-        if ("event=targets-response-issued " not in line or
-                re.search(r"\bgeneration=(\d+)\b", line) is None):
+        if "event=targets-response-issued " not in line:
             continue
         generation = re.search(r"\bgeneration=(\d+)\b", line)
         if generation is None or int(generation.group(1)) != expected_generation:
             continue
-        match = re.search(r"\btargets=([^ ]*)\s+truncated=(\d+)\s+result=(-?\d+)\b",
-                          line)
-        names = match.group(1).split(",") if match and match.group(1) else []
-        truncated = bool(int(match.group(2))) if match else None
-        status = int(match.group(3)) if match else None
-        # Never identify Firefox based on the X11 requestor XID alone.
+        # Older logs spell high numeric IDs as "unknown atom 0x..." with
+        # embedded spaces. New diagnostic logs use NAME@0xID or
+        # unresolved@0xID. Never split TARGETS at the first space.
+        match = re.search(
+            r"\btarget_count=(\d+)\s+targets=(.*?)\s+"
+            r"truncated=([01])\s+result=(-?\d+)(?:\s|$)", line)
+        target_count = int(match.group(1)) if match else None
+        raw_targets = match.group(2).split(",") if match and match.group(2) else []
+        truncated = bool(int(match.group(3))) if match else None
+        status = int(match.group(4)) if match else None
+        names: list[str] = []
+        target_ids: list[int | None] = []
+        all_names_resolved = bool(raw_targets)
+        for raw in raw_targets:
+            value = raw.strip()
+            tagged = re.fullmatch(r"([^@\s,]+)@0x([0-9a-fA-F]+)", value)
+            legacy_unknown = re.fullmatch(
+                r"unknown atom 0x([0-9a-fA-F]+)", value)
+            if tagged:
+                name, numeric = tagged.group(1), int(tagged.group(2), 16)
+                target_ids.append(numeric)
+                if name not in known_targets:
+                    all_names_resolved = False
+                names.append(name)
+            elif legacy_unknown:
+                names.append("unresolved")
+                target_ids.append(int(legacy_unknown.group(1), 16))
+                all_names_resolved = False
+            else:
+                names.append(value)
+                target_ids.append(None)
+                if not value or value.startswith("unknown") or value not in known_targets:
+                    all_names_resolved = False
+
+        complete = (
+            match is not None and status == 0 and not truncated and
+            len(names) == target_count and all_names_resolved)
+        def offered(name: str) -> bool | None:
+            if status == 0 and name in names:
+                return True
+            if complete:
+                return False
+            return None
+
+        # An XID is NOT proof that the target request came from Firefox.
         targets_responses.append({
             "requestor": x11_id(line, "requestor"),
+            "target_count": target_count,
             "targets": names,
+            "target_atom_ids": target_ids,
+            "names_resolved": all_names_resolved,
             "truncated": truncated,
             "result": status,
-            "png_advertised": (
-                True if match and status == 0 and "image/png" in names
-                else False if match and status == 0 and not truncated
-                else None),
+            "png_advertised": offered("image/png"),
+            "bmp_advertised": offered("image/bmp"),
         })
     stages["targets_response_count"] = len(targets_responses)
     stages["targets_responses"] = targets_responses
-    png_presence = [response["png_advertised"] for response in targets_responses]
-    stages["png_target_advertised"] = (
-        True if True in png_presence
-        else False if png_presence and all(p is False for p in png_presence)
-        else None)
+    for name, key in (("png", "png_target_advertised"),
+                      ("bmp", "bmp_target_advertised")):
+        presence = [response[f"{name}_advertised"]
+                    for response in targets_responses]
+        stages[key] = (
+            True if True in presence
+            else False if presence and all(p is False for p in presence)
+            else None)
     requestors = []
     primary: tuple[int, str, str | None] | None = None
     for index, line in enumerate(lines):

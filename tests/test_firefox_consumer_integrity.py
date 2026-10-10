@@ -114,6 +114,100 @@ class ReceiptTests(unittest.TestCase):
             self.assertIsNone(
                 result["targets_responses"][0]["png_advertised"])
 
+    def test_real_generation_five_legacy_unknown_atom_names_are_inconclusive(self):
+        # Retained read-only host evidence. 0x241 and 0x240 are *unresolved*
+        # atoms, NOT proven image/png or image/bmp, because xrdp's legacy
+        # get_atom_text() refuses IDs greater than 512.
+        trace = (
+            "event=targets-response-issued requestor=0x1e00011 "
+            "generation=5 target_count=4 "
+            "targets=TARGETS,TIMESTAMP,unknown atom 0x00000241,"
+            "unknown atom 0x00000240 truncated=0 result=0")
+        result = browser.correlate_metadata(
+            trace, "", 40005, 5, "NO_COMPLETED_TRUSTED_PASTE")
+        self.assertEqual(result["targets_response_count"], 1)
+        self.assertEqual(result["targets_responses"][0]["target_count"], 4)
+        self.assertEqual(result["targets_responses"][0]["target_atom_ids"],
+                         [None, None, 0x241, 0x240])
+        self.assertFalse(result["targets_responses"][0]["names_resolved"])
+        self.assertIsNone(result["png_target_advertised"])
+        self.assertIsNone(result["bmp_target_advertised"])
+        self.assertEqual(result["x11_request_count"], 0)
+
+    def test_new_numeric_targets_identify_known_png_bmp_atoms_without_x11_lookup(self):
+        # Synthetic identities are illustrative, not a claim that the
+        # host's 0x241/0x240 atoms have these identities.
+        trace = "\n".join([
+            "event=targets-response-issued requestor=0xA0 "
+            "generation=4 target_count=2 "
+            "targets=TARGETS@0x101,TIMESTAMP@0x102 truncated=0 result=0",
+            "event=targets-response-issued requestor=0xB1 "
+            "generation=5 target_count=4 "
+            "targets=TARGETS@0x101,TIMESTAMP@0x102,image/png@0x241,"
+            "image/bmp@0x240 truncated=0 result=0",
+        ])
+        result = browser.correlate_metadata(
+            trace, "", 40005, 5, "NO_IMAGE_PNG_ITEM")
+        self.assertEqual(result["targets_response_count"], 1)
+        self.assertEqual(result["targets_responses"][0]["requestor"], "0xb1")
+        self.assertEqual(result["targets_responses"][0]["target_atom_ids"],
+                         [0x101, 0x102, 0x241, 0x240])
+        self.assertTrue(result["targets_responses"][0]["names_resolved"])
+        self.assertTrue(result["png_target_advertised"])
+        self.assertTrue(result["bmp_target_advertised"])
+        self.assertEqual(result["x11_request_count"], 0)
+
+    def test_complete_resolved_target_list_with_no_image_is_true_absence(self):
+        trace = (
+            "event=targets-response-issued requestor=0xB1 "
+            "generation=5 target_count=3 "
+            "targets=TARGETS@0x101,TIMESTAMP@0x102,STRING@0x1f "
+            "truncated=0 result=0")
+        result = browser.correlate_metadata(
+            trace, "", 40005, 5, "NO_IMAGE_PNG_ITEM")
+        self.assertFalse(result["png_target_advertised"])
+        self.assertFalse(result["bmp_target_advertised"])
+
+    def test_unresolved_numeric_atom_prevents_false_absence(self):
+        trace = (
+            "event=targets-response-issued requestor=0xB1 "
+            "generation=5 target_count=3 "
+            "targets=TARGETS@0x101,TIMESTAMP@0x102,unresolved@0x241 "
+            "truncated=0 result=0")
+        result = browser.correlate_metadata(
+            trace, "", 40005, 5, "NO_IMAGE_PNG_ITEM")
+        response = result["targets_responses"][0]
+        self.assertEqual(response["target_atom_ids"][-1], 0x241)
+        self.assertFalse(response["names_resolved"])
+        self.assertIsNone(result["png_target_advertised"])
+        self.assertIsNone(result["bmp_target_advertised"])
+
+    def test_target_count_mismatch_and_truncated_list_remain_inconclusive(self):
+        for suffix in (
+                "target_count=4 targets=TARGETS@0x101,TIMESTAMP@0x102 "
+                "truncated=0 result=0",
+                "target_count=2 targets=TARGETS@0x101,TIMESTAMP@0x102 "
+                "truncated=1 result=0",
+                "target_count=2 targets=TARGETS@0x101,TIMESTAMP@0x102 "
+                "truncated=0 result=1",
+        ):
+            trace = "event=targets-response-issued generation=5 " + suffix
+            result = browser.correlate_metadata(
+                trace, "", 40005, 5, "NO_IMAGE_PNG_ITEM")
+            self.assertIsNone(result["png_target_advertised"])
+            self.assertIsNone(result["bmp_target_advertised"])
+
+    def test_diagnostic_patch_names_image_atoms_directly(self):
+        patch = (ROOT.parent / "patches" / "xrdp" /
+                 "0039-xrdp-chansrv-log-targets-response.patch").read_text(
+                     encoding="utf-8")
+        self.assertIn("target_atom == g_image_png_atom", patch)
+        self.assertIn("target_atom == g_image_bmp_atom", patch)
+        self.assertIn('target_names_remaining, "%s%s@0x%lx"', patch)
+        self.assertNotIn("+                get_atom_text(atom_buf[target_index])",
+                         patch)
+        self.assertIn('"unresolved"', patch)
+
     def test_targets_only_never_invents_png_transfer_timestamps(self):
         # Real post-boot evidence: successful TARGETS for an image-bearing
         # generation does not establish a PNG SelectionRequest or type-4/5.
