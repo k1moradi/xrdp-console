@@ -142,9 +142,70 @@ def _valid_binary_role(name: str, spec: dict[str, Any], root: Path) -> dict[str,
     return {"path": str(path), "sha256": expected_sha, "source_commit": source}
 
 
+def _validate_private_rdp_endpoint(
+        endpoint: dict[str, Any], release: Path,
+        run_root: Path, source_display: str
+        ) -> dict[str, Any]:
+    """Offline description only; no bind, connect, spawn or listener attestation."""
+    if not isinstance(endpoint, dict):
+        raise UnsafePlan("Missing private C-leg RDP endpoint contract")
+    if _manifest_value(endpoint, "bind_address", str) != "127.0.0.1":
+        raise UnsafePlan("C-leg requires an explicit private loopback listener")
+    port = _manifest_value(endpoint, "port", int)
+    if not 1025 <= port <= 65535:
+        raise UnsafePlan("C-leg listener port must be nonprivileged")
+    if _manifest_value(endpoint, "session_route", str) != "external-chansrv":
+        raise UnsafePlan("C-leg must not invent a sesman session")
+    client_display = _manifest_value(endpoint, "client_display", str)
+    if (not PRIVATE_DISPLAY.fullmatch(client_display) or
+            client_display == source_display):
+        raise UnsafePlan("C-leg client X11 display must be distinct and private")
+    client_authority = _private_path(
+        _manifest_value(endpoint, "client_xauthority", str),
+        run_root, "client_xauthority")
+    if (not client_authority.is_file() or
+            client_authority.stat().st_mode & 0o077):
+        raise UnsafePlan("C-leg client Xauthority is missing or not private")
+    config_path = _private_path(
+        _manifest_value(endpoint, "config_path", str),
+        run_root, "xrdp_config")
+    config_sha = _manifest_value(endpoint, "config_sha256", str)
+    if (not config_path.is_file() or
+            SHA256.fullmatch(config_sha) is None or
+            _sha256(config_path) != config_sha):
+        raise UnsafePlan("Private xrdp configuration hash mismatch")
+    bins = _manifest_value(endpoint, "artifacts", dict)
+    if set(bins) != {"xrdp", "module", "peer", "rdp_client"}:
+        raise UnsafePlan("Missing private xrdp/module/peer/client artifact identity")
+    artifacts = {
+        role: _valid_binary_role(role, record, release)
+        for role, record in bins.items()
+    }
+    if len({item["path"] for item in artifacts.values()}) != len(artifacts):
+        raise UnsafePlan("C-leg artifacts cannot share executable identities")
+    if artifacts["xrdp"]["source_commit"] != CHANSRV_SOURCE_REF:
+        raise UnsafePlan("Private xrdp must share the corrected chansrv source stack")
+    display_number = int(source_display[1:])
+    expected_route = f"DISPLAY({display_number},{os.getuid()})"
+    if _manifest_value(endpoint, "chansrvport", str) != expected_route:
+        raise UnsafePlan("C-leg chansrvport must match private owner display and UID")
+    return {
+        "bind_address_requested": "127.0.0.1",
+        "port_requested": port,
+        "listener_verified": False,
+        "config_sha256": config_sha,
+        "session_route": "external-chansrv",
+        "chansrvport": expected_route,
+        "client_display": client_display,
+        "client_auth_private": True,
+        "artifacts": artifacts,
+        "runtime_authorized": False,
+    }
+
+
 def review_manifest(spec: dict[str, Any]) -> dict[str, Any]:
     """Read-only, strict preflight. Never authorizes runtime execution."""
-    if not isinstance(spec, dict) or spec.get("schema") != 1:
+    if not isinstance(spec, dict) or spec.get("schema") not in (1, 2):
         raise UnsafePlan("Unrecognized controller manifest schema")
     release = Path(_manifest_value(spec, "release_root", str))
     if not release.is_absolute() or ".." in release.parts or release.is_symlink():
@@ -191,9 +252,18 @@ def review_manifest(spec: dict[str, Any]) -> dict[str, Any]:
     if artifacts["qt_owner"]["path"] == artifacts["chansrv"]["path"]:
         raise UnsafePlan("Owner binaries must be distinct")
 
+    schema = spec["schema"]
     binding = _manifest_value(spec, "rdp_listener", str)
-    if binding != "disabled":
-        raise UnsafePlan("RDP is not required/authorized for this controller")
+    if schema == 1:
+        if binding != "disabled":
+            raise UnsafePlan("Legacy offline controller permits no RDP listener")
+        endpoint = None
+    else:
+        if binding != "private-loopback-unverified":
+            raise UnsafePlan("C-leg needs a private loopback endpoint contract")
+        endpoint = _validate_private_rdp_endpoint(
+            _manifest_value(spec, "private_rdp_endpoint", dict),
+            release, run_root, display)
 
     # Explicit report of evidence the host operator must supply. A manifest
     # cannot self-attest a process PID, an ELF library closure, or X11 identity.
@@ -208,8 +278,14 @@ def review_manifest(spec: dict[str, Any]) -> dict[str, Any]:
         "cases": list(LEGS),
         "private_binaries": artifacts,
         "child_environment_keys": sorted(env),
-        "rdp_listener": "disabled",
+        "rdp_listener": binding,
+        "private_rdp_endpoint": endpoint,
         "host_gates": [
+            "C-leg requires a separate private RDP virtual-channel endpoint; "
+            "schema 1 has no C-leg route" if endpoint is None else
+            "C-leg private loopback listener and chansrvport runtime checks absent",
+            "Private RDP module, channel forwarding and synthetic CLIPRDR peer "
+            "not started or attested",
             "Xvfb process PID, arguments, socket and cookie must be attested",
             "Private chansrv sockets and full ELF dependency closure unverified",
             "Chansrv peer/session handshake and isolated startup unverified",
