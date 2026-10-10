@@ -11,6 +11,16 @@ set_tests_properties(xrdp-private-build-paths-unit PROPERTIES
     TIMEOUT 30
     LABELS "build;safety;offline")
 
+# Private build-only / module staging policy checks use inert byte fixtures
+# and CMake script mode only: no real xrdp build, loader or clipboard process.
+add_test(NAME xrdp-private-build-only-stage-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_private_build_only_stage.py)
+set_tests_properties(xrdp-private-build-only-stage-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 30
+    LABELS "build;safety;offline")
+
 # Read-only Git/ordered patch series/CMakeCache provenance test. Uses
 # synthetic source fixtures, not any native xrdp execution or compilation.
 add_test(NAME xrdp-private-build-provenance-unit
@@ -22,6 +32,7 @@ set_tests_properties(xrdp-private-build-provenance-unit PROPERTIES
     LABELS "build;safety;offline")
 
 set(PYTHON_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_private_build_only_stage.py
     ${CMAKE_CURRENT_SOURCE_DIR}/private_xrdp_config_provenance.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_private_xrdp_config_provenance.py
     ${CMAKE_SOURCE_DIR}/tools/benchmark/xrdp_console_bench.py
