@@ -100,6 +100,8 @@ def patchset_hash(source: Path) -> str:
                 not within(member.resolve(strict=True), directory)):
             raise ProvenanceError(f"Missing or external xrdp patch: {name}")
         members.append(member)
+    if len(members) != 53:
+        raise ProvenanceError("Expected the committed, ordered 52-patch stack")
     material = "".join(
         f"{p.relative_to(source).as_posix()}\n{sha(p.read_bytes())}\n"
         for p in members)
