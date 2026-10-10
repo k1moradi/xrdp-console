@@ -21,6 +21,17 @@ set_tests_properties(xrdp-private-build-only-stage-unit PROPERTIES
     TIMEOUT 30
     LABELS "build;safety;offline")
 
+# Inert byte fixtures and mocked readelf verify the first-party module's
+# static ELF dependency topology after *separate* private staging. Never
+# executes a module, dynamic loader, RDP client, or X11 process.
+add_test(NAME xrdp-private-staged-module-elf-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_private_staged_module_elf_audit.py)
+set_tests_properties(xrdp-private-staged-module-elf-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 25
+    LABELS "build;safety;offline")
+
 # Read-only Git/ordered patch series/CMakeCache provenance test. Uses
 # synthetic source fixtures, not any native xrdp execution or compilation.
 add_test(NAME xrdp-private-build-provenance-unit
@@ -32,6 +43,8 @@ set_tests_properties(xrdp-private-build-provenance-unit PROPERTIES
     LABELS "build;safety;offline")
 
 set(PYTHON_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/private_staged_module_elf_audit.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_private_staged_module_elf_audit.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_private_build_only_stage.py
     ${CMAKE_CURRENT_SOURCE_DIR}/private_xrdp_config_provenance.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_private_xrdp_config_provenance.py
