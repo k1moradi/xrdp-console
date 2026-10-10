@@ -411,7 +411,7 @@ class ReceiptTests(unittest.TestCase):
             "event=request format_id=400050 target=image/png mono_ns=100",
             "event=response status=0x1 format_id=400050 mono_ns=150",
             "event=request format_id=40005 target=image/png mono_ns=200",
-            "event=response status=0x1 format_id=40005 mono_ns=250",
+            "event=response status=0x1 format_id=40005 mono_ns=300",
         ])
         peer = "\n".join([
             "PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id=400050 mono_ns=111",
@@ -422,9 +422,38 @@ class ReceiptTests(unittest.TestCase):
         stages = browser.correlate_metadata(
             chansrv, peer, 40005, 5, "TRUSTED_PASTE_NULL_FILE")
         self.assertEqual(stages["format_data_request_ns"], 200)
-        self.assertEqual(stages["response_complete_ns"], 250)
+        self.assertEqual(stages["response_complete_ns"], 300)
+        self.assertTrue(stages["peer_timing_bracketed"])
         self.assertEqual(stages["peer_request_ns"], 211)
         self.assertEqual(stages["peer_response_sent_ns"], 260)
+
+    def test_single_peer_event_outside_generation_window_is_unattributable(self):
+        chansrv = "\\n".join([
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=request format_id=40005 target=image/png mono_ns=200",
+            "event=response status=0x1 format_id=40005 mono_ns=300",
+        ])
+        peer = "\\n".join([
+            "PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id=40005 mono_ns=100",
+            "PEER_CLIENT_FORMAT_RESPONSE_SENT format_id=40005 mono_ns=150",
+        ])
+        stages = browser.correlate_metadata(
+            chansrv, peer, 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertFalse(stages["peer_timing_bracketed"])
+        self.assertIsNone(stages["peer_request_ns"])
+        self.assertIsNone(stages["peer_response_sent_ns"])
+
+    def test_single_peer_event_with_no_same_generation_png_request_is_unattributable(self):
+        peer = "\\n".join([
+            "PEER_CLIENT_FORMAT_DATA_REQUEST_RECEIVED format_id=40005 mono_ns=220",
+            "PEER_CLIENT_FORMAT_RESPONSE_SENT format_id=40005 mono_ns=260",
+        ])
+        stages = browser.correlate_metadata(
+            "event=format-list generation=5", peer, 40005, 5,
+            "NO_COMPLETED_TRUSTED_PASTE")
+        self.assertFalse(stages["peer_timing_bracketed"])
+        self.assertIsNone(stages["peer_request_ns"])
+        self.assertIsNone(stages["peer_response_sent_ns"])
 
     def test_duplicate_peer_format_id_is_unattributable(self):
         chansrv = ("event=x11-request target=image/png "
