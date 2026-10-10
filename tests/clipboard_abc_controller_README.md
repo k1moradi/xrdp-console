@@ -110,6 +110,45 @@ acceptance remain unresolved. Do not treat the new schema as a runtime
 backend. Its purpose is to prevent accidentally treating a Qt-only
 controller as a complete A/B/C transport test.
 
+## Schema-2 private-build / IPC coherence (PR #44)
+
+The offline C-leg contract must refer to the **same** socket directory
+that corrected xrdp's opt-in private CMake build compiles into chansrv.
+The old schema-2 form had an incompatible socket directory under the
+experiment's per-leg run_root; PR #40 instead compiles
+`XRDP_SOCKET_ROOT_PATH` to
+`<release_root>/xrdp-console/socket-root` where release_root is
+the already-owned `.release` parent.
+
+Schema 2 now additionally requires `private_build` with:
+
+- `root`: the existing, owned `.release/xrdp-console` directory
+- `source_commit`: an explicitly reviewed **actual private-build commit**,
+  currently PR #40, PR #42 or PR #43; it is **not** the PR #32 base commit
+- `state_hash`: 64-hex CMake source/patch/configuration state digest
+- `install_prefix`: the existing matched hash-keyed private installation
+  ending in `xrdp-install-<first-16-state-hash-hex>`
+- `compiled_socket_root`: exactly `<root>/socket-root`, identical to
+  top-level `socket_dir` and distinct from the per-leg browser run directory
+- `compiled_runstate`: exactly `<root>/runstate`
+- `compiled_pid_path`: exactly `<install_prefix>/var/run`, derived from
+  the xrdp Autotools localstatedir rather than runstatedir
+
+The actual private chansrv, xrdp and native module binaries must all
+carry that **same private build commit** and exist under the matched
+installation prefix; the browser, Qt and synthetic peer remain separate
+test roles. An xrdp/module/chansrv artifact whose filename is merely
+under the broader `.release` area is not a matched private build.
+
+The offline validator checks field/path/hash identities and rejects
+mixed-socket, mixed-source, swapped-module, /run and protected-prefix
+mismatches. **It does not independently verify** the Git ancestry,
+CMakeCache hash, build transcript, RUNPATH/dlopen, native IPC handshake,
+listener binding or actual runtime process identity; those remain
+separate host gates. PR #43 provides a read-only configuration-provenance
+audit of actual Git, 52 ordered patches and CMakeCache. A manifest
+cannot replace that external evidence. All execution is still disabled.
+
 ## Test-only lifecycle core
 
 CaseCoordinator accepts injectable OwnerPort and BrowserPort interfaces
