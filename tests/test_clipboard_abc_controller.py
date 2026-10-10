@@ -194,6 +194,8 @@ class CaseCoordinatorTests(unittest.TestCase):
         coordinator = abc.CaseCoordinator()
         receipt = png_receipt()
         receipt["items"] = [{"kind": "string", "type": "text/plain"}]
+        receipt["getAsFileInvoked"] = False
+        receipt["getAsFileNull"] = None
         result = coordinator.run_case(
             "qt-pixmap", 1, DummyPort,
             lambda: DummyPort(receipt=receipt))
