@@ -84,9 +84,25 @@ foreach(_required IN ITEMS
         "${PRIVATE_INSTALL_ROOT}/sbin/xrdp"
         "${_libdir}/libxrdp.so"
         "${_libdir}/libcommon.so")
-    if(NOT EXISTS "${_required}" OR IS_DIRECTORY "${_required}" OR
-       IS_SYMLINK "${_required}")
+    if(NOT EXISTS "${_required}" OR IS_DIRECTORY "${_required}")
         message(FATAL_ERROR "Matched private xrdp dependency is missing: ${_required}")
+    endif()
+    # GNU libtool normally creates private libxrdp.so/libcommon.so
+    # symlinks to versioned ELF files. Require their canonical target
+    # to remain in this *same* matched private lib/xrdp directory.
+    file(REAL_PATH "${_required}" _resolved_dependency)
+    get_filename_component(_dependency_name "${_required}" NAME)
+    if(_dependency_name MATCHES "\\.so$")
+        cmake_path(SET _module_libdir NORMALIZE "${_libdir}")
+        cmake_path(IS_PREFIX _module_libdir "${_resolved_dependency}"
+            NORMALIZE _dep_inside)
+        if(NOT _dep_inside OR
+           "${_resolved_dependency}" STREQUAL "${_libdir}")
+            message(FATAL_ERROR
+                "Private libtool library symlink escapes matched loader directory")
+        endif()
+    elseif(IS_SYMLINK "${_required}")
+        message(FATAL_ERROR "Private xrdp executable is an unreviewed symlink")
     endif()
 endforeach()
 if(NOT IS_DIRECTORY "${_libdir}" OR IS_SYMLINK "${_libdir}")
