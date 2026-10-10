@@ -215,10 +215,17 @@ class CaseCoordinatorTests(unittest.TestCase):
 
     def test_abc_decision_matrix_has_hypotheses_not_root_cause_claims(self):
         def result(leg, generation, success):
+            receipt = png_receipt()
+            if not success:
+                receipt["getAsFileNull"] = True
+            classification = (
+                "TRUSTED_PASTE_NULL_FILE" if not success else
+                "READABLE_PNG_FILE" if leg == "chansrv" else
+                "READABLE_PNG_FILE_VALIDATED_IMAGE")
             return abc.CaseResult(
                 leg, generation,
                 "image-file-accepted" if success else "image-file-rejected",
-                {}, "READABLE_PNG_FILE" if success else "TRUSTED_PASTE_NULL_FILE")
+                receipt, classification)
         scenarios = (
             ((False, True, True), "REFERENCE_CONTROL_FAILED", "inconclusive"),
             ((True, True, False), "REMOTE_OWNER_PATH_SUSPECT", "hypothesis"),
@@ -238,20 +245,46 @@ class CaseCoordinatorTests(unittest.TestCase):
                 self.assertEqual(verdict["confidence"], certainty)
 
     def test_abc_comparison_refuses_incomplete_or_reused_generation(self):
-        base = [abc.CaseResult(leg, gen, "image-file-accepted", {},
-                               "READABLE_PNG_FILE") for leg, gen
-                in zip(abc.LEGS, (1, 2, 3))]
+        base = [
+            abc.CaseResult(
+                leg, gen, "image-file-accepted", png_receipt(),
+                "READABLE_PNG_FILE" if leg == "chansrv"
+                else "READABLE_PNG_FILE_VALIDATED_IMAGE")
+            for leg, gen in zip(abc.LEGS, (1, 2, 3))
+        ]
         for bad in (
                 base[:2],
                 [base[1], base[0], base[2]],
                 [base[0], base[1],
-                 abc.CaseResult("chansrv", 2, "image-file-accepted", {},
-                                "READABLE_PNG_FILE")],
+                 abc.CaseResult("chansrv", 2, "image-file-accepted",
+                                png_receipt(), "READABLE_PNG_FILE")],
                 [base[0], base[1],
-                 abc.CaseResult("chansrv", 3, "inconclusive", {},
+                 abc.CaseResult("chansrv", 3, "inconclusive",
+                                {"phase": "complete", "trusted": False},
                                 "INVALID_UNTRUSTED_EVENT")]):
             with self.subTest(bad=bad), self.assertRaises(abc.UnsafePlan):
                 abc.compare_file_acceptance(bad)
+
+    def test_comparison_does_not_trust_mutated_result_status(self):
+        cases = [
+            abc.CaseResult(
+                leg, gen, "image-file-accepted", png_receipt(),
+                "READABLE_PNG_FILE" if leg == "chansrv"
+                else "READABLE_PNG_FILE_VALIDATED_IMAGE")
+            for leg, gen in zip(abc.LEGS, (1, 2, 3))
+        ]
+        false_receipt = png_receipt()
+        false_receipt["getAsFileNull"] = True
+        cases[2] = abc.CaseResult(
+            "chansrv", 3, "image-file-accepted", false_receipt,
+            "READABLE_PNG_FILE")
+        with self.assertRaisesRegex(abc.UnsafePlan, "disagrees"):
+            abc.compare_file_acceptance(cases)
+        cases[2] = abc.CaseResult(
+            "chansrv", 3, "image-file-accepted", png_receipt(),
+            "TRUSTED_PASTE_NULL_FILE")
+        with self.assertRaisesRegex(abc.UnsafePlan, "disagrees"):
+            abc.compare_file_acceptance(cases)
 
     def test_stop_error_permanently_blocks_following_case(self):
         coordinator = abc.CaseCoordinator()
