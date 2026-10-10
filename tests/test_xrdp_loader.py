@@ -8636,6 +8636,33 @@ password=smoke
                     print(
                         f"WARNING: could not preserve coherence diagnostics: "
                         f"{error}", file=sys.stderr)
+            if release_workspace is not None:
+                # Reuse fixed log names under the owner's existing .release.
+                # Bound each file, and never archive clipboard contents.
+                logs_root = private_release_directory(
+                    release_workspace, "logs")
+                archived = private_release_directory(
+                    logs_root, "h264-cropped-edge")
+                for source_path, name in (
+                        (log_path, "xrdp.log"),
+                        (stdout_path, "xrdp-stdout.log"),
+                        (client_log_path, "freerdp.log"),
+                        (source_display_log_path, "source-xvfb.log")):
+                    if not source_path.is_file():
+                        continue
+                    with source_path.open("rb") as source:
+                        source.seek(0, os.SEEK_END)
+                        source.seek(max(0, source.tell() - 131072))
+                        last_bytes = source.read()
+                    target = archived / name
+                    if target.is_symlink() or (
+                            target.exists() and target.stat().st_nlink > 1):
+                        raise AssertionError(
+                            "refusing to overwrite linked .release test log")
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                    flags |= getattr(os, "O_NOFOLLOW", 0)
+                    with os.fdopen(os.open(target, flags, 0o600), "wb") as output:
+                        output.write(last_bytes)
             try:
                 module_link.unlink()
             except FileNotFoundError:
