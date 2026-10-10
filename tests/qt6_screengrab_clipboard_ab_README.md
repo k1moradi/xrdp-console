@@ -297,6 +297,37 @@ Older or incomplete logs without these fields remain inconclusive.
 The INCR chunk parser matches numeric generation **exactly**, so
 generation `50` can never be attributed to generation `5`.
 
+### Verified Qt ScreenGrab owner vs patched chansrv differences
+
+Source comparison (as reviewed 2026-10-10):
+
+| Behavior | Qt6 / ScreenGrab-style pixmap | Corrected xrdp-chansrv | Diagnostic meaning |
+| --- | --- | --- | --- |
+| Clipboard payload | `QClipboard::setPixmap()` publishes a `QMimeData` image backed by a local `QPixmap` / `QImage` | Remote PNG/DIB availability is announced over CLIPRDR, and the selected image may be fetched lazily | Qt A versus C can distinguish a locally materialized image from delayed remote ownership |
+| Advertised targets | Qt XCB `sendTargetsSelection()` enumerates `QInternalMimeData::formatsHelper()` and mapped MIME atoms; appends `TARGETS`, `MULTIPLE`, `TIMESTAMP`, `SAVE_TARGETS` | Patch 0053 advertises `TARGETS` and `TIMESTAMP` but deliberately removes `MULTIPLE` pending valid multi-format support; PNG/BMP offered only if available | Read the *actual* A/B/C TARGETS; do not assume Firefox requires MULTIPLE or emulate it speculatively |
+| Image conversion | Qt's `QXcbClipboard::sendSelection()` uses `QXcbMime::mimeDataForAtom()` on already local image data | Chansrv uses the negotiated PNG format ID, validates the returned PNG and publishes the requested X11 target | A success versus B failure would implicate pixmap MIME expansion/conversion; A+B success versus C failure shifts attention to the remote owner |
+| Incremental transfer | Qt XCB uses a property-deletion-driven `QXcbClipboardTransaction` and emits a terminating zero-length property | Corrected chansrv already selects property notifications, tracks generation/ACKs and limits property chunks to 256 KiB in patch 0053 | Missing or misordered ACKs require **observed** evidence before code changes |
+| Browser receipt | Same trusted Firefox paste probe and File decoding for every leg | Same probe and controlled synthetic PNG | A successful X11 transfer alone does not prove an image item, actual `getAsFile()` invocation or readable File |
+
+Qt source references:
+
+- `qtbase/src/gui/kernel/qclipboard.cpp` — `QClipboard::setPixmap()` wrapper.
+- `qtbase/src/plugins/platforms/xcb/qxcbclipboard.cpp` — `sendTargetsSelection()`,
+  `sendSelection()`, `QXcbClipboardTransaction::updateIncrementalProperty()`.
+- `patches/xrdp/0053-xrdp-chansrv-qt-like-x11-owner-contract.patch` — negotiated
+  max property size, selection-time check, `property=None` compatibility
+  and intentional removal of unsupported `MULTIPLE`.
+
+These are concrete **source differences, not yet proof of Firefox's
+choice of image flavor or of a timeout**. The first controlled experiment
+must collect the same-generation TARGETS, actual Firefox image target,
+X11 requestor/property and trusted File receipt for A, B and C.
+Specifically, no image item is a discovery/conversion boundary; only
+a present PNG item with `getAsFileInvoked=true` and
+`getAsFileNull=true` establishes a real null return. Do not implement
+eager fetching, extra MIME targets or INCR changes merely because C
+takes longer or diverges from Qt's TARGETS set.
+
 ### Trusted Firefox getAsFile invocation versus absent image flavor
 
 `tests/receipt.js` now reports `getAsFileInvoked` separately from
