@@ -195,8 +195,7 @@ int main(int argc, char *argv[])
     {
         QObject::connect(
             &controlInput,
-            QOverload<QSocketDescriptor, QSocketNotifier::Type>::of(
-                &QSocketNotifier::activated),
+            &QSocketNotifier::activated,
             &application,
             [](QSocketDescriptor, QSocketNotifier::Type) {
             char command = 0;

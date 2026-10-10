@@ -100,8 +100,13 @@ class Qt6ScreenGrabOwnerIntegrityTests(unittest.TestCase):
         self.assertLess(ownership, ready)
         self.assertIn('S_ISFIFO(inputStatus.st_mode)', source[:app])
         self.assertIn("fstat(STDIN_FILENO, &inputStatus)", source[:app])
-        self.assertIn("QOverload<QSocketDescriptor, QSocketNotifier::Type>::of(",
-                      source)
+        # Qt 6.10 declares a private signal marker argument. A
+        # two-argument QOverload<...>::of does not match the native signature.
+        # Direct member-pointer connect allows the private signal to bind to
+        # the two-argument slot/lambda without emitting it from user code.
+        self.assertIn("&QSocketNotifier::activated,", source)
+        self.assertIn("[](QSocketDescriptor, QSocketNotifier::Type)", source)
+        self.assertNotIn("QOverload<QSocketDescriptor", source)
         self.assertIn("QSocketNotifier controlInput(STDIN_FILENO", source)
         self.assertIn("controlInput.setEnabled(controlled);", source)
         self.assertIn("::read(STDIN_FILENO, &command, 1)", source)
