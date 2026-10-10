@@ -49,7 +49,11 @@ def canonical_directory(value: str | Path, *, label: str) -> Path:
     for parent in (path, *path.parents):
         if parent.is_symlink():
             raise ProvenanceError(f"{label}: symlinked ancestor not allowed")
-    resolved = path.resolve(strict=True)
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError as exc:
+        raise ProvenanceError(
+            f"{label}: required canonical directory unavailable") from exc
     if not resolved.is_dir() or resolved != path:
         raise ProvenanceError(f"{label}: existing canonical directory required")
     return resolved
@@ -190,11 +194,13 @@ def inspect_config(source: Path, build: Path, release: Path,
     # Older CMake versions may omit this metadata entirely.
     redirects_value = cache.get("CMAKE_FIND_PACKAGE_REDIRECTS_DIR")
     if redirects_value is not None:
-        redirects = canonical_directory(
-            redirects_value, label="CMake package redirects directory")
-        if redirects != build / "CMakeFiles" / "pkgRedirects":
+        expected_redirects = build / "CMakeFiles" / "pkgRedirects"
+        # Reject external paths before probing them for existence.
+        if Path(redirects_value) != expected_redirects:
             raise ProvenanceError(
                 "CMake package redirects escape the current private build")
+        canonical_directory(
+            redirects_value, label="CMake package redirects directory")
     require(cache, "XRDP_CONSOLE_BUILD_XRDP", "ON")
     require(cache, "XRDP_CONSOLE_PRIVATE_XRDP_BUILD", "ON")
     require(cache, "XRDP_CONSOLE_PRIVATE_RELEASE_ROOT", str(release))
