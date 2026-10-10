@@ -627,12 +627,22 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
                 if match:
                     peer_events[key].append(int(match.group(1)))
     # CLIPRDR has no response request-ID and the peer's log has no generation.
-    # Repeated matching peer events therefore cannot be assigned to this
-    # particular browser paste, even if their format ID is identical.
+    # A unique peer request/response is only a plausible same-generation
+    # candidate if its monotonic timestamps are enclosed by the chansrv
+    # request/response window. A reused format ID alone proves nothing.
     for key, events in peer_events.items():
         stages[key + "_event_count"] = len(events)
-        if len(events) == 1:
-            stages[key] = events[0]
+    first = stages["format_data_request_ns"]
+    last = stages["response_complete_ns"]
+    request_events = peer_events["peer_request_ns"]
+    response_events = peer_events["peer_response_sent_ns"]
+    stages["peer_timing_bracketed"] = (
+        type(first) is int and type(last) is int and
+        len(request_events) == 1 and len(response_events) == 1 and
+        first <= request_events[0] <= response_events[0] <= last)
+    if stages["peer_timing_bracketed"]:
+        stages["peer_request_ns"] = request_events[0]
+        stages["peer_response_sent_ns"] = response_events[0]
     stages["classification"] = classification
     stages["generation"] = expected_generation
     # NOTE: first/last fragment timestamps come from xrdp, not chansrv logs;
