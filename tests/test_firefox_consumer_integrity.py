@@ -20,7 +20,7 @@ class ReceiptTests(unittest.TestCase):
             "phase":"complete","source":"paste","trusted":True,
             "items":[{"kind":"file","type":"image/png"}],
             "getAsFileNull":False, "getAsFileError":None,
-            "fileSize":1049471,"readBytes":1049471,"readError":None,
+            "fileType":"image/png", "fileSize":1049471,"readBytes":1049471,"readError":None,
             "digestError":None,"sha256":"c6635535e3669a731add63b3c4b89a0c873e0c7c88412f6ea7b06423eacfee7c",
             "signatureValid":True,"decodeError":None,"ihdrWidth":512,
             "ihdrHeight":512,"decodedWidth":512,"decodedHeight":512,
@@ -348,6 +348,25 @@ class ReceiptTests(unittest.TestCase):
     def test_decode_failure(self):
         report=self.good();report["decodeError"]="createImageBitmap:Error"
         self.assertEqual(self.classify(report),"PNG_DECODE_FAILURE")
+
+    def test_file_type_and_synchronous_file_state_are_mandatory(self):
+        # A plausible byte/digest report must not override missing
+        # getAsFile metadata, or a File whose MIME contradicts image/png.
+        for field, value, expected in (
+                ("fileType", "", "FILE_MIME_NOT_PNG"),
+                ("fileType", "image/jpeg", "FILE_MIME_NOT_PNG"),
+                ("getAsFileNull", None, "GET_AS_FILE_STATE_UNVERIFIED"),
+                ("getAsFileNull", 0, "GET_AS_FILE_STATE_UNVERIFIED")):
+            with self.subTest(field=field, value=value):
+                report = self.good()
+                report[field] = value
+                self.assertEqual(self.classify(report), expected)
+        for missing, expected in (
+                ("getAsFileNull", "GET_AS_FILE_STATE_UNVERIFIED"),
+                ("fileType", "FILE_MIME_NOT_PNG")):
+            report = self.good()
+            del report[missing]
+            self.assertEqual(self.classify(report), expected)
 
     def test_synthetic_allowlist_accept(self):
         with tempfile.TemporaryDirectory() as directory:
