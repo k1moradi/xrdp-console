@@ -11,9 +11,9 @@
 #include <QPixmap>
 #include <QTimer>
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
-#include <ranges>
 #include <unistd.h>
 
 namespace
