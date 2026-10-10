@@ -83,6 +83,31 @@ without any OS spawn mechanism. Mock-only tests verify:
 - Browser and owner cleanup on startup errors and missing receipts
 - Permanent blocking of later legs if cleanup fails or a child remains alive
 - Paste-event evidence never mislabeled as PNG File acceptance
+- Complete trusted events are classified by the **existing Firefox receipt
+  validator**, including synchronous getAsFile state, actual File MIME,
+  complete File read, digest shape, PNG signature, decode and image dimensions.
+- A/B Qt legs accept valid images despite legitimate PNG re-encoding.
+  Chansrv C additionally requires the exact approved encoded size and SHA-256.
+- An untrusted or synthetic event, or a missing complete paste, invalidates
+  the experiment rather than merely advancing to the next owner.
+- A failed ScreenGrab A reference prevents a misleading B/C comparison.
+  A B or C File failure is retained as a negative result, not a false success.
+
+The separate compare_file_acceptance() helper only accepts three ordered,
+strictly increasing, complete-case results. It reports **hypotheses**, not
+assertions about unmeasured CLIPRDR delays or X11 requestor identity:
+
+| A pixmap | B Qt PNG-only | C chansrv | Evidence interpretation |
+|---|---|---|---|
+| Accepted | Accepted | Rejected | Remote owner/delivery path suspect |
+| Accepted | Rejected | Rejected | Qt pixmap MIME conversion/offer suspect |
+| Accepted | Accepted | Accepted | Approved synthetic Firefox PNG File route works |
+| Rejected | Any | Any | Baseline invalid; stop further case execution |
+| Accepted | Rejected | Accepted | Mixed results; inconclusive |
+
+These results remain offline **until** a separately authorized controller
+actually supplies browser receipts. They do not prove macOS screenshot paste,
+RDP integration, Firefox requestor attribution, or intended UI acceptance.
 
 There is deliberately no private chansrv runtime adapter until Codex
 provides verified startup, private library closure, sockets and rollback.

@@ -14,6 +14,22 @@ from unittest import mock
 import clipboard_abc_controller as abc
 
 
+def png_receipt(*, digest: str = abc.FIXTURE_SHA256,
+                byte_size: int = abc.FIXTURE_SIZE) -> dict:
+    """Metadata-only mock, not a forged browser runtime or image fixture."""
+    return {
+        "phase": "complete", "source": "paste", "trusted": True,
+        "items": [{"kind": "file", "type": "image/png"}],
+        "getAsFileNull": False, "getAsFileError": None,
+        "fileType": "image/png",
+        "fileSize": byte_size, "readBytes": byte_size, "readError": None,
+        "sha256": digest, "digestError": None,
+        "signatureValid": True, "decodeError": None,
+        "decodedWidth": 1000, "decodedHeight": 800,
+        "ihdrWidth": 1000, "ihdrHeight": 800,
+    }
+
+
 class DummyPort:
     def __init__(self, *, ready: bool = True, alive: bool = True,
                  stop_fail: bool = False, refuse_stop: bool = False,
@@ -22,7 +38,7 @@ class DummyPort:
         self.alive = alive
         self.stop_fail = stop_fail
         self.refuse_stop = refuse_stop
-        self.receipt = receipt or {"phase": "complete", "trusted": True}
+        self.receipt = png_receipt() if receipt is None else receipt
         self.stop_calls = 0
         self.paste_calls = 0
 
@@ -59,7 +75,7 @@ class CaseCoordinatorTests(unittest.TestCase):
             r = coordinator.run_case(leg, generation, lambda: owner,
                                      lambda: browser)
             self.assertEqual((r.leg, r.generation, r.status),
-                             (leg, generation, "trusted-paste-observed"))
+                             (leg, generation, "image-file-accepted"))
             self.assertEqual((owner.stop_calls, browser.stop_calls), (1, 1))
             self.assertFalse(owner.alive)
             self.assertFalse(browser.alive)
@@ -128,10 +144,147 @@ class CaseCoordinatorTests(unittest.TestCase):
         self.assertFalse(browser.alive)
 
     def test_untrusted_receipt_does_not_become_paste_proof(self):
-        r = abc.CaseCoordinator().run_case(
+        coordinator = abc.CaseCoordinator()
+        with self.assertRaisesRegex(abc.UnsafePlan, "trusted Firefox"):
+            coordinator.run_case(
+                "qt-pixmap", 1, DummyPort,
+                lambda: DummyPort(receipt={"phase": "complete", "trusted": False}))
+        with self.assertRaisesRegex(abc.UnsafePlan, "invalid"):
+            coordinator.run_case("qt-pixmap", 2, DummyPort, DummyPort)
+
+    def test_null_file_is_rejected_and_invalidates_qt_reference_control(self):
+        coordinator = abc.CaseCoordinator()
+        receipt = png_receipt()
+        receipt["getAsFileNull"] = True
+        result = coordinator.run_case(
+            "qt-pixmap", 1, DummyPort, lambda: DummyPort(receipt=receipt))
+        self.assertEqual(result.classification, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(result.status, "image-file-rejected")
+        with self.assertRaisesRegex(abc.UnsafePlan, "reference control invalid"):
+            coordinator.run_case("qt-png-only", 2, DummyPort, DummyPort)
+
+    def test_qt_controls_may_reencode_but_chansrv_must_match_remote_png(self):
+        coordinator = abc.CaseCoordinator()
+        reencoded = png_receipt(digest="a" * 64, byte_size=932_000)
+        for leg, generation in zip(abc.LEGS[:2], (4, 5)):
+            result = coordinator.run_case(
+                leg, generation, DummyPort,
+                lambda: DummyPort(receipt=dict(reencoded)))
+            self.assertEqual(result.classification,
+                             "READABLE_PNG_FILE_VALIDATED_IMAGE")
+            self.assertEqual(result.status, "image-file-accepted")
+        mismatch = coordinator.run_case(
+            "chansrv", 6, DummyPort,
+            lambda: DummyPort(receipt=dict(reencoded)))
+        self.assertEqual(mismatch.status, "image-file-rejected")
+        self.assertEqual(mismatch.classification, "FILE_SIZE_MISMATCH")
+
+    def test_qt_accepted_png_but_chansrv_source_digest_mismatch_is_rejected(self):
+        coordinator = abc.CaseCoordinator()
+        for leg, gen in (("qt-pixmap", 1), ("qt-png-only", 2)):
+            coordinator.run_case(leg, gen, DummyPort, DummyPort)
+        mismatch = png_receipt(digest="b" * 64)
+        result = coordinator.run_case(
+            "chansrv", 3, DummyPort,
+            lambda: DummyPort(receipt=mismatch))
+        self.assertEqual(result.classification, "FILE_DIGEST_MISMATCH")
+
+    def test_complete_paste_without_image_item_is_not_image_file_acceptance(self):
+        coordinator = abc.CaseCoordinator()
+        receipt = png_receipt()
+        receipt["items"] = [{"kind": "string", "type": "text/plain"}]
+        result = coordinator.run_case(
             "qt-pixmap", 1, DummyPort,
-            lambda: DummyPort(receipt={"phase": "complete", "trusted": False}))
-        self.assertEqual(r.status, "untrusted-paste-inconclusive")
+            lambda: DummyPort(receipt=receipt))
+        self.assertEqual(result.classification, "NO_IMAGE_PNG_ITEM")
+        self.assertEqual(result.status, "image-file-rejected")
+
+    def test_wrong_file_type_or_missing_getasfile_state_is_rejected(self):
+        for change, expected in (
+                ({"fileType": "text/plain"}, "FILE_MIME_NOT_PNG"),
+                ({"fileType": None}, "FILE_MIME_NOT_PNG"),
+                ({"getAsFileNull": None}, "GET_AS_FILE_STATE_UNVERIFIED")):
+            with self.subTest(change=change):
+                receipt = png_receipt()
+                receipt.update(change)
+                result = abc.CaseCoordinator().run_case(
+                    "qt-pixmap", 1, DummyPort,
+                    lambda: DummyPort(receipt=receipt))
+                self.assertEqual(result.classification, expected)
+                self.assertEqual(result.status, "image-file-rejected")
+
+    def test_abc_decision_matrix_has_hypotheses_not_root_cause_claims(self):
+        def result(leg, generation, success):
+            receipt = png_receipt()
+            if not success:
+                receipt["getAsFileNull"] = True
+            classification = (
+                "TRUSTED_PASTE_NULL_FILE" if not success else
+                "READABLE_PNG_FILE" if leg == "chansrv" else
+                "READABLE_PNG_FILE_VALIDATED_IMAGE")
+            return abc.CaseResult(
+                leg, generation,
+                "image-file-accepted" if success else "image-file-rejected",
+                receipt, classification)
+        scenarios = (
+            ((False, True, True), "REFERENCE_CONTROL_FAILED", "inconclusive"),
+            ((True, True, False), "REMOTE_OWNER_PATH_SUSPECT", "hypothesis"),
+            ((True, False, False), "QT_PIXMAP_MIME_CONVERSION_SUSPECT",
+             "hypothesis"),
+            ((True, True, True), "SYNTHETIC_FILE_ACCEPTANCE_CONFIRMED",
+             "hypothesis"),
+            ((True, False, True), "MIXED_RESULTS_INCONCLUSIVE", "hypothesis"),
+        )
+        for bits, expected, certainty in scenarios:
+            with self.subTest(bits=bits):
+                triples = [result(leg, gen, accepted)
+                           for leg, gen, accepted in zip(
+                               abc.LEGS, (7, 8, 9), bits)]
+                verdict = abc.compare_file_acceptance(triples)
+                self.assertEqual(verdict["outcome"], expected)
+                self.assertEqual(verdict["confidence"], certainty)
+
+    def test_abc_comparison_refuses_incomplete_or_reused_generation(self):
+        base = [
+            abc.CaseResult(
+                leg, gen, "image-file-accepted", png_receipt(),
+                "READABLE_PNG_FILE" if leg == "chansrv"
+                else "READABLE_PNG_FILE_VALIDATED_IMAGE")
+            for leg, gen in zip(abc.LEGS, (1, 2, 3))
+        ]
+        for bad in (
+                base[:2],
+                [base[1], base[0], base[2]],
+                [base[0], base[1],
+                 abc.CaseResult("chansrv", 2, "image-file-accepted",
+                                png_receipt(), "READABLE_PNG_FILE")],
+                [base[0], base[1],
+                 abc.CaseResult("chansrv", 3, "inconclusive",
+                                {"phase": "complete", "trusted": False},
+                                "INVALID_UNTRUSTED_EVENT")]):
+            with self.subTest(bad=bad), self.assertRaises(abc.UnsafePlan):
+                abc.compare_file_acceptance(bad)
+
+    def test_comparison_does_not_trust_mutated_result_status(self):
+        cases = [
+            abc.CaseResult(
+                leg, gen, "image-file-accepted", png_receipt(),
+                "READABLE_PNG_FILE" if leg == "chansrv"
+                else "READABLE_PNG_FILE_VALIDATED_IMAGE")
+            for leg, gen in zip(abc.LEGS, (1, 2, 3))
+        ]
+        false_receipt = png_receipt()
+        false_receipt["getAsFileNull"] = True
+        cases[2] = abc.CaseResult(
+            "chansrv", 3, "image-file-accepted", false_receipt,
+            "READABLE_PNG_FILE")
+        with self.assertRaisesRegex(abc.UnsafePlan, "disagrees"):
+            abc.compare_file_acceptance(cases)
+        cases[2] = abc.CaseResult(
+            "chansrv", 3, "image-file-accepted", png_receipt(),
+            "TRUSTED_PASTE_NULL_FILE")
+        with self.assertRaisesRegex(abc.UnsafePlan, "disagrees"):
+            abc.compare_file_acceptance(cases)
 
     def test_stop_error_permanently_blocks_following_case(self):
         coordinator = abc.CaseCoordinator()

@@ -17,7 +17,9 @@ import json
 import os
 from pathlib import Path
 import re
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Protocol, Sequence
+
+from firefox_chansrv_consumer import classify_receipt
 
 # Product and test identity are deliberately not conflated. The source used
 # for the staged native chansrv must include the corrected committed 0041.
@@ -238,6 +240,53 @@ class CaseResult:
     generation: int
     status: str
     receipt: dict[str, Any] | None
+    classification: str
+
+
+def compare_file_acceptance(results: Sequence[CaseResult]) -> dict[str, Any]:
+    """Compare only three *observed* ordered legs; return a hypothesis, not proof.
+
+    Native X11/CLIPRDR cause attribution requires separate runtime evidence.
+    This offline function never infers Firefox XIDs, timeouts, or byte paths.
+    """
+    if (len(results) != len(LEGS) or
+            [r.leg for r in results] != list(LEGS) or
+            any(type(r.generation) is not int for r in results) or
+            any(a.generation >= b.generation
+                for a, b in zip(results, results[1:]))):
+        raise UnsafePlan("A/B/C comparison requires three ordered fresh generations")
+    # Recompute from the actual retained metadata. A manually constructed
+    # CaseResult with status="accepted" must never launder failed File evidence.
+    for r in results:
+        if (not isinstance(r.receipt, dict) or
+                r.receipt.get("phase") != "complete" or
+                r.receipt.get("trusted") is not True or
+                r.receipt.get("source") != "paste"):
+            raise UnsafePlan("A/B/C comparison requires a completed trusted paste")
+        actual = classify_receipt(
+            r.receipt, FIXTURE_SIZE, FIXTURE_SHA256, FIXTURE_DIMS,
+            require_exact_png_encoding=(r.leg == "chansrv"))
+        required = ("READABLE_PNG_FILE" if r.leg == "chansrv"
+                    else "READABLE_PNG_FILE_VALIDATED_IMAGE")
+        expected_status = ("image-file-accepted" if actual == required
+                           else "image-file-rejected")
+        if r.classification != actual or r.status != expected_status:
+            raise UnsafePlan("Claimed image-file status disagrees with browser receipt")
+    accepted = [r.status == "image-file-accepted" for r in results]
+    labels = [r.classification for r in results]
+    if not accepted[0]:
+        return {"outcome": "REFERENCE_CONTROL_FAILED",
+                "confidence": "inconclusive", "classifications": labels}
+    if accepted == [True, True, False]:
+        outcome = "REMOTE_OWNER_PATH_SUSPECT"
+    elif accepted == [True, False, False]:
+        outcome = "QT_PIXMAP_MIME_CONVERSION_SUSPECT"
+    elif accepted == [True, True, True]:
+        outcome = "SYNTHETIC_FILE_ACCEPTANCE_CONFIRMED"
+    else:
+        outcome = "MIXED_RESULTS_INCONCLUSIVE"
+    return {"outcome": outcome, "confidence": "hypothesis",
+            "classifications": labels}
 
 
 class CaseCoordinator:
@@ -251,12 +300,15 @@ class CaseCoordinator:
         self._last_generation = -1
         self._active = False
         self._unsafe_cleanup = False
+        self._experiment_invalid = False
 
     def run_case(self, leg: str, generation: int,
                  owner_factory: Callable[[], OwnerPort],
                  browser_factory: Callable[[], BrowserPort]) -> CaseResult:
         if self._unsafe_cleanup or self._active:
             raise UnsafePlan("An owner is active or cleanup is unverified")
+        if self._experiment_invalid:
+            raise UnsafePlan("Browser event or reference control invalid; start a new trial")
         if self._next_leg >= len(LEGS) or leg != LEGS[self._next_leg]:
             raise UnsafePlan("Owners must run once, in pixmap/PNG-only/chansrv order")
         if type(generation) is not int or generation <= self._last_generation:
@@ -280,12 +332,22 @@ class CaseCoordinator:
             if not owner.is_running():
                 raise UnsafePlan("Clipboard owner exited before receipt")
             if not isinstance(receipt, dict) or receipt.get("phase") != "complete":
+                self._experiment_invalid = True
                 raise UnsafePlan("Trusted browser paste receipt incomplete")
-            # File acceptance is deliberately NOT inferred from just phase.
-            status = ("trusted-paste-observed"
-                      if receipt.get("trusted") is True else
-                      "untrusted-paste-inconclusive")
-            result = CaseResult(leg, generation, status, receipt)
+            # The screenshot paste success gate is the actual synchronous
+            # DataTransferItem.getAsFile() -> readable decoded PNG File.
+            # The Qt owners may re-encode; chansrv must preserve source bytes.
+            classification = classify_receipt(
+                receipt, FIXTURE_SIZE, FIXTURE_SHA256, FIXTURE_DIMS,
+                require_exact_png_encoding=(leg == "chansrv"))
+            if classification == "INVALID_UNTRUSTED_EVENT":
+                self._experiment_invalid = True
+                raise UnsafePlan("Missing trusted Firefox paste event")
+            good = ("READABLE_PNG_FILE" if leg == "chansrv"
+                    else "READABLE_PNG_FILE_VALIDATED_IMAGE")
+            status = ("image-file-accepted" if classification == good
+                      else "image-file-rejected")
+            result = CaseResult(leg, generation, status, receipt, classification)
         except BaseException as exc:
             pending_error = exc
         finally:
@@ -307,6 +369,10 @@ class CaseCoordinator:
         assert result is not None
         self._last_generation = generation
         self._next_leg += 1
+        # A failing ScreenGrab reference invalidates the remaining
+        # comparison; running more owners cannot isolate the root cause.
+        if leg == "qt-pixmap" and result.status != "image-file-accepted":
+            self._experiment_invalid = True
         return result
 
 
