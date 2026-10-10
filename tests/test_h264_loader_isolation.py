@@ -19,6 +19,7 @@ from h264_loader_isolation import (
     isolated_loader_module_name,
     private_client_display_is_safe,
     require_loopback_tcp_listener,
+    require_unoccupied_pinned_xrdp_pidfile,
 )
 
 
@@ -137,6 +138,28 @@ class LoaderIsolationTests(unittest.TestCase):
             with self.assertRaises(TimeoutError):
                 loader.start_source_display(log, 1366, 768, auth_file=auth)
         stop.assert_called_once_with(fake_process)
+
+    def test_pinned_xrdp_pidfile_gate_is_read_only(self):
+        prefix = self.root / "pinned-pid-check"
+        run_dir = prefix / "var" / "run"
+        run_dir.mkdir(parents=True)
+        require_unoccupied_pinned_xrdp_pidfile(prefix)
+        pid_file = run_dir / "xrdp.pid"
+        pid_file.write_text("1234\\n", encoding="ascii")
+        with self.assertRaisesRegex(AssertionError, "already exists"):
+            require_unoccupied_pinned_xrdp_pidfile(prefix)
+        self.assertEqual(pid_file.read_text(encoding="ascii"), "1234\\n")
+        self.assertEqual(sorted(p.name for p in run_dir.iterdir()), ["xrdp.pid"])
+
+    def test_pinned_xrdp_pidfile_gate_rejects_symlinked_run_dir(self):
+        prefix = self.root / "pinned-symlink-check"
+        outside = self.root / "outside-pid-check"
+        outside.mkdir()
+        (prefix / "var").mkdir(parents=True)
+        (prefix / "var" / "run").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(AssertionError, "symlink"):
+            require_unoccupied_pinned_xrdp_pidfile(prefix)
+        self.assertEqual(list(outside.iterdir()), [])
 
     def test_module_link_resolves_to_private_workspace_without_prefix_writes(self):
         prefix = self.root / "pinned"
