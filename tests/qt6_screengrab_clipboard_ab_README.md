@@ -347,6 +347,70 @@ summary as a proven failed call without examining its exact `items`,
 `classification`. None of this proves which X11 requestor belongs
 to Firefox or grants runtime authorization.
 
+### Current Firefox X11 clipboard source — prioritize resolved TARGETS
+
+Upstream Mozilla `firefox-main` as inspected on 2026-10-10
+(`widget/gtk/nsClipboard.cpp`) has a concrete two-stage X11 read:
+
+1. `nsClipboard::AsyncGetNativeClipboardData()` explicitly filters
+   requested flavors using
+   `AsyncHasNativeClipboardDataMatchingFlavorsWithMap()` **before**
+   requesting actual bytes on X11
+   (https://searchfox.org/firefox-main/source/widget/gtk/nsClipboard.cpp#2354-2444).
+2. The flavor matcher, `FlavorMatchesTarget()`, generally requires the
+   MIME flavor to equal the actual TARGETS atom name; its explicit alias
+   cases here are `image/jpg`→`image/jpeg` and
+   `application/x-moz-file`→`text/uri-list`, **not**
+   `image/bmp`→`image/png`
+   (https://searchfox.org/firefox-main/source/widget/gtk/nsClipboard.cpp#2513-2555).
+3. For `image/png`, `AsyncGetDataFlavor()` chooses
+   `AsyncGetDataImpl(DATATYPE_IMAGE)`. This implementation calls
+   `gtk_clipboard_request_contents()` and, on a successful nonempty
+   callback, wraps the received bytes as an `nsIInputStream`
+   (https://searchfox.org/firefox-main/source/widget/gtk/nsClipboard.cpp#1982-2077;
+   https://searchfox.org/firefox-main/source/widget/gtk/nsClipboard.cpp#2260-2282).
+   This inspected GTK retrieval path is **asynchronous**; it is not the
+   reviewers' asserted direct `gtk_clipboard_wait_for_contents()` path.
+   Do not infer a one-second absolute clipboard deadline from the name
+   or default of `widget.gtk.clipboard_timeout_ms` alone.
+
+This is current upstream source, **not** proof of the actual installed
+Firefox binary or its GTK/X11/Wayland backend. Codex must establish the
+real browser version/backend when independently authorized. For this
+project's next controlled comparison, first correlate
+`targets-response-issued` for the attested Firefox requestor and its
+X11 `SelectionRequest(image/png)`, then the browser's PNG File item and
+actual `getAsFile()` call. An unrelated requestor retrieving a valid
+PNG (or finishing INCR) cannot establish that Firefox saw the image
+flavor at all.
+
+### Two browser-local delay measurements (diagnostic only)
+
+The trusted-paste receipt now includes:
+
+- `shortcutToPasteMs`: difference between the test page's last **trusted**
+  Ctrl/Meta+V keydown handler and the first following trusted paste handler,
+  measured with `performance.now()` in the **same document**. A paste with
+  no preceding trusted shortcut reports `null`. The pairing is consumed so
+  later paste events cannot borrow it.
+- `getAsFileElapsedMs`: synchronous wall time spent in the actual first
+  `image/png` File item's `getAsFile()` call, including a thrown exception.
+  This is `null` when no PNG File item was found and no call occurred.
+
+These durations answer **different** questions. A long
+`shortcutToPasteMs` and short `getAsFileElapsedMs` suggests the delay
+occurred before JavaScript's paste listener (which can include browser
+clipboard prefetch, event scheduling or focus delay). A short interval
+before the paste but a long synchronous File call points to work done in
+`getAsFile()`. Both being short while no image item appears points toward
+format discovery or unsupported conversion, not a measured delay.
+
+Neither interval alone proves a Firefox/GTK timeout, identifies an X11
+requestor, or measures the CLIPRDR round trip. They cannot be subtracted
+from chansrv's `CLOCK_MONOTONIC` nanoseconds without a measured clock
+bridge. `null` means **not measured**, never zero or instantaneous.
+No clipboard pixels, filenames, text or payload bytes are logged.
+
 ### Fail-closed log attribution
 
 Use `correlate_metadata(chansrv_log, peer_log, format_id,

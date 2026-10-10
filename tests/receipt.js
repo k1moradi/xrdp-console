@@ -17,6 +17,14 @@
   ]);
   let sequence = 0;
   let current = Object.freeze({phase: 'waiting'});
+  // performance.now() is local to this document; do not compare its values
+  // with chansrv CLOCK_MONOTONIC without an independently measured bridge.
+  let lastTrustedShortcutMonoMs = null;
+  function elapsedMs(start, end) {
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end < start)
+      return null;
+    return Math.round((end - start) * 1000) / 1000;
+  }
   // Event-only metadata. No navigator.clipboard access, image bytes, key
   // content, page text, or X11 requestor identity is captured here.
   const observer = {trustedPasteShortcuts: 0, pasteEvents: 0,
@@ -28,6 +36,7 @@
          String(event.key || '').toLowerCase() === 'v')) {
       observer.trustedPasteShortcuts++;
       observer.lastShortcutWallMs = Date.now();
+      lastTrustedShortcutMonoMs = performance.now();
     }
   }
   function getLastReport() {
@@ -167,6 +176,13 @@
     publish({...report,phase:'complete'}, id);
   }
   function capturePaste(event) {
+    // This measures only time between our own trusted keydown listener
+    // and paste listener, not the full Firefox/GTK native clipboard wait.
+    const pasteStartMonoMs = performance.now();
+    const shortcutToPasteMs = event.isTrusted
+      ? elapsedMs(lastTrustedShortcutMonoMs, pasteStartMonoMs) : null;
+    // Consume this candidate pairing. A later paste cannot borrow it.
+    lastTrustedShortcutMonoMs = null;
     observer.pasteEvents++;
     if (event.isTrusted) observer.trustedPasteEvents++;
     observer.lastPasteWallMs = Date.now();
@@ -178,13 +194,17 @@
     // reported getAsFileNull:true for both that case and an actual null
     // return; do not conflate MIME discovery with File materialization.
     const getAsFileInvoked = imageItems.length > 0;
+    const getAsFileStartMonoMs = getAsFileInvoked ? performance.now() : null;
     try { if (getAsFileInvoked) file = imageItems[0].getAsFile(); }
     catch (error) { getAsFileError = errorCode(error,'getAsFile'); }
+    const getAsFileElapsedMs = getAsFileInvoked
+      ? elapsedMs(getAsFileStartMonoMs, performance.now()) : null;
     const id = ++sequence;
     const meta = {source:'paste',phase:'captured',trusted:event.isTrusted,
       types:Array.from(event.clipboardData?.types || []),
       items:items.map(item => ({kind:item.kind,type:item.type})),
       imageItemCount:imageItems.length,getAsFileInvoked,
+      shortcutToPasteMs, getAsFileElapsedMs,
       getAsFileNull:getAsFileInvoked ? file===null : null,
       getAsFileError,filesLength:event.clipboardData?.files.length ?? -1,
       fileType:file?.type ?? null,fileSize:file?.size ?? null,
@@ -203,6 +223,7 @@
     const meta = {source:'synthetic-validation',trusted:false,
       phase:'captured',types:[],items:[],imageItemCount:0,
       getAsFileInvoked:false,getAsFileNull:null,
+      shortcutToPasteMs:null,getAsFileElapsedMs:null,
       getAsFileError:null,filesLength:0,
       fileType:file.type,fileSize:file.size,selectionGeneration:null};
     publish(meta,id);await inspect(file,meta,id);return current;
