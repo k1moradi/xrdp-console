@@ -11,7 +11,19 @@ set_tests_properties(xrdp-private-build-paths-unit PROPERTIES
     TIMEOUT 30
     LABELS "build;safety;offline")
 
+# Read-only Git/ordered patch series/CMakeCache provenance test. Uses
+# synthetic source fixtures, not any native xrdp execution or compilation.
+add_test(NAME xrdp-private-build-provenance-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_private_xrdp_config_provenance.py)
+set_tests_properties(xrdp-private-build-provenance-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 20
+    LABELS "build;safety;offline")
+
 set(PYTHON_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/private_xrdp_config_provenance.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_private_xrdp_config_provenance.py
     ${CMAKE_SOURCE_DIR}/tools/benchmark/xrdp_console_bench.py
     ${CMAKE_SOURCE_DIR}/tools/benchmark/helpers/memory_pressure.py
     ${CMAKE_SOURCE_DIR}/tools/benchmark/rfb_v6_v4_proxy.py
