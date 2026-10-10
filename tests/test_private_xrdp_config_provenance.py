@@ -184,6 +184,63 @@ class ProvenanceTests(unittest.TestCase):
         with self.assertRaises(evidence.ProvenanceError):
             evidence.canonical_directory(bad, label="source")
 
+    def test_untracked_worktree_inputs_are_rejected_by_git_inspection(self):
+        invocations = []
+        def git_result(args, **kwargs):
+            self.assertEqual(kwargs["env"]["GIT_OPTIONAL_LOCKS"], "0")
+            self.assertEqual(kwargs["env"]["GIT_NO_REPLACE_OBJECTS"], "1")
+            self.assertIn("-c", args)
+            invocations.append(args)
+            if "--show-toplevel" in args:
+                out, code = str(self.source) + "\n", 0
+            elif "HEAD" in args and "rev-parse" in args:
+                out, code = "a" * 40 + "\n", 0
+            elif "status" in args:
+                out, code = "?? cmake/unreviewed.cmake\n", 0
+            else:
+                out, code = "", 0
+            return mock.Mock(stdout=out, returncode=code)
+        with mock.patch.object(evidence.subprocess, "run",
+                               side_effect=git_result):
+            with self.assertRaisesRegex(evidence.ProvenanceError,
+                                        "untracked"):
+                evidence.git_check(self.source)
+        status = [args for args in invocations if "status" in args]
+        self.assertEqual(len(status), 1)
+        self.assertIn("--untracked-files=all", status[0])
+
+    def test_corrected_git_ancestor_is_verified_from_real_checkout_metadata(self):
+        calls = []
+        def git_result(args, **kwargs):
+            calls.append(args)
+            if "--show-toplevel" in args:
+                return mock.Mock(stdout=str(self.source) + "\n", returncode=0)
+            if "rev-parse" in args:
+                return mock.Mock(stdout="b" * 40 + "\n", returncode=0)
+            if "status" in args:
+                return mock.Mock(stdout="", returncode=0)
+            if "merge-base" in args:
+                return mock.Mock(stdout="", returncode=1)
+            raise AssertionError("Unreviewed git invocation")
+        with mock.patch.object(evidence.subprocess, "run",
+                               side_effect=git_result):
+            with self.assertRaisesRegex(evidence.ProvenanceError,
+                                        "Git inspection failed"):
+                evidence.git_check(self.source)
+        ancestry = [args for args in calls if "merge-base" in args]
+        self.assertEqual(len(ancestry), 1)
+        self.assertIn(evidence.CORRECTED_CHANSRV_ANCESTOR, ancestry[0])
+        self.assertIn("--is-ancestor", ancestry[0])
+
+    def test_patch_symlinked_parent_even_inside_source_is_rejected(self):
+        patch_dir = self.source / "patches/xrdp"
+        (patch_dir / "alias").symlink_to(patch_dir, target_is_directory=True)
+        contents = self.series.read_text()
+        self.series.write_text(contents.replace(
+            "0010-fixture.patch", "alias/0010-fixture.patch"))
+        with self.assertRaisesRegex(evidence.ProvenanceError, "linked"):
+            self.audit()
+
     def test_cli_never_executes_xrdp_even_after_a_successful_config_audit(self):
         cmake_cache = self.build / "CMakeCache.txt"
         # The CLI is allowed to read file and git metadata, not launch
