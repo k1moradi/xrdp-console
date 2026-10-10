@@ -153,6 +153,6 @@ int main(int argc, char *argv[])
 
     // Bound the observation window; Firefox and chansrv are separate private
     // test processes, launched only after the owning harness verifies Xvfb.
-    QTimer::singleShot(45'000, &application, &QCoreApplication::quit);
+    QTimer::singleShot(45'000, &application, [] { QCoreApplication::quit(); });
     return application.exec();
 }
