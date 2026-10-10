@@ -68,7 +68,8 @@ class LoaderIsolationTests(unittest.TestCase):
                                 return_value=fake_process) as popen,
               mock.patch.object(loader, "read_line", return_value=b"94\n"),
               mock.patch.object(loader.subprocess, "run",
-                                return_value=mock.Mock(returncode=0)) as run):
+                                side_effect=[mock.Mock(returncode=0),
+                                             mock.Mock(returncode=1)]) as run):
             process, display = loader.start_source_display(
                 log, 1366, 768, auth_file=auth)
         self.assertIs(process, fake_process)
@@ -77,9 +78,35 @@ class LoaderIsolationTests(unittest.TestCase):
         self.assertEqual(args[-2:], ["-auth", str(auth)])
         self.assertIn("-nolisten", args)
         self.assertTrue(auth.is_file())
-        probe = run.call_args
-        self.assertEqual(probe.kwargs["env"]["DISPLAY"], ":94")
-        self.assertEqual(probe.kwargs["env"]["XAUTHORITY"], str(auth))
+        self.assertEqual(run.call_count, 2)
+        positive, negative = run.call_args_list
+        self.assertEqual(positive.kwargs["env"]["DISPLAY"], ":94")
+        self.assertEqual(positive.kwargs["env"]["XAUTHORITY"], str(auth))
+        self.assertEqual(negative.kwargs["env"]["DISPLAY"], ":94")
+        negative_auth = Path(negative.kwargs["env"]["XAUTHORITY"])
+        self.assertNotEqual(negative_auth, auth)
+        self.assertTrue(negative_auth.is_file())
+        self.assertEqual(negative_auth.stat().st_mode & 0o777, 0o600)
+        self.assertNotEqual(auth.read_bytes(), negative_auth.read_bytes())
+
+    def test_source_xvfb_refuses_unprotected_local_socket(self):
+        auth = self.root / "source.xauthority"
+        log = self.root / "source.log"
+        fake_process = mock.Mock()
+        fake_process.stdout = object()
+        with (mock.patch.object(loader.shutil, "which",
+                                return_value="/usr/bin/Xvfb"),
+              mock.patch.object(loader.subprocess, "Popen",
+                                return_value=fake_process),
+              mock.patch.object(loader, "read_line", return_value=b"94\\n"),
+              mock.patch.object(loader.subprocess, "run",
+                                side_effect=[mock.Mock(returncode=0),
+                                             mock.Mock(returncode=0)]) as run,
+              mock.patch.object(loader, "stop_process") as stop):
+            with self.assertRaisesRegex(AssertionError, "unrelated"):
+                loader.start_source_display(log, 1366, 768, auth_file=auth)
+        self.assertEqual(run.call_count, 2)
+        stop.assert_called_once_with(fake_process)
 
     def test_source_xvfb_rejects_display_zero_and_stops_process(self):
         auth = self.root / "source.xauthority"
