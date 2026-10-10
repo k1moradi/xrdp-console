@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+"""Offline source-integrity tests; never connects to X11 or a clipboard."""
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+import re
+import unittest
+
+TESTS_DIRECTORY = Path(__file__).resolve().parent
+QT_OWNER = TESTS_DIRECTORY / "helpers" / "qt6_screengrab_clipboard_owner.cpp"
+CONSUMER = TESTS_DIRECTORY / "firefox_chansrv_consumer.py"
+
+FIXTURE_DECLARATION = re.compile(
+    r'\{"([a-f0-9]{64})",\s*([0-9]+),\s*([0-9]+),\s*([0-9]+)\}')
+
+
+def established_synthetic_fixtures() -> dict[str, tuple[int, int, int]]:
+    """Read the existing allowlist as data, without importing test harnesses."""
+    consumer_tree = ast.parse(CONSUMER.read_text(encoding="utf-8"))
+    for statement in consumer_tree.body:
+        if (isinstance(statement, ast.Assign)
+                and any(isinstance(target, ast.Name)
+                        and target.id == "APPROVED_SYNTHETIC_PNGS"
+                        for target in statement.targets)):
+            return ast.literal_eval(statement.value)
+    raise AssertionError("Missing authoritative synthetic fixture allowlist")
+
+
+class Qt6ScreenGrabOwnerIntegrityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.source = QT_OWNER.read_text(encoding="utf-8")
+
+    def test_exactly_existing_synthetic_pngs_are_allowed(self) -> None:
+        actual = {
+            digest: (int(size), int(width), int(height))
+            for digest, size, width, height
+            in FIXTURE_DECLARATION.findall(self.source)
+        }
+        self.assertEqual(len(actual), 4)
+        self.assertEqual(actual, established_synthetic_fixtures())
+
+    def test_x11_is_not_opened_before_private_preflight(self) -> None:
+        application_init = self.source.index("QApplication application(argc, argv);")
+        for required_guard in (
+            'displayNumber < 191 || displayNumber > 249',
+            'QT_QPA_PLATFORM',
+            'WAYLAND_DISPLAY',
+            'releaseDirectory.ownerId() != geteuid()',
+            'releaseDirectory.isSymLink()',
+            'authority.ownerId() != geteuid()',
+            '!isInsideRoot(canonicalRoot, authorityPath)',
+            '!isInsideRoot(canonicalRoot, inputPath)',
+            'matchingFixture == approvedFixtures.end()',
+        ):
+            with self.subTest(required_guard=required_guard):
+                self.assertIn(required_guard, self.source[:application_init])
+
+    def test_exact_screengrab_copy_semantics_and_bounded_lifetime(self) -> None:
+        self.assertIn("clipboard->setPixmap(image, QClipboard::Clipboard);",
+                      self.source)
+        self.assertIn("clipboard->ownsClipboard()", self.source)
+        self.assertIn("QTimer::singleShot(45'000", self.source)
+        for forbidden in ("XGetImage(", "QScreen::grabWindow(",
+                          "QPixmap::grabWindow(", "QClipboard::text("):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, self.source)
+
+
+if __name__ == "__main__":
+    unittest.main()
