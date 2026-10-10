@@ -208,6 +208,7 @@ class LoaderIsolationTests(unittest.TestCase):
         command, args, child_env = exec_call.call_args.args
         self.assertEqual(command, "/usr/bin/xvfb-run")
         self.assertEqual(args[0:2], ["/usr/bin/xvfb-run", "-a"])
+        self.assertIn("-nolisten tcp", args[3])
         self.assertEqual(child_env["XRDP_CONSOLE_TEST_PARENT_DISPLAY"], ":0")
         self.assertEqual(child_env["XRDP_CONSOLE_TEST_PRIVATE_CLIENT_XVFB"], "1")
         self.assertEqual(child_env["XRDP_CONSOLE_TEST_XVFB_WRAPPER_PID"],
