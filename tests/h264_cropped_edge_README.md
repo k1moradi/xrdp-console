@@ -48,8 +48,11 @@ because they can occur before the first-party H.264 presentation.
    TCP, and neither may equal the physical `:0`. The temporary server
    must not launch chansrv or use the user's session bus.
 5. After the user **explicitly authorizes** one bounded private RDP test,
-   the operator may use the existing isolated CMake test build inside
-   `.release`. Set `XRDP_CONSOLE_RELEASE_ROOT` to its verified
+   the operator may use an existing isolated CMake test build **inside**
+   `.release`. The CTest definition passes its actual `CMAKE_BINARY_DIR`
+   as `XRDP_CONSOLE_CTEST_BUILD_ROOT`; the loader refuses execution if
+   that build directory is outside `.release` (CTest itself writes logs).
+   Set `XRDP_CONSOLE_RELEASE_ROOT` to its verified
    canonical absolute directory and select **only**
    `xrdp-loader-gfx-h264-cropped-edge`, running serially with the
    existing CTest 60-second timeout. Do not run the complete suite,
