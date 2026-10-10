@@ -58,6 +58,34 @@ class Qt6ScreenGrabOwnerIntegrityTests(unittest.TestCase):
             with self.subTest(required_guard=required_guard):
                 self.assertIn(required_guard, self.source[:application_init])
 
+    def test_png_only_control_uses_same_verified_fixture(self) -> None:
+        # The MIME-only control must not load an arbitrary PNG, capture a
+        # desktop screenshot, or bypass the existing digest and X11 guards.
+        source = self.source
+        application_init = source.index("QApplication application(argc, argv);")
+        validate_file = source.index("matchingFixture == approvedFixtures.end()")
+        mime_ownership = source.index("mime->setData(")
+        pixmap_ownership = source.index("clipboard->setPixmap(")
+        self.assertIn('std::strcmp(argv[1], "--png-only") == 0',
+                      source[:application_init])
+        self.assertIn("argc != 2 && !pngOnly", source[:application_init])
+        self.assertIn("argv[pngOnly ? 2 : 1]", source[:application_init])
+        self.assertLess(validate_file, application_init)
+        self.assertLess(application_init, mime_ownership)
+        self.assertLess(application_init, pixmap_ownership)
+        self.assertIn('mime->setData(QStringLiteral("image/png"), encodedImage);',
+                      source)
+        self.assertIn(
+            "clipboard->setMimeData(mime, QClipboard::Clipboard);", source)
+        self.assertIn("if (pngOnly)", source)
+        self.assertIn("else\n    {\n        // The exact clipboard API used by LXQt ScreenGrab.", source)
+        self.assertIn("clipboard->ownsClipboard()", source)
+        self.assertIn("QTimer::singleShot(45'000", source)
+        for forbidden in ("XSetSelectionOwner(", "QGuiApplication::primaryScreen()",
+                          "QScreen::grabWindow("):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, source)
+
     def test_exact_screengrab_copy_semantics_and_bounded_lifetime(self) -> None:
         self.assertIn("clipboard->setPixmap(image, QClipboard::Clipboard);",
                       self.source)
