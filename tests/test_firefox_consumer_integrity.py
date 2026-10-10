@@ -625,7 +625,7 @@ class ReceiptTests(unittest.TestCase):
             "event=x11-incr-property-delete-ack requestor=0xB2 property=0xF2 "
             "state=PropertyDelete acknowledged_bytes=0 state_match=1 "
             "start_generation=5 current_generation=5",
-            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 "
+            "event=x11-incr-chunk-issued requestor=0xB4 property=0xF2 "
             "start_generation=50 current_generation=50 mono_ns=120",
             "event=x11-incr-terminator-ack requestor=0xB3 property=0xF2 "
             "terminator_generation=5 start_generation=5 "
