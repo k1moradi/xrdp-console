@@ -31,6 +31,33 @@ option(XRDP_CONSOLE_RUN_XRDP_TESTS
     "Run the pinned xrdp upstream test suite during build and CTest"
     ON)
 
+# Keep BUILD_TESTING=ON and native xrdp unit coverage while allowing a
+# private, non-running chansrv/module build without an H.264 FreeRDP client.
+# Normal integration-test configurations retain the strict FreeRDP gate.
+option(XRDP_CONSOLE_PRIVATE_BUILD_ONLY
+    "Skip FreeRDP-dependent RDP loader integration only in isolated private build"
+    OFF)
+if(XRDP_CONSOLE_PRIVATE_BUILD_ONLY)
+    if(NOT XRDP_CONSOLE_BUILD_XRDP OR NOT XRDP_CONSOLE_PRIVATE_XRDP_BUILD)
+        message(FATAL_ERROR
+            "Private build-only requires both XRDP_CONSOLE_BUILD_XRDP=ON "
+            "and XRDP_CONSOLE_PRIVATE_XRDP_BUILD=ON")
+    endif()
+    if(NOT BUILD_TESTING)
+        message(FATAL_ERROR
+            "Private build-only requires BUILD_TESTING=ON for offline and upstream unit gates")
+    endif()
+endif()
+if(DEFINED XRDP_CONSOLE_PRIVATE_BUILD_ONLY_CONFIGURED AND
+   NOT XRDP_CONSOLE_PRIVATE_BUILD_ONLY_CONFIGURED STREQUAL
+       "${XRDP_CONSOLE_PRIVATE_BUILD_ONLY}")
+    message(FATAL_ERROR
+        "Private build-only flag changed in existing CMake cache; use fresh private build directory")
+endif()
+set(XRDP_CONSOLE_PRIVATE_BUILD_ONLY_CONFIGURED
+    "${XRDP_CONSOLE_PRIVATE_BUILD_ONLY}" CACHE INTERNAL
+    "Record whether FreeRDP-independent private build profile was configured" FORCE)
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
