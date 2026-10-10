@@ -11,6 +11,16 @@ set_tests_properties(xrdp-private-build-paths-unit PROPERTIES
     TIMEOUT 30
     LABELS "build;safety;offline")
 
+# Private build-only / module staging policy checks use inert byte fixtures
+# and CMake script mode only: no real xrdp build, loader or clipboard process.
+add_test(NAME xrdp-private-build-only-stage-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+        ${CMAKE_CURRENT_SOURCE_DIR}/test_private_build_only_stage.py)
+set_tests_properties(xrdp-private-build-only-stage-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 30
+    LABELS "build;safety;offline")
+
 # Read-only Git/ordered patch series/CMakeCache provenance test. Uses
 # synthetic source fixtures, not any native xrdp execution or compilation.
 add_test(NAME xrdp-private-build-provenance-unit
@@ -22,6 +32,7 @@ set_tests_properties(xrdp-private-build-provenance-unit PROPERTIES
     LABELS "build;safety;offline")
 
 set(PYTHON_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_private_build_only_stage.py
     ${CMAKE_CURRENT_SOURCE_DIR}/private_xrdp_config_provenance.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_private_xrdp_config_provenance.py
     ${CMAKE_SOURCE_DIR}/tools/benchmark/xrdp_console_bench.py
@@ -817,6 +828,19 @@ if(TARGET xrdp-console)
         module-lifecycle
         PROPERTIES RESOURCE_LOCK xrdp_console_private_xvfb)
 
+    # Private build-only is NOT a graphics acceptance mode. Keep every
+    # existing FreeRDP/H.264 requirement for normal test configurations,
+    # but avoid probing any executable during this isolated build-only phase.
+    if(XRDP_CONSOLE_PRIVATE_BUILD_ONLY)
+        if(DEFINED XRDP_CONSOLE_FREERDP_EXECUTABLE AND
+           NOT "${XRDP_CONSOLE_FREERDP_EXECUTABLE}" STREQUAL "")
+            message(FATAL_ERROR
+                "Private build-only cannot adopt a FreeRDP executable from the cache")
+        endif()
+        message(STATUS
+            "Private build-only: omit FreeRDP-dependent RDP loader tests; "
+            "retain offline CTests and pinned upstream xrdp unit suite")
+    else()
     set(XRDP_CONSOLE_FREERDP_EXECUTABLE "" CACHE FILEPATH
         "H.264-capable FreeRDP client used by RDP loader integration tests")
     if(NOT XRDP_CONSOLE_FREERDP_EXECUTABLE)
@@ -866,6 +890,7 @@ if(TARGET xrdp-console)
         message(STATUS
             "RDP loader tests use FreeRDP: ${XRDP_CONSOLE_FREERDP_EXECUTABLE}")
     endif()
+    endif() # strict FreeRDP preflight in normal configurations only
     if(XRDP_CONSOLE_FREERDP_EXECUTABLE AND
        TARGET x11-pixel-probe AND TARGET x11-latency-stimulus)
         find_package(PkgConfig REQUIRED)
