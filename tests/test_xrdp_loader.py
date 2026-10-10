@@ -27,6 +27,7 @@ from pathlib import Path
 
 from h264_frame_coherence import coherence_problem, parse_frame_sample
 from h264_loader_isolation import (
+    create_private_source_xauthority,
     isolated_desktop_environment,
     isolated_loader_module_name,
     private_client_display_is_safe,
@@ -5169,52 +5170,70 @@ def assert_clipboard_no_server_copy_on_reconnect(
 
 def start_source_display(
         log_path: Path, width: int = 1024, height: int = 768,
-        randr_resize: bool = False
+        randr_resize: bool = False,
+        auth_file: Path | None = None
 ) -> tuple[subprocess.Popen[bytes], str]:
     if randr_resize:
+        if auth_file is not None:
+            raise ValueError("source Xephyr is not authorized for private H.264 edge test")
         return start_source_xephyr(log_path, width, height)
 
     executable = shutil.which("Xvfb")
     if executable is None:
         raise AssertionError("xrdp loader smoke test needs Xvfb")
 
+    arguments = [
+        executable, "-displayfd", "1", "-screen", "0",
+        f"{width}x{height}x24", "-nolisten", "tcp", "-noreset"]
+    if auth_file is not None:
+        # The source display must require its own private MIT-MAGIC-COOKIE-1
+        # before Xvfb starts listening on its Unix socket.
+        create_private_source_xauthority(auth_file)
+        arguments.extend(("-auth", str(auth_file)))
     with log_path.open("w", encoding="utf-8") as log_file:
         process = subprocess.Popen(
-            [executable, "-displayfd", "1", "-screen", "0",
-             f"{width}x{height}x24",
-             "-nolisten", "tcp", "-noreset"],
+            arguments,
             stdout=subprocess.PIPE,
             stderr=log_file,
             start_new_session=True,
         )
-    if process.stdout is None:
-        stop_process(process)
-        raise AssertionError("source Xvfb display-number pipe was not created")
-    display_number = read_line(process.stdout, 5.0).strip()
-    if not display_number.isdigit():
-        details = read_text(log_path)
-        stop_process(process)
+    try:
+        if process.stdout is None:
+            raise AssertionError("source Xvfb display-number pipe was not created")
+        display_number = read_line(process.stdout, 5.0).strip()
+        if not display_number.isdigit():
+            raise AssertionError(
+                f"source Xvfb did not allocate a display: {read_text(log_path)}")
+        display = ":" + display_number.decode("ascii")
+        if auth_file is not None and display.split(".", 1)[0] == ":0":
+            raise AssertionError(
+                "private source Xvfb must not claim physical DISPLAY=:0")
+        probe_environment = os.environ.copy()
+        probe_environment["DISPLAY"] = display
+        if auth_file is not None:
+            probe_environment["XAUTHORITY"] = str(auth_file)
+
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            result = subprocess.run(
+                ["xdpyinfo", "-display", display],
+                env=probe_environment,
+                capture_output=True,
+                check=False,
+                timeout=2.0,
+            )
+            if result.returncode == 0:
+                return process, display
+            if process.poll() is not None:
+                break
+            time.sleep(0.05)
+
         raise AssertionError(
-            f"source Xvfb did not allocate a display: {details}")
-    display = ":" + display_number.decode("ascii")
-
-    deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline:
-        result = subprocess.run(
-            ["xdpyinfo", "-display", display],
-            capture_output=True,
-            check=False,
-            timeout=2.0,
-        )
-        if result.returncode == 0:
-            return process, display
-        if process.poll() is not None:
-            break
-        time.sleep(0.05)
-
-    details = read_text(log_path)
-    stop_process(process)
-    raise AssertionError(f"source Xvfb display {display} did not become ready:\n{details}")
+            f"source Xvfb display {display} did not authenticate or become ready:\n"
+            f"{read_text(log_path)}")
+    except BaseException:
+        stop_process(process)
+        raise
 
 
 def start_source_xephyr(
@@ -7707,11 +7726,13 @@ def main() -> int:
         config_path = root / "xrdp.ini"
         port = free_tcp_port()
         source_display_process: subprocess.Popen[bytes] | None = None
+        source_auth_file = root / "source-xvfb.xauthority"
         module_link: Path | None = None
         try:
             source_display_process, source_display = start_source_display(
                 source_display_log_path, source_width, source_height,
-                randr_resize=randr_resize_mode)
+                randr_resize=randr_resize_mode,
+                auth_file=source_auth_file if crop_edge_mode else None)
             if (crop_edge_mode and
                     source_display.split(".", 1)[0] ==
                     os.environ["DISPLAY"].split(".", 1)[0]):
@@ -7834,8 +7855,15 @@ password=smoke
                     stimulus_path, source_display, os.environ.copy(),
                     source_width, source_height)
             else:
+                source_stimulus_environment = (
+                    isolated_desktop_environment(
+                        os.environ.copy(), root, source_display)
+                    if crop_edge_mode else os.environ.copy())
+                if crop_edge_mode:
+                    source_stimulus_environment["XAUTHORITY"] = str(
+                        source_auth_file)
                 stimulus = start_stimulus(
-                    stimulus_path, source_display, os.environ.copy(),
+                    stimulus_path, source_display, source_stimulus_environment,
                     coherence_mode=coherence_mode,
                     full_screen_size=(source_width, source_height)
                     if (full_screen_update_mode or pointer_latency_mode)
@@ -7895,6 +7923,7 @@ password=smoke
                 if crop_edge_mode:
                     server_environment = isolated_desktop_environment(
                         server_environment, root, source_display)
+                    server_environment["XAUTHORITY"] = str(source_auth_file)
                 if pointer_latency_mode:
                     server_environment["XRDP_CONSOLE_POINTER_TRACE"] = "1"
                 server = subprocess.Popen(

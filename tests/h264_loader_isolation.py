@@ -8,6 +8,8 @@ the pinned xrdp install prefix, or inspect private clipboard data.
 from __future__ import annotations
 
 import os
+import secrets
+import struct
 from pathlib import Path
 
 LOOPBACK_IPV4_LISTENER = "0100007F"
@@ -127,3 +129,28 @@ def isolated_desktop_environment(
     env["HOME"] = str(root)
     env["DISPLAY"] = display
     return env
+
+# A FamilyWild MIT-MAGIC-COOKIE-1 record works with Xvfb -displayfd, where
+# the server display number is allocated only after the -auth file is opened.
+# The file is private to this synthetic source server, never shared with the
+# FreeRDP client Xvfb or the physical user's Xauthority.
+def create_private_source_xauthority(path: Path) -> None:
+    """Create an exclusive 0600 Xauthority file before launching source Xvfb."""
+    if path.parent.is_symlink() or not path.parent.is_dir():
+        raise ValueError("source Xauthority parent is not a private directory")
+    cookie = secrets.token_bytes(16)
+
+    def field(value: bytes) -> bytes:
+        return struct.pack("!H", len(value)) + value
+
+    record = (
+        struct.pack("!H", 0xFFFF) +  # Xauthority FamilyWild
+        field(b"") +              # address: any local Xvfb display
+        field(b"") +              # number: allocated by -displayfd
+        field(b"MIT-MAGIC-COOKIE-1") +
+        field(cookie)
+    )
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(descriptor, "wb") as file:
+        file.write(record)
