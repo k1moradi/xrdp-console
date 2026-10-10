@@ -69,16 +69,22 @@ def read_cache(text: str) -> dict[str, str]:
             continue
         key, typ = left.split(":", 1)
         if typ == "STATIC":
-            # CMake 4.2 generates this one STATIC cache entry. It is
-            # build-system metadata, not a project-controlled source or
-            # dependency flag. Other STATIC entries remain untrusted.
-            if key != "CMAKE_FIND_PACKAGE_REDIRECTS_DIR":
+            # CMake 4.2 generates these specific metadata entries; no
+            # arbitrary STATIC source, compiler or prefix keys are trusted.
+            if key == "CMAKE_PROJECT_COMPAT_VERSION":
+                # project() has no COMPAT_VERSION: the CMake 4.2.3 value
+                # must be exactly blank, never a forged compatibility policy.
+                if value != "":
+                    raise ProvenanceError(
+                        "CMake project compatibility version must be empty")
+            elif key != "CMAKE_FIND_PACKAGE_REDIRECTS_DIR":
                 raise ProvenanceError(f"Unexpected STATIC CMake cache key: {key}")
         elif typ not in ("BOOL", "STRING", "PATH", "FILEPATH", "INTERNAL",
                          "UNINITIALIZED"):
             raise ProvenanceError(f"Unexpected CMake cache type: {key}")
-        if key == "CMAKE_FIND_PACKAGE_REDIRECTS_DIR" and typ != "STATIC":
-            raise ProvenanceError("Redirects cache type must be STATIC")
+        if (key in ("CMAKE_FIND_PACKAGE_REDIRECTS_DIR",
+                    "CMAKE_PROJECT_COMPAT_VERSION") and typ != "STATIC"):
+            raise ProvenanceError(f"CMake-generated {key} cache type must be STATIC")
         if key in entries:
             raise ProvenanceError(f"Duplicate CMake cache value: {key}")
         entries[key] = value
@@ -189,6 +195,11 @@ def inspect_config(source: Path, build: Path, release: Path,
         raise ProvenanceError("Private source/build must be inside release root")
     require(cache, "CMAKE_HOME_DIRECTORY", str(source))
     require(cache, "CMAKE_CACHEFILE_DIR", str(build))
+    # Preserve the value constraint when inspecting direct cache mappings,
+    # not only cache files parsed by read_cache().
+    if cache.get("CMAKE_PROJECT_COMPAT_VERSION", "") != "":
+        raise ProvenanceError(
+            "Unexpected top-level CMake project compatibility version")
     # Accept only the exact CMake 4.2-generated redirects directory for
     # this private build, and reject external, traversing or symlink paths.
     # Older CMake versions may omit this metadata entirely.
