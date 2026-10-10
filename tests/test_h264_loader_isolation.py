@@ -98,7 +98,7 @@ class LoaderIsolationTests(unittest.TestCase):
                                 return_value="/usr/bin/Xvfb"),
               mock.patch.object(loader.subprocess, "Popen",
                                 return_value=fake_process),
-              mock.patch.object(loader, "read_line", return_value=b"94\\n"),
+              mock.patch.object(loader, "read_line", return_value=b"94\n"),
               mock.patch.object(loader.subprocess, "run",
                                 side_effect=[mock.Mock(returncode=0),
                                              mock.Mock(returncode=0)]) as run,
