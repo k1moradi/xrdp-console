@@ -66,10 +66,11 @@ class Qt6ScreenGrabOwnerIntegrityTests(unittest.TestCase):
         validate_file = source.index("matchingFixture == approvedFixtures.end()")
         mime_ownership = source.index("mime->setData(")
         pixmap_ownership = source.index("clipboard->setPixmap(")
-        self.assertIn('std::strcmp(argv[1], "--png-only") == 0',
+        self.assertIn('std::strcmp(argv[modeIndex], "--png-only") == 0',
                       source[:application_init])
-        self.assertIn("argc != 2 && !pngOnly", source[:application_init])
-        self.assertIn("argv[pngOnly ? 2 : 1]", source[:application_init])
+        self.assertIn("argc != modeIndex + (pngOnly ? 2 : 1)",
+                      source[:application_init])
+        self.assertIn("argv[argc - 1]", source[:application_init])
         self.assertLess(validate_file, application_init)
         self.assertLess(application_init, mime_ownership)
         self.assertLess(application_init, pixmap_ownership)
@@ -80,17 +81,37 @@ class Qt6ScreenGrabOwnerIntegrityTests(unittest.TestCase):
         self.assertIn("if (pngOnly)", source)
         self.assertIn("else\n    {\n        // The exact clipboard API used by LXQt ScreenGrab.", source)
         self.assertIn("clipboard->ownsClipboard()", source)
-        self.assertIn("QTimer::singleShot(45'000", source)
+        self.assertIn("controlled ? 180'000 : 45'000", source)
         for forbidden in ("XSetSelectionOwner(", "QGuiApplication::primaryScreen()",
                           "QScreen::grabWindow("):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, source)
 
+    def test_controlled_qt_owner_protocol_cannot_bypass_x11_preflight(self):
+        source = self.source
+        app = source.index("QApplication application(argc, argv);")
+        ownership = source.index("if (!clipboard->ownsClipboard())")
+        ready = source.index('std::puts("XRDP_CONSOLE_QT_OWNER_READY");')
+        self.assertIn('std::strcmp(argv[1], "--controlled") == 0',
+                      source[:app])
+        self.assertIn("const int modeIndex = controlled ? 2 : 1;",
+                      source[:app])
+        self.assertIn("#include <QSocketNotifier>", source)
+        self.assertLess(ownership, ready)
+        self.assertIn("QSocketNotifier controlInput(STDIN_FILENO", source)
+        self.assertIn("controlInput.setEnabled(controlled);", source)
+        self.assertIn("::read(STDIN_FILENO, &command, 1)", source)
+        self.assertIn("got != 1 || command != 'q'", source)
+        self.assertIn("std::fflush(stdout);", source)
+        self.assertIn("controlled ? 180'000 : 45'000", source)
+        self.assertNotIn("std::system(", source)
+        self.assertNotIn("QProcess::start(", source)
+
     def test_exact_screengrab_copy_semantics_and_bounded_lifetime(self) -> None:
         self.assertIn("clipboard->setPixmap(image, QClipboard::Clipboard);",
                       self.source)
         self.assertIn("clipboard->ownsClipboard()", self.source)
-        self.assertIn("QTimer::singleShot(45'000", self.source)
+        self.assertIn("controlled ? 180'000 : 45'000", self.source)
         for forbidden in ("XGetImage(", "QScreen::grabWindow(",
                           "QPixmap::grabWindow(", "QClipboard::text("):
             with self.subTest(forbidden=forbidden):
