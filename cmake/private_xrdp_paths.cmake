@@ -29,7 +29,7 @@ function(xrdp_console_validate_private_paths _root_arg _build_arg _deps_arg)
     # Explicitly reject symlinks at any existing ancestor. Canonicalization
     # alone can hide a symlink into a protected install prefix.
     set(_part "${_root}")
-    while(TRUE)
+    while(1)
         if(IS_SYMLINK "${_part}")
             message(FATAL_ERROR "private release root contains symlink")
         endif()
@@ -54,7 +54,7 @@ function(xrdp_console_validate_private_paths _root_arg _build_arg _deps_arg)
     # An existing path segment must not redirect a future private build.
     foreach(_candidate IN ITEMS "${_build}" "${_deps}")
         set(_part "${_candidate}")
-        while(TRUE)
+        while(1)
             if(IS_SYMLINK "${_part}")
                 message(FATAL_ERROR "private build/deps path contains symlink")
             endif()
