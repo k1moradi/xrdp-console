@@ -33,6 +33,7 @@ from h264_loader_isolation import (
     private_client_display_is_safe,
     private_release_directory,
     require_existing_release_workspace,
+    require_release_outside_pinned_prefix,
     require_loopback_tcp_listener,
     require_unoccupied_pinned_xrdp_pidfile,
 )
@@ -7642,6 +7643,9 @@ def main() -> int:
         require_existing_release_workspace(
             os.environ.get("XRDP_CONSOLE_RELEASE_ROOT"))
         if crop_edge_mode else None)
+    if release_workspace is not None:
+        require_release_outside_pinned_prefix(
+            release_workspace, Path(arguments[2]))
     release_runtime = (
         private_release_directory(release_workspace, "runtime")
         if release_workspace is not None else None)
