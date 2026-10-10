@@ -138,22 +138,21 @@ set(_xrdp_configure_args
     "--disable-neutrinordp")
 
 string(JOIN "\n" _xrdp_configure_arg_material ${_xrdp_configure_args})
+set(_xrdp_install_fingerprint "${XRDP_CONSOLE_XRDP_INSTALL_DIR}")
+if(XRDP_CONSOLE_PRIVATE_XRDP_BUILD)
+    # Avoid a hash cycle: final private install path gets the state tag below.
+    set(_xrdp_install_fingerprint "private-hash-keyed")
+endif()
 set(_xrdp_build_configuration_material
     "CFLAGS=${XRDP_CONSOLE_XRDP_CFLAGS}\n"
     "CPPFLAGS=${XRDP_CONSOLE_XRDP_CPPFLAGS}\n"
     "LDFLAGS=${XRDP_CONSOLE_XRDP_LDFLAGS}\n"
     "PKG_CONFIG_PATH=${XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH}\n"
+    "install-prefix=${_xrdp_install_fingerprint}\n"
     "configure-args=${_xrdp_configure_arg_material}\n")
-if(NOT XRDP_CONSOLE_PRIVATE_XRDP_BUILD)
-    list(APPEND _xrdp_build_configuration_material
-        "install-prefix=${XRDP_CONSOLE_XRDP_INSTALL_DIR}\n")
-endif()
 if(XRDP_CONSOLE_PRIVATE_XRDP_BUILD)
-    # Private installs are hash-keyed, avoiding stale modules from another
-    # patchset or a previously configured runstate/socket mode.
     list(APPEND _xrdp_build_configuration_material
-        "profile=${_xrdp_profile}\n"
-        "install-prefix=private-hash-keyed\n")
+        "profile=${_xrdp_profile}\n")
 endif()
 string(JOIN "" _xrdp_build_configuration_material
     ${_xrdp_build_configuration_material})
