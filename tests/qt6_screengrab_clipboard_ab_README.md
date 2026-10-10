@@ -128,6 +128,79 @@ chansrv native compilation/link, and 29/29 checks from a newly rebuilt
 execute patched `clipboard.c`, which was validated separately. All are
 **Codex-reported** host results, not a Firefox integration acceptance.
 
+## New PNG-only Qt control: separate MIME negotiation from latency
+
+There are now two **independently selectable Qt6 clipboard-owner controls**
+using the **same** preflight, allowlisted PNG SHA-256, Qt decoder, process
+lifetime and private Xvfb requirement:
+
+- **A: ScreenGrab-reference Qt pixmap owner:** invoke the helper with only
+  the synthetic fixture path, preserving the actual
+  `clipboard->setPixmap(image, QClipboard::Clipboard)` call.
+- **B: Qt PNG-only owner:** invoke with `--png-only` before the same
+  fixture path. The helper uses
+  `QMimeData::setData("image/png", encodedImage)` followed by
+  `clipboard->setMimeData(..., QClipboard::Clipboard)`. Qt owns the
+  same original encoded PNG, avoiding ScreenGrab's implicit image
+  writer/MIME expansion.
+- **C: Patched chansrv owner:** the same exact synthetic PNG is offered
+  through the private synthetic CLIPRDR peer and fetched on demand.
+
+The new mode is **only an experimental control**, not how LXQt ScreenGrab
+copies screenshots and not a proposed production change. All three legs
+must run **sequentially**, never share active X11 owners, and use the same
+authorized private Xvfb, Firefox/geckodriver configuration and trusted
+paste page. One owner change creates a new clipboard generation. Record
+actual TARGETS names/IDs and owner/timestamps in each leg; do not assume
+Qt will advertise exactly one X11 TARGETS atom merely because only one
+QMimeData format was set.
+
+Suggested interpretation:
+
+| A: pixmap | B: PNG-only Qt | C: remote chansrv | Leading investigation |
+|---|---|---|---|
+| File accepted | File accepted | File rejected | Remote owner/selection-generation, delayed PNG retrieval, INCR or GTK timing |
+| File accepted | File rejected | File rejected | Qt pixmap MIME expansion, image flavor conversion and TARGETS differences |
+| File rejected | Any | Any | Reference precondition or browser environment invalid; stop and fix the control |
+| File accepted | File accepted | File accepted | Synthetic clipboard route works; real Mac screenshot/UI acceptance remains untested |
+
+These are hypotheses **only after** independently confirming the same
+Firefox trusted event, image `DataTransferItem`, valid File/readback and
+PNG decoding.
+
+In the chansrv diagnostic metadata, `x11_image_flavor_requests` now
+retains `image/png` **and** `image/bmp` target requests scoped to the
+specified clipboard generation, requestor and property. If an
+**independently attested Firefox XID** requests BMP but never PNG,
+`diagnose_clipboard_boundary()` returns
+`OTHER_IMAGE_FLAVOR_REQUEST_OBSERVED` with the observed flavor. This
+does **not** establish a browser failure or attribute a request to
+Firefox without XID attestation. It prevents interpreting a legitimate
+fallback flavor choice as complete absence of image traffic. The Qt reference can re-encode PNG, so its output byte
+digest may differ. The Qt PNG-only leg should retain source bytes in the
+clipboard owner, but actual Firefox conversion/caching must still be
+observed; use the same structural acceptance rule as A, and additionally
+record whether size/digest matched. Chansrv leg C retains the strict
+source PNG byte digest gate.
+
+Example invocations below describe **a future approved private test**.
+They are **not permission to execute**:
+
+```sh
+# AFTER private Xvfb PID/auth/display has been independently attested:
+# A — actual ScreenGrab clipboard API
+"$XRDP_CONSOLE_RELEASE_ROOT/qt6-screengrab-clipboard-owner" \
+  "$XRDP_CONSOLE_RELEASE_ROOT/<approved-synthetic>.png"
+# B — format-controlled Qt X11 owner; never concurrently with A
+"$XRDP_CONSOLE_RELEASE_ROOT/qt6-screengrab-clipboard-owner" \
+  --png-only "$XRDP_CONSOLE_RELEASE_ROOT/<approved-synthetic>.png"
+```
+
+The existing native Qt helper binary SHA-256 recorded above is for the
+**older, pixmap-only source**. The `--png-only` change requires a new
+**build-only** validation from this PR before a future private trial.
+It has not been built or run here.
+
 ## One matched, authorized A/B experiment
 
 After explicit authorization, the Codex host operator should use the **same**

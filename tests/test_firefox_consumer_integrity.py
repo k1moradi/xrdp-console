@@ -541,6 +541,58 @@ class ReceiptTests(unittest.TestCase):
                          "BROWSER_READABLE_PNG")
 
 
+    def test_firefox_bmp_fallback_is_reported_without_inventing_png_request(self):
+        chansrv = "\n".join([
+            "event=targets-response-issued requestor=0xB2 generation=5 "
+            "target_count=4 targets=TARGETS@0x101,TIMESTAMP@0x102,"
+            "image/png@0x241,image/bmp@0x240 truncated=0 result=0",
+            "event=x11-request target=image/bmp requestor=0xF0 "
+            "property=0x77 generation=5",
+            "event=x11-request target=image/bmp requestor=0xB2 "
+            "property=0xF2 generation=4",
+            "event=x11-request target=image/bmp requestor=0xB2 "
+            "property=0xF2 generation=5",
+        ])
+        stages = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "NO_IMAGE_PNG_ITEM")
+        self.assertTrue(stages["png_target_advertised"])
+        self.assertEqual(stages["x11_request_count"], 0)
+        self.assertEqual(
+            [(request["target"], request["requestor"],
+              request["property"])
+             for request in stages["x11_image_flavor_requests"]],
+            [("image/bmp", "0xf0", "0x77"),
+             ("image/bmp", "0xb2", "0xf2")])
+        self.assertEqual(browser.diagnose_clipboard_boundary(stages)["boundary"],
+                         "REQUESTOR_IDENTITY_NOT_ATTESTED")
+        observed = browser.diagnose_clipboard_boundary(
+            stages, attested_browser_requestor="0xB2")
+        self.assertEqual(observed["boundary"],
+                         "OTHER_IMAGE_FLAVOR_REQUEST_OBSERVED")
+        self.assertEqual(observed["requested_flavors"], ["image/bmp"])
+        self.assertEqual(observed["confidence"], "observed")
+
+    def test_png_request_takes_precedence_over_bmp_alternative(self):
+        chansrv = "\n".join([
+            "event=targets-response-issued requestor=0xB2 generation=5 "
+            "target_count=3 targets=TARGETS@0x101,TIMESTAMP@0x102,"
+            "image/png@0x241 truncated=0 result=0",
+            "event=x11-request target=image/bmp requestor=0xB2 "
+            "property=0xF1 generation=5",
+            "event=x11-request target=image/png requestor=0xB2 "
+            "property=0xF2 generation=5",
+        ])
+        stages = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(stages["x11_request_count"], 1)
+        self.assertEqual(
+            [r["target"] for r in stages["x11_image_flavor_requests"]],
+            ["image/bmp", "image/png"])
+        observed = browser.diagnose_clipboard_boundary(
+            stages, attested_browser_requestor="0xB2")
+        self.assertEqual(observed["boundary"],
+                         "PNG_REQUEST_OBSERVED_DELIVERY_UNPROVEN")
+
     def test_incr_terminator_ack_requires_requestor_property_and_generation(self):
         chansrv = "\n".join([
             "event=targets-response-issued requestor=0xB2 generation=5 "
