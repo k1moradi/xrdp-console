@@ -283,12 +283,13 @@ def review_manifest(spec: dict[str, Any]) -> dict[str, Any]:
         "rdp_listener": binding,
         "private_rdp_endpoint": endpoint,
         "host_gates": [
+            "Xvfb process PID, arguments, socket and cookie must be attested",
             "C-leg requires a separate private RDP virtual-channel endpoint; "
             "schema 1 has no C-leg route" if endpoint is None else
-            "C-leg private loopback listener and chansrvport runtime checks absent",
-            "Private RDP module, channel forwarding and synthetic CLIPRDR peer "
-            "not started or attested",
-            "Xvfb process PID, arguments, socket and cookie must be attested",
+            "C-leg private loopback listener, virtual-channel forwarding "
+            "and chansrvport runtime checks absent",
+            "Private RDP module, virtual-channel forwarding and synthetic "
+            "CLIPRDR peer not started or attested",
             "Private chansrv sockets and full ELF dependency closure unverified",
             "Chansrv peer/session handshake and isolated startup unverified",
             "Geckodriver/Firefox startup and requestor PID evidence unverified",
