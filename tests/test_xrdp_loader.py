@@ -5223,6 +5223,27 @@ def start_source_display(
                 timeout=2.0,
             )
             if result.returncode == 0:
+                if auth_file is not None:
+                    # A successful authenticated probe alone is insufficient:
+                    # Xvfb with access control disabled would also succeed.
+                    # Use an unrelated private cookie to prove the source
+                    # X11 socket actually rejects unauthorized connections.
+                    negative_auth = auth_file.with_name(
+                        auth_file.name + ".negative-check")
+                    create_private_source_xauthority(negative_auth)
+                    negative_environment = probe_environment.copy()
+                    negative_environment["XAUTHORITY"] = str(negative_auth)
+                    rejected = subprocess.run(
+                        ["xdpyinfo", "-display", display],
+                        env=negative_environment,
+                        capture_output=True,
+                        check=False,
+                        timeout=2.0,
+                    )
+                    if rejected.returncode == 0:
+                        raise AssertionError(
+                            "source Xvfb unexpectedly accepted an unrelated "
+                            "MIT-MAGIC-COOKIE-1 credential")
                 return process, display
             if process.poll() is not None:
                 break
