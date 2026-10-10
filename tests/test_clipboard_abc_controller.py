@@ -20,7 +20,8 @@ def png_receipt(*, digest: str = abc.FIXTURE_SHA256,
     return {
         "phase": "complete", "source": "paste", "trusted": True,
         "items": [{"kind": "file", "type": "image/png"}],
-        "getAsFileNull": False, "getAsFileError": None,
+        "getAsFileInvoked": True, "getAsFileNull": False,
+        "getAsFileError": None,
         "fileType": "image/png",
         "fileSize": byte_size, "readBytes": byte_size, "readError": None,
         "sha256": digest, "digestError": None,
@@ -193,6 +194,8 @@ class CaseCoordinatorTests(unittest.TestCase):
         coordinator = abc.CaseCoordinator()
         receipt = png_receipt()
         receipt["items"] = [{"kind": "string", "type": "text/plain"}]
+        receipt["getAsFileInvoked"] = False
+        receipt["getAsFileNull"] = None
         result = coordinator.run_case(
             "qt-pixmap", 1, DummyPort,
             lambda: DummyPort(receipt=receipt))

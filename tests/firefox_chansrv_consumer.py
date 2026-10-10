@@ -409,9 +409,30 @@ def classify_receipt(report: dict, expected_size: int,
         return "NO_COMPLETED_TRUSTED_PASTE"
     if report.get("trusted") is not True or report.get("source") != "paste":
         return "INVALID_UNTRUSTED_EVENT"
-    if not any(i.get("type") == "image/png" and i.get("kind") == "file"
-               for i in report.get("items", []) if isinstance(i, dict)):
+    png_items = [i for i in report.get("items", []) if
+                 isinstance(i, dict) and i.get("type") == "image/png" and
+                 i.get("kind") == "file"]
+    invoked = report.get("getAsFileInvoked")
+    if not png_items:
+        # New receipts must never claim an attempted File conversion
+        # without a PNG File item. Old receipts lack this field and can
+        # still reliably establish that no image item was exposed.
+        if invoked is True:
+            return "GET_AS_FILE_INVOCATION_CONFLICT"
         return "NO_IMAGE_PNG_ITEM"
+    # A legacy getAsFileNull=true with a PNG item strongly suggests a
+    # null return, but does not independently prove the method was called.
+    # The new probe records the invocation inside the synchronous paste
+    # handler. Never upgrade a historical ambiguous receipt to proof.
+    if invoked is None:
+        return "GET_AS_FILE_INVOCATION_UNVERIFIED"
+    if invoked is False:
+        if (report.get("getAsFileNull") is not None or
+                report.get("getAsFileError") is not None):
+            return "GET_AS_FILE_INVOCATION_CONFLICT"
+        return "GET_AS_FILE_NOT_INVOKED"
+    if invoked is not True:
+        return "GET_AS_FILE_INVOCATION_UNVERIFIED"
     if report.get("getAsFileError"):
         return "GET_AS_FILE_EXCEPTION"
     # A missing getAsFile() result is not evidence that the synchronous

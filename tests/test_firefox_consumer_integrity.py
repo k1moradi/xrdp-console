@@ -19,7 +19,8 @@ class ReceiptTests(unittest.TestCase):
         return {
             "phase":"complete","source":"paste","trusted":True,
             "items":[{"kind":"file","type":"image/png"}],
-            "getAsFileNull":False, "getAsFileError":None,
+            "getAsFileInvoked":True, "getAsFileNull":False,
+            "getAsFileError":None,
             "fileType":"image/png", "fileSize":1049471,"readBytes":1049471,"readError":None,
             "digestError":None,"sha256":"c6635535e3669a731add63b3c4b89a0c873e0c7c88412f6ea7b06423eacfee7c",
             "signatureValid":True,"decodeError":None,"ihdrWidth":512,
@@ -316,6 +317,50 @@ class ReceiptTests(unittest.TestCase):
     def test_null_file(self):
         report=self.good();report["getAsFileNull"]=True
         self.assertEqual(self.classify(report),"TRUSTED_PASTE_NULL_FILE")
+
+    def test_null_file_requires_explicit_getasfile_invocation(self):
+        report = self.good()
+        report["getAsFileNull"] = True
+        report["fileSize"] = None
+        self.assertEqual(self.classify(report), "TRUSTED_PASTE_NULL_FILE")
+        report.pop("getAsFileInvoked")
+        self.assertEqual(
+            self.classify(report), "GET_AS_FILE_INVOCATION_UNVERIFIED")
+        report["getAsFileInvoked"] = False
+        self.assertEqual(
+            self.classify(report), "GET_AS_FILE_INVOCATION_CONFLICT")
+        report["getAsFileNull"] = None
+        self.assertEqual(self.classify(report), "GET_AS_FILE_NOT_INVOKED")
+
+    def test_absent_png_item_never_claims_getasfile_returned_null(self):
+        report = self.good()
+        report["items"] = [{"kind": "string", "type": "text/plain"}]
+        report["imageItemCount"] = 0
+        report["getAsFileInvoked"] = False
+        report["getAsFileNull"] = None
+        self.assertEqual(self.classify(report), "NO_IMAGE_PNG_ITEM")
+        # A legacy receipt can prove absence of PNG item even if its old
+        # getAsFileNull field misleadingly said true.
+        report.pop("getAsFileInvoked")
+        report["getAsFileNull"] = True
+        self.assertEqual(self.classify(report), "NO_IMAGE_PNG_ITEM")
+        report["getAsFileInvoked"] = True
+        self.assertEqual(
+            self.classify(report), "GET_AS_FILE_INVOCATION_CONFLICT")
+
+    def test_getasfile_invocation_state_cannot_be_synthetic_or_forged(self):
+        report = self.good()
+        for value in (0, 1, "", "true", [], {}):
+            with self.subTest(value=str(value)):
+                report["getAsFileInvoked"] = value
+                self.assertEqual(self.classify(report),
+                                 "GET_AS_FILE_INVOCATION_UNVERIFIED")
+        report["getAsFileInvoked"] = True
+        report["getAsFileNull"] = None
+        self.assertEqual(self.classify(report), "GET_AS_FILE_STATE_UNVERIFIED")
+        report = self.good()
+        report["source"] = "synthetic-validation"
+        self.assertEqual(self.classify(report), "INVALID_UNTRUSTED_EVENT")
 
     def test_untrusted_event(self):
         report=self.good();report["trusted"]=False
