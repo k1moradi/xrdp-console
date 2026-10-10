@@ -25,6 +25,33 @@ set(XRDP_CONSOLE_XRDP_INSTALL_DIR
     "${XRDP_CONSOLE_XRDP_DEPS_ROOT}/xrdp-install" CACHE PATH
     "Private xrdp installation prefix")
 
+# OFF preserves the pre-existing production/direct-console dependency build:
+# --runstatedir=/run and --with-socketdir=/run/xrdp/sockdir.
+# ON is only a configuration-time private candidate; it never runs a session.
+option(XRDP_CONSOLE_PRIVATE_XRDP_BUILD
+    "Opt in to a separate release-root private xrdp/chansrv diagnostic build"
+    OFF)
+set(XRDP_CONSOLE_PRIVATE_RELEASE_ROOT "" CACHE PATH
+    "Caller-owned existing .release/xrdp-console root for private builds")
+set(_xrdp_runstate_arg "--runstatedir=/run")
+set(_xrdp_socketdir_arg "--with-socketdir=/run/xrdp/sockdir")
+set(_xrdp_profile "default")
+if(XRDP_CONSOLE_PRIVATE_XRDP_BUILD)
+    if(NOT XRDP_CONSOLE_BUILD_XRDP)
+        message(FATAL_ERROR "Private xrdp mode requires XRDP_CONSOLE_BUILD_XRDP=ON")
+    endif()
+    include("${CMAKE_CURRENT_LIST_DIR}/private_xrdp_paths.cmake")
+    xrdp_console_validate_private_paths(
+        "${XRDP_CONSOLE_PRIVATE_RELEASE_ROOT}"
+        "${CMAKE_BINARY_DIR}"
+        "${XRDP_CONSOLE_XRDP_DEPS_ROOT}")
+    set(_xrdp_runstate_arg
+        "--runstatedir=${XRDP_CONSOLE_PRIVATE_RUNSTATE_DIR}")
+    set(_xrdp_socketdir_arg
+        "--with-socketdir=${XRDP_CONSOLE_PRIVATE_SOCKET_DIR}")
+    set(_xrdp_profile "private-offline-only")
+endif()
+
 # ExternalProject stamps are generated state, not source. Make the patch
 # series and its inputs part of that state so a changed patch can never reuse
 # an already patched tree. CMAKE_CONFIGURE_DEPENDS causes the top-level build
@@ -97,8 +124,8 @@ set(_xrdp_configure_args
     "--prefix=<INSTALL_DIR>"
     "--sysconfdir=<INSTALL_DIR>/etc"
     "--localstatedir=<INSTALL_DIR>/var"
-    "--runstatedir=/run"
-    "--with-socketdir=/run/xrdp/sockdir"
+    "${_xrdp_runstate_arg}"
+    "${_xrdp_socketdir_arg}"
     "--enable-strict-locations"
     "--enable-rfxcodec"
     "--enable-x264"
@@ -116,8 +143,18 @@ set(_xrdp_build_configuration_material
     "CPPFLAGS=${XRDP_CONSOLE_XRDP_CPPFLAGS}\n"
     "LDFLAGS=${XRDP_CONSOLE_XRDP_LDFLAGS}\n"
     "PKG_CONFIG_PATH=${XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH}\n"
-    "install-prefix=${XRDP_CONSOLE_XRDP_INSTALL_DIR}\n"
     "configure-args=${_xrdp_configure_arg_material}\n")
+if(NOT XRDP_CONSOLE_PRIVATE_XRDP_BUILD)
+    list(APPEND _xrdp_build_configuration_material
+        "install-prefix=${XRDP_CONSOLE_XRDP_INSTALL_DIR}\n")
+endif()
+if(XRDP_CONSOLE_PRIVATE_XRDP_BUILD)
+    # Private installs are hash-keyed, avoiding stale modules from another
+    # patchset or a previously configured runstate/socket mode.
+    list(APPEND _xrdp_build_configuration_material
+        "profile=${_xrdp_profile}\n"
+        "install-prefix=private-hash-keyed\n")
+endif()
 string(JOIN "" _xrdp_build_configuration_material
     ${_xrdp_build_configuration_material})
 
@@ -132,6 +169,18 @@ set(_xrdp_state_material
 string(JOIN "" _xrdp_state_material ${_xrdp_state_material})
 string(SHA256 _xrdp_state_hash "${_xrdp_state_material}")
 string(SUBSTRING "${_xrdp_state_hash}" 0 16 _xrdp_state_tag)
+
+if(XRDP_CONSOLE_PRIVATE_XRDP_BUILD)
+    set(XRDP_CONSOLE_XRDP_INSTALL_DIR
+        "${XRDP_CONSOLE_XRDP_DEPS_ROOT}/xrdp-install-${_xrdp_state_tag}"
+        CACHE PATH "Hash-keyed isolated private xrdp installation prefix" FORCE)
+    cmake_path(SET _private_install NORMALIZE "${XRDP_CONSOLE_XRDP_INSTALL_DIR}")
+    cmake_path(IS_PREFIX XRDP_CONSOLE_PRIVATE_CANONICAL_RELEASE_ROOT
+        "${_private_install}" NORMALIZE _private_install_inside)
+    if(NOT _private_install_inside)
+        message(FATAL_ERROR "Private installation directory escaped release root")
+    endif()
+endif()
 
 set(XRDP_CONSOLE_XRDP_PATCHSET_HASH "${_xrdp_patchset_hash}" CACHE INTERNAL
     "Hash of the pinned xrdp patch series" FORCE)
