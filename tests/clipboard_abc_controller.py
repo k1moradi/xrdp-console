@@ -122,13 +122,14 @@ def _validate_fixed_fixture(fixture: Path) -> None:
         raise UnsafePlan("Approved synthetic PNG dimensions mismatch")
 
 
-def _valid_binary_role(name: str, spec: dict[str, Any], root: Path) -> dict[str, str]:
+def _valid_binary_role(name: str, spec: dict[str, Any], root: Path,
+                       *, executable: bool = True) -> dict[str, str]:
     if not isinstance(spec, dict):
         raise UnsafePlan(f"{name}: missing binary specification")
     path = _private_path(_manifest_value(spec, "path", str), root,
                          name, must_exist=True)
-    if not path.is_file() or not os.access(path, os.X_OK):
-        raise UnsafePlan(f"{name}: executable file unavailable")
+    if not path.is_file() or (executable and not os.access(path, os.X_OK)):
+        raise UnsafePlan(f"{name}: executable/artifact file unavailable")
     expected_sha = _manifest_value(spec, "sha256", str)
     if SHA256.fullmatch(expected_sha) is None or _sha256(path) != expected_sha:
         raise UnsafePlan(f"{name}: executable checksum mismatch")
@@ -178,7 +179,8 @@ def _validate_private_rdp_endpoint(
     if set(bins) != {"xrdp", "module", "peer", "rdp_client"}:
         raise UnsafePlan("Missing private xrdp/module/peer/client artifact identity")
     artifacts = {
-        role: _valid_binary_role(role, record, release)
+        role: _valid_binary_role(role, record, release,
+                                 executable=(role != "module"))
         for role, record in bins.items()
     }
     if len({item["path"] for item in artifacts.values()}) != len(artifacts):
