@@ -20,6 +20,7 @@ from h264_loader_isolation import (
     isolated_loader_module_name,
     private_client_display_is_safe,
     private_release_directory,
+    require_ctest_build_inside_release,
     require_existing_release_workspace,
     require_release_outside_pinned_prefix,
     require_loopback_tcp_listener,
@@ -211,6 +212,24 @@ class LoaderIsolationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "group/world"):
             require_existing_release_workspace(str(workspace))
 
+    def test_ctest_build_must_live_inside_existing_release(self):
+        workspace = self.root / ".release"
+        workspace.mkdir(mode=0o700)
+        build = workspace / "build"
+        build.mkdir(mode=0o700)
+        self.assertEqual(require_ctest_build_inside_release(
+            workspace, str(build)), build.resolve())
+        outside = self.root / "active-build-direct-console"
+        outside.mkdir()
+        with self.assertRaisesRegex(ValueError, "inside existing \\.release"):
+            require_ctest_build_inside_release(workspace, str(outside))
+        with self.assertRaisesRegex(ValueError, "XRDP_CONSOLE_CTEST_BUILD_ROOT"):
+            require_ctest_build_inside_release(workspace, None)
+        missing = workspace / "new-timestamp-task"
+        with self.assertRaisesRegex(ValueError, "existing"):
+            require_ctest_build_inside_release(workspace, str(missing))
+        self.assertFalse(missing.exists())
+
     def test_release_workspace_cannot_overlap_pinned_dependency_tree(self):
         install = self.root / "build-direct-console" / "_deps" / "xrdp-install"
         install.mkdir(parents=True)
@@ -291,7 +310,7 @@ class LoaderIsolationTests(unittest.TestCase):
         begin = cmake.index("add_test(NAME xrdp-loader-gfx-h264-cropped-edge")
         end = cmake.index("add_test(NAME", begin + 1)
         definition = cmake[begin:end]
-        self.assertIn('ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"', definition)
+        self.assertIn("XRDP_CONSOLE_CTEST_BUILD_ROOT=", definition)
         self.assertNotIn("XRDP_CONSOLE_TEST_RUNTIME_ROOT=", definition)
         self.assertNotIn("XRDP_CONSOLE_TEST_ARTIFACT_DIR=", definition)
 
