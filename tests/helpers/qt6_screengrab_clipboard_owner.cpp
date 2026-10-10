@@ -182,8 +182,12 @@ int main(int argc, char *argv[])
     controlInput.setEnabled(controlled);
     if (controlled)
     {
-        QObject::connect(&controlInput, &QSocketNotifier::activated,
-                         &application, [](auto, auto) {
+        QObject::connect(
+            &controlInput,
+            QOverload<QSocketDescriptor, QSocketNotifier::Type>::of(
+                &QSocketNotifier::activated),
+            &application,
+            [](QSocketDescriptor, QSocketNotifier::Type) {
             char command = 0;
             const ssize_t got = ::read(STDIN_FILENO, &command, 1);
             // Unknown command, EOF or I/O failure all terminate the
