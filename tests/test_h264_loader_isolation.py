@@ -14,6 +14,7 @@ from unittest import mock
 import test_xrdp_loader as loader
 
 from h264_loader_isolation import (
+    archive_private_h264_logs,
     create_private_source_xauthority,
     isolated_desktop_environment,
     isolated_loader_module_name,
@@ -238,6 +239,51 @@ class LoaderIsolationTests(unittest.TestCase):
             private_release_directory(workspace, "runtime")
         with self.assertRaisesRegex(ValueError, "unapproved"):
             private_release_directory(workspace, "task-20261010")
+
+    def test_release_log_archive_reuses_owned_fixed_names_with_size_bound(self):
+        workspace = self.root / ".release"
+        workspace.mkdir(mode=0o700)
+        release = require_existing_release_workspace(str(workspace))
+        source = self.root / "synthetic-only-xrdp.log"
+        source.write_bytes(b"A" * 150000 + b"B" * 128)
+        saved = archive_private_h264_logs(release, ((source, "xrdp.log"),))
+        content = (saved / "xrdp.log").read_bytes()
+        self.assertEqual(len(content), 131072)
+        self.assertEqual(content[-128:], b"B" * 128)
+        self.assertTrue((saved / ".xrdp-console-synthetic-logs").is_file())
+        source.write_bytes(b"next synthetic run")
+        again = archive_private_h264_logs(release, ((source, "xrdp.log"),))
+        self.assertEqual(again, saved)
+        self.assertEqual((saved / "xrdp.log").read_bytes(),
+                         b"next synthetic run")
+
+    def test_release_log_archive_wont_overwrite_unclaimed_or_linked_files(self):
+        workspace = self.root / ".release"
+        workspace.mkdir(mode=0o700)
+        release = require_existing_release_workspace(str(workspace))
+        logs = private_release_directory(release, "logs")
+        folder = private_release_directory(logs, "h264-cropped-edge")
+        source = self.root / "synthetic-xrdp.log"
+        source.write_bytes(b"safe content")
+        preexisting = folder / "xrdp.log"
+        preexisting.write_bytes(b"unrelated user content")
+        with self.assertRaisesRegex(ValueError, "unclaimed"):
+            archive_private_h264_logs(
+                release, ((source, "xrdp.log"),))
+        self.assertEqual(preexisting.read_bytes(), b"unrelated user content")
+        preexisting.unlink()
+        archive_private_h264_logs(release, ((source, "xrdp.log"),))
+        (folder / "xrdp.log").unlink()
+        unrelated = self.root / "original-unrelated.txt"
+        unrelated.write_bytes(b"do not touch")
+        (folder / "xrdp.log").symlink_to(unrelated)
+        with self.assertRaisesRegex(ValueError, "unsafe"):
+            archive_private_h264_logs(
+                release, ((source, "xrdp.log"),))
+        self.assertEqual(unrelated.read_bytes(), b"do not touch")
+        with self.assertRaisesRegex(ValueError, "unexpected"):
+            archive_private_h264_logs(
+                release, ((source, "clipboard-private-data.png"),))
 
     def test_cropped_loader_ctest_no_longer_forces_checkout_build_artifacts(self):
         cmake = (Path(__file__).resolve().parent / "CMakeLists.txt").read_text(
