@@ -135,9 +135,11 @@ def start_authenticated_source_xvfb(root: Path, log_path: Path,
     if result.returncode != 0:
         raise TestInconclusive("Cannot prepare private Xvfb authentication")
     authority.chmod(0o600)
-    # The loader launches chansrv, the synthetic CLIPRDR peer, and any
-    # X11 deterministic requestors as descendants of this process.
-    os.environ["XAUTHORITY"] = str(authority)
+    # Keep the parent's XAUTHORITY untouched. Only the child probe may
+    # use the private display cookie; later clients construct their own
+    # explicit DISPLAY/XAUTHORITY environment.
+    private_probe_env = dict(
+        os.environ, DISPLAY=display, XAUTHORITY=str(authority))
     cmd = [shutil.which("Xvfb"), display, "-auth", str(authority),
            "-screen", "0", f"{width}x{height}x24", "-nolisten", "tcp",
            "-noreset"]
@@ -151,7 +153,7 @@ def start_authenticated_source_xvfb(root: Path, log_path: Path,
                 raise TestInconclusive("New private Xvfb exited before readiness")
             probe = subprocess.run(["xdpyinfo", "-display", display],
                                    capture_output=True, timeout=2, check=False,
-                                   env=dict(os.environ, DISPLAY=display))
+                                   env=private_probe_env)
             if probe.returncode == 0:
                 verify_isolated_xvfb(display, authority, proc.pid, root)
                 return proc, display
