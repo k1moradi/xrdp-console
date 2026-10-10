@@ -846,6 +846,38 @@ def diagnose_clipboard_boundary(
             "confidence": "inconclusive", "receipt": result}
 
 
+def private_browser_environment(*, source_display: str,
+                                xauthority: Path, root: Path,
+                                trial: Path, profile_root: Path
+                                ) -> dict[str, str]:
+    """No inherited display, session bus, LD_* or HOME can reach Firefox."""
+    if not re.fullmatch(r":(19[1-9]|2[0-4][0-9])", source_display):
+        raise TestInconclusive("Firefox requires an allocated private Xvfb slot")
+    root = root.resolve(strict=True)
+    if not trial.is_relative_to(root) or not profile_root.is_relative_to(trial):
+        raise TestInconclusive("Firefox profile is outside private release root")
+    authority = xauthority.resolve(strict=True)
+    if not authority.is_relative_to(root) or not authority.is_file():
+        raise TestInconclusive("Firefox Xauthority escapes the private root")
+    if authority.stat().st_uid != os.geteuid() or authority.stat().st_mode & 0o077:
+        raise TestInconclusive("Firefox Xauthority has unsafe owner or permissions")
+    home = trial / "home"
+    home.mkdir(mode=0o700, exist_ok=False)
+    return {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "HOME": str(home),
+        "DISPLAY": source_display,
+        "XAUTHORITY": str(authority),
+        "GDK_BACKEND": "x11",
+        "MOZ_ENABLE_WAYLAND": "0",
+        "MOZ_PROFILE_ROOT": str(profile_root),
+        "XDG_CACHE_HOME": str(trial / "cache"),
+        "XDG_CONFIG_HOME": str(trial / "config"),
+        "XDG_DATA_HOME": str(trial / "data"),
+    }
+
+
 def run_firefox_chansrv_timing(*, source_display: str,
                                xauthority: Path, xvfb_pid: int,
                                root: Path, firefox: Path, geckodriver: Path,
@@ -854,7 +886,9 @@ def run_firefox_chansrv_timing(*, source_display: str,
                                pref_ms: int = 1000,
                                expected_generation: int | None = None,
                                after_receipt: Any = None,
-                               require_exact_png_encoding: bool = True) -> dict:
+                               require_exact_png_encoding: bool = True,
+                               receipt_origin: ReceiptOriginLease | None = None,
+                               case_id: str | None = None) -> dict:
     """Browser leg for a separately verified private X11 clipboard owner.
 
     Default: frozen chansrv + synthetic CLIPRDR peer, with exact PNG bytes.
@@ -869,22 +903,30 @@ def run_firefox_chansrv_timing(*, source_display: str,
         raise ValueError("Expected PNG outside bounded File size")
     if not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
         raise ValueError("Invalid expected fixture SHA-256")
-    trial = root / ("firefox-consumer" if require_exact_png_encoding
-                    else "firefox-qt6-control")
+    if case_id is None:
+        case_id = secrets.token_hex(8)
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", case_id):
+        raise TestInconclusive("Unsafe Firefox case identifier")
+    trial = root / (("firefox-chansrv-" if require_exact_png_encoding
+                     else "firefox-qt-control-") + case_id)
     trial.mkdir(mode=0o700, exist_ok=False)
     profile_root = trial / "profiles"
     profile_root.mkdir(mode=0o700)
-    env = dict(os.environ, DISPLAY=source_display, XAUTHORITY=str(xauthority),
-               GDK_BACKEND="x11", MOZ_ENABLE_WAYLAND="0",
-               MOZ_PROFILE_ROOT=str(profile_root),
-               XDG_CACHE_HOME=str(trial / "cache"),
-               XDG_CONFIG_HOME=str(trial / "config"),
-               XDG_DATA_HOME=str(trial / "data"))
+    env = private_browser_environment(
+        source_display=source_display, xauthority=xauthority,
+        root=root, trial=trial, profile_root=profile_root)
     port = free_local_port()
     driver = WebDriver(port)
     gecko = None
+    # A caller-held origin stays identical across three sequential legs.
+    # A single-leg invocation still acquires a bounded local origin.
+    origin_context = (contextlib.nullcontext(receipt_origin)
+                      if receipt_origin is not None else serve_receipt_origin())
     try:
-        with serve_receipt_page() as url:
+        with origin_context as origin:
+            if not isinstance(origin, ReceiptOriginLease):
+                raise TestInconclusive("Invalid receipt origin lease")
+            url = origin.validated_url()
             with (trial / "geckodriver.log").open("wb") as log:
                 gecko = subprocess.Popen(
                     [str(geckodriver), "--host", "127.0.0.1", "--port", str(port),
@@ -896,6 +938,10 @@ def run_firefox_chansrv_timing(*, source_display: str,
                 receipt = send_trusted_paste(driver, url)
                 receipt["firefox_version"] = caps.get("browserVersion")
                 receipt["expected_generation"] = expected_generation
+                receipt["requested_clipboard_timeout_ms"] = pref_ms
+                # WebDriver's requested prefs are not proof that the browser
+                # applied them. Host-level verification remains a separate gate.
+                receipt["applied_clipboard_timeout_ms"] = None
                 receipt["classification"] = classify_receipt(
                     receipt, expected_size, expected_sha256,
                     expected_dimensions=expected_dimensions,
