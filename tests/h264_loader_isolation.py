@@ -53,6 +53,48 @@ def private_client_display_is_safe(
     return bool(xauthority and Path(xauthority).is_file())
 
 
+def require_existing_release_workspace(configured: str | None) -> Path:
+    """Return an explicitly selected existing .release workspace, unchanged.
+
+    The loader must not create task roots or guess whether the owner's
+    workspace is in their home folder or checkout.
+    """
+    if not configured:
+        raise ValueError(
+            "cropped H.264 test requires XRDP_CONSOLE_RELEASE_ROOT "
+            "pointing to the existing .release directory")
+    workspace = Path(configured)
+    if not workspace.is_absolute() or workspace.name != ".release":
+        raise ValueError("XRDP_CONSOLE_RELEASE_ROOT must be an absolute .release path")
+    if workspace.is_symlink() or not workspace.is_dir():
+        raise ValueError("existing .release must be a real, non-symlink directory")
+    resolved = workspace.resolve(strict=True)
+    if resolved != workspace or resolved.name != ".release":
+        raise ValueError(".release path must be canonical; do not follow aliases")
+    if resolved.stat().st_uid != os.getuid():
+        raise ValueError(".release workspace must be owned by the test user")
+    if resolved.stat().st_mode & 0o022:
+        raise ValueError(".release workspace may not be group/world writable")
+    if not os.access(resolved, os.W_OK | os.X_OK):
+        raise ValueError(".release workspace is not writable")
+    return resolved
+
+
+def private_release_directory(workspace: Path, name: str) -> Path:
+    """Reuse an owned, stable subdirectory; never follow an existing link."""
+    if name not in ("runtime", "logs", "client-xvfb-tmp", "h264-cropped-edge"):
+        raise ValueError("unapproved reusable .release subdirectory")
+    path = workspace / name
+    if path.is_symlink():
+        raise ValueError("reusable .release subdirectory may not be a symlink")
+    path.mkdir(mode=0o700, exist_ok=True)
+    if not path.is_dir() or path.resolve(strict=True).parent != workspace:
+        raise ValueError("reusable .release subdirectory escaped its parent")
+    if path.stat().st_uid != os.getuid() or path.stat().st_mode & 0o077:
+        raise ValueError("reusable .release subdirectory must be private")
+    return path
+
+
 def require_loopback_tcp_listener(
         port: int, proc_net: Path = Path("/proc/net")) -> None:
     """Refuse an RDP listener visible on any non-loopback interface.
