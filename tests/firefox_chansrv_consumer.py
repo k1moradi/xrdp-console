@@ -455,6 +455,144 @@ def classify_receipt(report: dict, expected_size: int,
             else "READABLE_PNG_FILE_VALIDATED_IMAGE")
 
 
+def _correlate_png_incr_order(lines: list[str],
+                              primary: tuple[int, str, str | None] | None,
+                              generation: int) -> dict:
+    """Check *logged* INCR ordering for one X11 requestor/property/generation.
+
+    An INCR terminator ACK can appear in an incomplete log without the
+    preceding announcement, property deletions, chunks, or terminator issue.
+    Those events must not be promoted into a verified delivery sequence.
+    Even a complete sequence proves only owner-side X11 events, NOT that
+    Firefox accepted a File or that XChangeProperty reached the requestor.
+    """
+    observed = {
+        "announcement": False,
+        "initial_property_delete": False,
+        "data_chunk": False,
+        "terminator_issued": False,
+        "terminator_ack": False,
+    }
+    result = {
+        "incr_order_complete": False,
+        "incr_order_conflict": False,
+        "incr_order_phase": "NO_PRIMARY_PNG_REQUEST",
+        "incr_order_observed": observed,
+        "incr_order_chunks": 0,
+        "incr_order_bytes_issued": 0,
+    }
+    if primary is None or primary[2] in (None, "0x0"):
+        return result
+
+    index, requestor, prop = primary
+    phase = "AWAITING_ANNOUNCEMENT"
+    last_chunk = 0
+    total_bytes = 0
+
+    def item(line: str, name: str) -> str | None:
+        match = re.search(r"(?:^|\s)" + re.escape(name) + r"=([^\s]+)", line)
+        return match.group(1) if match else None
+
+    def dec(line: str, name: str) -> int | None:
+        value = item(line, name)
+        return int(value) if value is not None and value.isdecimal() else None
+
+    relevant_events = {
+        "x11-incr-announcement",
+        "x11-incr-property-delete-ack",
+        "x11-incr-chunk-issued",
+        "x11-incr-terminator-issued",
+        "x11-incr-terminator-ack",
+    }
+    for line in lines[index + 1:]:
+        # No old XID may borrow a later request's completion. A fresh format
+        # list changes the clipboard identity even if the integer ID is reused.
+        if "event=format-list " in line:
+            break
+        if ("event=x11-request " in line and
+                item(line, "requestor") is not None and
+                item(line, "requestor").lower() == requestor and
+                item(line, "property") is not None and
+                item(line, "property").lower() == prop):
+            break
+        event = item(line, "event")
+        if event not in relevant_events:
+            continue
+        if ((item(line, "requestor") or "").lower() != requestor or
+                (item(line, "property") or "").lower() != prop):
+            continue
+        valid_generation = (
+            dec(line, "start_generation") == generation and
+            dec(line, "current_generation") == generation)
+        if event == "x11-incr-announcement":
+            valid_generation = dec(line, "generation") == generation
+        if not valid_generation:
+            result["incr_order_conflict"] = True
+            break
+
+        if event == "x11-incr-announcement":
+            if phase != "AWAITING_ANNOUNCEMENT":
+                result["incr_order_conflict"] = True
+                break
+            observed["announcement"] = True
+            phase = "AWAITING_INITIAL_DELETE"
+        elif event == "x11-incr-property-delete-ack":
+            acknowledged_bytes = dec(line, "acknowledged_bytes")
+            valid_delete = (
+                item(line, "state") == "PropertyDelete" and
+                dec(line, "state_match") == 1)
+            if (phase == "AWAITING_INITIAL_DELETE" and valid_delete and
+                    acknowledged_bytes == 0):
+                observed["initial_property_delete"] = True
+                phase = "AWAITING_CHUNK_OR_TERMINATOR"
+            elif (phase == "AWAITING_DATA_DELETE" and valid_delete and
+                  acknowledged_bytes == total_bytes):
+                phase = "AWAITING_CHUNK_OR_TERMINATOR"
+            else:
+                result["incr_order_conflict"] = True
+                break
+        elif event == "x11-incr-chunk-issued":
+            chunk = dec(line, "chunk")
+            offset = dec(line, "offset")
+            amount = dec(line, "bytes")
+            end_offset = dec(line, "end_offset")
+            if (phase != "AWAITING_CHUNK_OR_TERMINATOR" or
+                    dec(line, "state_match") != 1 or
+                    chunk != last_chunk + 1 or offset != total_bytes or
+                    amount is None or amount <= 0 or
+                    end_offset != total_bytes + amount):
+                result["incr_order_conflict"] = True
+                break
+            total_bytes += amount
+            last_chunk = chunk
+            observed["data_chunk"] = True
+            phase = "AWAITING_DATA_DELETE"
+        elif event == "x11-incr-terminator-issued":
+            if (phase != "AWAITING_CHUNK_OR_TERMINATOR" or
+                    last_chunk < 1 or dec(line, "state_match") != 1 or
+                    dec(line, "offset") != total_bytes):
+                result["incr_order_conflict"] = True
+                break
+            observed["terminator_issued"] = True
+            phase = "AWAITING_TERMINATOR_ACK"
+        elif event == "x11-incr-terminator-ack":
+            if (phase != "AWAITING_TERMINATOR_ACK" or
+                    dec(line, "terminator_generation") != generation or
+                    dec(line, "state_match") != 1):
+                result["incr_order_conflict"] = True
+                break
+            observed["terminator_ack"] = True
+            phase = "TERMINATOR_ACK_OBSERVED"
+
+    result["incr_order_phase"] = phase
+    result["incr_order_chunks"] = last_chunk
+    result["incr_order_bytes_issued"] = total_bytes
+    result["incr_order_complete"] = (
+        phase == "TERMINATOR_ACK_OBSERVED" and
+        not result["incr_order_conflict"] and all(observed.values()))
+    return result
+
+
 def correlate_metadata(chansrv_log: str, peer_log: str,
                        format_id: int, expected_generation: int,
                        classification: str) -> dict:
@@ -701,6 +839,10 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
         if "event=x11-incr-terminator-ack " in line:
             # Raw count is a cross-request aggregate, *not* receipt proof.
             stages["incr_terminator_ack_count"] += 1
+    # Full INCR chain attribution is stricter than a matching terminal ACK.
+    # Retain the legacy ACK-only fields for forensic context, but never
+    # mistake them for a complete, ordered delivery trace.
+    stages.update(_correlate_png_incr_order(lines, primary, expected_generation))
     stages["incr_terminator_ack_matches"] = len(matched_terminator_acks)
     # No arbitrary "first" choice when a client reused the same property.
     if len(matched_terminator_acks) == 1:
@@ -809,7 +951,8 @@ def diagnose_clipboard_boundary(
     # protocol evidence than issuing an XChangeProperty call. It is *still*
     # not a trusted Firefox paste event or proof that getAsFile() succeeded.
     if (stages.get("primary_x11_requestor") == requestor and
-            stages.get("incr_terminator_ack_correlated")):
+            stages.get("incr_terminator_ack_correlated") and
+            stages.get("incr_order_complete")):
         return {"boundary": "PNG_INCR_TERMINATOR_ACK_ONLY",
                 "confidence": "observed", "receipt": result}
 
