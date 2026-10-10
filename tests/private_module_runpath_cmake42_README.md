@@ -55,7 +55,18 @@ does not specify `COMPAT_VERSION`. The parser allows **exactly an empty**
 `CMAKE_PROJECT_COMPAT_VERSION:STATIC` value and refuses a nonempty value,
 other cache types or arbitrary extra STATIC keys. The check also applies to
 directly inspected cache mappings, so callers cannot bypass the parser.
-Older CMake versions without either generated entry remain supported.
+CMake also writes top-level `project()` metadata as STATIC: the
+reviewed name `xrdp_console`, description
+`Direct-X11 shared physical-console module for xrdp`, version `0.1.0`
+and its components, empty homepage/compatibility/SPDX fields, and exact
+`xrdp_console_SOURCE_DIR`/`xrdp_console_BINARY_DIR` directories.
+These fields are accepted **only at source-defined values**; the
+directory entries must be canonical and equal the already attested source
+and build roots. We confirmed the baseline project metadata keys from
+a real local CMake 3.31 configure, and included CMake 4.2's new
+`CMAKE_PROJECT_COMPAT_VERSION` entry. Any unknown STATIC key, type
+substitution, forged path or altered metadata value remains rejected.
+CMake versions omitting some or all of these metadata fields are supported.
 
 The tool still independently checks the real Git ancestry, 52 ordered
 patches, build-state hash, owned private source/dependency paths, archive
