@@ -392,11 +392,13 @@ diff --git a/sesman/chansrv/clipboard.c b/sesman/chansrv/clipboard.c
          (unsigned long long)g_clipboard_format_generation,
          g_clip_c2s.incr_in_progress, g_clip_s2c.incr_in_progress);
      LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_owner_notify: 0x%lx", lxevent->owner);
-@@ -3114,6 +3366,7 @@
+@@ -3114,8 +3366,9 @@
      int target_index;
      int target_names_truncated;
      int targets_result;
 +    int result;
+     Atom target_atom;
+     const char *target_name;
  
      lxev = (XSelectionRequestEvent *)xevent;
      LOG_DEVEL(LOG_LEVEL_DEBUG, "clipboard_event_selection_request: 0x%lx", lxev->property);
