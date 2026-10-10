@@ -66,7 +66,7 @@ class LoaderIsolationTests(unittest.TestCase):
                                 return_value="/usr/bin/Xvfb"),
               mock.patch.object(loader.subprocess, "Popen",
                                 return_value=fake_process) as popen,
-              mock.patch.object(loader, "read_line", return_value=b"94\\n"),
+              mock.patch.object(loader, "read_line", return_value=b"94\n"),
               mock.patch.object(loader.subprocess, "run",
                                 return_value=mock.Mock(returncode=0)) as run):
             process, display = loader.start_source_display(
@@ -90,7 +90,7 @@ class LoaderIsolationTests(unittest.TestCase):
                                 return_value="/usr/bin/Xvfb"),
               mock.patch.object(loader.subprocess, "Popen",
                                 return_value=fake_process),
-              mock.patch.object(loader, "read_line", return_value=b"0\\n"),
+              mock.patch.object(loader, "read_line", return_value=b"0\n"),
               mock.patch.object(loader, "stop_process") as stop):
             with self.assertRaisesRegex(AssertionError, "physical DISPLAY"):
                 loader.start_source_display(log, 1366, 768, auth_file=auth)
