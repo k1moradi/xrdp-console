@@ -2,9 +2,11 @@
 """Test-only browser receipt classification and synthetic fixture gating."""
 from pathlib import Path
 import hashlib
+import os
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0,str(ROOT))
@@ -40,8 +42,8 @@ class ReceiptTests(unittest.TestCase):
             "event=x11-request target=image/png requestor=0xC3 owner=0x2 property=0xF3 generation=2",
             "event=x11-selection-notify-issued path=incr requestor=0xC3 property=0xF3 mono_ns=200",
             "event=x11-selection-notify-issued path=incr requestor=0xB2 property=0xF2 mono_ns=300",
-            "event=x11-incr-chunk-issued requestor=0xC3 property=0xF3 start_generation=2 mono_ns=400",
-            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 start_generation=2 mono_ns=500",
+            "event=x11-incr-chunk-issued requestor=0xC3 property=0xF3 start_generation=2 current_generation=2 mono_ns=400",
+            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 start_generation=2 current_generation=2 mono_ns=500",
         ])
         result = browser.correlate_metadata(
             chansrv, "", 40005, 2, "TRUSTED_PASTE_NULL_FILE")
@@ -537,6 +539,143 @@ class ReceiptTests(unittest.TestCase):
         stages["classification"] = "READABLE_PNG_FILE_VALIDATED_IMAGE"
         self.assertEqual(browser.diagnose_clipboard_boundary(stages)["boundary"],
                          "BROWSER_READABLE_PNG")
+
+
+    def test_incr_terminator_ack_requires_requestor_property_and_generation(self):
+        chansrv = "\n".join([
+            "event=targets-response-issued requestor=0xB2 generation=5 "
+            "target_count=3 targets=TARGETS@0x101,TIMESTAMP@0x102,"
+            "image/png@0x241 truncated=0 result=0",
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-selection-notify-issued path=incr requestor=0xB2 "
+            "property=0xF2 send_result=1 mono_ns=110",
+            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 "
+            "start_generation=50 current_generation=50 mono_ns=120",
+            "event=x11-incr-terminator-ack requestor=0xB3 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=1 mono_ns=130",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=50 start_generation=50 "
+            "current_generation=50 state_match=1 mono_ns=140",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=0 mono_ns=150",
+            "event=x11-incr-chunk-issued requestor=0xB2 property=0xF2 "
+            "start_generation=5 current_generation=5 mono_ns=160",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=1 mono_ns=180",
+        ])
+        stages = browser.correlate_metadata(
+            chansrv, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(stages["incr_terminator_ack_count"], 4)
+        self.assertEqual(stages["incr_terminator_ack_matches"], 1)
+        self.assertTrue(stages["incr_terminator_ack_correlated"])
+        self.assertEqual(stages["incr_terminator_ack_ns"], 180)
+        self.assertEqual(stages["first_incr_chunk_ns"], 160)
+        self.assertEqual(stages["x11_notify_send_result"], 1)
+        self.assertEqual(browser.diagnose_clipboard_boundary(stages)["boundary"],
+                         "REQUESTOR_IDENTITY_NOT_ATTESTED")
+        decision = browser.diagnose_clipboard_boundary(
+            stages, attested_browser_requestor="0xB2")
+        self.assertEqual(decision["boundary"], "PNG_INCR_TERMINATOR_ACK_ONLY")
+        self.assertEqual(decision["confidence"], "observed")
+        self.assertNotEqual(decision["boundary"], "BROWSER_READABLE_PNG")
+
+    def test_unrelated_ack_never_proves_primary_incr_completion(self):
+        trace = "\n".join([
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-terminator-ack requestor=0xB3 property=0xF3 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=1 mono_ns=190",
+        ])
+        stages = browser.correlate_metadata(
+            trace, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(stages["incr_terminator_ack_count"], 1)
+        self.assertEqual(stages["incr_terminator_ack_matches"], 0)
+        self.assertFalse(stages["incr_terminator_ack_correlated"])
+        self.assertIsNone(stages["incr_terminator_ack_ns"])
+
+    def test_multiple_matching_ack_events_are_not_silently_collapsed(self):
+        trace = "\n".join([
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=1 mono_ns=190",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=1 mono_ns=200",
+        ])
+        stages = browser.correlate_metadata(
+            trace, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(stages["incr_terminator_ack_matches"], 2)
+        self.assertFalse(stages["incr_terminator_ack_correlated"])
+        self.assertIsNone(stages["incr_terminator_ack_ns"])
+
+    def test_reused_xid_property_after_later_request_disables_ack_attribution(self):
+        trace = "\n".join([
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=6",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 state_match=1 mono_ns=190",
+        ])
+        stages = browser.correlate_metadata(
+            trace, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertEqual(stages["incr_terminator_ack_count"], 1)
+        self.assertFalse(stages["incr_terminator_ack_correlated"])
+
+    def test_incr_ack_missing_state_match_is_inconclusive(self):
+        trace = "\n".join([
+            "event=x11-request target=image/png requestor=0xB2 property=0xF2 generation=5",
+            "event=x11-incr-terminator-ack requestor=0xB2 property=0xF2 "
+            "terminator_generation=5 start_generation=5 "
+            "current_generation=5 mono_ns=190",
+        ])
+        stages = browser.correlate_metadata(
+            trace, "", 40005, 5, "TRUSTED_PASTE_NULL_FILE")
+        self.assertFalse(stages["incr_terminator_ack_correlated"])
+
+
+    def test_private_xvfb_launcher_preserves_parent_xauthority(self):
+        """Offline mocks: never starts Xvfb or queries an actual X display."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake_xvfb = mock.Mock()
+            fake_xvfb.pid = 2147483000
+            fake_xvfb.poll.return_value = None
+            done = []
+
+            def fake_run(args, **kwargs):
+                done.append((args, kwargs))
+                return mock.Mock(returncode=0)
+
+            with (mock.patch.dict(os.environ, {
+                    "XAUTHORITY": "/original/unchanged/authority"}),
+                  mock.patch.object(browser.shutil, "which",
+                                    return_value="/mocked/test-only-binary"),
+                  mock.patch.object(browser.subprocess, "Popen",
+                                    return_value=fake_xvfb) as start,
+                  mock.patch.object(browser.subprocess, "run",
+                                    side_effect=fake_run),
+                  mock.patch.object(browser, "verify_isolated_xvfb") as verify):
+                _proc, display = browser.start_authenticated_source_xvfb(
+                    root, root / "xvfb.log", 512, 512)
+                self.assertIs(_proc, fake_xvfb)
+                self.assertRegex(display, r"^:(19[1-9]|2[0-4][0-9])$")
+                self.assertEqual(os.environ["XAUTHORITY"],
+                                 "/original/unchanged/authority")
+                self.assertEqual(start.call_count, 1)
+                verify.assert_called_once()
+                self.assertEqual(len(done), 2)
+                self.assertEqual(done[0][0][0], "xauth")
+                self.assertEqual(done[1][0][0], "xdpyinfo")
+                probe_env = done[1][1]["env"]
+                self.assertEqual(probe_env["DISPLAY"], display)
+                self.assertEqual(probe_env["XAUTHORITY"],
+                                 str(root / "firefox-Xauthority"))
+                self.assertNotEqual(
+                    probe_env["XAUTHORITY"], os.environ["XAUTHORITY"])
 
 
 if __name__ == "__main__":

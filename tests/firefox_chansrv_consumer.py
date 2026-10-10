@@ -135,9 +135,11 @@ def start_authenticated_source_xvfb(root: Path, log_path: Path,
     if result.returncode != 0:
         raise TestInconclusive("Cannot prepare private Xvfb authentication")
     authority.chmod(0o600)
-    # The loader launches chansrv, the synthetic CLIPRDR peer, and any
-    # X11 deterministic requestors as descendants of this process.
-    os.environ["XAUTHORITY"] = str(authority)
+    # Keep the parent's XAUTHORITY untouched. Only the child probe may
+    # use the private display cookie; later clients construct their own
+    # explicit DISPLAY/XAUTHORITY environment.
+    private_probe_env = dict(
+        os.environ, DISPLAY=display, XAUTHORITY=str(authority))
     cmd = [shutil.which("Xvfb"), display, "-auth", str(authority),
            "-screen", "0", f"{width}x{height}x24", "-nolisten", "tcp",
            "-noreset"]
@@ -151,7 +153,7 @@ def start_authenticated_source_xvfb(root: Path, log_path: Path,
                 raise TestInconclusive("New private Xvfb exited before readiness")
             probe = subprocess.run(["xdpyinfo", "-display", display],
                                    capture_output=True, timeout=2, check=False,
-                                   env=dict(os.environ, DISPLAY=display))
+                                   env=private_probe_env)
             if probe.returncode == 0:
                 verify_isolated_xvfb(display, authority, proc.pid, root)
                 return proc, display
@@ -416,6 +418,12 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
         "x11_notify_ns": None,
         "first_incr_chunk_ns": None,
         "incr_terminator_ack_count": 0,
+        # Per-request protocol acknowledgement is different from a count of
+        # acknowledgements across *all* clipboard generations/requestors.
+        "incr_terminator_ack_correlated": False,
+        "incr_terminator_ack_ns": None,
+        "incr_terminator_ack_matches": 0,
+        "x11_notify_send_result": None,
         # These diagnostics prove XChangeProperty *arguments were issued*,
         # not that Firefox received or decoded the bytes.
         "png_x11_argument_issue": None,
@@ -428,6 +436,10 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
     def x11_id(line: str, key: str) -> str | None:
         match = re.search(rf"\b{key}=(0x[0-9a-fA-F]+)\b", line)
         return match.group(1).lower() if match else None
+
+    def decimal_field(line: str, key: str) -> int | None:
+        match = re.search(rf"\b{re.escape(key)}=(\d+)\b", line)
+        return int(match.group(1)) if match else None
 
     def matches_format_id(line: str) -> bool:
         # Substring checks mistake format_id=400050 for format_id=40005.
@@ -543,6 +555,7 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
     transfer_open = primary is not None
     format_request_seen = False
     issued_png_arguments: list[dict] = []
+    matched_terminator_acks: list[int] = []
     for index, line in enumerate(lines):
         if transfer_open and primary is not None and index > primary[0]:
             # CLIPRDR does not carry a request identity in the response.
@@ -596,18 +609,39 @@ def correlate_metadata(chansrv_log: str, peer_log: str,
                         })
                 if ("event=x11-selection-notify-issued" in line and
                         stages["x11_notify_ns"] is None):
-                    match = re.search(r"\bmono_ns=(\d+)\b", line)
-                    if match:
-                        stages["x11_notify_ns"] = int(match.group(1))
+                    mono_ns = decimal_field(line, "mono_ns")
+                    if mono_ns is not None:
+                        stages["x11_notify_ns"] = mono_ns
+                        stages["x11_notify_send_result"] = decimal_field(
+                            line, "send_result")
                 if ("event=x11-incr-chunk-issued" in line and
-                        f"start_generation={expected_generation}" in line and
+                        decimal_field(line, "start_generation") ==
+                        expected_generation and
+                        decimal_field(line, "current_generation") ==
+                        expected_generation and
                         stages["first_incr_chunk_ns"] is None):
-                    match = re.search(r"\bmono_ns=(\d+)\b", line)
-                    if match:
-                        stages["first_incr_chunk_ns"] = int(match.group(1))
-        if "event=x11-incr-terminator-ack" in line:
-            # Deliberately an aggregate count, not a correlated timestamp.
+                    mono_ns = decimal_field(line, "mono_ns")
+                    if mono_ns is not None:
+                        stages["first_incr_chunk_ns"] = mono_ns
+                if ("event=x11-incr-terminator-ack " in line and
+                        decimal_field(line, "terminator_generation") ==
+                        expected_generation and
+                        decimal_field(line, "start_generation") ==
+                        expected_generation and
+                        decimal_field(line, "current_generation") ==
+                        expected_generation and
+                        decimal_field(line, "state_match") == 1):
+                    mono_ns = decimal_field(line, "mono_ns")
+                    if mono_ns is not None:
+                        matched_terminator_acks.append(mono_ns)
+        if "event=x11-incr-terminator-ack " in line:
+            # Raw count is a cross-request aggregate, *not* receipt proof.
             stages["incr_terminator_ack_count"] += 1
+    stages["incr_terminator_ack_matches"] = len(matched_terminator_acks)
+    # No arbitrary "first" choice when a client reused the same property.
+    if len(matched_terminator_acks) == 1:
+        stages["incr_terminator_ack_ns"] = matched_terminator_acks[0]
+        stages["incr_terminator_ack_correlated"] = True
     stages["png_x11_argument_issue_count"] = len(issued_png_arguments)
     # Do not choose one transaction if multiple same-XID completions exist.
     if len(issued_png_arguments) == 1:
@@ -695,6 +729,14 @@ def diagnose_clipboard_boundary(
     if requestor not in stages.get("x11_requestors", []):
         return {"boundary": "PNG_REQUEST_NOT_OBSERVED_FOR_ATTESTED_XID",
                 "confidence": "inconclusive", "receipt": result}
+
+    # A matching PropertyDelete for the INCR terminator is stronger
+    # protocol evidence than issuing an XChangeProperty call. It is *still*
+    # not a trusted Firefox paste event or proof that getAsFile() succeeded.
+    if (stages.get("primary_x11_requestor") == requestor and
+            stages.get("incr_terminator_ack_correlated")):
+        return {"boundary": "PNG_INCR_TERMINATOR_ACK_ONLY",
+                "confidence": "observed", "receipt": result}
 
     # Source hash agreement is at the owner's XChangeProperty argument
     # boundary. No acknowledgement or Firefox File acceptance is implied.
