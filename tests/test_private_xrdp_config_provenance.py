@@ -338,18 +338,110 @@ class ProvenanceTests(unittest.TestCase):
         self.cache.update(parsed)
         self.assertTrue(self.audit()["private_build_config_verified"])
 
+    def test_cmake_31_and_42_generated_project_static_cache_schema(self):
+        # A real local CMake 3.31 configure for this exact project() outputs
+        # description/name/version/homepage, component versions, and all
+        # three source/build ownership keys as STATIC. CMake 4.2 adds blank
+        # experimental COMPAT_VERSION; project SPDX is optional and blank.
+        directory = self.build / "CMakeFiles/pkgRedirects"
+        directory.mkdir(parents=True)
+        data = {
+            **evidence.PROJECT_STATIC_METADATA,
+            "CMAKE_FIND_PACKAGE_REDIRECTS_DIR": str(directory),
+            "xrdp_console_BINARY_DIR": str(self.build),
+            "xrdp_console_SOURCE_DIR": str(self.source),
+        }
+        text = "".join(
+            f"{key}:STATIC={value}\n" for key, value in sorted(data.items()))
+        parsed = evidence.read_cache(text)
+        self.assertEqual(parsed, data)
+        self.cache.update(parsed)
+        self.assertTrue(self.audit()["private_build_config_verified"])
+        # The CLI returns 2 deliberately, even with valid config provenance;
+        # the JSON is the positive result. No Git hooks/native tools executed.
+        cachepath = self.build / "CMakeCache.txt"
+        cachepath.write_text(
+            "".join(
+                f"{key}:INTERNAL={value}\n"
+                for key, value in self.cache.items()
+                if key not in data) + text,
+            encoding="utf-8")
+        from contextlib import redirect_stdout
+        import io
+        output = io.StringIO()
+        with mock.patch.object(evidence, "git_check", return_value="a" * 40):
+            with redirect_stdout(output):
+                self.assertEqual(evidence.main([
+                    "--source", str(self.source),
+                    "--build", str(self.build),
+                    "--release", str(self.release)]), 2)
+        document = json.loads(output.getvalue())
+        self.assertNotIn("error", document)
+        self.assertTrue(document["private_build_config_verified"])
+        self.assertFalse(document["runtime_authorized"])
+
+    def test_generated_static_project_metadata_is_source_matched(self):
+        for key, expected in evidence.PROJECT_STATIC_METADATA.items():
+            for altered in (expected + "x", "/usr/local/xrdp", "", "OFF"):
+                if altered == expected:
+                    continue
+                with self.subTest(key=key, altered=altered):
+                    with self.assertRaisesRegex(
+                            evidence.ProvenanceError, key):
+                        evidence.read_cache(
+                            f"{key}:STATIC={altered}\n")
+                    self.cache[key] = altered
+                    with self.assertRaisesRegex(
+                            evidence.ProvenanceError, key):
+                        self.audit()
+                    del self.cache[key]
+            with self.subTest(key=key, typ="INTERNAL"):
+                with self.assertRaisesRegex(evidence.ProvenanceError, "type"):
+                    evidence.read_cache(f"{key}:INTERNAL={expected}\n")
+
+    def test_generated_project_paths_are_exact_and_canonical(self):
+        project_entries = {
+            "xrdp_console_SOURCE_DIR": self.source,
+            "xrdp_console_BINARY_DIR": self.build,
+        }
+        for key, valid in project_entries.items():
+            self.cache[key] = str(valid)
+            self.assertTrue(self.audit()["private_build_config_verified"])
+            for forged in ("/usr/local/share", str(valid / ".."),
+                           str(self.release / "wrong")):
+                with self.subTest(key=key, forged=forged):
+                    self.cache[key] = forged
+                    with self.assertRaises(evidence.ProvenanceError):
+                        self.audit()
+            del self.cache[key]
+            with self.assertRaises(evidence.ProvenanceError):
+                evidence.read_cache(f"{key}:STRING={valid}\n")
+
+    def test_unreviewed_similarly_named_project_static_fields_rejected(self):
+        for name in (
+            "CMAKE_PROJECT_EXTRA",
+            "CMAKE_PROJECT_VERSION_BUILD",
+            "CMAKE_PROJECT_SPDX_LICENSE_BAD",
+            "xrdp_console_INSTALL_DIR",
+            "xrdp_console_CFLAGS",
+            "CMAKE_INSTALL_PREFIX",
+        ):
+            with self.subTest(name=name):
+                with self.assertRaises(evidence.ProvenanceError):
+                    evidence.read_cache(f"{name}:STATIC=/protected/xrdp\n")
+
     def test_cmake_project_compat_version_must_remain_exactly_blank(self):
         for value in (
                 "0.1.0", "1", "4.2.3", "/usr/local/lib/xrdp",
                 "ON", " ", "../build", "$ORIGIN"):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(
-                        evidence.ProvenanceError, "compatibility version"):
+                        evidence.ProvenanceError, "CMAKE_PROJECT_COMPAT_VERSION"):
                     evidence.read_cache(
                         "CMAKE_PROJECT_COMPAT_VERSION:STATIC=" + value + "\n")
                 self.cache["CMAKE_PROJECT_COMPAT_VERSION"] = value
                 with self.assertRaisesRegex(
-                        evidence.ProvenanceError, "compatibility version"):
+                        evidence.ProvenanceError, "CMAKE_PROJECT_COMPAT_VERSION"):
                     self.audit()
         self.cache.pop("CMAKE_PROJECT_COMPAT_VERSION")
 
