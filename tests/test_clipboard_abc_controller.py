@@ -506,7 +506,7 @@ class PlanIsolationTests(unittest.TestCase):
             self.review()
         self.spec["socket_dir"] = old
         build = self.spec["private_build"]
-        build["compiled_socket_root"] = str(self.run_root / "sockets")
+        build["compiled_socket_root"] = str(self.private_install)
         with self.assertRaisesRegex(abc.UnsafePlan, "socket roots differ"):
             self.review()
 
