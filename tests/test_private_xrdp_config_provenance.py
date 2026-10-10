@@ -161,6 +161,22 @@ class ProvenanceTests(unittest.TestCase):
                 finally:
                     self.cache[key] = old
 
+    def test_even_consistent_cache_hash_cannot_launder_unreviewed_flags(self):
+        for flag in ("-O2 -I/protected/xrdp/include",
+                     "-O2 -Wl,-rpath,/protected/xrdp/lib",
+                     "-O2 @/tmp/unreviewed.rsp",
+                     "-O2 -fplugin=/tmp/custom.so"):
+            with self.subTest(flag=flag):
+                self.cache["XRDP_CONSOLE_XRDP_CFLAGS"] = flag
+                self.refresh()  # Model an internally consistent forged cache
+                with self.assertRaisesRegex(evidence.ProvenanceError,
+                                            "unreviewed compiler"):
+                    self.audit()
+        self.cache["XRDP_CONSOLE_XRDP_CFLAGS"] = (
+            "-O3 -march=native -mtune=native")
+        self.refresh()
+        self.assertTrue(self.audit()["private_build_config_verified"])
+
     def test_compiled_profile_and_archive_pins_are_checked(self):
         for key, new_value in (
             ("XRDP_CONSOLE_XRDP_CONFIGURED_PROFILE", "default"),
