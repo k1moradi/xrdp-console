@@ -405,7 +405,7 @@ class PlanIsolationTests(unittest.TestCase):
             if role in ("xrdp", "module"):
                 subdir = "sbin" if role == "xrdp" else "lib/xrdp"
                 binary = self.private_install / subdir / (
-                    "xrdp" if role == "xrdp" else "libxrdp.so")
+                    "xrdp" if role == "xrdp" else "libxrdp_console.so")
                 binary.parent.mkdir(parents=True, exist_ok=True)
             else:
                 binary = self.release / ("private-" + role)
@@ -560,6 +560,53 @@ class PlanIsolationTests(unittest.TestCase):
             (self.release / "qt-screengrab-owner").read_bytes()).hexdigest()
         with self.assertRaisesRegex(abc.UnsafePlan, "outside matched install"):
             self.review()
+
+    def test_c_leg_cannot_confuse_core_libxrdp_with_first_party_module(self):
+        self.install_private_rdp_endpoint()
+        actual = self.spec["private_rdp_endpoint"]["artifacts"]["module"]
+        self.assertEqual(Path(actual["path"]).name, "libxrdp_console.so")
+        # A native libxrdp.so is a private dependency of the module, not
+        # the module itself; SHA, source and prefix would otherwise pass.
+        core = self.private_install / "lib/xrdp/libxrdp.so"
+        core.write_bytes(b"inert core libxrdp, not first-party module")
+        old_path, old_hash = actual["path"], actual["sha256"]
+        actual["path"] = str(core)
+        actual["sha256"] = hashlib.sha256(core.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(abc.UnsafePlan, "libxrdp_console.so"):
+            self.review()
+        actual["path"], actual["sha256"] = old_path, old_hash
+        self.assertFalse(self.review()["runtime_authorized"])
+
+    def test_c_leg_xrdp_server_must_be_from_matched_private_sbin(self):
+        self.install_private_rdp_endpoint()
+        artifact = self.spec["private_rdp_endpoint"]["artifacts"]["xrdp"]
+        other = self.private_install / "bin/xrdp"
+        other.parent.mkdir(parents=True, exist_ok=True)
+        other.write_bytes(b"inert wrong private xrdp path")
+        other.chmod(0o700)
+        original_path, original_hash = artifact["path"], artifact["sha256"]
+        artifact["path"] = str(other)
+        artifact["sha256"] = hashlib.sha256(other.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(abc.UnsafePlan, "private sbin"):
+            self.review()
+        artifact["path"], artifact["sha256"] = original_path, original_hash
+        self.assertFalse(self.review()["runtime_authorized"])
+
+    def test_reviewed_pr45_native_build_identity_is_accepted_offline_only(self):
+        self.install_private_rdp_endpoint()
+        expected = "96f4b7d9c84bdf6ca63ed69f094787aecdcfab9e"
+        self.spec["private_build"]["source_commit"] = expected
+        self.spec["private_binaries"]["chansrv"]["source_commit"] = expected
+        for name in ("xrdp", "module"):
+            self.spec["private_rdp_endpoint"]["artifacts"][name][
+                "source_commit"] = expected
+        plan = self.review()
+        self.assertEqual(plan["private_build"]["source_commit"], expected)
+        self.assertEqual(
+            Path(plan["private_rdp_endpoint"]["artifacts"]["module"]["path"]).name,
+            "libxrdp_console.so")
+        self.assertFalse(plan["runtime_authorized"])
+        self.assertFalse(plan["private_build"]["ancestry_proven_by_manifest"])
 
     def test_private_endpoint_rejects_foreign_authority_and_config(self):
         self.install_private_rdp_endpoint()

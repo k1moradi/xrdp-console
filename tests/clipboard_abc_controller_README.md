@@ -149,6 +149,27 @@ separate host gates. PR #43 provides a read-only configuration-provenance
 audit of actual Git, 52 ordered patches and CMakeCache. A manifest
 cannot replace that external evidence. All execution is still disabled.
 
+## Verified build-only staging identity (PR #45)
+
+The corrected private build-only profile in PR #45 adds an explicit
+`xrdp-console-private-stage` target, which stages **the first-party**
+`libxrdp_console.so` under the hash-keyed private xrdp install's
+`lib/xrdp` loader directory. The similarly named `libxrdp.so` is
+xrdp's **core shared library**, not the direct-console module.
+
+Schema-2 now rejects a C-leg manifest that supplies `libxrdp.so`
+as its module, even if that file is inside the right private install and
+carries a plausible SHA-256 and source commit. It also requires the
+private xrdp server at `<install>/sbin/xrdp`. The exact reviewed PR #45
+source SHA is accepted for *offline contract description* only; it
+does **not** prove the actual artifact was compiled from that revision,
+that the module is loadable, or that a correct private session exists.
+
+PR #45's BUILD_TESTING/FreeRDP build-only gating and module stage do
+not authorize startup. The separately required Codex native build,
+Git/CMake provenance audit, ELF closure, full private IPC/loopback
+verification and browser trusted PNG File acceptance remain NO-GO.
+
 ## Test-only lifecycle core
 
 CaseCoordinator accepts injectable OwnerPort and BrowserPort interfaces

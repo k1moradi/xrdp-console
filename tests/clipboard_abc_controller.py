@@ -31,6 +31,7 @@ REVIEWED_PRIVATE_BUILD_COMMITS = frozenset({
     "5d012ecd54cf177b7df1f25a1ec4c9bc04f800c8",  # PR #40
     "b8faacbac64a78edea196890b066737a36561dd3",  # PR #42
     "ab22e93ad531b3e857cd0fa07792af638f39766d",  # PR #43
+    "96f4b7d9c84bdf6ca63ed69f094787aecdcfab9e",  # PR #45 staged-module build
 })
 FIXTURE_SHA256 = "d9b7864e95e934ee999ee333ce9bf86adcf823aaca271634bafb8d8b9d3f6c22"
 FIXTURE_SIZE = 2_401_598
@@ -260,6 +261,17 @@ def _validate_private_rdp_endpoint(
         if not _inside(Path(artifacts[name]["path"]),
                        Path(build_contract["install_prefix"])):
             raise UnsafePlan(f"{name}: compiled artifact outside matched install")
+    # The native libxrdp.so is a *core loader dependency*, not our first-
+    # party module. Reject a manifest that swaps them while supplying a
+    # plausible SHA-256 and identical source commit.
+    prefix = Path(build_contract["install_prefix"])
+    expected_xrdp = prefix / "sbin" / "xrdp"
+    expected_module = prefix / "lib" / "xrdp" / "libxrdp_console.so"
+    if Path(artifacts["xrdp"]["path"]) != expected_xrdp:
+        raise UnsafePlan("C-leg xrdp server is not from matched private sbin")
+    if Path(artifacts["module"]["path"]) != expected_module:
+        raise UnsafePlan(
+            "C-leg module must be staged libxrdp_console.so, not core libxrdp.so")
     display_number = int(source_display[1:])
     expected_route = f"DISPLAY({display_number},{os.getuid()})"
     if _manifest_value(endpoint, "chansrvport", str) != expected_route:
