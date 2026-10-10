@@ -8,6 +8,7 @@
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
+#include <QMimeData>
 #include <QFileInfo>
 #include <QPixmap>
 #include <QTimer>
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstring>
 #include <unistd.h>
 
 namespace
@@ -53,9 +55,14 @@ int main(int argc, char *argv[])
 {
     // Never initialize Qt/X11 before validating the isolated display and
     // caller-supplied test paths. The live :0 session is always rejected.
-    if (argc != 2)
+    // Default: ScreenGrab setPixmap(). Alternative: Qt owns only the
+    // original allowlisted PNG bytes. This isolates Qt's image MIME
+    // expansion from chansrv's delayed remote CLIPRDR rendering.
+    const bool pngOnly = argc == 3 &&
+        std::strcmp(argv[1], "--png-only") == 0;
+    if (argc != 2 && !pngOnly)
     {
-        return fail("expected one previously approved synthetic PNG");
+        return fail("expected [--png-only] <approved synthetic PNG>");
     }
 
     const QByteArray display = qgetenv("DISPLAY");
@@ -96,7 +103,7 @@ int main(int argc, char *argv[])
         return fail("XAUTHORITY is not a private release-root file");
     }
 
-    const QFileInfo inputFile(QString::fromLocal8Bit(argv[1]));
+    const QFileInfo inputFile(QString::fromLocal8Bit(argv[pngOnly ? 2 : 1]));
     const QString inputPath = inputFile.canonicalFilePath();
     if (!inputFile.isFile() || inputFile.size() < 1
         || inputFile.size() > 8 * 1024 * 1024
@@ -142,10 +149,21 @@ int main(int argc, char *argv[])
         return fail("Qt clipboard unavailable");
     }
 
-    // Mirror LXQt ScreenGrab's actual screenshot-copy API. Qt owns the
-    // underlying MIME data; image bytes live for this event loop's lifetime.
-    // No data transfer or GUI operation takes place on a worker thread.
-    clipboard->setPixmap(image, QClipboard::Clipboard);
+    // No image data transfer or clipboard operation occurs on a worker
+    // thread. QClipboard owns the MIME object for this bounded event loop.
+    if (pngOnly)
+    {
+        // A CONTROL, not a claim that ScreenGrab uses this API. Unlike
+        // setPixmap(), the Qt owner starts with only encoded image/png.
+        auto *mime = new QMimeData;
+        mime->setData(QStringLiteral("image/png"), encodedImage);
+        clipboard->setMimeData(mime, QClipboard::Clipboard);
+    }
+    else
+    {
+        // The exact clipboard API used by LXQt ScreenGrab.
+        clipboard->setPixmap(image, QClipboard::Clipboard);
+    }
     if (!clipboard->ownsClipboard())
     {
         return fail("Qt failed to acquire private CLIPBOARD selection");
