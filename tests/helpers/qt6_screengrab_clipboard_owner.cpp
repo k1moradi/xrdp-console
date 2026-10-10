@@ -4,6 +4,7 @@
 // harness. It never captures a screen or reads an existing clipboard.
 #include <QApplication>
 #include <QClipboard>
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
@@ -64,6 +65,12 @@ int main(int argc, char *argv[])
     if (!validDisplayNumber || displayNumber < 191 || displayNumber > 249)
     {
         return fail("DISPLAY is not in the private Xvfb test range");
+    }
+
+    if (qEnvironmentVariable("QT_QPA_PLATFORM") != QStringLiteral("xcb")
+        || !qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY"))
+    {
+        return fail("test must use isolated XCB backend without Wayland");
     }
 
     const QFileInfo releaseDirectory(qEnvironmentVariable("XRDP_CONSOLE_RELEASE_ROOT"));
