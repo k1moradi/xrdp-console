@@ -704,11 +704,14 @@ def run_firefox_chansrv_timing(*, source_display: str,
                                expected_dimensions: tuple[int, int] | None = None,
                                pref_ms: int = 1000,
                                expected_generation: int | None = None,
-                               after_receipt: Any = None) -> dict:
-    """Browser leg only; caller controls frozen chansrv + synthetic CLIPRDR peer.
+                               after_receipt: Any = None,
+                               require_exact_png_encoding: bool = True) -> dict:
+    """Browser leg for a separately verified private X11 clipboard owner.
 
-    Do not call until remote Format List is installed and owner is verified.
-    Caller collects all chansrv and peer logs after this function returns.
+    Default: frozen chansrv + synthetic CLIPRDR peer, with exact PNG bytes.
+    Qt6/ScreenGrab control: set require_exact_png_encoding=False; Qt may
+    re-encode the same pixmap. The caller verifies the private owner and
+    collects its independent logs before asserting any X11 attribution.
     """
     verify_isolated_xvfb(source_display, xauthority, xvfb_pid, root)
     if not all(p.is_file() and os.access(p, os.X_OK) for p in (firefox, geckodriver)):
@@ -717,7 +720,8 @@ def run_firefox_chansrv_timing(*, source_display: str,
         raise ValueError("Expected PNG outside bounded File size")
     if not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
         raise ValueError("Invalid expected fixture SHA-256")
-    trial = root / "firefox-consumer"
+    trial = root / ("firefox-consumer" if require_exact_png_encoding
+                    else "firefox-qt6-control")
     trial.mkdir(mode=0o700, exist_ok=False)
     profile_root = trial / "profiles"
     profile_root.mkdir(mode=0o700)
@@ -745,7 +749,8 @@ def run_firefox_chansrv_timing(*, source_display: str,
                 receipt["expected_generation"] = expected_generation
                 receipt["classification"] = classify_receipt(
                     receipt, expected_size, expected_sha256,
-                    expected_dimensions=expected_dimensions)
+                    expected_dimensions=expected_dimensions,
+                    require_exact_png_encoding=require_exact_png_encoding)
                 if after_receipt is not None:
                     # Keep Firefox alive while chansrv finishes outstanding
                     # INCR transfers, even when getAsFile was synchronously null.
