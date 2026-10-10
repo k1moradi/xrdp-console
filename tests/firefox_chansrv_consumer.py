@@ -17,7 +17,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import shutil
 import signal
 import socket
 import subprocess
@@ -115,6 +114,18 @@ def serve_receipt_page():
         yield lease.validated_url()
 
 
+def _private_xvfb_cmdline(args: list[bytes], display: str,
+                          authority: Path) -> bool:
+    """Validate paired auth/transport flags, not substring occurrences."""
+    def paired_values(flag: bytes) -> list[bytes]:
+        return [args[i + 1] for i in range(len(args) - 1)
+                if args[i] == flag]
+    return (bool(args) and Path(os.fsdecode(args[0])).name == "Xvfb" and
+            paired_values(b"-auth") == [os.fsencode(authority)] and
+            paired_values(b"-nolisten") == [b"tcp"] and
+            args.count(os.fsencode(display)) == 1 and b"-noreset" in args)
+
+
 def verify_isolated_xvfb(display: str, authority: Path,
                          xvfb_pid: int, scratch_root: Path) -> None:
     """Fail closed on unknown display or a server not created by this loader.
@@ -134,18 +145,7 @@ def verify_isolated_xvfb(display: str, authority: Path,
         args = Path(f"/proc/{xvfb_pid}/cmdline").read_bytes().split(b"\0")
     except OSError as exc:
         raise TestInconclusive("Private Xvfb process exited") from exc
-    if not args or Path(os.fsdecode(args[0])).name != "Xvfb":
-        raise TestInconclusive("Display process is not Xvfb")
-    # Mere membership of -auth / -nolisten is insufficient; their *paired
-    # argument values* must match this exact test display/authentication.
-    def paired_values(flag: bytes) -> list[bytes]:
-        return [args[i + 1] for i in range(len(args) - 1)
-                if args[i] == flag]
-
-    if (paired_values(b"-auth") != [os.fsencode(auth)] or
-            paired_values(b"-nolisten") != [b"tcp"] or
-            args.count(os.fsencode(display)) != 1 or
-            b"-noreset" not in args or
+    if (not _private_xvfb_cmdline(args, display, auth) or
             Path(f"/proc/{xvfb_pid}").stat().st_uid != os.geteuid()):
         raise TestInconclusive("Xvfb arguments/UID do not prove private configuration")
     # Server socket ownership, cookie rejection and race-free allocation
