@@ -114,15 +114,6 @@ def patchset_hash(source: Path) -> str:
 def expected_state_hash(cache: dict[str, str], release: Path,
                         patch_hash: str, patch_script_hash: str) -> str:
     cflags = require(cache, "XRDP_CONSOLE_XRDP_CFLAGS")
-    try:
-        tokens = shlex.split(cflags)
-    except ValueError as exc:
-        raise ProvenanceError("Unparseable private compiler flags") from exc
-    if not tokens or any(re.fullmatch(
-            r"(-O[0-3sgz]|-g[0-9]?|-march=[A-Za-z0-9._+-]+|"
-            r"-mtune=[A-Za-z0-9._+-]+|-fno-omit-frame-pointer|-fPIC|"
-            r"-fPIE|-W[a-zA-Z0-9-]+)", token) is None for token in tokens):
-        raise ProvenanceError("Private CFLAGS contain unreviewed compiler inputs")
     cppflags = require(cache, "XRDP_CONSOLE_XRDP_CPPFLAGS", "")
     ldflags = require(cache, "XRDP_CONSOLE_XRDP_LDFLAGS", "")
     pkgpath = require(cache, "XRDP_CONSOLE_XRDP_PKG_CONFIG_PATH", "")
@@ -160,6 +151,24 @@ def expected_state_hash(cache: dict[str, str], release: Path,
     return sha(material.encode("utf-8"))
 
 
+def verify_private_compiler_flags(cache: dict[str, str]) -> None:
+    """Validate even an internally self-consistent CMake cache.
+
+    The hash calculation must remain pure: an attacker can recompute the
+    hash over unsafe -I/-L/rpath inputs. A matching hash is not a policy pass.
+    """
+    cflags = require(cache, "XRDP_CONSOLE_XRDP_CFLAGS")
+    try:
+        tokens = shlex.split(cflags)
+    except ValueError as exc:
+        raise ProvenanceError("Unparseable private compiler flags") from exc
+    if not tokens or any(re.fullmatch(
+            r"(-O[0-3sgz]|-g[0-9]?|-march=[A-Za-z0-9._+-]+|"
+            r"-mtune=[A-Za-z0-9._+-]+|-fno-omit-frame-pointer|-fPIC|"
+            r"-fPIE|-W[a-zA-Z0-9-]+)", token) is None for token in tokens):
+        raise ProvenanceError("Private CFLAGS contain unreviewed compiler inputs")
+
+
 def inspect_config(source: Path, build: Path, release: Path,
                    cache: dict[str, str]) -> dict[str, Any]:
     if release.name != "xrdp-console" or release.parent.name != ".release":
@@ -187,6 +196,7 @@ def inspect_config(source: Path, build: Path, release: Path,
     full_state = expected_state_hash(
         cache, release, patch_hash, sha(patch_script.read_bytes()))
     require(cache, "XRDP_CONSOLE_XRDP_STATE_HASH", full_state)
+    verify_private_compiler_flags(cache)
     tag = full_state[:16]
     install = Path(require(cache, "XRDP_CONSOLE_XRDP_INSTALL_DIR"))
     source_dir = Path(require(cache, "XRDP_CONSOLE_XRDP_SOURCE_DIR"))
