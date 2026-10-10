@@ -85,7 +85,19 @@ list(APPEND PYTHON_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/test_xrdp_clipboard_publication_watch.py
     ${CMAKE_CURRENT_SOURCE_DIR}/firefox_chansrv_consumer.py
     ${CMAKE_CURRENT_SOURCE_DIR}/test_firefox_consumer_integrity.py
-    ${CMAKE_CURRENT_SOURCE_DIR}/test_qt6_screengrab_owner_integrity.py)
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_qt6_screengrab_owner_integrity.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/clipboard_abc_controller.py
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_clipboard_abc_controller.py)
+# A/B/C controller is deliberately OFFLINE_ONLY. Negative tests mock every
+# owner/browser port; no runtime process, X11 or clipboard access is permitted.
+add_test(NAME clipboard-abc-controller-safety-unit
+    COMMAND ${Python3_EXECUTABLE} -B
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_clipboard_abc_controller.py)
+set_tests_properties(clipboard-abc-controller-safety-unit PROPERTIES
+    ENVIRONMENT "PYTHONDONTWRITEBYTECODE=1"
+    TIMEOUT 20
+    LABELS "clipboard;safety;unit")
+
 # Offline event-stage checks need no Firefox, live clipboard, or generated PNG.
 # Do not turn the synthetic fixture/Firefox integration into a CI prerequisite.
 add_test(NAME firefox-consumer-classification-unit

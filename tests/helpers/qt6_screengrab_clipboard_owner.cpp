@@ -9,14 +9,17 @@
 #include <QDir>
 #include <QFile>
 #include <QMimeData>
+#include <QObject>
 #include <QFileInfo>
 #include <QPixmap>
+#include <QSocketNotifier>
 #include <QTimer>
 
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace
@@ -58,11 +61,23 @@ int main(int argc, char *argv[])
     // Default: ScreenGrab setPixmap(). Alternative: Qt owns only the
     // original allowlisted PNG bytes. This isolates Qt's image MIME
     // expansion from chansrv's delayed remote CLIPRDR rendering.
-    const bool pngOnly = argc == 3 &&
-        std::strcmp(argv[1], "--png-only") == 0;
-    if (argc != 2 && !pngOnly)
+    const bool controlled = argc >= 3 &&
+        std::strcmp(argv[1], "--controlled") == 0;
+    const int modeIndex = controlled ? 2 : 1;
+    const bool pngOnly = argc > modeIndex + 1 &&
+        std::strcmp(argv[modeIndex], "--png-only") == 0;
+    if (argc != modeIndex + (pngOnly ? 2 : 1))
     {
-        return fail("expected [--png-only] <approved synthetic PNG>");
+        return fail("expected [--controlled] [--png-only] <approved synthetic PNG>");
+    }
+    if (controlled)
+    {
+        struct stat inputStatus {};
+        if (fstat(STDIN_FILENO, &inputStatus) != 0 ||
+            !S_ISFIFO(inputStatus.st_mode))
+        {
+            return fail("controlled mode requires a dedicated stdin pipe");
+        }
     }
 
     const QByteArray display = qgetenv("DISPLAY");
@@ -103,7 +118,7 @@ int main(int argc, char *argv[])
         return fail("XAUTHORITY is not a private release-root file");
     }
 
-    const QFileInfo inputFile(QString::fromLocal8Bit(argv[pngOnly ? 2 : 1]));
+    const QFileInfo inputFile(QString::fromLocal8Bit(argv[argc - 1]));
     const QString inputPath = inputFile.canonicalFilePath();
     if (!inputFile.isFile() || inputFile.size() < 1
         || inputFile.size() > 8 * 1024 * 1024
@@ -169,8 +184,37 @@ int main(int argc, char *argv[])
         return fail("Qt failed to acquire private CLIPBOARD selection");
     }
 
-    // Bound the observation window; Firefox and chansrv are separate private
-    // test processes, launched only after the owning harness verifies Xvfb.
-    QTimer::singleShot(45'000, &application, [] { QCoreApplication::quit(); });
+    // Controlled mode fixes the old 45-second race: the future owner
+    // controller must receive READY after ownership, then send 'q' on the
+    // held pipe (or close it) after a trusted paste receipt. A separate
+    // 180-second hard ceiling bounds hangs and abandoned callers.
+    // The old direct invocation retains its original 45-second behavior.
+    QSocketNotifier controlInput(STDIN_FILENO, QSocketNotifier::Read, &application);
+    controlInput.setEnabled(controlled);
+    if (controlled)
+    {
+        QObject::connect(
+            &controlInput,
+            QOverload<QSocketDescriptor, QSocketNotifier::Type>::of(
+                &QSocketNotifier::activated),
+            &application,
+            [](QSocketDescriptor, QSocketNotifier::Type) {
+            char command = 0;
+            const ssize_t got = ::read(STDIN_FILENO, &command, 1);
+            // Unknown command, EOF or I/O failure all terminate the
+            // isolated test owner; never leave a clipboard owner behind.
+            if (got != 1 || command != 'q')
+            {
+                std::fprintf(stderr, "qt6-screengrab-owner: invalid control or EOF\n");
+            }
+            QCoreApplication::quit();
+        });
+        // Deliberately emit only a state marker, never image bytes.
+        std::puts("XRDP_CONSOLE_QT_OWNER_READY");
+        std::fflush(stdout);
+    }
+
+    QTimer::singleShot(controlled ? 180'000 : 45'000, &application,
+                       [] { QCoreApplication::quit(); });
     return application.exec();
 }
