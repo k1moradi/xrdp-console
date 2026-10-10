@@ -96,6 +96,12 @@ MIT-MAGIC-COOKIE, `-nolisten tcp`, and rollback. Reuse
 `verify_isolated_xvfb()` in `tests/firefox_chansrv_consumer.py`; never
 execute the helper against the physical display or arbitrary X server.
 
+The private Xvfb launcher now passes `DISPLAY` and `XAUTHORITY`
+explicitly to its child readiness probe rather than overwriting the
+Python caller's global `os.environ`. A **mocked, offline** regression
+checks that the parent environment is preserved without starting Xvfb,
+connecting to X11, or inspecting any clipboard.
+
 If the *already installed* Qt6 development packages are available and the
 operator has verified the existing workspace, a **build-only** invocation is:
 
