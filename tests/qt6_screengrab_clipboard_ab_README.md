@@ -297,6 +297,25 @@ Older or incomplete logs without these fields remain inconclusive.
 The INCR chunk parser matches numeric generation **exactly**, so
 generation `50` can never be attributed to generation `5`.
 
+### Trusted Firefox getAsFile invocation versus absent image flavor
+
+`tests/receipt.js` now reports `getAsFileInvoked` separately from
+`getAsFileNull`. In a trusted paste with **no** `kind=file,type=image/png`
+item, `getAsFileInvoked=false` and `getAsFileNull=null` (not applicable).
+Only when an item is present and `getAsFileInvoked=true` does
+`getAsFileNull=true` prove an actual invocation returned null or threw;
+`getAsFileError` distinguishes the exception.
+
+Older receipts had `getAsFileNull=true` even when there was no image
+item and no call. The classifier reports `NO_IMAGE_PNG_ITEM` when that
+absence is visible, but returns `GET_AS_FILE_INVOCATION_UNVERIFIED`
+for historical image-item receipts lacking the new invocation field.
+Do not reinterpret the retained synthetic "trusted paste, null file"
+summary as a proven failed call without examining its exact `items`,
+`imageItemCount`, `getAsFileInvoked` (if available) and
+`classification`. None of this proves which X11 requestor belongs
+to Firefox or grants runtime authorization.
+
 ### Fail-closed log attribution
 
 Use `correlate_metadata(chansrv_log, peer_log, format_id,
