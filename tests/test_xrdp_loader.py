@@ -32,6 +32,7 @@ from h264_loader_isolation import (
     isolated_loader_module_name,
     private_client_display_is_safe,
     require_loopback_tcp_listener,
+    require_unoccupied_pinned_xrdp_pidfile,
 )
 
 PLANAR_PIXEL_LIMIT = 128 * 1024
@@ -7638,6 +7639,11 @@ def main() -> int:
     if crop_edge_mode and not os.environ.get("XRDP_CONSOLE_TEST_RUNTIME_ROOT"):
         raise AssertionError(
             "cropped H.264 test requires a build-local TEST_RUNTIME_ROOT")
+    if crop_edge_mode:
+        # The 0.10.6.1 xrdp main() reads a compile-time PID path even for
+        # --nodaemon. Refuse an occupied pinned PID namespace BEFORE we
+        # start the private client Xvfb. Never remove the live pidfile.
+        require_unoccupied_pinned_xrdp_pidfile(Path(arguments[2]))
     private_client_scratch = (
         Path(os.environ["XRDP_CONSOLE_TEST_RUNTIME_ROOT"]) / "client-xvfb-tmp"
         if crop_edge_mode else None)
