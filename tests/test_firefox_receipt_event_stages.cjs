@@ -9,6 +9,7 @@ const source = fs.readFileSync(path.join(__dirname, 'receipt.js'), 'utf8');
 
 function createPage() {
   const handlers = new Map();
+  let nowMs = 10;
   const editor = {};
   const document = {
     activeElement: editor,
@@ -21,15 +22,19 @@ function createPage() {
   };
   const context = {
     window, document, Date, Uint8Array, Uint32Array, DataView, Array, Number,
-    performance: {now: () => 10},
+    performance: {now: () => nowMs},
     crypto: {subtle: null},
     fetch: () => { throw Error('test must not fetch the clipboard'); },
     File: class {}, Promise
   };
   context.globalThis = context;
   vm.runInNewContext(source, context, {filename: 'receipt.js'});
-  return {handlers, document, receipt: () =>
-    window.ClipboardImageReceipt.getLastReport()};
+  return {handlers, document,
+    advanceClock(ms) {
+      assert(Number.isFinite(ms) && ms >= 0);
+      nowMs += ms;
+    },
+    receipt: () => window.ClipboardImageReceipt.getLastReport()};
 }
 
 function main() {
@@ -61,6 +66,7 @@ function main() {
   assert.equal(report.observer.pasteEvents, 0);
   assert.equal(typeof report.observer.lastShortcutWallMs, 'number');
 
+  page.advanceClock(275);
   let prevented = false;
   page.handlers.get('paste')({
     isTrusted: true,
@@ -79,6 +85,8 @@ function main() {
   assert.equal(report.imageItemCount, 0);
   assert.equal(report.getAsFileInvoked, false);
   assert.equal(report.getAsFileNull, null);
+  assert.equal(report.shortcutToPasteMs, 275);
+  assert.equal(report.getAsFileElapsedMs, null);
   assert.equal(typeof report.observer.lastPasteWallMs, 'number');
   assert.equal(report.items[0].type, 'text/plain');
 
@@ -91,7 +99,9 @@ function main() {
       types: ['Files'],
       files: [{}],
       items: [{kind: 'file', type: 'image/png',
-        getAsFile: () => { nullCalls++; return null; }}]
+        getAsFile: () => {
+          nullCalls++; nullPage.advanceClock(87.25); return null;
+        }}]
     }
   });
   report = nullPage.receipt();
@@ -100,6 +110,8 @@ function main() {
   assert.equal(nullCalls, 1);
   assert.equal(report.getAsFileInvoked, true);
   assert.equal(report.getAsFileNull, true);
+  assert.equal(report.shortcutToPasteMs, null);
+  assert.equal(report.getAsFileElapsedMs, 87.25);
   assert.equal(report.observer.pasteEvents, 1);
   assert.equal(report.observer.trustedPasteEvents, 1);
   assert.equal(report.observer.trustedPasteShortcuts, 0);
@@ -114,6 +126,7 @@ function main() {
       items: [{kind: 'file', type: 'image/png',
         getAsFile: () => {
           exceptionCalls++;
+          exceptionPage.advanceClock(43.125);
           throw new TypeError('synthetic offline exception');
         }}]
     }
@@ -123,6 +136,8 @@ function main() {
   assert.equal(report.getAsFileInvoked, true);
   assert.equal(report.getAsFileNull, true);
   assert.equal(report.getAsFileError, 'getAsFile:TypeError');
+  assert.equal(report.shortcutToPasteMs, null);
+  assert.equal(report.getAsFileElapsedMs, 43.125);
 
   const filePage = createPage();
   let fileCalls = 0;
@@ -146,6 +161,29 @@ function main() {
   assert.equal(report.fileType, 'image/png');
   // Byte integrity is handled by the async stage and classifier, not by
   // successful synchronous construction of an in-memory File-like object.
+
+  // The same keyboard shortcut must never be attributed to a second
+  // paste event; the observer consumes its event-pairing candidate.
+  page.advanceClock(5);
+  page.handlers.get('paste')({
+    isTrusted: true, preventDefault() {},
+    clipboardData: {types: [], items: [], files: []}
+  });
+  report = page.receipt();
+  assert.equal(report.shortcutToPasteMs, null);
+
+  // An untrusted synthetic keydown or paste must not create the timing
+  // of an authenticated user/WebDriver paste. Durations stay same-page.
+  const untrusted = createPage();
+  untrusted.handlers.get('keydown')({
+    isTrusted: false, ctrlKey: true, code: 'KeyV', key: 'v'
+  });
+  untrusted.advanceClock(500);
+  untrusted.handlers.get('paste')({
+    isTrusted: true, preventDefault() {},
+    clipboardData: {types: [], items: [], files: []}
+  });
+  assert.equal(untrusted.receipt().shortcutToPasteMs, null);
 
   const other = createPage();
   other.handlers.get('paste')({
