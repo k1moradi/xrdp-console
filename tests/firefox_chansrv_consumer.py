@@ -97,14 +97,18 @@ def serve_receipt_origin():
     server = ReceiptServer(("127.0.0.1", 0), ReceiptHandler)
     lease = ReceiptOriginLease(server=server, issuing_pid=os.getpid())
     thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    started = False
     try:
+        thread.start()
+        started = True
         yield lease
     finally:
         lease.active = False
-        server.shutdown()
+        if started:
+            server.shutdown()
         server.server_close()
-        thread.join(timeout=3)
+        if started:
+            thread.join(timeout=3)
 
 
 @contextlib.contextmanager
