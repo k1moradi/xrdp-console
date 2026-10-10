@@ -110,8 +110,17 @@ c++ -std=c++23 -Wall -Wextra -Wpedantic -Werror -O2 \
 ```
 
 This documentation is **not permission to run the owner, Firefox, chansrv or
-private RDP**. No Qt6 compiler/development headers were available to this
-ChatGPT analysis environment, so native Qt compilation is still unverified.
+private RDP**. Codex's read-only host report (2026-10-10) records that the Qt6
+helper **compiled** with GCC 15.2.0, C++23, and
+`-Wall -Wextra -Wpedantic -Werror`, with no warnings; reported ELF SHA-256
+`79e6ed4f437a3505dac6ab11da18b03dfa9ff68a3e1075439b9a951b147158b6`.
+The helper **has not been launched**, so selection behavior is unverified.
+The same host report records a successful 52/52 committed-patch replay at
+`447447ff68fe34cf2391ca9c908c4bd993ed4ef2` (PR #32), clean staged
+chansrv native compilation/link, and 29/29 checks from a newly rebuilt
+`test_xrdp` executable. This xrdp unit executable does **not** compile or
+execute patched `clipboard.c`, which was validated separately. All are
+**Codex-reported** host results, not a Firefox integration acceptance.
 
 ## One matched, authorized A/B experiment
 
@@ -131,6 +140,73 @@ the isolated CLIPRDR test peer. Record generation, owner, the corrected PR #27
 TARGETS names/IDs, Firefox requestor XID, X11 target/property,
 SelectionNotify/INCR completion, request-to-response timing and matching
 trusted-paste receipt.
+
+### Private X11 requestor identity (readiness gate)
+
+A chansrv X11 `SelectionRequest.requestor` is an XID; it does **not**
+carry the requesting process's PID. We must not infer that every image
+request while Firefox runs belongs to Firefox. The browser's WebDriver
+session ID is not an X11 resource ID, and `_NET_WM_PID` is a
+client-writable window property, not a trusted server-side identity.
+
+The leading optional approach for an **explicitly authorized private Xvfb
+trial** is X-Resource extension **v1.2** `XResQueryClientIds()` with
+`XRES_CLIENT_ID_PID_MASK` on the exact requestor XID. This asks the
+server for the local X11 client's PID, independent of GTK's window metadata.
+It requires `X-Resource >= 1.2` plus the `libXRes` development/runtime
+interfaces; no working host support has yet been established. The operator
+must first attest the private Xvfb PID, authentication, display socket,
+and caller-owned Firefox/geckodriver process-group identities.
+
+A valid correlation should record, without screenshot data:
+
+- Exact `(requestor_xid, xres_local_pid)` returned by the private Xvfb.
+- The X-Resource negotiated major/minor version and successful lookup.
+- Firefox/geckodriver PID lineage verified from caller-held process handles,
+  with `/proc/<pid>/stat` start times to reject PID reuse.
+- The Xvfb PID/auth/display identity **before and after** the lookup.
+- The clipboard generation and requestor XID *at the event*; capture as
+  close to the request as practical, since X11 resources may be destroyed
+  and XIDs reused.
+- Confirmation that the returned PID is in the **attested browser tree**,
+  not the Qt owner, chansrv, or an unrelated X11 client.
+
+If any condition is missing, the identity remains **inconclusive**. This
+source review implements **no live X-Resource query** and introduces **no**
+additional X11 connection. Codex's readiness inventory should check whether
+the private Xvfb build supports the extension and required library. Do not
+fall back to window title, timing proximity, or `_NET_WM_PID` as proof.
+Source references:
+[X-Resource protocol v1.2](https://sources.debian.org/src/xorgproto/2018.4-4/resproto.txt),
+[libXRes client PID API](https://manpages.debian.org/unstable/libxres-dev/XRes.3.en.html).
+
+### Timing domains and transfer completion
+
+Chansrv patch 0041 uses `clock_gettime(CLOCK_MONOTONIC)`. Cross-process
+nanosecond timestamps may only be ordered after verifying the synthetic
+peer uses the **same OS monotonic clock**; the parser's
+`peer_timing_bracketed` is a candidate correlation, *not* a wire
+request identity. Browser `performance.now()` is elapsed relative to
+its own time origin; JavaScript `Date.now()` is wall-clock time. Neither
+should be subtracted from a chansrv monotonic clock timestamp without
+an independently measured bridge. WebDriver elapsed time is an
+observer-bound end-to-end duration, not isolated native clipboard latency.
+
+`x11-selection-notify-issued` means the owner **issued a notification
+request**; `send_result` documents the Xlib submission outcome, not
+consumer handling. `png-xchange-arguments-issued` records owner-side
+arguments and their digest, not proof of remote client receipt.
+`x11-incr-terminator-ack` is a requestor's PropertyDelete at the end of
+INCR. The correlator now distinguishes the **aggregate count** from
+`incr_terminator_ack_correlated`, which only succeeds when exactly one
+matching (requestor XID, property Atom, start/current/terminator
+generation, `state_match=1`) acknowledgement is observed before reuse
+or format-list change. This is stronger X11 protocol evidence, but still
+does not establish a trusted Firefox File or intended UI acceptance.
+
+Older or incomplete logs without these fields remain inconclusive.
+The INCR chunk parser matches numeric generation **exactly**, so
+generation `50` can never be attributed to generation `5`.
 
 ### Fail-closed log attribution
 
