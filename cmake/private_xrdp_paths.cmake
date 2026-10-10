@@ -81,3 +81,46 @@ function(xrdp_console_validate_private_paths _root_arg _build_arg _deps_arg)
     set(XRDP_CONSOLE_PRIVATE_SOCKET_DIR "${_socketdir}" PARENT_SCOPE)
     set(XRDP_CONSOLE_PRIVATE_CANONICAL_RELEASE_ROOT "${_root}" PARENT_SCOPE)
 endfunction()
+
+
+# These checks are intentionally stricter than the normal build. Private
+# diagnostics have no business picking a different libcommon/libsesman/libipm
+# through ambient compiler, pkg-config or dynamic-linker search paths.
+function(xrdp_console_reject_private_host_environment)
+    foreach(_name IN ITEMS
+            LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT LIBRARY_PATH CPATH
+            C_INCLUDE_PATH CPLUS_INCLUDE_PATH OBJC_INCLUDE_PATH
+            PKG_CONFIG_PATH PKG_CONFIG_LIBDIR PKG_CONFIG_SYSROOT_DIR
+            CMAKE_PREFIX_PATH CMAKE_LIBRARY_PATH)
+        if(NOT "$ENV{${_name}}" STREQUAL "")
+            message(FATAL_ERROR
+                "private xrdp build forbids inherited ${_name}; "
+                "start a clean, isolated configuration environment")
+        endif()
+    endforeach()
+endfunction()
+
+function(xrdp_console_reject_private_build_flags _cflags _cppflags
+                                                    _ldflags _pkgpath)
+    if(NOT "${_pkgpath}" STREQUAL "" OR
+       NOT "${_cppflags}" STREQUAL "" OR
+       NOT "${_ldflags}" STREQUAL "")
+        message(FATAL_ERROR
+            "private xrdp build requires empty PKG_CONFIG_PATH, "
+            "CPPFLAGS and LDFLAGS until their closure is reviewed")
+    endif()
+    # Permit only inert host-CPU build optimizations, warning and debug
+    # switches. Disallow any path injection (-I, -L, -B, -isystem), compiler
+    # plugin/specs, response files, linker search/rpath or shell expansions.
+    # Native build users may widen this only through reviewed source changes.
+    separate_arguments(_tokens UNIX_COMMAND "${_cflags}")
+    if(NOT _tokens)
+        message(FATAL_ERROR "private xrdp requires explicit safe CFLAGS")
+    endif()
+    foreach(_flag IN LISTS _tokens)
+        if(NOT _flag MATCHES "^(-O[0-3sgz]|-g([0-9])?|-march=[A-Za-z0-9._+-]+|-mtune=[A-Za-z0-9._+-]+|-fno-omit-frame-pointer|-fPIC|-fPIE|-W[a-zA-Z0-9-]+)$")
+            message(FATAL_ERROR
+                "unsafe or unreviewed private xrdp compiler flag: ${_flag}")
+        endif()
+    endforeach()
+endfunction()
