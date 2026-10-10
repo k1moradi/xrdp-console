@@ -80,6 +80,24 @@ def require_existing_release_workspace(configured: str | None) -> Path:
     return resolved
 
 
+def require_ctest_build_inside_release(
+        release_root: Path, configured: str | None) -> Path:
+    """Prevent CTest itself from writing outside .release/Testing.
+
+    CTest writes its own output alongside CMakeCache.txt even if the loader
+    sends all subprocess logs into .release/runtime.
+    """
+    if not configured:
+        raise ValueError("private H.264 CTest requires XRDP_CONSOLE_CTEST_BUILD_ROOT")
+    build = Path(configured)
+    if not build.is_absolute() or build.is_symlink() or not build.is_dir():
+        raise ValueError("CTest build root must be existing, absolute, and non-symlinked")
+    resolved = build.resolve(strict=True)
+    if not resolved.is_relative_to(release_root) or resolved == release_root:
+        raise ValueError("CTest build root must be inside existing .release")
+    return resolved
+
+
 def require_release_outside_pinned_prefix(
         release_root: Path, install_root: Path) -> None:
     """Never place reusable test scratch inside a live pinned prefix."""
