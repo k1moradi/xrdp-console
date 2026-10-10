@@ -166,7 +166,17 @@ Suggested interpretation:
 
 These are hypotheses **only after** independently confirming the same
 Firefox trusted event, image `DataTransferItem`, valid File/readback and
-PNG decoding. The Qt reference can re-encode PNG, so its output byte
+PNG decoding.
+
+In the chansrv diagnostic metadata, `x11_image_flavor_requests` now
+retains `image/png` **and** `image/bmp` target requests scoped to the
+specified clipboard generation, requestor and property. If an
+**independently attested Firefox XID** requests BMP but never PNG,
+`diagnose_clipboard_boundary()` returns
+`OTHER_IMAGE_FLAVOR_REQUEST_OBSERVED` with the observed flavor. This
+does **not** establish a browser failure or attribute a request to
+Firefox without XID attestation. It prevents interpreting a legitimate
+fallback flavor choice as complete absence of image traffic. The Qt reference can re-encode PNG, so its output byte
 digest may differ. The Qt PNG-only leg should retain source bytes in the
 clipboard owner, but actual Firefox conversion/caching must still be
 observed; use the same structural acceptance rule as A, and additionally
