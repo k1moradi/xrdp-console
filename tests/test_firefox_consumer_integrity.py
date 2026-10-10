@@ -708,45 +708,266 @@ class ReceiptTests(unittest.TestCase):
         self.assertFalse(stages["incr_terminator_ack_correlated"])
 
 
-    def test_private_xvfb_launcher_preserves_parent_xauthority(self):
-        """Offline mocks: never starts Xvfb or queries an actual X display."""
+    def test_legacy_xvfb_starter_refuses_without_spawning_anything(self):
+        """Disable check-then-launch; the future safe allocator is separate."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            fake_xvfb = mock.Mock()
-            fake_xvfb.pid = 2147483000
-            fake_xvfb.poll.return_value = None
-            done = []
+            with (mock.patch.object(browser.subprocess, "Popen") as start,
+                  mock.patch.object(browser.subprocess, "run") as run,
+                  mock.patch.dict(os.environ, {
+                      "DISPLAY": ":0", "XAUTHORITY": "/physical/auth"})):
+                original = dict(os.environ)
+                with self.assertRaisesRegex(browser.TestInconclusive,
+                                            "disabled"):
+                    browser.start_authenticated_source_xvfb(
+                        root, root / "xvfb.log", 512, 512)
+                self.assertEqual(dict(os.environ), original)
+                start.assert_not_called()
+                run.assert_not_called()
 
-            def fake_run(args, **kwargs):
-                done.append((args, kwargs))
-                return mock.Mock(returncode=0)
+    def test_xvfb_authentication_requires_exact_flag_pairs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            authority = Path(directory) / "Xauthority"
+            expected = [
+                b"/usr/bin/Xvfb", b":191", b"-auth", os.fsencode(authority),
+                b"-screen", b"0", b"512x512x24", b"-nolisten", b"tcp",
+                b"-noreset"]
+            self.assertTrue(browser._private_xvfb_cmdline(
+                expected, ":191", authority))
+            negatives = [
+                [b"-nolisten", b"unix", b"tcp"],
+                [b"-auth", b"/physical/.Xauthority"],
+                [b"-auth", os.fsencode(authority), b"-auth",
+                 b"/untrusted/duplicate"],
+                [b"-nolisten", b"tcp", b"-nolisten", b"unix"],
+            ]
+            for replacement in negatives:
+                with self.subTest(replacement=replacement):
+                    if replacement[0] == b"-auth":
+                        candidate = expected[:]
+                        i = candidate.index(b"-auth")
+                        candidate[i:i+2] = replacement
+                    else:
+                        candidate = expected[:]
+                        i = candidate.index(b"-nolisten")
+                        candidate[i:i+2] = replacement
+                    self.assertFalse(browser._private_xvfb_cmdline(
+                        candidate, ":191", authority))
+            self.assertFalse(browser._private_xvfb_cmdline(
+                expected, ":192", authority))
+            self.assertFalse(browser._private_xvfb_cmdline(
+                expected, ":191", Path(directory) / "different-authority"))
 
-            with (mock.patch.dict(os.environ, {
-                    "XAUTHORITY": "/original/unchanged/authority"}),
-                  mock.patch.object(browser.shutil, "which",
-                                    return_value="/mocked/test-only-binary"),
+    def test_browser_child_environment_never_inherits_physical_session(self):
+        """Pure environment construction, with no browser/X11 process."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trial = root / "leg-a"
+            trial.mkdir()
+            profiles = trial / "profiles"
+            profiles.mkdir()
+            authority = root / "Xauthority"
+            authority.write_bytes(b"private fixture only")
+            authority.chmod(0o600)
+            with mock.patch.dict(os.environ, {
+                    "DISPLAY": ":0",
+                    "XAUTHORITY": "/physical/user/.Xauthority",
+                    "WAYLAND_DISPLAY": "wayland-0",
+                    "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/live/bus",
+                    "LD_LIBRARY_PATH": "/protected/installed/xrdp",
+                    "LD_PRELOAD": "/untrusted/libinject.so",
+                    "MOZ_USE_XINPUT2": "1",
+                    "XDG_RUNTIME_DIR": "/run/user/1000"}):
+                original = dict(os.environ)
+                env = browser.private_browser_environment(
+                    source_display=":191", xauthority=authority,
+                    root=root, trial=trial, profile_root=profiles)
+                self.assertEqual(original, dict(os.environ))
+            self.assertEqual(env["DISPLAY"], ":191")
+            self.assertEqual(env["XAUTHORITY"], str(authority))
+            self.assertEqual(env["HOME"], str(trial / "home"))
+            self.assertEqual(env["MOZ_ENABLE_WAYLAND"], "0")
+            self.assertEqual(env["GDK_BACKEND"], "x11")
+            for key in ("DBUS_SESSION_BUS_ADDRESS", "LD_LIBRARY_PATH",
+                        "LD_PRELOAD", "XDG_RUNTIME_DIR", "WAYLAND_DISPLAY",
+                        "MOZ_USE_XINPUT2"):
+                self.assertNotIn(key, env)
+
+    def test_browser_environment_rejects_wrong_display_or_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            trial = root / "leg"
+            trial.mkdir()
+            profiles = trial / "profiles"
+            profiles.mkdir()
+            authority = root / "Xauthority"
+            authority.write_bytes(b"not a real cookie")
+            authority.chmod(0o600)
+            for display in (":0", ":190", ":250", "localhost:191", ":191.0"):
+                with self.subTest(display=display), self.assertRaises(browser.TestInconclusive):
+                    browser.private_browser_environment(
+                        source_display=display, xauthority=authority,
+                        root=root, trial=trial, profile_root=profiles)
+            authority.chmod(0o644)
+            with self.assertRaisesRegex(browser.TestInconclusive, "permissions"):
+                browser.private_browser_environment(
+                    source_display=":191", xauthority=authority,
+                    root=root, trial=trial, profile_root=profiles)
+
+    def test_shared_receipt_origin_lease_closes_and_cannot_reopen(self):
+        server = mock.Mock()
+        server.server_port = 38481
+        server.server_address = ("127.0.0.1", 38481)
+        thread = mock.Mock()
+        with (mock.patch.object(browser, "ReceiptServer",
+                                return_value=server),
+              mock.patch.object(browser.threading, "Thread",
+                                return_value=thread)):
+            with browser.serve_receipt_origin() as lease:
+                self.assertEqual(
+                    lease.validated_url(), "http://127.0.0.1:38481/paste")
+                self.assertEqual(lease.validated_url(),
+                                 lease.validated_url())
+                self.assertTrue(lease.active)
+            self.assertFalse(lease.active)
+            with self.assertRaisesRegex(browser.TestInconclusive, "inactive"):
+                lease.validated_url()
+        thread.start.assert_called_once()
+        server.shutdown.assert_called_once()
+        server.server_close.assert_called_once()
+        thread.join.assert_called_once()
+
+    def test_receipt_origin_rejects_foreign_pid_or_nonloopback_binding(self):
+        server = mock.Mock()
+        server.server_port = 48271
+        server.server_address = ("127.0.0.1", 48271)
+        lease = browser.ReceiptOriginLease(server, os.getpid() + 1000)
+        with self.assertRaises(browser.TestInconclusive):
+            lease.validated_url()
+        lease.issuing_pid = os.getpid()
+        server.server_address = ("0.0.0.0", 48271)
+        with self.assertRaises(browser.TestInconclusive):
+            lease.validated_url()
+
+    def test_exited_group_leader_can_never_hide_live_descendants(self):
+        process = mock.Mock()
+        process.pid = 28401
+        process.poll.return_value = 1
+        with (mock.patch.object(browser, "_group_still_exists",
+                                return_value=True),
+              mock.patch.object(browser.os, "killpg") as signal_group):
+            with self.assertRaisesRegex(browser.TestInconclusive, "unverified"):
+                browser.stop_group(process)
+            signal_group.assert_not_called()
+            process.wait.assert_not_called()
+        with mock.patch.object(browser, "_group_still_exists",
+                               return_value=False):
+            browser.stop_group(process)
+
+    def test_private_group_must_be_attested_session_leader_before_signalling(self):
+        process = mock.Mock()
+        process.pid = 28402
+        process.poll.return_value = None
+        with (mock.patch.object(browser.os, "getpgid",
+                                return_value=28402),
+              mock.patch.object(browser.os, "getsid",
+                                return_value=28403),
+              mock.patch.object(browser.os, "killpg") as signal_group):
+            with self.assertRaisesRegex(browser.TestInconclusive, "expected private"):
+                browser.stop_group(process)
+            signal_group.assert_not_called()
+
+    def test_private_group_cleanup_checks_descendants_after_leader_exit(self):
+        process = mock.Mock()
+        process.pid = 28403
+        process.poll.return_value = None
+        with (mock.patch.object(browser.os, "getpgid",
+                                return_value=28403),
+              mock.patch.object(browser.os, "getsid",
+                                return_value=28403),
+              mock.patch.object(browser.os, "killpg") as signal_group,
+              mock.patch.object(browser, "_group_still_exists",
+                                return_value=True)):
+            with self.assertRaisesRegex(browser.TestInconclusive, "descendants"):
+                browser.stop_group(process)
+            signal_group.assert_called_once_with(28403, browser.signal.SIGTERM)
+            process.wait.assert_called_once_with(timeout=4)
+
+    def test_private_group_clean_teardown_with_no_group_remaining(self):
+        process = mock.Mock()
+        process.pid = 28404
+        process.poll.return_value = None
+        with (mock.patch.object(browser.os, "getpgid", return_value=28404),
+              mock.patch.object(browser.os, "getsid", return_value=28404),
+              mock.patch.object(browser.os, "killpg") as signal_group,
+              mock.patch.object(browser, "_group_still_exists",
+                                return_value=False)):
+            browser.stop_group(process)
+            signal_group.assert_called_once_with(28404, browser.signal.SIGTERM)
+
+    def test_browser_leg_shared_origin_and_unique_profiles_are_mock_only(self):
+        """Mock every process, HTTP request and Xvfb verification."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            authority = root / "Xauthority"
+            authority.write_bytes(b"not an X11 connection")
+            authority.chmod(0o600)
+            firefox = root / "mock-firefox"
+            gecko = root / "mock-geckodriver"
+            for target in (firefox, gecko):
+                target.write_bytes(b"test binary placeholder")
+                target.chmod(0o700)
+            origin_server = mock.Mock()
+            origin_server.server_address = ("127.0.0.1", 38571)
+            origin_server.server_port = 38571
+            lease = browser.ReceiptOriginLease(origin_server, os.getpid())
+            driver = mock.Mock()
+            driver.start.return_value = {"browserVersion": "mock-only"}
+            popped = []
+            receipts = []
+            def fake_spawn(_args, **kwargs):
+                popped.append(kwargs["env"])
+                return mock.Mock(pid=20401)
+            def fake_paste(_driver, url):
+                receipts.append(url)
+                return self.good()
+            with (mock.patch.object(browser, "verify_isolated_xvfb"),
+                  mock.patch.object(browser, "WebDriver", return_value=driver),
+                  mock.patch.object(browser, "free_local_port", return_value=38572),
                   mock.patch.object(browser.subprocess, "Popen",
-                                    return_value=fake_xvfb) as start,
-                  mock.patch.object(browser.subprocess, "run",
-                                    side_effect=fake_run),
-                  mock.patch.object(browser, "verify_isolated_xvfb") as verify):
-                _proc, display = browser.start_authenticated_source_xvfb(
-                    root, root / "xvfb.log", 512, 512)
-                self.assertIs(_proc, fake_xvfb)
-                self.assertRegex(display, r"^:(19[1-9]|2[0-4][0-9])$")
-                self.assertEqual(os.environ["XAUTHORITY"],
-                                 "/original/unchanged/authority")
-                self.assertEqual(start.call_count, 1)
-                verify.assert_called_once()
-                self.assertEqual(len(done), 2)
-                self.assertEqual(done[0][0][0], "xauth")
-                self.assertEqual(done[1][0][0], "xdpyinfo")
-                probe_env = done[1][1]["env"]
-                self.assertEqual(probe_env["DISPLAY"], display)
-                self.assertEqual(probe_env["XAUTHORITY"],
-                                 str(root / "firefox-Xauthority"))
+                                    side_effect=fake_spawn),
+                  mock.patch.object(browser, "stop_group"),
+                  mock.patch.object(browser, "send_trusted_paste",
+                                    side_effect=fake_paste),
+                  mock.patch.object(browser, "serve_receipt_origin",
+                                    side_effect=AssertionError("origin recreated")),
+                  mock.patch.dict(os.environ, {
+                      "DISPLAY": ":0", "LD_LIBRARY_PATH": "/unsafe/xrdp",
+                      "WAYLAND_DISPLAY": "wayland-0"})):
+                for case in ("screen-grab", "png-only"):
+                    result = browser.run_firefox_chansrv_timing(
+                        source_display=":191", xauthority=authority,
+                        xvfb_pid=20400, root=root, firefox=firefox,
+                        geckodriver=gecko,
+                        expected_size=1049471,
+                        expected_sha256=self.good()["sha256"],
+                        expected_dimensions=(512, 512),
+                        require_exact_png_encoding=False,
+                        receipt_origin=lease, case_id=case)
+                    self.assertEqual(result["classification"],
+                                     "READABLE_PNG_FILE_VALIDATED_IMAGE")
+                    self.assertIsNone(result["applied_clipboard_timeout_ms"])
+                    self.assertEqual(result["requested_clipboard_timeout_ms"], 1000)
+                self.assertEqual(receipts, [lease.validated_url()] * 2)
+                self.assertEqual(len(popped), 2)
                 self.assertNotEqual(
-                    probe_env["XAUTHORITY"], os.environ["XAUTHORITY"])
+                    popped[0]["MOZ_PROFILE_ROOT"], popped[1]["MOZ_PROFILE_ROOT"])
+                for child_env in popped:
+                    self.assertEqual(child_env["DISPLAY"], ":191")
+                    self.assertNotIn("LD_LIBRARY_PATH", child_env)
+                    self.assertNotIn("WAYLAND_DISPLAY", child_env)
+                self.assertEqual(driver.wait_ready.call_count, 2)
+                self.assertEqual(driver.stop.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ There are no production chansrv/clipboard operations in this module.
 from __future__ import annotations
 
 import contextlib
+from dataclasses import dataclass
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -16,7 +17,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import shutil
 import signal
 import socket
 import subprocess
@@ -72,17 +72,62 @@ class ReceiptHandler(BaseHTTPRequestHandler):
         pass
 
 
+@dataclass
+class ReceiptOriginLease:
+    """Controller-held private loopback origin, not an unverified URL string."""
+    server: ReceiptServer
+    issuing_pid: int
+    active: bool = True
+
+    def validated_url(self) -> str:
+        if (not self.active or self.issuing_pid != os.getpid() or
+                self.server.server_address[0] != "127.0.0.1" or
+                not 1 <= self.server.server_port <= 65535):
+            raise TestInconclusive("Receipt origin is inactive or not owned locally")
+        return f"http://127.0.0.1:{self.server.server_port}/paste"
+
+
+@contextlib.contextmanager
+def serve_receipt_origin():
+    """One caller-held loopback origin may span all three sequential legs.
+
+    A lease cannot be reused after shutdown, or from another process. The
+    browser's per-profile page reload resets JS receipt state for every leg.
+    """
+    server = ReceiptServer(("127.0.0.1", 0), ReceiptHandler)
+    lease = ReceiptOriginLease(server=server, issuing_pid=os.getpid())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    started = False
+    try:
+        thread.start()
+        started = True
+        yield lease
+    finally:
+        lease.active = False
+        if started:
+            server.shutdown()
+        server.server_close()
+        if started:
+            thread.join(timeout=3)
+
+
 @contextlib.contextmanager
 def serve_receipt_page():
-    server = ReceiptServer(("127.0.0.1", 0), ReceiptHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}/paste"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=3)
+    # Backward-compatible one-leg API; A/B/C must hold one OriginLease.
+    with serve_receipt_origin() as lease:
+        yield lease.validated_url()
+
+
+def _private_xvfb_cmdline(args: list[bytes], display: str,
+                          authority: Path) -> bool:
+    """Validate paired auth/transport flags, not substring occurrences."""
+    def paired_values(flag: bytes) -> list[bytes]:
+        return [args[i + 1] for i in range(len(args) - 1)
+                if args[i] == flag]
+    return (bool(args) and Path(os.fsdecode(args[0])).name == "Xvfb" and
+            paired_values(b"-auth") == [os.fsencode(authority)] and
+            paired_values(b"-nolisten") == [b"tcp"] and
+            args.count(os.fsencode(display)) == 1 and b"-noreset" in args)
 
 
 def verify_isolated_xvfb(display: str, authority: Path,
@@ -92,8 +137,8 @@ def verify_isolated_xvfb(display: str, authority: Path,
     PID is a caller-attested subprocess handle, not an untrusted /proc search.
     Caller MUST have spawned it, confirmed its command, and control its cleanup.
     """
-    if not re.fullmatch(r":[1-9][0-9]{0,4}", display) or int(display[1:]) < 2:
-        raise TestInconclusive("Not an isolated numbered Xvfb display")
+    if not re.fullmatch(r":(19[1-9]|2[0-4][0-9])", display):
+        raise TestInconclusive("Not an isolated :191..:249 Xvfb display")
     root = scratch_root.resolve(strict=True)
     auth = authority.resolve(strict=True)
     if not auth.is_relative_to(root) or not auth.is_file() or auth.stat().st_size == 0:
@@ -104,67 +149,30 @@ def verify_isolated_xvfb(display: str, authority: Path,
         args = Path(f"/proc/{xvfb_pid}/cmdline").read_bytes().split(b"\0")
     except OSError as exc:
         raise TestInconclusive("Private Xvfb process exited") from exc
-    if not args or Path(os.fsdecode(args[0])).name != "Xvfb":
-        raise TestInconclusive("Display process is not Xvfb")
-    if not (b"-auth" in args and os.fsencode(auth) in args and
-            os.fsencode(display) in args and b"-nolisten" in args):
-        raise TestInconclusive("Xvfb missing private authentication or isolation")
+    if (not _private_xvfb_cmdline(args, display, auth) or
+            Path(f"/proc/{xvfb_pid}").stat().st_uid != os.geteuid()):
+        raise TestInconclusive("Xvfb arguments/UID do not prove private configuration")
+    # Server socket ownership, cookie rejection and race-free allocation
+    # remain separate host gates. This check does not attest the X11 server
+    # socket or authorize opening any display.
 
 
 def start_authenticated_source_xvfb(root: Path, log_path: Path,
                                     width: int, height: int
                                     ) -> tuple[subprocess.Popen[Any], str]:
-    """Allocate a *new* numbered Xvfb with a private MIT-MAGIC-COOKIE.
+    """Permanently reject the legacy check-then-start Xvfb path.
 
-    Only called by the explicit Firefox loader mode. The loader owns cleanup.
+    A filesystem socket scan is a TOCTOU allocation, not proof that the
+    newly launched Xvfb owns the chosen display. The launch also lacked an
+    independent wrong-cookie authentication test. No source-based claim of
+    private X11 safety is justified until a reviewed, caller-held display
+    allocator and attested Xauthority are implemented. The parameters and
+    return shape are retained only for source compatibility with old callers.
     """
-    for utility in ("Xvfb", "xauth", "xdpyinfo"):
-        if shutil.which(utility) is None:
-            raise TestInconclusive(f"Private X11 prerequisite unavailable: {utility}")
-    if not (100 <= width <= 8192 and 100 <= height <= 8192):
-        raise ValueError("Invalid synthetic Xvfb dimensions")
-    slot = next((i for i in range(191, 250)
-                 if not Path(f"/tmp/.X11-unix/X{i}").exists()
-                 and not Path(f"/tmp/.X{i}-lock").exists()), None)
-    if slot is None:
-        raise TestInconclusive("No unoccupied private Xvfb display slot")
-    display = f":{slot}"
-    authority = root / "firefox-Xauthority"
-    authority.touch(mode=0o600, exist_ok=False)
-    cookie = secrets.token_hex(16)
-    result = subprocess.run(["xauth", "-f", str(authority), "add", display,
-                             "MIT-MAGIC-COOKIE-1", cookie],
-                            capture_output=True, check=False, timeout=5)
-    if result.returncode != 0:
-        raise TestInconclusive("Cannot prepare private Xvfb authentication")
-    authority.chmod(0o600)
-    # Keep the parent's XAUTHORITY untouched. Only the child probe may
-    # use the private display cookie; later clients construct their own
-    # explicit DISPLAY/XAUTHORITY environment.
-    private_probe_env = dict(
-        os.environ, DISPLAY=display, XAUTHORITY=str(authority))
-    cmd = [shutil.which("Xvfb"), display, "-auth", str(authority),
-           "-screen", "0", f"{width}x{height}x24", "-nolisten", "tcp",
-           "-noreset"]
-    with log_path.open("wb") as log:
-        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
-                                stderr=log, start_new_session=True)
-    try:
-        deadline = time.monotonic() + 8
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                raise TestInconclusive("New private Xvfb exited before readiness")
-            probe = subprocess.run(["xdpyinfo", "-display", display],
-                                   capture_output=True, timeout=2, check=False,
-                                   env=private_probe_env)
-            if probe.returncode == 0:
-                verify_isolated_xvfb(display, authority, proc.pid, root)
-                return proc, display
-            time.sleep(0.08)
-        raise TestInconclusive("Authenticated private Xvfb unavailable")
-    except BaseException:
-        stop_group(proc)
-        raise
+    raise TestInconclusive(
+        "Legacy Xvfb display scan is disabled: private allocation and "
+        "negative-cookie authentication remain NO-GO")
+
 
 
 def free_local_port() -> int:
@@ -173,22 +181,56 @@ def free_local_port() -> int:
         return int(s.getsockname()[1])
 
 
+def _group_still_exists(group_id: int) -> bool:
+    """Probe only. Never send a nonzero signal to an unattested group."""
+    try:
+        os.killpg(group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def stop_group(process: subprocess.Popen[Any] | None) -> None:
+    """Conservatively close a caller-spawned new-session group.
+
+    Popen leader exit != descendant cleanup. If its original session
+    identity can no longer be established, raise instead of signalling an
+    unrelated PID-reused group or claiming cleanup succeeded. The future
+    runnable backend still needs cgroup/pidfd-based descendant ownership.
+    """
     if process is None:
         return
-    if process.poll() is None:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
-        try:
-            process.wait(timeout=4)
-        except subprocess.TimeoutExpired:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=4)
+    pid = process.pid
+    if type(pid) is not int or pid <= 1:
+        raise TestInconclusive("Cannot attest a valid private process-group leader")
+    if process.poll() is not None:
+        if _group_still_exists(pid):
+            raise TestInconclusive(
+                "Private group leader exited; descendants or reused PID remain unverified")
+        return
+    try:
+        if os.getpgid(pid) != pid or os.getsid(pid) != pid:
+            raise TestInconclusive(
+                "Process does not own the expected private session and group")
+    except ProcessLookupError as exc:
+        raise TestInconclusive("Private group leader exited during attestation") from exc
+    # While this Popen child remains unreaped, its PID cannot be reused.
+    try:
+        os.killpg(pid, signal.SIGTERM)
+    except ProcessLookupError as exc:
+        raise TestInconclusive("Private process group vanished during teardown") from exc
+    try:
+        process.wait(timeout=4)
+    except subprocess.TimeoutExpired:
+        # The unreaped leader still anchors the original PID/group identity.
+        os.killpg(pid, signal.SIGKILL)
+        process.wait(timeout=4)
+    if _group_still_exists(pid):
+        # Never silently advance to a new clipboard owner while any child
+        # group remains. Do not blindly kill an unanchored, reused group.
+        raise TestInconclusive("Private group descendants not proved terminated")
 
 
 class WebDriver:
@@ -782,6 +824,38 @@ def diagnose_clipboard_boundary(
             "confidence": "inconclusive", "receipt": result}
 
 
+def private_browser_environment(*, source_display: str,
+                                xauthority: Path, root: Path,
+                                trial: Path, profile_root: Path
+                                ) -> dict[str, str]:
+    """No inherited display, session bus, LD_* or HOME can reach Firefox."""
+    if not re.fullmatch(r":(19[1-9]|2[0-4][0-9])", source_display):
+        raise TestInconclusive("Firefox requires an allocated private Xvfb slot")
+    root = root.resolve(strict=True)
+    if not trial.is_relative_to(root) or not profile_root.is_relative_to(trial):
+        raise TestInconclusive("Firefox profile is outside private release root")
+    authority = xauthority.resolve(strict=True)
+    if not authority.is_relative_to(root) or not authority.is_file():
+        raise TestInconclusive("Firefox Xauthority escapes the private root")
+    if authority.stat().st_uid != os.geteuid() or authority.stat().st_mode & 0o077:
+        raise TestInconclusive("Firefox Xauthority has unsafe owner or permissions")
+    home = trial / "home"
+    home.mkdir(mode=0o700, exist_ok=False)
+    return {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "HOME": str(home),
+        "DISPLAY": source_display,
+        "XAUTHORITY": str(authority),
+        "GDK_BACKEND": "x11",
+        "MOZ_ENABLE_WAYLAND": "0",
+        "MOZ_PROFILE_ROOT": str(profile_root),
+        "XDG_CACHE_HOME": str(trial / "cache"),
+        "XDG_CONFIG_HOME": str(trial / "config"),
+        "XDG_DATA_HOME": str(trial / "data"),
+    }
+
+
 def run_firefox_chansrv_timing(*, source_display: str,
                                xauthority: Path, xvfb_pid: int,
                                root: Path, firefox: Path, geckodriver: Path,
@@ -790,7 +864,9 @@ def run_firefox_chansrv_timing(*, source_display: str,
                                pref_ms: int = 1000,
                                expected_generation: int | None = None,
                                after_receipt: Any = None,
-                               require_exact_png_encoding: bool = True) -> dict:
+                               require_exact_png_encoding: bool = True,
+                               receipt_origin: ReceiptOriginLease | None = None,
+                               case_id: str | None = None) -> dict:
     """Browser leg for a separately verified private X11 clipboard owner.
 
     Default: frozen chansrv + synthetic CLIPRDR peer, with exact PNG bytes.
@@ -805,22 +881,30 @@ def run_firefox_chansrv_timing(*, source_display: str,
         raise ValueError("Expected PNG outside bounded File size")
     if not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
         raise ValueError("Invalid expected fixture SHA-256")
-    trial = root / ("firefox-consumer" if require_exact_png_encoding
-                    else "firefox-qt6-control")
+    if case_id is None:
+        case_id = secrets.token_hex(8)
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,39}", case_id):
+        raise TestInconclusive("Unsafe Firefox case identifier")
+    trial = root / (("firefox-chansrv-" if require_exact_png_encoding
+                     else "firefox-qt-control-") + case_id)
     trial.mkdir(mode=0o700, exist_ok=False)
     profile_root = trial / "profiles"
     profile_root.mkdir(mode=0o700)
-    env = dict(os.environ, DISPLAY=source_display, XAUTHORITY=str(xauthority),
-               GDK_BACKEND="x11", MOZ_ENABLE_WAYLAND="0",
-               MOZ_PROFILE_ROOT=str(profile_root),
-               XDG_CACHE_HOME=str(trial / "cache"),
-               XDG_CONFIG_HOME=str(trial / "config"),
-               XDG_DATA_HOME=str(trial / "data"))
+    env = private_browser_environment(
+        source_display=source_display, xauthority=xauthority,
+        root=root, trial=trial, profile_root=profile_root)
     port = free_local_port()
     driver = WebDriver(port)
     gecko = None
+    # A caller-held origin stays identical across three sequential legs.
+    # A single-leg invocation still acquires a bounded local origin.
+    origin_context = (contextlib.nullcontext(receipt_origin)
+                      if receipt_origin is not None else serve_receipt_origin())
     try:
-        with serve_receipt_page() as url:
+        with origin_context as origin:
+            if not isinstance(origin, ReceiptOriginLease):
+                raise TestInconclusive("Invalid receipt origin lease")
+            url = origin.validated_url()
             with (trial / "geckodriver.log").open("wb") as log:
                 gecko = subprocess.Popen(
                     [str(geckodriver), "--host", "127.0.0.1", "--port", str(port),
@@ -832,6 +916,10 @@ def run_firefox_chansrv_timing(*, source_display: str,
                 receipt = send_trusted_paste(driver, url)
                 receipt["firefox_version"] = caps.get("browserVersion")
                 receipt["expected_generation"] = expected_generation
+                receipt["requested_clipboard_timeout_ms"] = pref_ms
+                # WebDriver's requested prefs are not proof that the browser
+                # applied them. Host-level verification remains a separate gate.
+                receipt["applied_clipboard_timeout_ms"] = None
                 receipt["classification"] = classify_receipt(
                     receipt, expected_size, expected_sha256,
                     expected_dimensions=expected_dimensions,

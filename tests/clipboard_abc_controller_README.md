@@ -112,6 +112,46 @@ RDP integration, Firefox requestor attribution, or intended UI acceptance.
 There is deliberately no private chansrv runtime adapter until Codex
 provides verified startup, private library closure, sockets and rollback.
 
+## Browser origin, environment and cleanup tightening
+
+The browser helper now exposes `serve_receipt_origin()`: the future caller
+can hold one `ReceiptOriginLease` across A, B and C, rather than starting
+three unrelated receipt HTTP servers. The lease points only to
+`127.0.0.1`, is tied to the creating process and becomes invalid after
+shutdown. The older one-leg `serve_receipt_page()` context manager remains
+as a wrapper for compatibility. No HTTP server was launched by these
+offline changes.
+
+`run_firefox_chansrv_timing()` can consume a caller-held
+`receipt_origin` and unique bounded `case_id` for each leg. It creates a
+fresh profile root for each case. Browser children receive an explicit
+environment allowlist with private `DISPLAY`, private `XAUTHORITY`,
+`HOME`, per-case XDG/cache/profile paths, loopback WebDriver and
+`GDK_BACKEND=x11`. Nothing is copied from the user's X11/session bus,
+Wayland environment or `LD_LIBRARY_PATH`. The requested
+`widget.gtk.clipboard_timeout_ms` is recorded **separately** from its
+unverified applied value. The browser helper still does **not** attest the
+actual browser preference readback or Firefox X11 requestor PID.
+
+`stop_group()` no longer silently returns after the process-group leader
+has exited. If the group might still have descendants, or an unknown
+session/group would be signalled, it fails closed instead. A group leader
+being reaped is not proof that all Firefox descendants have stopped.
+A fully executable backend still requires independently attested process
+group/cgroup or pidfd identity and complete post-cleanup inspection.
+
+The old `start_authenticated_source_xvfb()` helper now **always refuses**:
+its filesystem scan followed by a launch could race another display owner,
+and the old implementation did not verify negative-cookie rejection.
+An atomic caller-owned allocator and authenticated private Xvfb socket
+attestation are prerequisites for restoring a real start path. The
+read-only `verify_isolated_xvfb()` checks the expected :191–:249 range,
+paired `-auth` and `-nolisten tcp` arguments, and process UID, but it
+does **not** substitute for socket-ownership or cookie-negation evidence.
+
+All added tests use only mocked process/HTTP/X11 boundaries; no private
+server, Firefox or clipboard operation was executed.
+
 ## Known host blockers — separate proof required
 
 Codex's 2026-10-10 readiness report says the old loader can reuse a physical
